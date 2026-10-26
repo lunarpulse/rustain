@@ -42,6 +42,15 @@ fn item(id: &str) -> ItemId {
     ItemId::from_replay(id)
 }
 
+/// Decode legacy wire evidence; there is no production RAP item producer.
+pub(super) fn legacy_rap_address(peer: PeerId, item: ItemId) -> ItemAddress {
+    serde_json::from_value(json!({
+        "principal": {"kind": "rap", "peer": peer.as_str()},
+        "item": item.as_str(),
+    }))
+    .expect("legacy RAP address decodes")
+}
+
 fn bound_item_address() -> ItemAddress {
     ItemAddress::from_a2a_bound(pin(), item("ri_bound"))
 }
@@ -205,10 +214,7 @@ async fn k09_bound_addresses_round_trip_through_every_event_and_the_production_r
     // Production byte reader: the writer's lines, in order, then a Rap and a
     // pseudonym control so the reader is not just echoing one shape.
     let mut rows: Vec<RoomEvent> = events.clone();
-    rows.push(received(ItemAddress::from_rap_ingress(
-        pin(),
-        item("ri_rap"),
-    )));
+    rows.push(received(legacy_rap_address(pin(), item("ri_rap"))));
     rows.push(received(ItemAddress::from_a2a_ingress(
         pin(),
         item("ri_pseudo"),
@@ -249,7 +255,7 @@ async fn k09_bound_addresses_round_trip_through_every_event_and_the_production_r
 
 #[tokio::test]
 async fn k09_rap_and_pseudonym_addresses_stay_byte_identical_to_the_pre_19_18d_form() {
-    let rap = ItemAddress::from_rap_ingress(pin(), item("ri_a"));
+    let rap = legacy_rap_address(pin(), item("ri_a"));
     let pseudonym = ItemAddress::from_a2a_ingress(pin(), item("ri_b"));
     let rap_json = serde_json::to_string(&rap).expect("rap");
     let pseudonym_json = serde_json::to_string(&pseudonym).expect("pseudonym");
@@ -490,10 +496,7 @@ fn k09_pre_19_18d_reader_reads_a_bound_line_as_unknown_and_keeps_the_journal_int
 
     // Positive control: a Rap line of the same shape decodes to its real
     // principal, so `Unknown` above is the bound arm's doing, not the copy's.
-    let rap = bytes_around(&received(ItemAddress::from_rap_ingress(
-        pin(),
-        item("ri_r"),
-    )));
+    let rap = bytes_around(&received(legacy_rap_address(pin(), item("ri_r"))));
     let entries = old_reader::parse_entries(&rap).expect("rap journal");
     assert!(matches!(
         &entries[1].record,

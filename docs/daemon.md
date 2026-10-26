@@ -612,6 +612,15 @@ card saved by an older build refuses resolution with
 notice. The sender still receives only the truthful accepted/refused verdict,
 never response text. Conversational replies use A2A.
 
+Transparency accept/refuse rows say `via RAP` or `via A2A`. An accepted RAP row
+reads `message delivered one way; no task runs and nothing is sent back`;
+A2A and older rail-less rows retain their existing copy. `team log --json`
+and the transparency export carry an additive `rail` key only when recorded;
+older rail-less rows are unchanged. After restart, RAP `remote-peer` dispatch
+contexts and their descendants are retired, not restored as resumable agents.
+Non-terminal contexts are journaled as cancelled; the sender's next frame
+materializes a fresh live mailbox.
+
 At daemon startup, a persisted `Drafting` response row without a live draft
 phase settles before attachments are accepted:
 `[draft interrupted] The daemon restarted while this reply was being drafted; nothing was sent.`

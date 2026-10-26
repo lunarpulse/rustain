@@ -145,12 +145,13 @@ fn hostile_entry_with_direction(seq: u64, direction: Direction) -> JournalEntry 
     JournalEntry::new(
         seq,
         JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: PeerId::from_public_key(&[4u8; 32]).unwrap(),
             reason: RejectReason::Policy {
                 // A would-be escape sequence, of the shape a remote peer can
                 // put in `task.id` on the outbound path.
                 detail: "remote agent requested input (task \u{1b}[2K\rWIPED\u{7}, context \
-                         \u{9b}2J)"
+                     \u{9b}2J)"
                     .to_owned(),
             },
             direction,
@@ -306,6 +307,7 @@ fn cli_export_summary_reports_the_unfiltered_snapshot_count() {
 fn a_room_event_produces_exactly_one_persistent_transcript_line() {
     let mut state = TuiState::new(120, 24);
     let payload = DomainEventPayload::Room(RoomEvent::RemoteEnvelopeRejected {
+        rail: None,
         peer: PeerId::from_public_key(&[8u8; 32]).unwrap(),
         reason: RejectReason::Policy {
             detail: "refused by server.admission policy".to_owned(),

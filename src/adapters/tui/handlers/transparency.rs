@@ -14,15 +14,16 @@
 //! A busy peer must not flood the transcript. Only **decision-bearing** records
 //! surface as a chat notice — accept, refuse, awaiting-approval. Status polls
 //! are excluded at the source (AC1 journals only the first observation per
-//! task) and excluded again here. When more than one record for the same
-//! `(peer, task)` arrives inside a turn, the later one replaces the earlier
-//! row rather than adding a line: the `FeedbackBlock` id is derived from
-//! `(peer, task)`, and `feedback_blocks` is a map.
+//! task) and excluded again here. Repeated decision rows for one
+//! `(rail, peer, task)` replace each other. Different rails never coalesce;
+//! rail-less legacy rows retain their existing `(peer, task)` key. The
+//! awaiting-approval row has no rail field, but its gate is A2A-only, so it
+//! takes the A2A identity and the later A2A verdict replaces it.
 
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::DomainEventPayload;
 use crate::domain::events::DomainKey;
-use crate::domain::models::{FeedbackBlock, FeedbackLevel, RoomEvent};
+use crate::domain::models::{FeedbackBlock, FeedbackLevel, PeerRail, RoomEvent};
 use crate::domain::services::transparency::{
     TransparencyKind, TransparencyRow, sanitize_disclosable,
 };
@@ -35,8 +36,8 @@ use crate::domain::services::transparency::{
 /// increment a count on that same row" means.
 pub(crate) const JOURNAL_FAILURE_BLOCK_ID: &str = "transparency-journal-failure";
 
-/// Prefix for per-interaction transcript rows. The suffix is `(peer, task)`,
-/// which is what makes repeated records for one interaction coalesce.
+/// Prefix for per-interaction transcript rows; repeated records on one rail
+/// coalesce, while legacy rail-less records retain their old key.
 const NOTICE_BLOCK_PREFIX: &str = "transparency-";
 
 /// Apply one bus event to the TUI. Returns `true` when the transcript changed.
@@ -51,12 +52,25 @@ pub fn apply_domain_event(state: &mut TuiState, payload: &DomainEventPayload) ->
     match payload {
         DomainEventPayload::Room(event) => match notice_row(event) {
             Some(row) => {
+                // `a2a-inbound-approval:` is minted only by the A2A server, so
+                // the pending row shares the identity of its A2A verdict.
+                let rail = row
+                    .rail
+                    .or((row.kind == TransparencyKind::AwaitingApproval).then_some(PeerRail::A2a));
                 let block = FeedbackBlock {
-                    id: format!(
-                        "{NOTICE_BLOCK_PREFIX}{}-{}",
-                        row.peer,
-                        row.task.as_deref().unwrap_or("-")
-                    ),
+                    id: match rail {
+                        Some(rail) => format!(
+                            "{NOTICE_BLOCK_PREFIX}{}-{}-{}",
+                            rail.as_str(),
+                            row.peer,
+                            row.task.as_deref().unwrap_or("-")
+                        ),
+                        None => format!(
+                            "{NOTICE_BLOCK_PREFIX}{}-{}",
+                            row.peer,
+                            row.task.as_deref().unwrap_or("-")
+                        ),
+                    },
                     level: feedback_level(row.kind),
                     message: row.one_line(),
                     actions: Vec::new(),
@@ -273,6 +287,7 @@ mod tests {
 
     fn rejection(detail: &str) -> RoomEvent {
         RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: peer(),
             reason: RejectReason::Policy {
                 detail: detail.to_owned(),
@@ -280,6 +295,67 @@ mod tests {
             direction: Direction::Inbound,
             task: Some("task-1".to_owned()),
         }
+    }
+
+    #[test]
+    fn cross_rail_decisions_do_not_coalesce_across_rails() {
+        let mut state = TuiState::new(80, 24);
+        for rail in ["rap", "a2a", "rap"] {
+            let mut value = serde_json::to_value(rejection("same peer/task")).unwrap();
+            value["rail"] = serde_json::json!(rail);
+            let event = serde_json::from_value(value).unwrap();
+            apply_domain_event(&mut state, &DomainEventPayload::Room(event));
+        }
+        assert_eq!(state.feedback_blocks.len(), 2);
+        for rail in ["rap", "a2a"] {
+            assert!(
+                state
+                    .feedback_blocks
+                    .contains_key(&format!("transparency-{rail}-{}-task-1", peer()))
+            );
+        }
+    }
+
+    /// An A2A task parked for approval and then decided leaves one notice:
+    /// the verdict replaces the pending row. A RAP decision with the same
+    /// peer and task id stays a separate notice.
+    #[test]
+    fn an_a2a_verdict_replaces_its_awaiting_approval_notice_but_not_a_rap_one() {
+        let mut state = TuiState::new(80, 24);
+        let awaiting = RoomEvent::AdmissionDeferred {
+            coordinator: AgentId::root(),
+            spoke: peer().as_str().to_owned(),
+            gate: "a2a-inbound-approval:task-1".to_owned(),
+            principal: None,
+        };
+        assert!(apply_domain_event(
+            &mut state,
+            &DomainEventPayload::Room(awaiting)
+        ));
+        let a2a_key = format!("transparency-a2a-{}-task-1", peer());
+        assert!(
+            state.feedback_blocks[&a2a_key]
+                .message
+                .contains("awaiting operator approval")
+        );
+        for rail in ["a2a", "rap"] {
+            let mut value = serde_json::to_value(rejection("decided")).unwrap();
+            value["rail"] = serde_json::json!(rail);
+            let event = serde_json::from_value(value).unwrap();
+            apply_domain_event(&mut state, &DomainEventPayload::Room(event));
+        }
+        assert_eq!(state.feedback_blocks.len(), 2);
+        assert!(
+            !state.feedback_blocks[&a2a_key]
+                .message
+                .contains("awaiting operator approval"),
+            "the A2A verdict replaces the pending notice"
+        );
+        assert!(
+            state
+                .feedback_blocks
+                .contains_key(&format!("transparency-rap-{}-task-1", peer()))
+        );
     }
 
     #[test]
@@ -347,6 +423,7 @@ mod tests {
     fn a_non_transparency_room_event_surfaces_nothing() {
         let mut state = TuiState::new(80, 24);
         let unrelated = RoomEvent::RemoteEnvelopeAccepted {
+            rail: None,
             peer: peer(),
             node: AgentId::root(),
             content_hash: ContentHash::from_bytes([0u8; 32]),

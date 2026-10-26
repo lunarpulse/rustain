@@ -139,7 +139,7 @@ def _import_ticket(stack, binary, world, alias, ticket, evidence):
     assert child.exitstatus == 0, (child.exitstatus, child.signalstatus)
 
 
-def _exercise(binary, evidence, root, monkeypatch):
+def _exercise(binary, evidence, root, monkeypatch, after_delivery=None):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
     scene = evidence / "scene.json"
@@ -224,6 +224,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             "PASS: attached 80x24 screen shows [no reply over RAP].\n"
             "PASS: no observed screen contains Received. Reviewing.; no provider turn.\n"
             f"Consent card answered: {consent_answered}\n")
+        if after_delivery is not None:
+            after_delivery(tui, evidence)
 
 
 @pytest.mark.a2a_binary

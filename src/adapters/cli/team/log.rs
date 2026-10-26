@@ -41,6 +41,8 @@ struct JsonRow<'a> {
     recorded_at_ms: Option<i64>,
     direction: &'a str,
     kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rail: Option<&'a str>,
     peer: &'a str,
     task: Option<&'a str>,
     summary: &'a str,
@@ -86,6 +88,7 @@ pub fn render_team_log(
                     recorded_at_ms: row.recorded_at_ms,
                     direction: row.direction.label(),
                     kind: row.kind.label(),
+                    rail: row.rail.map(|rail| rail.as_str()),
                     peer: &row.peer,
                     task: row.task.as_deref(),
                     summary: &row.summary,
@@ -157,4 +160,47 @@ pub fn rows_from_entries(
     filter: Option<&str>,
 ) -> Result<Vec<TransparencyRow>> {
     build_transparency_rows(entries, filter).map_err(|message| anyhow::anyhow!(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{JournalEntry, JournalRecord, PeerId, RoomEvent};
+    use crate::domain::services::transparency::fold_transparency;
+
+    #[test]
+    fn cross_rail_json_is_additive_and_text_uses_the_shared_labels() {
+        let peer = PeerId::from_public_key(&[7; 32]).unwrap();
+        let entries: Vec<_> = [None, Some("rap"), Some("a2a")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, rail)| {
+                let mut value = serde_json::json!({
+                    "event": "remote_envelope_accepted", "peer": peer.as_str(),
+                    "node": "root", "content_hash": "00".repeat(32),
+                    "direction": "inbound", "task": "same"
+                });
+                if let Some(rail) = rail {
+                    value["rail"] = serde_json::json!(rail);
+                }
+                let event: RoomEvent = serde_json::from_value(value).unwrap();
+                JournalEntry::new(index as u64 + 1, JournalRecord::Room(event), 1)
+            })
+            .collect();
+        let report = TransparencyReport {
+            rows: fold_transparency(&entries),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        render_team_log(None, true, &report, None, &mut out).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(value["rows"][0].get("rail").is_none());
+        assert_eq!(value["rows"][1]["rail"], "rap");
+        assert_eq!(value["rows"][2]["rail"], "a2a");
+        out.clear();
+        render_team_log(None, false, &report, None, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("accepted via RAP"));
+        assert!(text.contains("accepted via A2A"));
+    }
 }

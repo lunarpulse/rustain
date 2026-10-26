@@ -493,6 +493,7 @@ pub(super) fn dispatched(
 /// The settlement row of an outbound refusal or cancellation.
 pub(super) fn rejected(spec: &A2aPeerSpec, task: &str, detail: &str) -> RoomEvent {
     RoomEvent::RemoteEnvelopeRejected {
+        rail: Some(rustain::domain::models::PeerRail::A2a),
         peer: spec.resolved_identity(),
         reason: rustain::domain::models::RejectReason::Policy {
             detail: detail.to_owned(),

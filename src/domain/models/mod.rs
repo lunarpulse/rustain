@@ -209,7 +209,7 @@ pub use orchestration::{
 pub use orchestration_room::{
     ApplyOutcome, ApplyState, ApprovalView, Direction, DispatchAct, HostBinding,
     MAX_SEND_ACTION_ID_LEN, NodeView, OperatorApplyFinding, OrchestrationRoom, OrchestrationRoomId,
-    PeerAdmissionOutcome, PeerFrameAttemptOutcome, RejectReason, RemoteRejectionView,
+    PeerAdmissionOutcome, PeerFrameAttemptOutcome, PeerRail, RejectReason, RemoteRejectionView,
     ReviewVerdict, RoomEvent, RoomIdError, SEND_ACTION_ID_PREFIX, SendActionId,
     SendActionRecipient, SendActionRef, SendSettlement, SettlementCause, SettlementCauseKind,
     TicketResolution, WaveId, WaveOutcome, WaveView,

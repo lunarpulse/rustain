@@ -45,3 +45,6 @@ mod k11_k14_consent_policy;
 
 #[path = "conformance_19_18d/k19_20b_rap_one_way.rs"]
 mod k19_20b_rap_one_way;
+
+#[path = "conformance_19_18d/k19_18f_cross_rail.rs"]
+mod k19_18f_cross_rail;

@@ -6147,7 +6147,7 @@ mod tests {
         use crate::domain::models::{
             ItemAddress, ItemId, PeerId, ReceivedStories, ReceivedStory, RoomEvent, StoryKey,
         };
-        let address = ItemAddress::from_rap_ingress(
+        let address = ItemAddress::from_a2a_ingress(
             PeerId::from_public_key(&[74; 32]).unwrap(),
             ItemId::from_replay(item_id),
         );
@@ -6883,7 +6883,7 @@ mod tests {
     ) -> crate::domain::models::ItemAddress {
         use crate::domain::models::{ItemAddress, ItemId, PeerId, RoomEvent};
 
-        let address = ItemAddress::from_rap_ingress(
+        let address = ItemAddress::from_a2a_ingress(
             PeerId::from_public_key(&[73; 32]).unwrap(),
             ItemId::from_replay(item_id),
         );
@@ -8700,6 +8700,7 @@ mod tests {
                 timestamp_ms: 0,
                 kind: RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
                     crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        rail: None,
                         peer: crate::domain::models::PeerId::from_public_key(&[7; 32])
                             .expect("valid test peer"),
                         reason: crate::domain::models::RejectReason::Policy {

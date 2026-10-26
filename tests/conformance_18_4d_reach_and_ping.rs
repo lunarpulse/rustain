@@ -608,10 +608,11 @@ fn the_two_halves_of_one_frame_render_as_two_rows() {
         entry(
             2,
             RoomEvent::RemoteEnvelopeRejected {
+                rail: None,
                 peer: peer(11),
                 reason: RejectReason::Policy {
                     detail: "transport admission refused a frame from the connected key: this key \
-                             is not in the peer allowlist"
+                         is not in the peer allowlist"
                         .to_owned(),
                 },
                 direction: Direction::Inbound,

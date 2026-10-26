@@ -149,6 +149,8 @@ pub struct RecoveryReport {
     pub suspended: Vec<AgentId>,
     pub failed: Vec<AgentId>,
     pub host_bound_unavailable: Vec<AgentId>,
+    /// One-way RAP contexts and their descendants omitted from the live tree.
+    pub retired_peer_contexts: Vec<AgentId>,
     pub hazards: Vec<AgentId>,
     /// Waves that journaled `WaveStarted` before the crash but never reached
     /// `WaveCompleted`; recovery closes each with `WaveOutcome::Failed`.
@@ -338,9 +340,42 @@ impl NodeRecovery {
                 .then_with(|| left.id.cmp(&right.id))
         });
         let mut report = RecoveryReport::default();
+        let mut retired = BTreeSet::new();
 
         for mut checkpoint in ordered {
             let node = checkpoint.id.clone();
+            if (checkpoint.ownership
+                == crate::domain::models::subagent_view::WireOwnershipKind::Peer
+                && checkpoint.subagent_type == super::node_tree::RAP_DISPATCH_SUBAGENT_TYPE)
+                || checkpoint
+                    .parent
+                    .as_ref()
+                    .is_some_and(|parent| retired.contains(parent))
+            {
+                // Depth ordering retires descendants before a missing-parent
+                // restore can fail. Terminal checkpoints make the fold idempotent,
+                // so the checkpoint and its transition must land as ONE journal
+                // line: a torn tail must not keep a terminal checkpoint whose
+                // Room transition was lost (the next boot would skip it).
+                if !checkpoint.state.is_terminal() {
+                    let event = RoomEvent::NodeStateChanged {
+                        node: node.clone(),
+                        from: checkpoint.state,
+                        to: NodeState::Cancelled,
+                    };
+                    checkpoint.state = NodeState::Cancelled;
+                    journal
+                        .append_atomic_batch(vec![
+                            JournalRecord::Checkpoint(checkpoint),
+                            JournalRecord::Room(event.clone()),
+                        ])
+                        .await?;
+                    tree.emit_room_event(event);
+                }
+                retired.insert(node.clone());
+                report.retired_peer_contexts.push(node);
+                continue;
+            }
             if let Some(host) = hosts
                 .get(&node)
                 .filter(|host| host.host_id != current_host_id)
@@ -477,6 +512,9 @@ impl NodeRecovery {
         }
 
         for (node, accepted_ids) in accepted {
+            if retired.contains(&node) {
+                continue;
+            }
             let resolved_ids = resolved.remove(&node).unwrap_or_default();
             let pending = accepted_ids
                 .into_iter()
@@ -488,7 +526,10 @@ impl NodeRecovery {
         // 17.2d-b (AC-b1/b3): expose the durable parked set (`Parked −
         // Unparked`) for the composition-root resume consumer. `reconcile`
         // stays state-only — it never dispatches (layering).
-        report.parked = parked_set.into_values().collect();
+        report.parked = parked_set
+            .into_values()
+            .filter(|park| !retired.contains(&park.node))
+            .collect();
 
         // 17.5b (C3): `Waiting` hazards were captured against the pre-fold
         // checkpoint above (folding to `Suspended` first would make
@@ -583,5 +624,407 @@ mod tests {
         // Replaying the same stream yields the identical set.
         let replayed = fold_parked_records(&entries);
         assert_eq!(folded, replayed);
+    }
+
+    const NOW_MS: i64 = 1_700_000_100_000;
+    /// Dwell past the hazard threshold: a `Waiting` checkpoint stamped here
+    /// escalates if (and only if) it reaches the hazard-capture path.
+    const STALE_WAIT_MS: i64 = NOW_MS - crate::domain::models::WAITING_HAZARD_THRESHOLD_MS - 1;
+    const LOCAL_HOST: &str = "host-local";
+    const RAP: &str = crate::infrastructure::subagent::node_tree::RAP_DISPATCH_SUBAGENT_TYPE;
+
+    fn recovery_checkpoint(
+        id: &str,
+        parent: Option<&AgentId>,
+        ownership: crate::domain::models::WireOwnershipKind,
+        subagent_type: &str,
+        state: NodeState,
+        depth: usize,
+    ) -> NodeCheckpoint {
+        NodeCheckpoint {
+            id: AgentId::parse(id).expect("valid fixture agent id"),
+            token: crate::domain::models::CapabilityTokenId::root(),
+            parent: parent.cloned(),
+            ownership,
+            state,
+            origin: crate::domain::models::NodeOrigin::Subagent,
+            foreground: false,
+            effective_model: "test-model".into(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            subagent_type: subagent_type.into(),
+            spawned_at: 1_700_000_000_000,
+            depth,
+            tainted: false,
+            waiting_since: (state == NodeState::Waiting).then_some(STALE_WAIT_MS),
+            wait_reason: None,
+        }
+    }
+
+    fn recovery_tree(journal: &Arc<NodeJournal>) -> NodeTree {
+        NodeTree::with_now_fn(Arc::new(|| NOW_MS)).with_journal(journal.clone())
+    }
+
+    fn state_change(node: &AgentId, from: NodeState, to: NodeState) -> RoomEvent {
+        RoomEvent::NodeStateChanged {
+            node: node.clone(),
+            from,
+            to,
+        }
+    }
+
+    /// The exact retirement batch for one nonterminal node: its checkpoint
+    /// rewritten to `Cancelled` plus the matching room transition.
+    fn cancellation_batch(checkpoint: &NodeCheckpoint) -> [JournalRecord; 2] {
+        let event = state_change(&checkpoint.id, checkpoint.state, NodeState::Cancelled);
+        let cancelled = NodeCheckpoint {
+            state: NodeState::Cancelled,
+            ..checkpoint.clone()
+        };
+        [
+            JournalRecord::Checkpoint(cancelled),
+            JournalRecord::Room(event),
+        ]
+    }
+
+    /// The dwell stamp a cancelled checkpoint carries is not part of the
+    /// retirement contract; compare everything else exactly.
+    fn without_dwell(record: JournalRecord) -> JournalRecord {
+        match record {
+            JournalRecord::Checkpoint(mut checkpoint) => {
+                checkpoint.waiting_since = None;
+                JournalRecord::Checkpoint(checkpoint)
+            }
+            other => other,
+        }
+    }
+
+    /// Story 19.18f: Peer-owned `remote-peer` checkpoints (Waiting, Created,
+    /// Cancelled, and one bound to a FOREIGN host) plus every descendant are
+    /// retired by the real `reconcile` before the foreign-host branch. Each
+    /// nonterminal retired node gets exactly one checkpoint(Cancelled) +
+    /// `NodeStateChanged` batch; terminal ones append nothing. Durable
+    /// `Parked`/`ObligationAccepted` records of a retired descendant neither
+    /// fail recovery nor surface in `report.parked` / restored obligations.
+    /// Nothing retired is restored, suspended, hazarded or marked
+    /// host-bound-unavailable, and a second reconcile is a no-op.
+    #[tokio::test]
+    async fn reconcile_retires_rap_contexts_and_descendants_with_exact_cancellation_batches() {
+        use crate::domain::models::WireOwnershipKind::{Owned, Peer};
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let journal = Arc::new(
+            NodeJournal::open_workspace(workspace.path())
+                .await
+                .expect("open journal"),
+        );
+        let rap_waiting =
+            recovery_checkpoint("rap-a-waiting", None, Peer, RAP, NodeState::Waiting, 1);
+        let rap_created =
+            recovery_checkpoint("rap-b-created", None, Peer, RAP, NodeState::Created, 1);
+        let rap_cancelled =
+            recovery_checkpoint("rap-c-cancelled", None, Peer, RAP, NodeState::Cancelled, 1);
+        let rap_foreign =
+            recovery_checkpoint("rap-d-foreign", None, Peer, RAP, NodeState::Waiting, 1);
+        let mut parked_child = recovery_checkpoint(
+            "rap-e-parked-child",
+            Some(&rap_waiting.id),
+            Owned,
+            "test",
+            NodeState::Suspended,
+            2,
+        );
+        parked_child.wait_reason =
+            Some(crate::domain::models::WaitReason::AwaitingUpstreamArtifact);
+        let running_child = recovery_checkpoint(
+            "rap-f-running-child",
+            Some(&rap_cancelled.id),
+            Owned,
+            "test",
+            NodeState::Running,
+            2,
+        );
+        let done_grandchild = recovery_checkpoint(
+            "rap-g-done-grandchild",
+            Some(&parked_child.id),
+            Owned,
+            "test",
+            NodeState::Completed,
+            3,
+        );
+        let all = [
+            &rap_waiting,
+            &rap_created,
+            &rap_cancelled,
+            &rap_foreign,
+            &parked_child,
+            &running_child,
+            &done_grandchild,
+        ];
+        let mut seed = all
+            .iter()
+            .map(|&checkpoint| JournalRecord::Checkpoint(checkpoint.clone()))
+            .collect::<Vec<_>>();
+        seed.push(JournalRecord::Room(RoomEvent::NodeRegistered {
+            node: rap_foreign.id.clone(),
+            origin: crate::domain::models::NodeOrigin::Subagent,
+            host: HostBinding::new("host-foreign", "workspace-foreign"),
+        }));
+        seed.push(JournalRecord::Parked {
+            node: parked_child.id.clone(),
+            producers: vec![rap_waiting.id.clone()],
+            spec: parked_spec(&parked_child.id, vec![rap_waiting.id.clone()]),
+            concurrency: 1,
+        });
+        seed.push(JournalRecord::ObligationAccepted {
+            node: parked_child.id.clone(),
+            correlation_id: CorrelationId::new("corr-retired-child"),
+        });
+        journal.append_batch(seed).await.expect("seed journal");
+        let seeded_len = journal.load().await.expect("load seeded journal").len();
+
+        let tree = recovery_tree(&journal);
+        let singleton = DaemonSingletonLock::try_acquire(workspace.path())
+            .await
+            .expect("acquire daemon singleton");
+        let report = NodeRecovery::reconcile(&journal, &tree, &singleton, LOCAL_HOST)
+            .await
+            .expect("retired peer state must not fail recovery");
+
+        let retired = all
+            .iter()
+            .map(|checkpoint| checkpoint.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            report,
+            RecoveryReport {
+                retired_peer_contexts: retired.clone(),
+                ..RecoveryReport::default()
+            },
+            "retired contexts are reported in depth order and nowhere else \
+             (not restored/suspended/hazarded/host-bound/parked)"
+        );
+        assert!(
+            tree.list().await.is_empty(),
+            "no retired context is restored into the live tree"
+        );
+
+        let after = journal.load().await.expect("load reconciled journal");
+        let appended = after[seeded_len..]
+            .iter()
+            .map(|entry| without_dwell(entry.record.clone()))
+            .collect::<Vec<_>>();
+        let expected = [
+            &rap_waiting,
+            &rap_created,
+            &rap_foreign,
+            &parked_child,
+            &running_child,
+        ]
+        .into_iter()
+        .flat_map(cancellation_batch)
+        .map(without_dwell)
+        .collect::<Vec<_>>();
+        assert_eq!(
+            appended, expected,
+            "exactly one checkpoint(Cancelled)+NodeStateChanged per nonterminal retired \
+             node; no hazard, host-bound-unavailable, suspend or violation records"
+        );
+        let seqs = after[seeded_len..]
+            .iter()
+            .map(|entry| entry.seq)
+            .collect::<Vec<_>>();
+        assert!(
+            seqs.chunks(2)
+                .all(|pair| pair.len() == 2 && pair[0] == pair[1])
+                && seqs.windows(3).step_by(2).all(|run| run[1] != run[2]),
+            "each retirement is one atomic journal line (shared seq): {seqs:?}"
+        );
+
+        // Restart again: every retired checkpoint is now terminal, so the fold
+        // reports the same contexts and appends nothing.
+        let restarted = recovery_tree(&journal);
+        let replay = NodeRecovery::reconcile(&journal, &restarted, &singleton, LOCAL_HOST)
+            .await
+            .expect("replay reconcile");
+        assert_eq!(
+            replay,
+            RecoveryReport {
+                retired_peer_contexts: retired,
+                ..RecoveryReport::default()
+            }
+        );
+        assert_eq!(
+            journal.load().await.expect("load replayed journal").len(),
+            after.len(),
+            "terminal retired checkpoints are skipped on replay"
+        );
+        assert!(restarted.list().await.is_empty());
+
+        assert!(
+            tree.journal_obligation_violations(&parked_child.id)
+                .await
+                .expect("drain obligations")
+                .is_empty(),
+            "a retired descendant's accepted obligation is not restored"
+        );
+    }
+
+    /// Positive controls beside a retired RAP context: an Owned `Waiting`
+    /// node still captures its hazard, folds to `Suspended`, is restored and
+    /// keeps its pending obligation; Peer `a2a-peer` / `a2a-inbound` contexts
+    /// stay on the existing suspend+restore path for their later
+    /// reconciliation. Only the `remote-peer` sibling is retired.
+    #[tokio::test]
+    async fn reconcile_keeps_owned_and_a2a_peer_recovery_beside_retired_rap_context() {
+        use crate::domain::models::OwnershipKind;
+        use crate::domain::models::WireOwnershipKind::{Owned, Peer};
+        let workspace = tempfile::tempdir().expect("temporary workspace");
+        let journal = Arc::new(
+            NodeJournal::open_workspace(workspace.path())
+                .await
+                .expect("open journal"),
+        );
+        let a2a_inbound = recovery_checkpoint(
+            "a2a-inbound-task",
+            None,
+            Peer,
+            "a2a-inbound",
+            NodeState::Running,
+            1,
+        );
+        let a2a_peer =
+            recovery_checkpoint("a2a-out", None, Peer, "a2a-peer", NodeState::Running, 1);
+        let owned_waiting =
+            recovery_checkpoint("owned-waiting", None, Owned, "test", NodeState::Waiting, 1);
+        let rap_waiting =
+            recovery_checkpoint("rap-waiting", None, Peer, RAP, NodeState::Waiting, 1);
+        let owned_obligation = CorrelationId::new("corr-owned");
+        let rap_obligation = CorrelationId::new("corr-rap");
+        journal
+            .append_batch(vec![
+                JournalRecord::Checkpoint(a2a_inbound.clone()),
+                JournalRecord::Checkpoint(a2a_peer.clone()),
+                JournalRecord::Checkpoint(owned_waiting.clone()),
+                JournalRecord::Checkpoint(rap_waiting.clone()),
+                JournalRecord::ObligationAccepted {
+                    node: owned_waiting.id.clone(),
+                    correlation_id: owned_obligation.clone(),
+                },
+                JournalRecord::ObligationAccepted {
+                    node: rap_waiting.id.clone(),
+                    correlation_id: rap_obligation,
+                },
+            ])
+            .await
+            .expect("seed journal");
+        let seeded_len = journal.load().await.expect("load seeded journal").len();
+
+        let tree = recovery_tree(&journal);
+        let singleton = DaemonSingletonLock::try_acquire(workspace.path())
+            .await
+            .expect("acquire daemon singleton");
+        let report = NodeRecovery::reconcile(&journal, &tree, &singleton, LOCAL_HOST)
+            .await
+            .expect("reconcile");
+
+        let kept = [
+            a2a_inbound.id.clone(),
+            a2a_peer.id.clone(),
+            owned_waiting.id.clone(),
+        ];
+        assert_eq!(report.suspended, kept);
+        assert_eq!(report.restored, kept);
+        assert_eq!(report.hazards, vec![owned_waiting.id.clone()]);
+        assert_eq!(report.retired_peer_contexts, vec![rap_waiting.id.clone()]);
+        assert!(report.failed.is_empty());
+        assert!(report.host_bound_unavailable.is_empty());
+
+        let after = journal.load().await.expect("load reconciled journal");
+        let appended = &after[seeded_len..];
+        let hazarded = appended
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                JournalRecord::HazardRaised { node, .. } => Some(node.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            hazarded,
+            vec![owned_waiting.id.clone()],
+            "the Owned Waiting hazard is captured; the retired RAP Waiting one is not"
+        );
+        let transitions = appended
+            .iter()
+            .filter_map(|entry| match &entry.record {
+                JournalRecord::Room(event @ RoomEvent::NodeStateChanged { .. }) => {
+                    Some(event.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transitions,
+            vec![
+                state_change(&a2a_inbound.id, NodeState::Running, NodeState::Suspended),
+                state_change(&a2a_peer.id, NodeState::Running, NodeState::Suspended),
+                state_change(&owned_waiting.id, NodeState::Waiting, NodeState::Suspended),
+                state_change(&rap_waiting.id, NodeState::Waiting, NodeState::Cancelled),
+            ],
+            "A2A peer contexts and the Owned node keep the suspend fold; only RAP is cancelled"
+        );
+
+        let live = tree
+            .list()
+            .await
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.agent_id,
+                    entry.subagent_type,
+                    entry.ownership,
+                    entry.current_status,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            live,
+            vec![
+                (
+                    a2a_inbound.id.clone(),
+                    "a2a-inbound".to_string(),
+                    OwnershipKind::Peer,
+                    NodeState::Suspended,
+                ),
+                (
+                    a2a_peer.id.clone(),
+                    "a2a-peer".to_string(),
+                    OwnershipKind::Peer,
+                    NodeState::Suspended,
+                ),
+                (
+                    owned_waiting.id.clone(),
+                    "test".to_string(),
+                    OwnershipKind::Owned,
+                    NodeState::Suspended,
+                ),
+            ],
+            "A2A peer contexts and the Owned node are restored; the RAP context is not"
+        );
+
+        assert!(
+            tree.journal_obligation_violations(&rap_waiting.id)
+                .await
+                .expect("drain retired obligations")
+                .is_empty(),
+            "the retired RAP context's obligation is excluded"
+        );
+        assert_eq!(
+            tree.journal_obligation_violations(&owned_waiting.id)
+                .await
+                .expect("drain owned obligations"),
+            vec![owned_obligation],
+            "the Owned node's pending obligation is restored"
+        );
     }
 }

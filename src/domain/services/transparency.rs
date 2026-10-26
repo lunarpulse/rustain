@@ -45,7 +45,7 @@ use std::path::PathBuf;
 use crate::domain::models::provenance::provenance_tags;
 use crate::domain::models::{
     Direction, FrameRefusal, JournalEntry, JournalRecord, PeerAdmissionOutcome,
-    PeerFrameAttemptOutcome, PeerId, RejectReason, RoomEvent, node_journal,
+    PeerFrameAttemptOutcome, PeerId, PeerRail, RejectReason, RoomEvent, node_journal,
 };
 
 /// Longest disclosable free-text field rendered by any transparency surface.
@@ -292,6 +292,10 @@ impl TransparencyKind {
     }
 }
 
+/// RAP acceptance is delivery only, never execution or a reply promise.
+pub const RAP_ACCEPTED_SUMMARY: &str =
+    "message delivered one way; no task runs and nothing is sent back";
+
 /// One rendered transparency row. Every surface renders exactly this.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransparencyRow {
@@ -304,6 +308,8 @@ pub struct TransparencyRow {
     pub retracted_at_ms: Option<i64>,
     pub direction: Direction,
     pub kind: TransparencyKind,
+    /// Decision-time rail, only on accept/refuse rows; never inferred on replay.
+    pub rail: Option<PeerRail>,
     /// The remote principal, or `—` when the record carries none.
     pub peer: String,
     /// A2A task correlation id when recoverable.
@@ -339,12 +345,16 @@ impl TransparencyRow {
         let retracted = self.retracted_at_ms.map_or_else(String::new, |ms| {
             format!(" [retracted {}]", format_unix_millis(ms))
         });
+        let rail = self
+            .rail
+            .map_or_else(String::new, |rail| format!(" via {}", rail.label()));
         format!(
-            "{} {} {} {} · peer {} · task {} · {}{}",
+            "{} {} {} {}{} · peer {} · task {} · {}{}",
             self.direction.glyph(),
             self.direction.label(),
             self.kind.glyph(),
             self.kind.label(),
+            rail,
             self.peer,
             task,
             self.summary,
@@ -413,6 +423,11 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         RoomEvent::PeerInteractionSurfaced { provenance, .. } => Some(provenance.clone()),
         _ => None,
     };
+    let rail = match event {
+        RoomEvent::RemoteEnvelopeAccepted { rail, .. }
+        | RoomEvent::RemoteEnvelopeRejected { rail, .. } => *rail,
+        _ => None,
+    };
     let (kind, direction, peer, task, summary) = match event {
         RoomEvent::RemoteEnvelopeDispatched {
             peer,
@@ -454,7 +469,12 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
                 *direction,
                 peer.as_str().to_owned(),
                 task,
-                "task accepted and executing".to_owned(),
+                if rail == Some(PeerRail::Rap) {
+                    RAP_ACCEPTED_SUMMARY
+                } else {
+                    "task accepted and executing"
+                }
+                .to_owned(),
             )
         }
         RoomEvent::RemoteEnvelopeRejected {
@@ -462,6 +482,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
             reason,
             direction,
             task,
+            ..
         } => (
             TransparencyKind::Rejected,
             *direction,
@@ -824,6 +845,7 @@ pub fn transparency_row(entry: &JournalEntry) -> Option<TransparencyRow> {
         seq: entry.seq,
         recorded_at_ms,
         direction,
+        rail,
         retracted_at_ms,
         kind,
         // The peer id is host-derived (a SHA-256 pseudonym), but sanitizing it
@@ -1161,6 +1183,9 @@ pub fn render_export(rows: &[TransparencyRow]) -> String {
             ),
             "structural_replay": STRUCTURAL_REPLAY_CLAIM,
         });
+        if let Some(rail) = row.rail {
+            value["rail"] = serde_json::Value::from(rail.as_str());
+        }
         // Story 19.16d `AC5(d)` (owner: EXPAND) — the retract mark reaches the
         // export, read from the one field every face reads. ⛔ Additive and
         // optional, the `acknowledgedBeforeRemoval` discipline: emitted only
@@ -1398,6 +1423,232 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
     use crate::domain::models::{AgentId, ContentHash, PeerId};
+
+    #[test]
+    fn cross_rail_projection_keeps_legacy_bytes_and_labels_new_rows() {
+        let legacy = serde_json::json!({
+            "event": "remote_envelope_accepted", "peer": peer().as_str(),
+            "node": "a2a-in/peer/task", "content_hash": "00".repeat(32),
+            "direction": "inbound", "task": "same-task"
+        });
+        let event: RoomEvent = serde_json::from_value(legacy.clone()).unwrap();
+        let old = transparency_row(&room_entry(1, 1, event)).unwrap();
+        let old_line = old.one_line();
+        let old_export = render_export(std::slice::from_ref(&old));
+        assert!(!old_line.contains("via "));
+        assert!(!old_export.contains("\"rail\""));
+        // Pinned literal bytes: the rail-less legacy row is the pre-19.18f
+        // rendering, not merely self-consistent with today's code.
+        assert_eq!(
+            old_line,
+            format!(
+                "← inbound ✓ accepted · peer {} · task same-task · task accepted and executing",
+                peer().as_str()
+            )
+        );
+        assert_eq!(
+            old_export,
+            format!(
+                "{{\"direction\":\"inbound\",\"kind\":\"accepted\",\"notificationProvenance\":null,\
+                 \"peer\":\"{}\",\"recordedAtMs\":1,\"responseProvenance\":null,\"seq\":1,\
+                 \"structural_replay\":\"{STRUCTURAL_REPLAY_CLAIM}\",\
+                 \"summary\":\"task accepted and executing\",\"task\":\"same-task\"}}\n",
+                peer().as_str()
+            )
+        );
+        let mut rap = legacy.clone();
+        rap["rail"] = serde_json::json!("rap");
+        let rap_row =
+            transparency_row(&room_entry(1, 1, serde_json::from_value(rap).unwrap())).unwrap();
+        assert_eq!(
+            rap_row.one_line(),
+            format!(
+                "← inbound ✓ accepted via RAP · peer {} · task same-task · {RAP_ACCEPTED_SUMMARY}",
+                peer().as_str()
+            )
+        );
+        assert_eq!(
+            render_export(std::slice::from_ref(&rap_row)),
+            format!(
+                "{{\"direction\":\"inbound\",\"kind\":\"accepted\",\"notificationProvenance\":null,\
+                 \"peer\":\"{}\",\"rail\":\"rap\",\"recordedAtMs\":1,\"responseProvenance\":null,\
+                 \"seq\":1,\"structural_replay\":\"{STRUCTURAL_REPLAY_CLAIM}\",\
+                 \"summary\":\"{RAP_ACCEPTED_SUMMARY}\",\"task\":\"same-task\"}}\n",
+                peer().as_str()
+            )
+        );
+        assert!(!TransparencyFilter::parse("via").unwrap().matches(&old));
+        for (rail, label, summary) in [
+            (
+                "rap",
+                "RAP",
+                "message delivered one way; no task runs and nothing is sent back",
+            ),
+            ("a2a", "A2A", "task accepted and executing"),
+            ("future", "unknown rail", "task accepted and executing"),
+        ] {
+            let mut value = legacy.clone();
+            value["rail"] = serde_json::json!(rail);
+            let event: RoomEvent = serde_json::from_value(value).unwrap();
+            let row = transparency_row(&room_entry(1, 1, event)).unwrap();
+            assert!(
+                row.one_line().contains(&format!("accepted via {label}")),
+                "{}",
+                row.one_line()
+            );
+            assert_eq!(row.summary, summary);
+            assert!(
+                TransparencyFilter::parse(&format!("via {label}"))
+                    .unwrap()
+                    .matches(&row)
+            );
+            let export: serde_json::Value =
+                serde_json::from_str(render_export(&[row]).trim()).unwrap();
+            assert_eq!(
+                export["rail"],
+                if rail == "future" { "unknown" } else { rail }
+            );
+        }
+        let event: RoomEvent = serde_json::from_value(legacy).unwrap();
+        let replay = transparency_row(&room_entry(1, 1, event)).unwrap();
+        assert_eq!(replay.one_line(), old_line);
+        assert_eq!(render_export(&[replay]), old_export);
+    }
+
+    /// Story 19.18f: the rail reaches a row only from accept/refuse events.
+    /// A refusal's summary is the reason, whatever the rail; every other kind
+    /// (item-received, dispatched, disclosed, unknown) carries no rail and
+    /// renders/exports exactly as before.
+    #[test]
+    fn rail_reaches_only_accept_and_refuse_rows_and_never_changes_refusal_summary() {
+        use crate::domain::models::{
+            Authorship, ItemAddress, ItemId, SemanticMessageType, SendAuthorization,
+        };
+
+        let refusal = |rail: Option<PeerRail>| {
+            transparency_row(&room_entry(
+                2,
+                1_700_000_000_001,
+                RoomEvent::RemoteEnvelopeRejected {
+                    rail,
+                    peer: peer(),
+                    reason: RejectReason::Policy {
+                        detail: "policy".to_owned(),
+                    },
+                    direction: Direction::Outbound,
+                    task: Some("outbound-task".to_owned()),
+                },
+            ))
+            .expect("refusal projects")
+        };
+        let legacy = refusal(None);
+        assert_eq!(legacy.rail, None);
+        assert_eq!(
+            legacy.one_line(),
+            format!(
+                "→ outbound ✗ refused · peer {} · task outbound-task · policy",
+                peer().as_str()
+            )
+        );
+        assert_eq!(
+            render_export(std::slice::from_ref(&legacy)),
+            format!(
+                "{{\"direction\":\"outbound\",\"kind\":\"refused\",\"notificationProvenance\":null,\
+                 \"peer\":\"{}\",\"recordedAtMs\":1700000000001,\"responseProvenance\":null,\
+                 \"seq\":2,\"structural_replay\":\"{STRUCTURAL_REPLAY_CLAIM}\",\
+                 \"summary\":\"policy\",\"task\":\"outbound-task\"}}\n",
+                peer().as_str()
+            )
+        );
+        for rail in [PeerRail::Rap, PeerRail::A2a, PeerRail::Unknown] {
+            let row = refusal(Some(rail));
+            assert_eq!(row.rail, Some(rail));
+            assert_eq!(row.kind, TransparencyKind::Rejected);
+            assert_eq!(
+                row.summary, "policy",
+                "refusal summary ignores rail {rail:?}"
+            );
+            assert_eq!(
+                row.one_line(),
+                format!(
+                    "→ outbound ✗ refused via {} · peer {} · task outbound-task · policy",
+                    rail.label(),
+                    peer().as_str()
+                )
+            );
+            let export: serde_json::Value =
+                serde_json::from_str(render_export(std::slice::from_ref(&row)).trim()).unwrap();
+            assert_eq!(export["rail"], rail.as_str());
+            assert_eq!(export["summary"], "policy");
+            let mut without_rail = export.clone();
+            without_rail.as_object_mut().unwrap().remove("rail");
+            let legacy_export: serde_json::Value =
+                serde_json::from_str(render_export(std::slice::from_ref(&legacy)).trim()).unwrap();
+            assert_eq!(
+                without_rail, legacy_export,
+                "rail is the only added export key"
+            );
+            assert!(
+                TransparencyFilter::parse("kind=refused")
+                    .unwrap()
+                    .matches(&row)
+            );
+        }
+
+        let address = ItemAddress::from_a2a_ingress(peer(), ItemId::from_replay("ri_question"));
+        let non_rail_events = [
+            RoomEvent::RecipientItemReceived {
+                stories: None,
+                selected_for: None,
+                address,
+                task: "sender-task".to_owned(),
+                alias: None,
+                message_type: SemanticMessageType::Unknown,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+                content: "private body must not enter the ledger".to_owned(),
+                in_reply_to: None,
+                capability_hash: None,
+                reply_capability_matched: false,
+            },
+            RoomEvent::RemoteEnvelopeDispatched {
+                peer: peer(),
+                task: Some("sender-message-1".to_owned()),
+                bytes: 3,
+                act: crate::domain::models::DispatchAct::Task,
+                content_hash: None,
+                endpoint: None,
+                action: None,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
+            RoomEvent::PeerDisclosure {
+                peer: Some(peer()),
+                node: AgentId::root(),
+                task: None,
+                disclosed_bytes: 4,
+                authorship: Authorship::Unknown,
+                send_authorization: SendAuthorization::Unknown,
+            },
+            RoomEvent::Unrecognized,
+        ];
+        let expected_kinds = [
+            TransparencyKind::RecipientItemReceived,
+            TransparencyKind::Dispatched,
+            TransparencyKind::Disclosed,
+            TransparencyKind::Unknown,
+        ];
+        for (event, kind) in non_rail_events.into_iter().zip(expected_kinds) {
+            let row = transparency_row(&room_entry(3, 3, event)).expect("row projects");
+            assert_eq!(row.kind, kind);
+            assert_eq!(row.rail, None, "{kind:?} rows never carry a rail");
+            assert!(!row.one_line().contains(" via "), "{}", row.one_line());
+            assert!(
+                !render_export(std::slice::from_ref(&row)).contains("\"rail\""),
+                "{kind:?} export carries no rail key"
+            );
+        }
+    }
 
     fn peer() -> PeerId {
         PeerId::from_public_key(&[7u8; 32]).unwrap()
@@ -1650,6 +1901,7 @@ mod tests {
             1,
             0,
             RoomEvent::RemoteEnvelopeRejected {
+                rail: None,
                 peer: peer(),
                 reason: RejectReason::Policy {
                     detail: "nope".to_owned(),
@@ -1809,6 +2061,7 @@ mod tests {
                 1,
                 1_700_000_000_000,
                 RoomEvent::RemoteEnvelopeAccepted {
+                    rail: None,
                     peer: peer(),
                     node: AgentId::from_validated("a2a-in/peer/task"),
                     content_hash: ContentHash::from_bytes([0u8; 32]),
@@ -1845,6 +2098,7 @@ mod tests {
                 1,
                 5,
                 RoomEvent::RemoteEnvelopeAccepted {
+                    rail: None,
                     peer: peer(),
                     node: AgentId::from_validated(node.to_owned()),
                     content_hash: ContentHash::from_bytes([0u8; 32]),
@@ -1860,6 +2114,7 @@ mod tests {
             1,
             5,
             RoomEvent::RemoteEnvelopeAccepted {
+                rail: None,
                 peer: peer(),
                 node: AgentId::from_validated("a2a-in/p-c3VibWl0dGVy/t-cmVtb3RlLXRhc2s".to_owned()),
                 content_hash: ContentHash::from_bytes([0u8; 32]),
@@ -2088,6 +2343,7 @@ mod tests {
             TransparencyKind::RoomRoleRevoked,
         ] {
             let row = TransparencyRow {
+                rail: None,
                 seq: 1,
                 recorded_at_ms: Some(1),
                 retracted_at_ms: None,
@@ -2112,6 +2368,7 @@ mod tests {
     #[test]
     fn filters_reject_invalid_single_values_and_and_remaining_terms() {
         let row = TransparencyRow {
+            rail: None,
             seq: 1,
             recorded_at_ms: Some(1),
             retracted_at_ms: None,
@@ -2166,6 +2423,7 @@ mod tests {
                 1,
                 1_700_000_000_000,
                 RoomEvent::RemoteEnvelopeAccepted {
+                    rail: None,
                     peer: peer(),
                     node: AgentId::from_validated("a2a-in/s/t-1".to_owned()),
                     content_hash: ContentHash::from_bytes([0u8; 32]),
@@ -2177,6 +2435,7 @@ mod tests {
                 2,
                 1_700_000_000_001,
                 RoomEvent::RemoteEnvelopeRejected {
+                    rail: None,
                     peer: peer(),
                     reason: RejectReason::Policy {
                         detail: "policy".to_owned(),

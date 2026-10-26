@@ -115,6 +115,7 @@ fn remote_envelope_rejection_is_observable_and_idempotent() {
     let peer = PeerId::from_public_key(&[9u8; 32]).expect("peer id");
     let events = [
         RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: peer.clone(),
             reason: RejectReason::Policy {
                 detail: "multi-turn not supported".to_owned(),
@@ -123,6 +124,7 @@ fn remote_envelope_rejection_is_observable_and_idempotent() {
             task: Some("task-out".to_owned()),
         },
         RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: peer.clone(),
             reason: RejectReason::Malformed,
             direction: Direction::Inbound,

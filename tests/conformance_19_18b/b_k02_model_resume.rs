@@ -148,6 +148,7 @@ async fn resume_round_trip(ids: TaskIds) {
         vec![
             dispatched(&peer.spec(), resumed, endpoint),
             RoomEvent::RemoteEnvelopeAccepted {
+                rail: Some(rustain::domain::models::PeerRail::A2a),
                 peer: peer.spec().resolved_identity(),
                 node: node.agent_id.clone(),
                 content_hash: result_hash(&completed),

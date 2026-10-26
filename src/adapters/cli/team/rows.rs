@@ -42,6 +42,7 @@ mod tests {
         JournalEntry::new(
             seq,
             JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected {
+                rail: None,
                 peer: PeerId::from_public_key(&[seq as u8; 32]).unwrap(),
                 reason: RejectReason::Policy {
                     detail: "policy".to_owned(),

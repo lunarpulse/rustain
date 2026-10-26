@@ -197,6 +197,9 @@ honestly migrate relay→direct mid-run.
 RAP application messages are one-way. The receiver returns only an
 accepted/refused verdict, never response text; its response-mode setting does
 not run a reply. Conversational replies use A2A.
+`team log`, `/team log` and the transparency panel label RAP accept/refuse rows
+`via RAP`; accepted rows say `message delivered one way; no task runs and
+nothing is sent back` (older rail-less rows are unchanged).
 
 - `--count` — frames sent on one connection; default 1; `0` is refused at
   parse. More than one exists to watch a revocation take effect between

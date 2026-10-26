@@ -40,9 +40,9 @@ use rustain::adapters::rap::{
 use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::{
-    AgentEnvelope, AgentId, ApprovalSource, CorrelationId, ItemAddress, ItemId, MessageKind,
-    PeerId, PinnedVia, PolicyPrincipal, PrincipalKind, RequestId, ResponseMode, RoomEvent,
-    SemanticMessageType, ToolRisk,
+    AgentEnvelope, AgentId, ApprovalSource, CorrelationId, ItemId, MessageKind, PeerId, PinnedVia,
+    PolicyPrincipal, PrincipalKind, RequestId, ResponseMode, RoomEvent, SemanticMessageType,
+    ToolRisk,
 };
 use rustain::domain::ports::{
     ConsentProjectionQuery, ConsentSlot, ConsentState, InboundPeerRuntime, RoomJournalReader,
@@ -545,14 +545,14 @@ async fn k11_a_typed_pinned_grant_from_a_rap_card_answer_is_reused_by_bound_a2a_
         "the RAP card answer wrote the typed pinned grant"
     );
 
-    // A RAP-addressed item for the same pin exists in the journal (written by
-    // the production room journal, as an earlier RAP exchange would leave it).
+    // Decoded legacy RAP wire evidence for the same pin; no production
+    // producer exists. It must remain outside the bound A2A item scope.
     host.journal
         .room
         .record_event(RoomEvent::RecipientItemReceived {
             stories: None,
             message_type: rustain::domain::models::SemanticMessageType::Unknown,
-            address: ItemAddress::from_rap_ingress(
+            address: super::k09_journal::legacy_rap_address(
                 pin.clone(),
                 ItemId::from_replay("ri_rap_planted"),
             ),

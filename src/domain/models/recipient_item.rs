@@ -1,10 +1,9 @@
 //! Recipient-side durable-item identity.
 //!
-//! The address retains principal provenance. AD-1821's stronger transport-
-//! authenticated identity is represented by [`ItemPrincipal::Rap`]; the A2A
-//! ingress in Story 19.16 is legal only through AD-1825's pseudonymous
-//! provenance narrowing; Story 19.18d adds the operator-bound pin
-//! ([`ItemPrincipal::A2aBound`]), a third provenance kept apart from both.
+//! Items are minted only by A2A ingress, under pseudonymous or operator-bound
+//! provenance. [`ItemPrincipal::Rap`] is decode-only legacy wire evidence:
+//! no build mints RAP items while RAP is one-way. Replayed RAP addresses keep
+//! their principal and remain outside every A2A scope.
 use super::provenance::Authorship;
 
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
@@ -45,7 +44,7 @@ impl ItemId {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "peer")]
 pub enum ItemPrincipal {
-    /// Identity supplied by the authenticated RAP ingress.
+    /// Decode-only legacy provenance; no production ingress mints RAP items.
     Rap(PeerId),
     /// Stable pseudonym derived from the credential accepted by A2A ingress.
     A2aPseudonym(PeerId),
@@ -226,16 +225,6 @@ impl ItemAddress {
     pub fn from_a2a_bound(pin: PeerId, item: ItemId) -> Self {
         Self {
             principal: ItemPrincipal::A2aBound(pin),
-            item,
-        }
-    }
-
-    /// Construct only at the RAP ingress after envelope verification supplied
-    /// the transport identity. There is intentionally no `From<PeerId>` conversion.
-    #[must_use]
-    pub fn from_rap_ingress(peer: PeerId, item: ItemId) -> Self {
-        Self {
-            principal: ItemPrincipal::Rap(peer),
             item,
         }
     }

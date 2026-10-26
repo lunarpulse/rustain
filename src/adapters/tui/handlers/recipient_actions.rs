@@ -873,7 +873,7 @@ mod tests {
             Conversation, ItemAddress, ItemId, PeerId, PeerRowControl, PeerRowStage,
             RetroContribution, RetroField, RetroFieldSet, RetroPreview, SemanticMessageType,
         };
-        let address = ItemAddress::from_rap_ingress(
+        let address = ItemAddress::from_a2a_ingress(
             PeerId::from_public_key(&[73; 32]).unwrap(),
             ItemId::from_replay("ri_retro"),
         );

@@ -1255,6 +1255,7 @@ mod tests {
 
     fn row(seq: u64) -> TransparencyRow {
         TransparencyRow {
+            rail: None,
             seq,
             recorded_at_ms: Some(1_700_000_000_000),
             retracted_at_ms: None,

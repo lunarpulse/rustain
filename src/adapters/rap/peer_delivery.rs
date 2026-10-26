@@ -727,15 +727,6 @@ impl VerifiedPeerFrameHandler {
             }
             materialized.remove(&recipient);
         }
-        // A daemon restart restores this context's durable node with no worker
-        // behind it, and the in-memory set above starts empty — so without
-        // this, the first frame after a restart collides with the husk at
-        // registration below, for every admitted sender, forever. A live
-        // context is not in `awaiting_resume`, so this is a no-op for it.
-        self.node_tree
-            .retire_unresumed_peer_context(&recipient)
-            .await;
-
         let (command_tx, mut command_rx) = mpsc::channel(1);
         let (status_tx, _) = watch::channel(NodeState::Created);
         let (_, metrics_rx) = watch::channel(AgentMetrics::default());
@@ -750,7 +741,9 @@ impl VerifiedPeerFrameHandler {
                     command_tx,
                     cancel_token: cancel.clone(),
                     depth: 0,
-                    subagent_type: "remote-peer".into(),
+                    subagent_type:
+                        crate::infrastructure::subagent::node_tree::RAP_DISPATCH_SUBAGENT_TYPE
+                            .into(),
                     spawned_at: 0,
                     status: status_tx.clone(),
                     metrics: metrics_rx,
@@ -1252,8 +1245,18 @@ mod tests {
         mpsc::UnboundedReceiver<AppEvent>,
         Arc<RecordingConsumer>,
     ) {
+        handler_with_tree(NodeTree::new())
+    }
+
+    fn handler_with_tree(
+        node_tree: NodeTree,
+    ) -> (
+        VerifiedPeerFrameHandler,
+        NodeTree,
+        mpsc::UnboundedReceiver<AppEvent>,
+        Arc<RecordingConsumer>,
+    ) {
         let (domain_tx, domain_rx) = mpsc::unbounded_channel();
-        let node_tree = NodeTree::new();
         let bus = Arc::new(LocalMessageBus::new(
             node_tree.clone(),
             Arc::new(RelationshipDeliveryPolicy) as Arc<dyn DeliveryPolicy>,
@@ -1275,12 +1278,14 @@ mod tests {
         )
     }
 
-    /// A daemon restart restores the recipient's durable node with no worker
-    /// behind it; the first frame after the restart must still land — the
-    /// husk is retired and the context rematerialized.
+    /// Recovery retires the durable RAP mailbox before the next frame arrives.
     #[tokio::test]
     async fn peer_context_is_rematerialized_after_a_daemon_restart() {
-        let (first_handler, node_tree, _domain_rx, _consumer) = handler();
+        use crate::infrastructure::subagent::{DaemonSingletonLock, NodeJournal, NodeRecovery};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+        let (first_handler, node_tree, _domain_rx, _consumer) =
+            handler_with_tree(NodeTree::new().with_journal(journal.clone()));
         let signed = envelope(MessageKind::PeerMessage, serde_json::json!("one"));
         let peer_id = signed.signer.peer_id.clone();
         first_handler
@@ -1290,57 +1295,30 @@ mod tests {
         let id = fixture_recipient();
         assert!(node_tree.delivery_target(&id).await.is_some());
 
-        // The restart: a fresh handler (empty in-memory set) over a tree
-        // whose recipient node was restored from its durable checkpoint —
-        // fabricated handle, awaiting a resume that never comes.
-        let (fresh_handler, fresh_tree, _domain_rx2, _consumer2) = handler();
-        fresh_tree
-            .restore_checkpoint(crate::domain::models::NodeCheckpoint {
-                id: id.clone(),
-                token: CapabilityTokenId::nil(),
-                parent: Some(AgentId::root()),
-                ownership: crate::domain::models::subagent_view::WireOwnershipKind::Peer,
-                state: NodeState::Cancelled,
-                origin: crate::domain::models::NodeOrigin::Remote,
-                foreground: false,
-                effective_model: String::new(),
-                tokens_in: 0,
-                tokens_out: 0,
-                turns: 0,
-                subagent_type: "remote-peer".to_owned(),
-                spawned_at: 0,
-                depth: 1,
-                tainted: false,
-                waiting_since: None,
-                wait_reason: None,
-            })
+        let (fresh_handler, fresh_tree, _domain_rx2, _consumer2) =
+            handler_with_tree(NodeTree::new().with_journal(journal.clone()));
+        let singleton = DaemonSingletonLock::try_acquire(workspace.path())
             .await
-            .expect("the husk restores");
+            .unwrap();
+        let report = NodeRecovery::reconcile(&journal, &fresh_tree, &singleton, "test-host")
+            .await
+            .unwrap();
+        assert_eq!(report.retired_peer_contexts, vec![id.clone()]);
+        assert!(fresh_tree.delivery_target(&id).await.is_none());
 
         let mut next = envelope(MessageKind::PeerMessage, serde_json::json!("two"));
         next.header.correlation_id = CorrelationId::new("corr-restart");
         fresh_handler
             .handle_verified_peer_frame(next, peer_id)
             .await
-            .expect("the restored husk is retired and the context rematerialized");
-    }
-
-    /// The retirement must never touch a live context.
-    #[tokio::test]
-    async fn only_an_unresumed_remote_peer_husk_is_retired() {
-        let (handler, node_tree, _domain_rx, _consumer) = handler();
-        let signed = envelope(MessageKind::PeerMessage, serde_json::json!("one"));
-        let peer_id = signed.signer.peer_id.clone();
-        handler
-            .handle_verified_peer_frame(signed, peer_id)
-            .await
-            .unwrap();
-        let id = fixture_recipient();
+            .expect("the retired context rematerializes");
         assert!(
-            !node_tree.retire_unresumed_peer_context(&id).await,
-            "a live context is not a husk"
+            !fresh_tree
+                .delivery_target(&id)
+                .await
+                .unwrap()
+                .awaiting_resume
         );
-        assert!(node_tree.delivery_target(&id).await.is_some());
     }
 
     #[test]

@@ -872,6 +872,7 @@ async fn legacy_dispatch_rows_remain_inventory_only_and_action_selectors_render_
         .journal
         .room
         .record_event(rustain::domain::models::RoomEvent::RemoteEnvelopeAccepted {
+            rail: None,
             peer,
             node: rustain::domain::models::AgentId::root(),
             content_hash: rustain::domain::models::ContentHash::from_bytes([0x19; 32]),

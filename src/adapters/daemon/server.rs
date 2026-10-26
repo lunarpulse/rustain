@@ -14083,12 +14083,12 @@ mod tests {
             tier: ConnectionTier::TrustedLocal,
             approval_ready: true,
         });
-
         let mut assistant_buf = String::new();
         server
             .handle_bus_event(
                 &AppEvent::DomainEvent(crate::domain::events::DomainEventPayload::Room(
                     crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                        rail: Some(crate::domain::models::PeerRail::Rap),
                         peer: crate::domain::models::PeerId::from_public_key(&[9; 32])
                             .expect("valid test peer"),
                         reason: crate::domain::models::RejectReason::Policy {
@@ -14101,7 +14101,6 @@ mod tests {
                 &mut assistant_buf,
             )
             .await;
-
         let frame = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
             .await
             .expect("domain event reaches attached client queue")
@@ -14111,6 +14110,7 @@ mod tests {
                 kind:
                     RawEventKind::DomainEvent(crate::domain::events::DomainEventPayload::Room(
                         crate::domain::models::RoomEvent::RemoteEnvelopeRejected {
+                            rail: Some(crate::domain::models::PeerRail::Rap),
                             task: Some(task),
                             ..
                         },

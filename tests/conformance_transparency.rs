@@ -552,10 +552,11 @@ fn a_hostile_record_already_on_disk_is_neutralized_on_read() {
     let hostile = JournalEntry::new(
         1,
         JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: rustain::domain::models::PeerId::from_public_key(&[9u8; 32]).unwrap(),
             reason: rustain::domain::models::RejectReason::Policy {
                 detail: "remote agent requested input (task \u{1b}[2K\rEVIL\u{7}, context \
-                         \u{9b}31m); multi-turn not supported"
+                     \u{9b}31m); multi-turn not supported"
                     .to_owned(),
             },
             direction: Direction::Outbound,
@@ -586,6 +587,7 @@ async fn the_export_bytes_carry_no_control_sequences() {
     let hostile = JournalEntry::new(
         1,
         JournalRecord::Room(RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: rustain::domain::models::PeerId::from_public_key(&[9u8; 32]).unwrap(),
             reason: rustain::domain::models::RejectReason::Policy {
                 detail: "\u{1b}]0;pwned\u{7}".to_owned(),

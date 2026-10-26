@@ -67,11 +67,15 @@ fn row_line(row: &TransparencyRow, width: usize, theme: &Theme, selected: bool) 
     let mark = row.retracted_at_ms.map_or_else(String::new, |ms| {
         format!(" [retracted {}]", format_unix_millis(ms))
     });
+    let rail = row
+        .rail
+        .map_or_else(String::new, |rail| format!(" via {}", rail.label()));
     let text = format!(
-        "{}{} {}{} {} · {} · {} · {}",
+        "{}{} {}{}{} {} · {} · {} · {}",
         row.direction.glyph(),
         row.kind.glyph(),
         row.kind.label(),
+        rail,
         mark,
         row.direction.label(),
         time,
@@ -237,11 +241,15 @@ pub fn render(
             ))];
             if state.drill_seq == Some(row.seq) {
                 for detail in [
-                    format!("    seq {}", row.seq),
-                    format!("    peer {}", row.peer),
-                    format!("    task {}", row.task.as_deref().unwrap_or("—")),
-                    format!("    {}", row.summary),
-                ] {
+                    Some(format!("    seq {}", row.seq)),
+                    Some(format!("    peer {}", row.peer)),
+                    row.rail.map(|rail| format!("    rail {}", rail.label())),
+                    Some(format!("    task {}", row.task.as_deref().unwrap_or("—"))),
+                    Some(format!("    {}", row.summary)),
+                ]
+                .into_iter()
+                .flatten()
+                {
                     lines.push(ListItem::new(Line::from(Span::styled(
                         truncate_to_width(&detail, inner.width as usize),
                         muted,
@@ -331,6 +339,7 @@ mod tests {
 
     fn row(seq: u64, recorded_at_ms: Option<i64>) -> TransparencyRow {
         TransparencyRow {
+            rail: None,
             seq,
             recorded_at_ms,
             retracted_at_ms: None,
@@ -346,6 +355,14 @@ mod tests {
 
     fn theme() -> Theme {
         Theme::dark()
+    }
+
+    #[test]
+    fn cross_rail_label_survives_the_80_column_sidebar() {
+        let mut row = row(1, None);
+        row.rail = Some(crate::domain::models::PeerRail::Rap);
+        let text = row_line(&row, 30, &theme(), false).to_string();
+        assert!(text.contains("refused via RAP"), "{text}");
     }
 
     #[test]

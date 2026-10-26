@@ -6316,6 +6316,7 @@ mod tests {
         use crate::domain::services::transparency::{TransparencyKind, TransparencyRow};
 
         let row = |seq, summary: &str| TransparencyRow {
+            rail: None,
             seq,
             recorded_at_ms: Some(seq as i64),
             retracted_at_ms: None,

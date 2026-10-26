@@ -998,6 +998,7 @@ impl A2aDelegationRuntime {
         error: &str,
     ) -> Result<(), DelegationError> {
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            rail: Some(crate::domain::models::PeerRail::A2a),
             peer: spec.resolved_identity(),
             reason: RejectReason::Policy {
                 detail: sanitize_disclosable(error, MAX_SUMMARY_BYTES),
@@ -1152,6 +1153,7 @@ impl A2aDelegationRuntime {
         answer: &serde_json::Value,
     ) -> Result<(), DelegationError> {
         self.emit_room(RoomEvent::RemoteEnvelopeAccepted {
+            rail: Some(crate::domain::models::PeerRail::A2a),
             peer: spec.resolved_identity(),
             node: mint_node_id(&spec.id, task),
             content_hash: content_hash(answer),
@@ -1168,6 +1170,7 @@ impl A2aDelegationRuntime {
         detail: &str,
     ) -> Result<(), DelegationError> {
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            rail: Some(crate::domain::models::PeerRail::A2a),
             peer: spec.resolved_identity(),
             reason: RejectReason::Policy {
                 detail: sanitize_disclosable(detail, MAX_SUMMARY_BYTES),
@@ -1456,6 +1459,7 @@ impl A2aDelegationRuntime {
     ) {
         let _ = self
             .emit_room(RoomEvent::RemoteEnvelopeRejected {
+                rail: Some(crate::domain::models::PeerRail::A2a),
                 peer: spec.resolved_identity(),
                 reason: RejectReason::Policy {
                     detail: sanitize_disclosable(detail, MAX_SUMMARY_BYTES),
@@ -1621,6 +1625,7 @@ impl A2aDelegationRuntime {
             Ok(value) => value,
             Err(error) => {
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                    rail: Some(crate::domain::models::PeerRail::A2a),
                     peer,
                     reason: RejectReason::Policy {
                         detail: sanitize_disclosable(
@@ -1639,6 +1644,7 @@ impl A2aDelegationRuntime {
             Ok(first) => first,
             Err(error) => {
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                    rail: Some(crate::domain::models::PeerRail::A2a),
                     peer,
                     reason: RejectReason::Policy {
                         detail: sanitize_disclosable(
@@ -1657,6 +1663,7 @@ impl A2aDelegationRuntime {
         if raw_task_id.len() > MAX_PEER_ID_BYTES {
             let reason = "remote task id exceeds the supported size".to_owned();
             self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                rail: Some(crate::domain::models::PeerRail::A2a),
                 peer,
                 reason: RejectReason::Policy {
                     detail: reason.clone(),
@@ -2144,6 +2151,7 @@ impl A2aDelegationRuntime {
         };
         let task_correlation = disclosable_task_id(task_id);
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            rail: Some(crate::domain::models::PeerRail::A2a),
             peer: peer.clone(),
             reason: RejectReason::Policy {
                 detail: sanitize_disclosable(&detail, MAX_SUMMARY_BYTES),
@@ -2288,6 +2296,7 @@ impl A2aDelegationRuntime {
                     // Remote content enters local context: taint it (never trust a
                     // peer's answer) and record the accepted envelope durably.
                     self.emit_room(RoomEvent::RemoteEnvelopeAccepted {
+                        rail: Some(crate::domain::models::PeerRail::A2a),
                         peer: peer.clone(),
                         node: node_id.clone(),
                         content_hash: content_hash(&task.result),
@@ -2308,6 +2317,7 @@ impl A2aDelegationRuntime {
                     // `Failed`: `Cancelled -> Failed` is an illegal FSM hop.
                     let task_correlation = disclosable_task_id(&task.id);
                     self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                        rail: Some(crate::domain::models::PeerRail::A2a),
                         peer: peer.clone(),
                         reason: RejectReason::Policy {
                             detail: sanitize_disclosable(
@@ -2372,6 +2382,7 @@ impl A2aDelegationRuntime {
                         .unwrap_or_else(|| "—".to_owned()),
                 );
                 self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+                    rail: Some(crate::domain::models::PeerRail::A2a),
                     peer: peer.clone(),
                     reason: RejectReason::Policy { detail },
                     direction: Direction::Outbound,
@@ -2448,6 +2459,7 @@ impl A2aDelegationRuntime {
             .map_err(|error| DelegationError::State(error.to_string()))?;
         let task_correlation = disclosable_task_id(task_id);
         self.emit_room(RoomEvent::RemoteEnvelopeRejected {
+            rail: Some(crate::domain::models::PeerRail::A2a),
             peer: peer.clone(),
             reason: RejectReason::Policy {
                 // AC8 — `reason` reaches here from `error.to_string()` on the
@@ -3435,6 +3447,7 @@ mod tests {
         assert!(matches!(
             room_events.get(1),
             Some(RoomEvent::RemoteEnvelopeAccepted {
+                rail: Some(crate::domain::models::PeerRail::A2a),
                 task: Some(task),
                 direction: Direction::Outbound,
                 ..
@@ -3552,6 +3565,7 @@ mod tests {
         assert!(matches!(
             room_events.last(),
             Some(RoomEvent::RemoteEnvelopeRejected {
+                rail: Some(crate::domain::models::PeerRail::A2a),
                 direction: Direction::Outbound,
                 ..
             })
@@ -3692,6 +3706,7 @@ mod tests {
         assert!(matches!(
             room_events.last(),
             Some(RoomEvent::RemoteEnvelopeRejected {
+                rail: Some(crate::domain::models::PeerRail::A2a),
                 direction: Direction::Outbound,
                 task: Some(task),
                 ..

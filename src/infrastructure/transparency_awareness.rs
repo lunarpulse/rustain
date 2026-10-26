@@ -753,6 +753,7 @@ pub(crate) mod test_support {
     /// One transparency-producing room event (a refused inbound envelope).
     pub(crate) fn rejection(tag: u8) -> RoomEvent {
         RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
             peer: PeerId::from_public_key(&[tag.max(1); 32]).unwrap(),
             reason: RejectReason::Policy {
                 detail: "policy".to_owned(),

@@ -272,6 +272,16 @@ impl TransparencySink {
     /// **accept** caller MUST treat this as fatal and refuse; a refusal caller
     /// MUST still return its refusal.
     pub async fn record(&self, outcome: InboundOutcome) -> Result<(), RoomJournalError> {
+        self.record_on_rail(outcome, crate::domain::models::PeerRail::A2a)
+            .await
+    }
+
+    /// Single accept/refuse event builder: callers supply decision-time provenance.
+    async fn record_on_rail(
+        &self,
+        outcome: InboundOutcome,
+        rail: crate::domain::models::PeerRail,
+    ) -> Result<(), RoomJournalError> {
         let Some(journal) = &self.journal else {
             tracing::debug!(?outcome, "A2A inbound outcome (no journal configured)");
             return Ok(());
@@ -282,6 +292,7 @@ impl TransparencySink {
                 node,
                 task_id,
             } => RoomEvent::RemoteEnvelopeAccepted {
+                rail: Some(rail),
                 peer,
                 node,
                 // The admission record's subject is the *decision*, not the
@@ -297,6 +308,7 @@ impl TransparencySink {
                 task_id,
                 reason,
             } => RoomEvent::RemoteEnvelopeRejected {
+                rail: Some(rail),
                 peer,
                 // Strip-on-write (AC8). Inbound refusal reasons are
                 // host-authored today, but "audited clean once" is not an
@@ -399,7 +411,7 @@ impl PeerInteractionRecorder for TransparencySink {
                 reason: format!("peer delivery refused ({content_bytes} bytes)"),
             },
         };
-        self.record(outcome)
+        self.record_on_rail(outcome, crate::domain::models::PeerRail::Rap)
             .await
             .map_err(|error| error.to_string())
     }
@@ -418,13 +430,16 @@ impl PeerInteractionRecorder for TransparencySink {
             detail,
             correlation_id,
         } = record;
-        self.record(InboundOutcome::Refused {
-            peer,
-            // ⛔ Not an empty string: a frame with no readable correlation has an
-            // unknown task, and an unknown fact renders as one.
-            task_id: correlation_id.map_or_else(|| "—".to_owned(), |id| id.0),
-            reason: detail,
-        })
+        self.record_on_rail(
+            InboundOutcome::Refused {
+                peer,
+                // ⛔ Not an empty string: a frame with no readable correlation has an
+                // unknown task, and an unknown fact renders as one.
+                task_id: correlation_id.map_or_else(|| "—".to_owned(), |id| id.0),
+                reason: detail,
+            },
+            crate::domain::models::PeerRail::Rap,
+        )
         .await
         .map_err(|error| error.to_string())
     }
@@ -468,6 +483,67 @@ mod tests {
 
     fn peer() -> PeerId {
         PeerId::from_public_key(&[3u8; 32]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn decision_writers_stamp_a2a_and_both_rap_paths() {
+        use crate::infrastructure::subagent::{NodeJournal, NodeRoomJournal};
+        let workspace = tempfile::tempdir().unwrap();
+        let journal = Arc::new(NodeJournal::open_workspace(workspace.path()).await.unwrap());
+        let sink = TransparencySink::new(Arc::new(NodeRoomJournal::new(journal.clone(), None)));
+        for accepted in [true, false] {
+            let outcome = if accepted {
+                InboundOutcome::Accepted {
+                    peer: peer(),
+                    node: AgentId::root(),
+                    task_id: "same".into(),
+                }
+            } else {
+                InboundOutcome::Refused {
+                    peer: peer(),
+                    task_id: "same".into(),
+                    reason: "no".into(),
+                }
+            };
+            sink.record(outcome).await.unwrap();
+            sink.record_peer_delivery(PeerDeliveryRecord {
+                peer: peer(),
+                node: AgentId::root(),
+                correlation_id: crate::domain::models::CorrelationId::new("same"),
+                content_bytes: 7,
+                outcome: if accepted {
+                    PeerDeliveryOutcome::Accepted
+                } else {
+                    PeerDeliveryOutcome::Refused
+                },
+            })
+            .await
+            .unwrap();
+        }
+        sink.record_transport_refusal(TransportRefusalRecord {
+            peer: peer(),
+            detail: "transport policy".into(),
+            correlation_id: None,
+        })
+        .await
+        .unwrap();
+        let rows: Vec<_> = journal
+            .load()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| {
+                if let JournalRecord::Room(event) = entry.record {
+                    Some(serde_json::to_value(event).unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(rows.len(), 5);
+        for (row, rail) in rows.iter().zip(["a2a", "rap", "a2a", "rap", "rap"]) {
+            assert_eq!(row["rail"], rail, "{row}");
+        }
     }
 
     #[tokio::test]

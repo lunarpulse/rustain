@@ -1226,8 +1226,15 @@ recovered tasks of `tasks/get` and `tasks/cancel`, in one global journal order.
 Adoption does not change the capability-class edge: a legacy follow-up joins an
 adopted legacy thread, while a capability-bearing follow-up of a legacy root
 starts its own root. The opt-in was renamed to `adoptPreBinding` before its
-first release; no other spelling is read. A bound peer's items and a RAP peer's
-items of the same pin stay separate (`DF-19-18D-CROSS-RAIL-PRINCIPAL`).
+first release; no other spelling is read. Recipient items are A2A-only: RAP
+mints no FR165 item while it is one-way. Decoded legacy `rap` addresses retain
+their provenance and remain outside every A2A item scope.
+
+Where traffic from the same pin meets in transparency, accept/refuse rows name
+their decision-time rail: `via RAP` or `via A2A`. These remain separate rows,
+not an item or policy union. `rustain team log --json` and the transparency
+export add `"rail":"rap"` / `"rail":"a2a"` only on these rows; older rail-less
+rows retain their existing text and export bytes.
 
 **Adopted tasks.** Bindings apply only at startup, and startup fails every task
 that was in flight. With adoption, `tasks/get` and `tasks/cancel` from any key

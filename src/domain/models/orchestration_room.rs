@@ -202,6 +202,38 @@ impl Direction {
     }
 }
 
+/// Decision-time transport provenance. Missing legacy fields remain absent;
+/// an unrecognised future rail is explicit rather than inferred from a peer id.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerRail {
+    Rap,
+    A2a,
+    #[serde(other)]
+    Unknown,
+}
+
+impl PeerRail {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rap => "rap",
+            Self::A2a => "a2a",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rap => "RAP",
+            Self::A2a => "A2A",
+            Self::Unknown => "unknown rail",
+        }
+    }
+}
+
 /// Outcome of one `git apply` attempt against the One-Ring workspace
 /// (Story 18.3a-d, FR160(c)).
 ///
@@ -655,6 +687,8 @@ pub enum RoomEvent {
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
     RemoteEnvelopeAccepted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rail: Option<PeerRail>,
         peer: PeerId,
         node: AgentId,
         content_hash: ContentHash,
@@ -670,6 +704,8 @@ pub enum RoomEvent {
     /// Defined against 17.1a's `PeerId`; production emission is the sole
     /// 17.1b-gated room-event seam.
     RemoteEnvelopeRejected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rail: Option<PeerRail>,
         peer: PeerId,
         reason: RejectReason,
         /// Story 18.2 (AC2). This variant carries no node, so direction is
@@ -1773,6 +1809,113 @@ mod tests {
         let future: Direction =
             serde_json::from_str(r#""sideways""#).expect("future direction parses");
         assert_eq!(future, Direction::Unknown);
+    }
+
+    #[test]
+    fn peer_rail_as_str_and_labels_are_stable_and_match_serde() {
+        for (rail, wire, label) in [
+            (PeerRail::Rap, "rap", "RAP"),
+            (PeerRail::A2a, "a2a", "A2A"),
+            (PeerRail::Unknown, "unknown", "unknown rail"),
+        ] {
+            assert_eq!(rail.as_str(), wire);
+            assert_eq!(rail.label(), label);
+            assert_eq!(
+                serde_json::to_value(rail).expect("serialize rail"),
+                serde_json::json!(wire)
+            );
+            let back: PeerRail =
+                serde_json::from_value(serde_json::json!(wire)).expect("rail round-trip");
+            assert_eq!(back, rail);
+        }
+        for future in ["quic", "RAP", "A2A", "a2a-v2", ""] {
+            let decoded: PeerRail =
+                serde_json::from_value(serde_json::json!(future)).expect("future rail parses");
+            assert_eq!(decoded, PeerRail::Unknown, "future rail `{future}`");
+        }
+    }
+
+    fn rail_of(event: &RoomEvent) -> Option<PeerRail> {
+        match event {
+            RoomEvent::RemoteEnvelopeAccepted { rail, .. }
+            | RoomEvent::RemoteEnvelopeRejected { rail, .. } => *rail,
+            other => panic!("not an accept/refuse event: {other:?}"),
+        }
+    }
+
+    /// Story 19.18f: `rail` on accept/refuse is additive. A rail-less event
+    /// keeps the exact legacy JSON object (no `rail` key, not even `null`), a
+    /// legacy line without the key replays as `None` (never inferred), known
+    /// rails round-trip, and a future rail string replays as an explicit
+    /// `Unknown` that re-serializes as `"unknown"`.
+    #[test]
+    fn accept_and_refuse_rail_is_additive_legacy_absent_and_future_unknown() {
+        let peer = PeerId::from_public_key(&[7u8; 32]).expect("peer");
+        let legacy_literal = serde_json::json!({
+            "event": "remote_envelope_accepted", "peer": peer.as_str(),
+            "node": "a2a-in/peer/task", "content_hash": "00".repeat(32),
+            "direction": "inbound", "task": "same-task"
+        });
+        let decoded: RoomEvent =
+            serde_json::from_value(legacy_literal.clone()).expect("legacy accepted decodes");
+        assert_eq!(rail_of(&decoded), None);
+        assert_eq!(
+            serde_json::to_value(&decoded).expect("serialize"),
+            legacy_literal,
+            "a rail-less accepted event must re-encode to the legacy object"
+        );
+
+        let accepted = RoomEvent::RemoteEnvelopeAccepted {
+            rail: None,
+            peer: peer.clone(),
+            node: AgentId::from_validated("a2a-in/peer/task"),
+            content_hash: ContentHash::from_bytes([0u8; 32]),
+            direction: Direction::Inbound,
+            task: Some("same-task".to_owned()),
+        };
+        let rejected = RoomEvent::RemoteEnvelopeRejected {
+            rail: None,
+            peer,
+            reason: RejectReason::Policy {
+                detail: "nope".to_owned(),
+            },
+            direction: Direction::Outbound,
+            task: Some("same-task".to_owned()),
+        };
+        for legacy_event in [accepted, rejected] {
+            let json = serde_json::to_string(&legacy_event).expect("serialize");
+            assert!(!json.contains("\"rail\""), "None rail is omitted: {json}");
+            let legacy: serde_json::Value = serde_json::from_str(&json).expect("value");
+            let back: RoomEvent = serde_json::from_value(legacy.clone()).expect("legacy decodes");
+            assert_eq!(rail_of(&back), None, "missing rail decodes None");
+            assert_eq!(back, legacy_event);
+            assert_eq!(serde_json::to_string(&back).expect("re-serialize"), json);
+
+            let mut explicit_null = legacy.clone();
+            explicit_null["rail"] = serde_json::Value::Null;
+            let back: RoomEvent = serde_json::from_value(explicit_null).expect("null decodes");
+            assert_eq!(rail_of(&back), None);
+            assert_eq!(serde_json::to_string(&back).expect("re-serialize"), json);
+
+            for (wire, expected, reencoded) in [
+                ("rap", PeerRail::Rap, "rap"),
+                ("a2a", PeerRail::A2a, "a2a"),
+                ("unknown", PeerRail::Unknown, "unknown"),
+                ("carrier-pigeon", PeerRail::Unknown, "unknown"),
+            ] {
+                let mut value = legacy.clone();
+                value["rail"] = serde_json::json!(wire);
+                let event: RoomEvent = serde_json::from_value(value).expect("railed decodes");
+                assert_eq!(rail_of(&event), Some(expected), "rail `{wire}`");
+                let out = serde_json::to_value(&event).expect("serialize railed");
+                assert_eq!(out["rail"], serde_json::json!(reencoded));
+                let mut without_rail = out.clone();
+                without_rail.as_object_mut().expect("object").remove("rail");
+                assert_eq!(without_rail, legacy, "rail is the only added key");
+                let again: RoomEvent = serde_json::from_value(out).expect("round-trip");
+                assert_eq!(again, event);
+            }
+        }
     }
 
     /// NFR70(d) / AC3: replaying the journal twice yields the identical room,
