@@ -2832,30 +2832,41 @@ fn build_anthropic_provider_from_env(
     {
         use crate::adapters::anthropic::AuthMode;
 
-        // 1. Resolve auth: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY (CC precedence)
-        let auth_token = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_AUTH_TOKEN");
-        let api_key = crate::infrastructure::utils::env_var_trimmed("ANTHROPIC_API_KEY");
+        use crate::domain::models::{AuthSource, ResolvedAuth};
+        use crate::domain::services::key_cascade::{
+            CascadeInputs, SelectionMaterial, select_ready,
+        };
 
-        if auth_token.is_some() && api_key.is_some() {
-            tracing::warn!(
-                "Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)"
-            );
-        }
-
-        let auth_mode = if let Some(token) = auth_token {
-            tracing::info!("Using ANTHROPIC_AUTH_TOKEN (Bearer auth)");
-            AuthMode::BearerToken(token.into())
-        } else if let Some(key) = api_key {
-            tracing::info!("Using ANTHROPIC_API_KEY (X-Api-Key auth)");
-            AuthMode::ApiKey(key.into())
-        } else if let Some(stored_key) =
-            crate::adapters::auth_store::FileAuthStore::get_sync("anthropic")
-        {
-            // Story 13.4a AC7: auth.json fallback — strictly below env vars.
-            tracing::info!("Using stored credential from auth.json (X-Api-Key auth)");
-            AuthMode::ApiKey(stored_key.into())
-        } else {
-            anyhow::bail!(
+        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+        let lookup = |name: &str| crate::infrastructure::utils::env_var_trimmed(name);
+        let selection = select_ready(&CascadeInputs {
+            runtime: None,
+            rows: snapshot.rows("anthropic"),
+            env_vars: &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
+            env_lookup: &lookup,
+            now_ms: chrono::Utc::now().timestamp_millis(),
+        });
+        let auth_mode = match selection {
+            Some(selection) => match selection.material {
+                SelectionMaterial::Ready(ResolvedAuth::OAuth { access }) => {
+                    AuthMode::BearerToken(access)
+                }
+                SelectionMaterial::Ready(ResolvedAuth::ApiKey(key)) => match selection.source {
+                    AuthSource::Env { var } if var == "ANTHROPIC_AUTH_TOKEN" => {
+                        if lookup("ANTHROPIC_API_KEY").is_some() {
+                            tracing::warn!(
+                                "Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set; using ANTHROPIC_AUTH_TOKEN (Bearer auth)"
+                            );
+                        }
+                        AuthMode::BearerToken(key)
+                    }
+                    _ => AuthMode::ApiKey(key),
+                },
+                SelectionMaterial::NeedsRefresh { .. } => {
+                    unreachable!("select_ready skips stale rows")
+                }
+            },
+            None => anyhow::bail!(
                 "No API key found.\n\n\
                  Set one of:\n\
                  \n\
@@ -2864,7 +2875,7 @@ fn build_anthropic_provider_from_env(
                  rustain auth login anthropic               # Store via auth.json\n\
                  \n\
                  Get your API key at: https://console.anthropic.com/"
-            );
+            ),
         };
 
         // 2. Resolve base URL (filter empty to preserve default)

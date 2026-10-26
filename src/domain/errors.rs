@@ -476,6 +476,8 @@ pub enum AuthError {
     Io(String),
     #[error("Parse error: {0}")]
     Parse(String),
+    #[error("Unsupported auth.json version: {0}")]
+    UnsupportedVersion(u32),
     #[error("Lock contention: {0}")]
     Locked(String),
     #[error("Unknown provider: {0}")]

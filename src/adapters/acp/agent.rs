@@ -438,22 +438,18 @@ impl RustainAcpAgent {
         &self,
         provider: &crate::adapters::cli::auth::providers::ProviderMeta,
     ) -> acp::Result<bool> {
-        let statuses = self
+        let snapshot = self
             .auth_store
-            .list()
+            .snapshot()
             .await
             .map_err(|err| acp::Error::internal_error().data(err.to_string()))?;
-        let auth_by_provider: HashMap<&str, &crate::domain::models::credential::ProviderStatus> =
-            statuses
-                .iter()
-                .map(|status| (status.provider.as_str(), status))
-                .collect();
-        Ok(
-            crate::adapters::cli::auth::detect_source(provider, &auth_by_provider, &|key| {
-                crate::infrastructure::utils::env_var_trimmed(key)
-            })
-            .is_some(),
+        Ok(crate::adapters::cli::auth::source_for(
+            provider.id,
+            &crate::adapters::cli::auth::env_vars_for(provider.id, provider.api_key_env),
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
         )
+        .is_some())
     }
 
     fn parse_skill_prompt(prompt: &str) -> Option<(&str, &str)> {

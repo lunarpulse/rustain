@@ -435,40 +435,52 @@ async fn acp_session_new_forwards_mcp_servers_to_core_factory() {
 
 #[derive(Clone)]
 struct StaticAuthStore {
-    statuses: Vec<rustain::domain::models::credential::ProviderStatus>,
+    rows: Vec<rustain::domain::models::StoredCredential>,
 }
 
 #[async_trait::async_trait]
 impl rustain::domain::ports::AuthStorePort for StaticAuthStore {
-    async fn get(
+    async fn snapshot(
         &self,
-        _provider: &str,
-    ) -> Result<
-        Option<rustain::domain::models::credential::Credential>,
-        rustain::domain::errors::AuthError,
-    > {
-        Ok(None)
+    ) -> Result<rustain::domain::models::AuthSnapshot, rustain::domain::errors::AuthError> {
+        let mut snapshot = rustain::domain::models::AuthSnapshot::default();
+        snapshot
+            .providers
+            .insert("moonshot".to_owned(), self.rows.clone());
+        Ok(snapshot)
     }
 
-    async fn set(
+    async fn upsert(
         &self,
         _provider: &str,
-        _cred: rustain::domain::models::credential::Credential,
-    ) -> Result<(), rustain::domain::errors::AuthError> {
-        Ok(())
+        _cred: rustain::domain::models::Credential,
+        _origin: rustain::domain::models::CredentialOrigin,
+        _validated: bool,
+    ) -> Result<rustain::domain::models::CredentialId, rustain::domain::errors::AuthError> {
+        Ok(rustain::domain::models::CredentialId(1))
     }
 
     async fn remove(&self, _provider: &str) -> Result<(), rustain::domain::errors::AuthError> {
         Ok(())
     }
 
-    async fn list(
+    async fn replace_if_matches(
         &self,
-    ) -> Result<
-        Vec<rustain::domain::models::credential::ProviderStatus>,
-        rustain::domain::errors::AuthError,
-    > {
-        Ok(self.statuses.clone())
+        _provider: &str,
+        _id: rustain::domain::models::CredentialId,
+        _rev: u64,
+        _cred: rustain::domain::models::Credential,
+    ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
+        Ok(rustain::domain::models::CasOutcome::Stale)
+    }
+    async fn disable_if_matches(
+        &self,
+        _provider: &str,
+        _id: rustain::domain::models::CredentialId,
+        _rev: u64,
+        _cause: &str,
+    ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
+        Ok(rustain::domain::models::CasOutcome::Stale)
     }
 }
 
@@ -504,9 +516,7 @@ async fn acp_initialize_advertises_auth_methods_without_secret_leaks() {
         NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000)),
         workspace.path().to_path_buf(),
         rustain::adapters::acp::run::deterministic_acp_id_source(),
-        Arc::new(StaticAuthStore {
-            statuses: Vec::new(),
-        }),
+        Arc::new(StaticAuthStore { rows: Vec::new() }),
     );
 
     let drive = async {
@@ -623,13 +633,16 @@ async fn acp_authenticate_checks_credential_presence() {
 
     use rustain::adapters::acp::run::serve_acp_with_acp_core_factory_and_node_tree_and_auth_store;
     use rustain::domain::models::AppConfig;
-    use rustain::domain::models::credential::{AuthSource, AuthStatus, ProviderStatus};
+    use rustain::domain::models::{
+        Credential, CredentialId, CredentialIdentity, CredentialOrigin, OAuthCredential,
+        SecretString, StoredCredential,
+    };
     use rustain::infrastructure::composition::AcpCore;
     use rustain::infrastructure::subagent::NodeTree;
 
     // P7 — hermeticity: the "missing credential" case must NOT be satisfied by
-    // an ambient `MOONSHOT_API_KEY` in the developer's shell (`detect_source`
-    // checks the process env before the auth store). Save + remove it for the
+    // an ambient `MOONSHOT_API_KEY` in the developer's shell (the cascade
+    // checks the process env before stored-origin keys). Save + remove it for the
     // duration of the test and restore the prior value on exit.
     let prior_moonshot = std::env::var("MOONSHOT_API_KEY").ok();
     if prior_moonshot.is_some() {
@@ -645,7 +658,7 @@ async fn acp_authenticate_checks_credential_presence() {
         }
     });
 
-    let run_case = |statuses: Vec<ProviderStatus>| async move {
+    let run_case = |rows: Vec<StoredCredential>| async move {
         let workspace = tempfile::tempdir().expect("workspace tempdir");
         let ws_for_factory = workspace.path().to_path_buf();
         let (server_incoming, mut client_write) = tokio::io::duplex(8 * 1024);
@@ -661,7 +674,7 @@ async fn acp_authenticate_checks_credential_presence() {
             NodeTree::with_now_fn(Arc::new(|| 1_700_000_000_000)),
             workspace.path().to_path_buf(),
             rustain::adapters::acp::run::deterministic_acp_id_source(),
-            Arc::new(StaticAuthStore { statuses }),
+            Arc::new(StaticAuthStore { rows }),
         );
 
         let drive = async {
@@ -717,17 +730,43 @@ async fn acp_authenticate_checks_credential_presence() {
         "missing-auth error must include login hint: {error_text}"
     );
 
-    let success = run_case(vec![ProviderStatus {
-        provider: "moonshot".to_string(),
-        status: AuthStatus::Authenticated,
-        source: AuthSource::AuthJson,
+    let row = StoredCredential {
+        id: CredentialId(1),
+        rev: 1,
+        origin: CredentialOrigin::Stored,
+        credential: Credential::ApiKey(SecretString::new("acp-stored-secret".to_owned())),
         last_validated: None,
-    }])
-    .await;
+        disabled_cause: None,
+    };
+    let success = run_case(vec![row.clone()]).await;
     assert!(
         success.get("result").is_some() && success.get("error").is_none(),
         "authenticate must succeed when auth store reports a credential: {success}"
     );
+    let mut disabled = row.clone();
+    disabled.disabled_cause = Some("oauth refresh failed: revoked".to_owned());
+    let rejected = run_case(vec![disabled]).await;
+    assert!(
+        rejected.get("error").is_some(),
+        "disabled rows must not configure ACP: {rejected}"
+    );
+    let mut stale = row;
+    stale.credential = Credential::OAuth(OAuthCredential {
+        access: SecretString::new("acp-stale-access".to_owned()),
+        refresh: SecretString::new("acp-stale-refresh".to_owned()),
+        expires_at_ms: 0,
+        identity: CredentialIdentity::default(),
+    });
+    let available = run_case(vec![stale]).await;
+    assert!(
+        available.get("result").is_some() && available.get("error").is_none(),
+        "stale-only OAuth remains available for ACP: {available}"
+    );
+    for secret in ["acp-stored-secret", "acp-stale-access", "acp-stale-refresh"] {
+        assert!(!success.to_string().contains(secret));
+        assert!(!rejected.to_string().contains(secret));
+        assert!(!available.to_string().contains(secret));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

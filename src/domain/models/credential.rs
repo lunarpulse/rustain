@@ -1,102 +1,167 @@
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use std::collections::BTreeMap;
+
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 
 use super::secret::SecretString;
 
-// ---------------------------------------------------------------------------
-// Credential
-// ---------------------------------------------------------------------------
-
-/// A stored authentication credential.
-///
-/// Forward-compat scaffold: Epic 20 (OAuth; numbered 19 until 2026-08-23) adds an OAuth variant.
+/// A stored authentication credential. Serialization is always masked.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Credential {
     ApiKey(SecretString),
+    OAuth(OAuthCredential),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OAuthCredential {
+    pub access: SecretString,
+    pub refresh: SecretString,
+    #[serde(rename = "expires_at")]
+    pub expires_at_ms: i64,
+    pub identity: CredentialIdentity,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialIdentity {
+    pub account_id: Option<String>,
+    pub email: Option<String>,
+    pub project_id: Option<String>,
+}
+
+impl CredentialIdentity {
+    /// Stable upsert identity; missing identities never match each other.
+    pub fn key(&self) -> Option<String> {
+        self.account_id
+            .as_ref()
+            .map(|id| format!("account:{id}"))
+            .or_else(|| self.email.as_ref().map(|email| format!("email:{email}")))
+            .or_else(|| self.project_id.as_ref().map(|id| format!("project:{id}")))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialOrigin {
+    Login,
+    Stored,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CredentialId(pub u64);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCredential {
+    pub id: CredentialId,
+    pub rev: u64,
+    pub origin: CredentialOrigin,
+    #[serde(flatten)]
+    pub credential: Credential,
+    pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
+    pub disabled_cause: Option<String>,
+}
+
+impl std::fmt::Display for StoredCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuthSnapshot {
+    pub providers: BTreeMap<String, Vec<StoredCredential>>,
+    pub unknown_rows: usize,
+}
+
+impl AuthSnapshot {
+    pub fn rows(&self, provider: &str) -> &[StoredCredential] {
+        self.providers
+            .get(provider)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CasOutcome {
+    Applied,
+    Stale,
 }
 
 impl Credential {
-    /// Wrap a raw API key string into a [`Credential::ApiKey`].
     pub fn new_api_key(key: String) -> Self {
         Self::ApiKey(SecretString::new(key))
     }
 
-    /// Expose the inner API-key value.
-    ///
-    /// Use **only** at disk-write and provider-construction boundaries.
+    /// Expose only at disk-write and provider-construction boundaries.
     pub fn expose_api_key(&self) -> Option<&str> {
         match self {
             Self::ApiKey(s) => Some(s.expose_secret()),
+            Self::OAuth(_) => None,
         }
     }
 }
+
 impl std::fmt::Display for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiKey(s) => write!(f, "{s}"),
+            Self::OAuth(_) => write!(f, "OAuth(***)"),
         }
     }
 }
 
 impl Serialize for Credential {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(None)?;
         match self {
             Self::ApiKey(_) => {
-                let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("type", "api_key")?;
                 map.serialize_entry("api_key", "***")?;
-                map.end()
+            }
+            Self::OAuth(oauth) => {
+                map.serialize_entry("type", "oauth")?;
+                map.serialize_entry("access", "***")?;
+                map.serialize_entry("refresh", "***")?;
+                map.serialize_entry("expires_at", &oauth.expires_at_ms)?;
+                map.serialize_entry("identity", &oauth.identity)?;
             }
         }
+        map.end()
     }
 }
 
 impl<'de> Deserialize<'de> for Credential {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        /// Helper for tag-based deserialization.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(tag = "type")]
+        #[serde(tag = "type", rename_all = "snake_case")]
         enum Tagged {
-            #[serde(rename = "api_key")]
-            ApiKey { api_key: String },
+            ApiKey {
+                api_key: SecretString,
+            },
+            Oauth {
+                access: SecretString,
+                refresh: SecretString,
+                expires_at: i64,
+                identity: CredentialIdentity,
+            },
         }
-
-        struct CredentialVisitor;
-
-        impl<'de> Visitor<'de> for CredentialVisitor {
-            type Value = Credential;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(
-                    r#"a tagged credential object, e.g. {"type":"api_key","api_key":"..."}"#,
-                )
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                let tagged = Tagged::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                match tagged {
-                    Tagged::ApiKey { api_key } => Ok(Credential::new_api_key(api_key)),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(CredentialVisitor)
+        Ok(match Tagged::deserialize(deserializer)? {
+            Tagged::ApiKey { api_key } => Self::ApiKey(api_key),
+            Tagged::Oauth {
+                access,
+                refresh,
+                expires_at,
+                identity,
+            } => Self::OAuth(OAuthCredential {
+                access,
+                refresh,
+                expires_at_ms: expires_at,
+                identity,
+            }),
+        })
     }
-}
-
-// ---------------------------------------------------------------------------
-// ProviderStatus / AuthStatus / AuthSource
-// ---------------------------------------------------------------------------
-
-/// Current authentication state of a provider.
-#[derive(Debug, Clone)]
-pub struct ProviderStatus {
-    pub provider: String,
-    pub status: AuthStatus,
-    pub source: AuthSource,
-    pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Whether the credential has been verified.
@@ -107,18 +172,15 @@ pub enum AuthStatus {
     Unknown,
 }
 
-/// Where the credential was discovered.
-#[derive(Debug, Clone)]
+/// Where the winning credential was discovered. Absence is `Option::None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthSource {
-    Env,
-    AuthJson,
-    Config,
-    None,
+    Runtime,
+    StoredOAuth,
+    LoginKey,
+    Env { var: String },
+    StoredKey,
 }
-
-// ---------------------------------------------------------------------------
-// AuthMethod
-// ---------------------------------------------------------------------------
 
 /// Supported authentication mechanisms for a provider.
 #[non_exhaustive]
@@ -128,30 +190,93 @@ pub enum AuthMethod {
     // Epic 20 will add: OAuth { ... }
 }
 
-// ---------------------------------------------------------------------------
-// ResolvedAuth
-// ---------------------------------------------------------------------------
-
-/// A fully-resolved credential ready for use in an API call.
+/// A fully-resolved credential; refresh tokens never leave the store/resolver.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum ResolvedAuth {
     ApiKey(SecretString),
-    // Epic 20 will add: OAuth { access_token, ... }
+    OAuth { access: SecretString },
 }
 
 impl ResolvedAuth {
-    /// Extract the API key as a `SecretString` if this is the `ApiKey` variant.
     pub fn to_api_key(self) -> Option<SecretString> {
         match self {
             Self::ApiKey(s) => Some(s),
+            Self::OAuth { .. } => None,
         }
+    }
+
+    pub fn bearer_secret(&self) -> &SecretString {
+        match self {
+            Self::ApiKey(s) | Self::OAuth { access: s } => s,
+        }
+    }
+}
+
+impl std::fmt::Display for ResolvedAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "***")
+    }
+}
+
+impl Serialize for ResolvedAuth {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(2))?;
+        match self {
+            Self::ApiKey(_) => {
+                map.serialize_entry("type", "api_key")?;
+                map.serialize_entry("api_key", "***")?;
+            }
+            Self::OAuth { .. } => {
+                map.serialize_entry("type", "oauth")?;
+                map.serialize_entry("access", "***")?;
+            }
+        }
+        map.end()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_model_masks_both_tokens_and_preserves_identity_priority() {
+        let identity = CredentialIdentity {
+            account_id: Some("account".into()),
+            email: Some("mail".into()),
+            project_id: Some("project".into()),
+        };
+        assert_eq!(identity.key().as_deref(), Some("account:account"));
+        let credential = Credential::OAuth(OAuthCredential {
+            access: "ACCESS-CANARY".into(),
+            refresh: "REFRESH-CANARY".into(),
+            expires_at_ms: 123,
+            identity,
+        });
+        assert!(credential.expose_api_key().is_none());
+        let row = StoredCredential {
+            id: CredentialId(1),
+            rev: 1,
+            origin: CredentialOrigin::Stored,
+            credential,
+            last_validated: None,
+            disabled_cause: None,
+        };
+        let resolved = ResolvedAuth::OAuth {
+            access: "ACCESS-CANARY".into(),
+        };
+        for output in [
+            format!("{row:?} {row}"),
+            serde_json::to_string(&row).unwrap(),
+            format!("{resolved:?} {resolved}"),
+            serde_json::to_string(&resolved).unwrap(),
+        ] {
+            assert!(!output.contains("ACCESS-CANARY"));
+            assert!(!output.contains("REFRESH-CANARY"));
+        }
+        assert_eq!(resolved.bearer_secret().expose_secret(), "ACCESS-CANARY");
+    }
 
     // P0-1a: Redaction canary — Credential Debug mask (delegates to SecretString)
     #[test]

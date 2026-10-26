@@ -3,48 +3,136 @@
 //! Story 13.4a.  Atomic writes via sibling `.tmp` + `rename(2)`, advisory
 //! locking via `flock(2)` on unix, in-process serialisation via `tokio::sync::Mutex`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-use crate::domain::models::secret::{SecretString, expose_secret_string};
+use serde_json::value::RawValue;
 
 use crate::domain::errors::AuthError;
-use crate::domain::models::credential::{AuthSource, AuthStatus, Credential, ProviderStatus};
-use crate::domain::ports::AuthStorePort;
+use crate::domain::models::credential::{
+    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialIdentity, CredentialOrigin,
+    StoredCredential,
+};
+use crate::domain::models::secret::{SecretString, expose_secret_string};
+use crate::domain::ports::{AuthStorePort, RefreshLease};
 use crate::infrastructure::paths;
 
-// ---------------------------------------------------------------------------
-// On-disk schema (private)
-// ---------------------------------------------------------------------------
-
-/// Top-level `auth.json` schema.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct AuthFile {
     version: u32,
-    providers: HashMap<String, AuthEntry>,
+    next_id: u64,
+    providers: BTreeMap<String, Vec<AuthRow>>,
 }
 
-/// Per-provider entry. Tagged enum for forward-compat — Epic 20 (OAuth; numbered 19 until 2026-08-23).
-///
-/// `api_key` field is `SecretString` — `Debug` derive is safe (redacts automatically).
-/// The `serialize_with` chokepoint is the ONLY cleartext-to-disk egress (AC3/D2).
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type")]
-enum AuthEntry {
-    #[serde(rename = "api_key")]
+/// Epic 20 rows retain unrecognised credential types verbatim for downgrade safety.
+enum AuthRow {
+    Known(StoredCredential),
+    Unknown(Box<RawValue>),
+}
+
+/// Private disk projection: the only unmasked serializer uses the audited
+/// `expose_secret_string` chokepoint, never the public masking serializer.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum DiskCredential<'a> {
     ApiKey {
         #[serde(serialize_with = "expose_secret_string")]
-        api_key: SecretString,
-        /// RFC 3339 timestamp of last validation, if known.
-        last_validated: Option<String>,
+        api_key: &'a SecretString,
     },
-    // Epic 20 will add:
-    // #[serde(rename = "oauth")]
-    // OAuth { access: String, refresh: String, expires: String },
+    Oauth {
+        #[serde(serialize_with = "expose_secret_string")]
+        access: &'a SecretString,
+        #[serde(serialize_with = "expose_secret_string")]
+        refresh: &'a SecretString,
+        expires_at: i64,
+        identity: &'a CredentialIdentity,
+    },
+}
+
+impl Serialize for AuthRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct DiskRow<'a> {
+            id: CredentialId,
+            rev: u64,
+            origin: CredentialOrigin,
+            disabled_cause: &'a Option<String>,
+            last_validated: Option<chrono::DateTime<chrono::Utc>>,
+            #[serde(flatten)]
+            credential: DiskCredential<'a>,
+        }
+        match self {
+            Self::Unknown(raw) => raw.serialize(serializer),
+            Self::Known(row) => DiskRow {
+                id: row.id,
+                rev: row.rev,
+                origin: row.origin,
+                disabled_cause: &row.disabled_cause,
+                last_validated: row.last_validated,
+                credential: match &row.credential {
+                    Credential::ApiKey(api_key) => DiskCredential::ApiKey { api_key },
+                    Credential::OAuth(oauth) => DiskCredential::Oauth {
+                        access: &oauth.access,
+                        refresh: &oauth.refresh,
+                        expires_at: oauth.expires_at_ms,
+                        identity: &oauth.identity,
+                    },
+                },
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl AuthFile {
+    fn snapshot(self) -> AuthSnapshot {
+        let mut snapshot = AuthSnapshot::default();
+        for (provider, rows) in self.providers {
+            let known = snapshot.providers.entry(provider).or_default();
+            for row in rows {
+                match row {
+                    AuthRow::Known(row) => known.push(row),
+                    AuthRow::Unknown(_) => snapshot.unknown_rows += 1,
+                }
+            }
+        }
+        snapshot
+    }
+}
+
+fn parse_error(error: impl std::fmt::Display) -> AuthError {
+    AuthError::Parse(error.to_string())
+}
+
+/// serde_json quotes offending values (`invalid type: string "…"`), which in a
+/// malformed store can be credential bytes. Keep only category and position.
+fn json_error(error: serde_json::Error) -> AuthError {
+    AuthError::Parse(format!(
+        "malformed auth.json ({:?} error at line {} column {})",
+        error.classify(),
+        error.line(),
+        error.column()
+    ))
+}
+
+/// Row type tag, plus the row id when present (unknown rows included), so
+/// `next_id` can never hand out an id the file already uses.
+fn row_header(raw: &RawValue) -> Result<(bool, Option<u64>), AuthError> {
+    #[derive(Deserialize)]
+    struct Header {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        id: Option<serde_json::Value>,
+    }
+    let header: Header = serde_json::from_str(raw.get()).map_err(json_error)?;
+    Ok((
+        matches!(header.kind.as_str(), "api_key" | "oauth"),
+        header.id.as_ref().and_then(serde_json::Value::as_u64),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +144,7 @@ pub struct FileAuthStore {
     /// In-process serialisation guard — prevents concurrent read-modify-write
     /// cycles within the same process (cross-process safety is handled by flock).
     lock: tokio::sync::Mutex<()>,
+    path: Option<PathBuf>,
 }
 
 impl Default for FileAuthStore {
@@ -68,28 +157,36 @@ impl FileAuthStore {
     pub fn new() -> Self {
         Self {
             lock: tokio::sync::Mutex::new(()),
+            path: None,
         }
     }
 
-    /// Synchronous credential lookup for the provider key resolution path.
-    ///
-    /// Used by `provider_factory` at startup — the async port is not available in
-    /// the sync `build_provider_for_config` call chain.  Reads `auth.json` directly
-    /// (no lock needed for read-only access on an atomically-written file).
-    pub fn get_sync(provider: &str) -> Option<String> {
-        let path = Self::auth_file_path().ok()?;
-        // A corrupt auth.json must NOT silently look like "no credentials" — surface it
-        // so a busted file isn't mistaken for a first-run/empty state (P-7).
-        let data = match Self::read_auth_file(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("auth.json unreadable; ignoring stored credentials: {e}");
-                return None;
+    /// Explicit path for composition and isolated stores.
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self {
+            lock: tokio::sync::Mutex::new(()),
+            path: Some(path.into()),
+        }
+    }
+
+    /// Read-only startup bridge. Failures warn, never look like valid credentials.
+    /// Secret wrappers remain intact through the synchronous selection path.
+    pub fn snapshot_sync() -> AuthSnapshot {
+        let result = Self::auth_file_path().and_then(|path| Self::read_auth_file(&path));
+        match result {
+            Ok(data) => data.snapshot(),
+            Err(error) => {
+                tracing::warn!("auth.json unreadable; ignoring stored credentials: {error}");
+                AuthSnapshot::default()
             }
-        };
-        data.providers.get(provider).map(|entry| match entry {
-            AuthEntry::ApiKey { api_key, .. } => api_key.expose_secret().to_owned(),
-        })
+        }
+    }
+
+    fn path(&self) -> Result<PathBuf, AuthError> {
+        self.path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(Self::auth_file_path)
     }
 
     /// Canonical path: `<data_dir>/auth.json`.
@@ -102,15 +199,99 @@ impl FileAuthStore {
     /// Read and parse `auth.json`.  A missing file is not an error — it
     /// returns an empty provider map (first-run case).
     fn read_auth_file(path: &Path) -> Result<AuthFile, AuthError> {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str::<AuthFile>(&contents)
-                .map_err(|e| AuthError::Parse(e.to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AuthFile {
-                version: 1,
-                providers: HashMap::new(),
-            }),
-            Err(e) => Err(AuthError::Io(e.to_string())),
+        let contents = match std::fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(AuthFile {
+                    version: 2,
+                    next_id: 1,
+                    providers: BTreeMap::new(),
+                });
+            }
+            Err(e) => return Err(AuthError::Io(e.to_string())),
+        };
+        #[derive(Deserialize)]
+        struct VersionProbe {
+            version: u32,
         }
+        // The version decides the body shape, so it is checked before the body parses.
+        let version = serde_json::from_str::<VersionProbe>(&contents)
+            .map_err(json_error)?
+            .version;
+        if version > 2 {
+            return Err(AuthError::UnsupportedVersion(version));
+        }
+        if version == 0 {
+            return Err(parse_error("unsupported auth.json version 0"));
+        }
+        #[derive(Deserialize)]
+        struct Envelope {
+            #[serde(default)]
+            next_id: u64,
+            providers: BTreeMap<String, Box<RawValue>>,
+        }
+        let envelope: Envelope = serde_json::from_str(&contents).map_err(json_error)?;
+        let mut data = AuthFile {
+            version: 2,
+            next_id: if version == 1 { 1 } else { envelope.next_id },
+            providers: BTreeMap::new(),
+        };
+        let mut max_id: u64 = 0;
+        for (provider, raw) in envelope.providers {
+            let rows = if version == 1 {
+                vec![raw]
+            } else {
+                serde_json::from_str::<Vec<Box<RawValue>>>(raw.get()).map_err(json_error)?
+            };
+            let mut parsed = Vec::with_capacity(rows.len());
+            for raw in rows {
+                let (known, raw_id) = row_header(&raw)?;
+                if !known {
+                    max_id = max_id.max(raw_id.unwrap_or(0));
+                    parsed.push(AuthRow::Unknown(raw));
+                    continue;
+                }
+                let row = if version == 1 {
+                    #[derive(Deserialize)]
+                    struct LegacyRow {
+                        #[serde(flatten)]
+                        credential: Credential,
+                        // v1 kept this opaque; an unparseable stamp must not hide the key.
+                        #[serde(default)]
+                        last_validated: Option<String>,
+                    }
+                    let legacy: LegacyRow = serde_json::from_str(raw.get()).map_err(json_error)?;
+                    let id = CredentialId(data.next_id);
+                    data.next_id = data
+                        .next_id
+                        .checked_add(1)
+                        .ok_or_else(|| parse_error("credential id exhausted"))?;
+                    StoredCredential {
+                        id,
+                        rev: 1,
+                        origin: CredentialOrigin::Stored,
+                        credential: legacy.credential,
+                        last_validated: legacy
+                            .last_validated
+                            .as_deref()
+                            .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
+                            .map(|stamp| stamp.with_timezone(&chrono::Utc)),
+                        disabled_cause: None,
+                    }
+                } else {
+                    serde_json::from_str::<StoredCredential>(raw.get()).map_err(json_error)?
+                };
+                max_id = max_id.max(row.id.0);
+                parsed.push(AuthRow::Known(row));
+            }
+            data.providers.insert(provider, parsed);
+        }
+        // A missing or lagging counter (hand edit, older writer) must not reuse ids.
+        let floor = max_id
+            .checked_add(1)
+            .ok_or_else(|| parse_error("credential id exhausted"))?;
+        data.next_id = data.next_id.max(floor);
+        Ok(data)
     }
 
     /// Acquire the advisory flock, then run the whole read → modify → write cycle
@@ -184,9 +365,15 @@ impl FileAuthStore {
                 .map_err(|e| AuthError::Io(format!("removing stale tmp: {e}")))?;
         }
 
-        let mut tmp_file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Created owner-only: the tmp file holds refresh tokens before the rename.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut tmp_file = options
             .open(&tmp_path)
             .map_err(|e| AuthError::Io(format!("creating tmp file: {e}")))?;
 
@@ -226,90 +413,183 @@ impl FileAuthStore {
 
 #[async_trait]
 impl AuthStorePort for FileAuthStore {
-    async fn get(&self, provider: &str) -> Result<Option<Credential>, AuthError> {
-        let path = Self::auth_file_path()?;
-        let data = Self::read_auth_file(&path)?;
-        Ok(data.providers.get(provider).map(|entry| match entry {
-            AuthEntry::ApiKey { api_key, .. } => Credential::ApiKey(api_key.clone()),
-        }))
+    async fn snapshot(&self) -> Result<AuthSnapshot, AuthError> {
+        Self::read_auth_file(&self.path()?).map(AuthFile::snapshot)
     }
 
-    async fn set(&self, provider: &str, cred: Credential) -> Result<(), AuthError> {
-        // Default: stamp `last_validated = now`.
-        self.set_validated(provider, cred, true).await
-    }
-
-    /// Store a credential with an explicit validation outcome (P-3 / spec Q1).
-    /// `validated = false` (e.g. an inconclusive `/models` probe) records
-    /// `last_validated = None`, so 13.4b's `auth status` won't misreport an
-    /// unvalidated key as verified.
-    async fn set_validated(
+    async fn upsert(
         &self,
         provider: &str,
         cred: Credential,
+        origin: CredentialOrigin,
         validated: bool,
-    ) -> Result<(), AuthError> {
+    ) -> Result<CredentialId, AuthError> {
         let _guard = self.lock.lock().await;
-        let path = Self::auth_file_path()?;
-
-        // Extract the SecretString from the Credential — clone the wrapper, not the inner.
-        let Credential::ApiKey(secret) = cred;
-
-        let last_validated = if validated {
-            Some(chrono::Utc::now().to_rfc3339())
-        } else {
-            None
-        };
-        let provider = provider.to_string();
-
-        Self::modify_locked(&path, move |data| {
-            data.providers.insert(
-                provider,
-                AuthEntry::ApiKey {
-                    api_key: secret,
+        let path = self.path()?;
+        let mut result = CredentialId(0);
+        Self::modify_locked(&path, |data| {
+            let identity = match &cred {
+                Credential::OAuth(oauth) => oauth.identity.key(),
+                Credential::ApiKey(_) => None,
+            };
+            let matches = |row: &StoredCredential| match (&cred, &row.credential) {
+                (Credential::ApiKey(_), Credential::ApiKey(_)) => true,
+                (Credential::OAuth(_), Credential::OAuth(old)) => {
+                    identity.is_some() && identity == old.identity.key()
+                }
+                _ => false,
+            };
+            let rows = data.providers.entry(provider.to_owned()).or_default();
+            // Superseded tombstones must not accumulate across re-login.
+            rows.retain(|row| {
+                !matches!(row, AuthRow::Known(row)
+                if row.disabled_cause.is_some() && matches(row))
+            });
+            let last_validated = validated.then(chrono::Utc::now);
+            if let Some(row) = rows.iter_mut().find_map(|row| match row {
+                AuthRow::Known(row) if row.disabled_cause.is_none() && matches(row) => Some(row),
+                _ => None,
+            }) {
+                row.rev = row
+                    .rev
+                    .checked_add(1)
+                    .ok_or_else(|| parse_error("credential revision exhausted"))?;
+                row.credential = cred;
+                row.origin = origin;
+                row.last_validated = last_validated;
+                result = row.id;
+            } else {
+                result = CredentialId(data.next_id);
+                data.next_id = data
+                    .next_id
+                    .checked_add(1)
+                    .ok_or_else(|| parse_error("credential id exhausted"))?;
+                rows.push(AuthRow::Known(StoredCredential {
+                    id: result,
+                    rev: 1,
+                    origin,
+                    credential: cred,
                     last_validated,
-                },
-            );
+                    disabled_cause: None,
+                }));
+            }
             Ok(true)
         })?;
-        Ok(())
+        Ok(result)
+    }
+
+    async fn replace_if_matches(
+        &self,
+        provider: &str,
+        id: CredentialId,
+        expected_rev: u64,
+        cred: Credential,
+    ) -> Result<CasOutcome, AuthError> {
+        self.change_if_matches(provider, id, expected_rev, |row| {
+            row.credential = cred;
+        })
+        .await
+    }
+
+    async fn disable_if_matches(
+        &self,
+        provider: &str,
+        id: CredentialId,
+        expected_rev: u64,
+        cause: &str,
+    ) -> Result<CasOutcome, AuthError> {
+        self.change_if_matches(provider, id, expected_rev, |row| {
+            row.disabled_cause = Some(cause.to_owned());
+        })
+        .await
     }
 
     async fn remove(&self, provider: &str) -> Result<(), AuthError> {
         let _guard = self.lock.lock().await;
-        let path = Self::auth_file_path()?;
-        let provider = provider.to_string();
-        Self::modify_locked(&path, |data| {
-            // P-8: skip the write entirely if nothing was actually removed.
-            Ok(data.providers.remove(&provider).is_some())
-        })?;
-        Ok(())
+        Self::modify_locked(&self.path()?, |data| {
+            Ok(data.providers.remove(provider).is_some())
+        })
     }
 
-    async fn list(&self) -> Result<Vec<ProviderStatus>, AuthError> {
-        let path = Self::auth_file_path()?;
-        let data = Self::read_auth_file(&path)?;
-        Ok(data
-            .providers
-            .iter()
-            .map(|(id, entry)| {
-                let last_validated = match entry {
-                    AuthEntry::ApiKey { last_validated, .. } => {
-                        last_validated.as_ref().and_then(|s| {
-                            chrono::DateTime::parse_from_rfc3339(s)
-                                .ok()
-                                .map(|dt| dt.with_timezone(&chrono::Utc))
-                        })
-                    }
-                };
-                ProviderStatus {
-                    provider: id.clone(),
-                    status: AuthStatus::Authenticated,
-                    source: AuthSource::AuthJson,
-                    last_validated,
+    /// ADR-19-1-03 no-daemon election: an flock on a sibling file, separate from
+    /// the write lock so the holder can still persist through `modify_locked`.
+    /// The kernel releases it when the holder exits or crashes, so there is no
+    /// stale-lease reclaim; a holder keeps it for one bounded refresh.
+    async fn refresh_lease(&self) -> Result<RefreshLease, AuthError> {
+        let lock_path = self.path()?.with_extension("json.refresh.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| AuthError::Io(format!("opening refresh lock file: {e}")))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: fd is valid and owned by `file` for the duration of the call.
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if ret != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                    return Err(AuthError::Locked(format!(
+                        "flock(LOCK_EX|LOCK_NB): {error}"
+                    )));
                 }
-            })
-            .collect())
+                // Contended: a peer process is refreshing. Wait off the async runtime.
+                return tokio::task::spawn_blocking(move || {
+                    // SAFETY: fd is valid and owned by `file`, which moved into this closure.
+                    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                        return Err(AuthError::Locked(format!(
+                            "flock(LOCK_EX): {}",
+                            std::io::Error::last_os_error()
+                        )));
+                    }
+                    Ok(RefreshLease::held(file))
+                })
+                .await
+                .map_err(|e| AuthError::Locked(format!("refresh lease wait: {e}")))?;
+            }
+        }
+        Ok(RefreshLease::held(file))
+    }
+}
+
+impl FileAuthStore {
+    async fn change_if_matches(
+        &self,
+        provider: &str,
+        id: CredentialId,
+        expected_rev: u64,
+        change: impl FnOnce(&mut StoredCredential) + Send,
+    ) -> Result<CasOutcome, AuthError> {
+        let _guard = self.lock.lock().await;
+        let mut outcome = CasOutcome::Stale;
+        Self::modify_locked(&self.path()?, |data| {
+            let row = data
+                .providers
+                .get_mut(provider)
+                .into_iter()
+                .flatten()
+                .find_map(|row| match row {
+                    AuthRow::Known(row)
+                        if row.id == id
+                            && row.rev == expected_rev
+                            && row.disabled_cause.is_none() =>
+                    {
+                        Some(row)
+                    }
+                    _ => None,
+                });
+            let Some(row) = row else { return Ok(false) };
+            row.rev = row
+                .rev
+                .checked_add(1)
+                .ok_or_else(|| parse_error("credential revision exhausted"))?;
+            change(row);
+            outcome = CasOutcome::Applied;
+            Ok(true)
+        })?;
+        Ok(outcome)
     }
 }
 
@@ -318,275 +598,149 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Save the current `RUSTAIN_DATA_DIR`, point it at `dir`, return the original.
-    fn set_data_dir(dir: &std::path::Path) -> Option<String> {
-        let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        unsafe {
-            std::env::set_var("RUSTAIN_DATA_DIR", dir.as_os_str()); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        }
+    fn set_data_dir(dir: &Path) -> Option<String> {
+        let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env save/restore
+        unsafe { std::env::set_var("RUSTAIN_DATA_DIR", dir) }; // CONFORMANCE_EXCEPTION: test-only env save/restore
         original
     }
 
-    /// Restore `RUSTAIN_DATA_DIR` from a saved original value.
     fn restore_data_dir(original: Option<String>) {
         match original {
-            Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-            None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
+            Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env save/restore
+            None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env save/restore
         }
     }
 
-    // P0-3a: 0600 permissions (unix only)
-    #[cfg(unix)]
-    #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn auth_file_has_0600_permissions() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
-        let cred = Credential::new_api_key("test-key".to_string());
-        store.set("test-provider", cred).await.expect("set");
-
-        let auth_path = tmp.path().join("auth.json");
-        assert!(auth_path.exists(), "auth.json should exist after set()");
-
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::metadata(&auth_path).unwrap().permissions();
-        assert_eq!(
-            perms.mode() & 0o777,
-            0o600,
-            "auth.json should have 0600 permissions, got {:o}",
-            perms.mode() & 0o777
-        );
-
-        // No leftover .tmp file
-        let tmp_path = tmp.path().join("auth.json.tmp");
-        assert!(!tmp_path.exists(), "stale .tmp file should not exist");
-
-        restore_data_dir(original);
-    }
-
-    // P0-3b: Versioned schema on disk
-    #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn auth_file_uses_versioned_schema() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
-        let cred = Credential::new_api_key("schema-test-key".to_string());
-        store.set("anthropic", cred).await.expect("set");
-
-        let auth_path = tmp.path().join("auth.json");
-        let raw = std::fs::read_to_string(&auth_path).expect("read auth.json");
-        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("parse json");
-
-        // Version tag
-        assert_eq!(parsed["version"], 1, "auth.json should have version: 1");
-
-        // Type tag on the provider entry
-        let entry = &parsed["providers"]["anthropic"];
-        assert_eq!(entry["type"], "api_key", "entry should have type: api_key");
-
-        // last_validated is RFC3339
-        let lv = entry["last_validated"]
-            .as_str()
-            .expect("last_validated should be a string");
-        chrono::DateTime::parse_from_rfc3339(lv).expect("last_validated should be RFC3339");
-
-        restore_data_dir(original);
-    }
-
-    // P0-3c: Missing file returns empty
-    #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn missing_auth_file_returns_none() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
-        let result = store.get("anthropic").await.expect("get");
-        assert!(result.is_none(), "missing auth.json should return None");
-
-        restore_data_dir(original);
-    }
-
-    // P0-5: Overwrite (set replaces)
-    #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn set_replaces_existing_entry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
+    async fn put(store: &FileAuthStore, provider: &str, key: &str) -> CredentialId {
         store
-            .set("test-provider", Credential::new_api_key("key1".to_string()))
-            .await
-            .expect("set key1");
-        store
-            .set("test-provider", Credential::new_api_key("key2".to_string()))
-            .await
-            .expect("set key2");
-
-        let got = store
-            .get("test-provider")
-            .await
-            .expect("get")
-            .expect("should be Some");
-        assert_eq!(
-            got.expose_api_key(),
-            Some("key2"),
-            "set should replace existing entry"
-        );
-
-        restore_data_dir(original);
-    }
-
-    // P0-3d: Remove works
-    #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn remove_deletes_entry() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
-        store
-            .set(
-                "ephemeral",
-                Credential::new_api_key("gone-soon".to_string()),
+            .upsert(
+                provider,
+                Credential::new_api_key(key.into()),
+                CredentialOrigin::Stored,
+                true,
             )
             .await
-            .expect("set");
-        store.remove("ephemeral").await.expect("remove");
-
-        let got = store.get("ephemeral").await.expect("get");
-        assert!(got.is_none(), "removed entry should return None");
-
-        restore_data_dir(original);
+            .unwrap()
     }
 
-    // P0-3e: List returns stored providers
+    #[cfg(unix)]
     #[tokio::test]
-    #[serial(rustain_data_dir)]
-    async fn list_returns_all_stored_providers() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let original = set_data_dir(tmp.path());
-
-        let store = FileAuthStore::new();
-        store
-            .set("provider-a", Credential::new_api_key("ka".to_string()))
-            .await
-            .expect("set a");
-        store
-            .set("provider-b", Credential::new_api_key("kb".to_string()))
-            .await
-            .expect("set b");
-
-        let statuses = store.list().await.expect("list");
-        assert_eq!(statuses.len(), 2, "should list both providers");
-
-        let ids: std::collections::HashSet<&str> =
-            statuses.iter().map(|s| s.provider.as_str()).collect();
-        assert!(ids.contains("provider-a"), "should contain provider-a");
-        assert!(ids.contains("provider-b"), "should contain provider-b");
-
-        for s in &statuses {
-            assert!(
-                matches!(s.status, AuthStatus::Authenticated),
-                "status should be Authenticated"
-            );
-            assert!(
-                matches!(s.source, AuthSource::AuthJson),
-                "source should be AuthJson"
-            );
-        }
-
-        restore_data_dir(original);
+    async fn auth_file_has_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("auth.json");
+        let store = FileAuthStore::at(&path);
+        put(&store, "test-provider", "test-key").await;
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(!path.with_extension("json.tmp").exists());
     }
 
-    // get_sync works
+    #[tokio::test]
+    async fn auth_file_uses_versioned_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("auth.json");
+        let store = FileAuthStore::at(&path);
+        put(&store, "anthropic", "schema-test-key").await;
+        let raw = std::fs::read_to_string(path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["version"], 2);
+        let entry = &parsed["providers"]["anthropic"][0];
+        assert_eq!(entry["type"], "api_key");
+        assert_eq!(entry["origin"], "stored");
+        chrono::DateTime::parse_from_rfc3339(entry["last_validated"].as_str().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_auth_file_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileAuthStore::at(tmp.path().join("auth.json"));
+        assert!(store.snapshot().await.unwrap().rows("anthropic").is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_replaces_existing_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileAuthStore::at(tmp.path().join("auth.json"));
+        let first = put(&store, "test-provider", "key1").await;
+        let second = put(&store, "test-provider", "key2").await;
+        assert_eq!(first, second);
+        let snapshot = store.snapshot().await.unwrap();
+        let rows = snapshot.rows("test-provider");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rev, 2);
+        assert_eq!(rows[0].credential.expose_api_key(), Some("key2"));
+    }
+
+    #[tokio::test]
+    async fn remove_deletes_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileAuthStore::at(tmp.path().join("auth.json"));
+        put(&store, "ephemeral", "gone-soon").await;
+        store.remove("ephemeral").await.unwrap();
+        assert!(store.snapshot().await.unwrap().rows("ephemeral").is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_returns_all_stored_providers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FileAuthStore::at(tmp.path().join("auth.json"));
+        put(&store, "provider-a", "ka").await;
+        put(&store, "provider-b", "kb").await;
+        let snapshot = store.snapshot().await.unwrap();
+        assert_eq!(snapshot.providers.len(), 2);
+        assert!(snapshot.providers.contains_key("provider-a"));
+        assert!(snapshot.providers.contains_key("provider-b"));
+        for rows in snapshot.providers.values() {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].origin, CredentialOrigin::Stored);
+            assert!(rows[0].last_validated.is_some());
+            assert!(rows[0].disabled_cause.is_none());
+        }
+    }
+
     #[test]
     #[serial(rustain_data_dir)]
     fn get_sync_returns_stored_key() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().unwrap();
         let original = set_data_dir(tmp.path());
-
-        // Manually write a valid auth.json
-        let auth_json = serde_json::json!({
-            "version": 1,
-            "providers": {
-                "test": {
-                    "type": "api_key",
-                    "api_key": "sync-test-key",
-                    "last_validated": null
-                }
-            }
-        });
-        let auth_path = tmp.path().join("auth.json");
-        std::fs::write(
-            &auth_path,
-            serde_json::to_string_pretty(&auth_json).unwrap(),
-        )
-        .expect("write auth.json");
-
-        let got = FileAuthStore::get_sync("test");
-        assert_eq!(got, Some("sync-test-key".to_string()));
-
-        // Unknown provider returns None
-        let missing = FileAuthStore::get_sync("nonexistent");
-        assert!(missing.is_none());
-
-        restore_data_dir(original);
+        let _restore = scopeguard::guard(original, restore_data_dir);
+        std::fs::write(tmp.path().join("auth.json"),
+            r#"{"version":1,"providers":{"test":{"type":"api_key","api_key":"sync-test-key","last_validated":null}}}"#).unwrap();
+        let got = FileAuthStore::snapshot_sync();
+        assert_eq!(
+            got.rows("test")[0].credential.expose_api_key(),
+            Some("sync-test-key")
+        );
+        assert!(got.rows("nonexistent").is_empty());
     }
 
-    // AC3 anti-vacuous round-trip: real key on disk, no `***`, read-back equality.
     #[tokio::test]
     #[serial(rustain_data_dir)]
     async fn auth_json_round_trip_persists_real_key() {
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().unwrap();
         let original = set_data_dir(tmp.path());
-
+        let _restore = scopeguard::guard(original, restore_data_dir);
         let real_key = "sk-REAL-KEY-FOR-ROUND-TRIP-TEST";
         let store = FileAuthStore::new();
-        store
-            .set("rt-provider", Credential::new_api_key(real_key.to_string()))
-            .await
-            .expect("set");
-
-        // 1. Read raw auth.json bytes — assert they CONTAIN the real key
-        let auth_path = tmp.path().join("auth.json");
-        let raw = std::fs::read_to_string(&auth_path).expect("read auth.json");
-        assert!(
-            raw.contains(real_key),
-            "auth.json must persist the REAL key on disk, got: {raw}"
-        );
-
-        // 2. Negative control — assert they do NOT contain `***`
-        assert!(
-            !raw.contains("***"),
-            "auth.json must NOT contain masked `***` — that would corrupt the credential: {raw}"
-        );
-
-        // 3. Read-back via get_sync — assert the real value is returned
-        let got = FileAuthStore::get_sync("rt-provider");
+        put(&store, "rt-provider", real_key).await;
+        let raw = std::fs::read_to_string(tmp.path().join("auth.json")).unwrap();
+        assert!(raw.contains(real_key));
+        assert!(!raw.contains("***"));
         assert_eq!(
-            got.as_deref(),
-            Some(real_key),
-            "get_sync should return the real key"
+            FileAuthStore::snapshot_sync().rows("rt-provider")[0]
+                .credential
+                .expose_api_key(),
+            Some(real_key)
         );
-
-        // 4. Read-back via async get — assert expose_api_key returns the real value
-        let cred = store
-            .get("rt-provider")
-            .await
-            .expect("get")
-            .expect("should be Some");
         assert_eq!(
-            cred.expose_api_key(),
-            Some(real_key),
-            "get should return the real key via expose_api_key"
+            store.snapshot().await.unwrap().rows("rt-provider")[0]
+                .credential
+                .expose_api_key(),
+            Some(real_key)
         );
-
-        restore_data_dir(original);
     }
 }

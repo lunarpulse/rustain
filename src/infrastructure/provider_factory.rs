@@ -10,37 +10,50 @@ use crate::domain::ports::StreamingProvider;
 #[cfg(any(test, feature = "test-instrumentation"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Resolve auth for a provider: env var → auth.json fallback (Story 13.4a AC7).
-///
-/// Returns `Some(ResolvedAuth)` if the env var is set (trimmed, non-empty), OR if
-/// `auth.json` has a stored credential for `provider_id`.  Env var always wins
-/// (backward compatible).  Returns `None` only when neither source has a key.
-///
-/// Forward-compat scaffold: returns `ResolvedAuth` (today only `ApiKey`;
-/// Epic 20 (OAuth; numbered 19 until 2026-08-23)
-/// adds `OAuth` which selects `Authorization: Bearer` + provider betas).
+/// Resolve ready material through the shared credential cascade.
+/// Epic 20 (OAuth; numbered 19 until 2026-08-23) adds provider betas later.
 pub fn resolve_auth(
     api_key_env: &str,
     provider_id: &str,
 ) -> Option<crate::domain::models::credential::ResolvedAuth> {
-    use crate::domain::models::SecretString;
-    use crate::domain::models::credential::ResolvedAuth;
-    if !api_key_env.is_empty() {
-        if let Some(key) = crate::infrastructure::utils::env_var_trimmed(api_key_env) {
-            return Some(ResolvedAuth::ApiKey(SecretString::new(key)));
-        }
-    }
-    // Fallback: auth.json (Story 13.4a read-path integration).
-    crate::adapters::auth_store::FileAuthStore::get_sync(provider_id)
-        .map(|s| ResolvedAuth::ApiKey(SecretString::new(s)))
+    resolve_auth_with_runtime(api_key_env, provider_id, None)
 }
 
 /// Convenience wrapper that unwraps `ResolvedAuth` to a plain `String` key.
 /// Used by the OpenAI-compatible builders that take a bare `String`.
 pub fn resolve_api_key(api_key_env: &str, provider_id: &str) -> Option<String> {
-    resolve_auth(api_key_env, provider_id)
-        .and_then(|a| a.to_api_key())
-        .map(|s| s.expose_secret().to_owned())
+    resolved_key(resolve_auth(api_key_env, provider_id))
+}
+
+fn resolved_key(auth: Option<crate::domain::models::ResolvedAuth>) -> Option<String> {
+    auth.map(|a| a.bearer_secret().expose_secret().to_owned())
+}
+
+fn resolve_auth_with_runtime(
+    api_key_env: &str,
+    provider_id: &str,
+    runtime: Option<&crate::domain::models::SecretString>,
+) -> Option<crate::domain::models::ResolvedAuth> {
+    use crate::domain::services::key_cascade::{CascadeInputs, SelectionMaterial, select_ready};
+    let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+    let env_vars = if api_key_env.is_empty() {
+        &[][..]
+    } else {
+        std::slice::from_ref(&api_key_env)
+    };
+    let selection = select_ready(&CascadeInputs {
+        runtime,
+        rows: snapshot.rows(provider_id),
+        env_vars,
+        env_lookup: &crate::infrastructure::utils::env_var_trimmed,
+        now_ms: chrono::Utc::now().timestamp_millis(),
+    })?;
+    match selection.material {
+        SelectionMaterial::Ready(auth) => Some(auth),
+        SelectionMaterial::NeedsRefresh { .. } => {
+            unreachable!("select_ready only returns ready material")
+        }
+    }
 }
 
 /// Runtime call counter for provider construction — Story 13.2a P0-3 sentinel.
@@ -84,13 +97,7 @@ pub fn build_provider_for_config(
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     match kind {
         "anthropic" => {
-            // Story 13.4a AC7: env var → auth.json → None.
-            let api_key = if cfg.api_key_env.is_empty() {
-                None
-            } else {
-                resolve_api_key(&cfg.api_key_env, &cfg.provider_id)
-            };
-            build_anthropic_from_config(cfg, api_key)
+            build_anthropic_from_config(cfg, resolve_auth(&cfg.api_key_env, &cfg.provider_id))
         }
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
@@ -164,12 +171,18 @@ pub fn build_provider_for_config_with_key(
     key: &str,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
+    let runtime = crate::domain::models::SecretString::new(key.to_owned());
+    let auth = resolve_auth_with_runtime(&cfg.api_key_env, provider_id, Some(&runtime));
     match kind {
-        "anthropic" => build_anthropic_from_config(cfg, Some(key.to_string())),
+        "anthropic" => build_anthropic_from_config(cfg, auth),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                let adapter = build_openai_from_config(provider_id, cfg, key.to_string())?;
+                let adapter = build_openai_from_config(
+                    provider_id,
+                    cfg,
+                    resolved_key(auth).unwrap_or_default(),
+                )?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -194,8 +207,11 @@ pub fn build_provider_for_config_with_key(
         "openai-compatible" => {
             #[cfg(feature = "openai")]
             {
-                let adapter =
-                    build_openai_compatible_from_config(provider_id, cfg, key.to_string())?;
+                let adapter = build_openai_compatible_from_config(
+                    provider_id,
+                    cfg,
+                    resolved_key(auth).unwrap_or_default(),
+                )?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -214,18 +230,26 @@ pub fn build_provider_for_config_with_key(
 
 fn build_anthropic_from_config(
     cfg: &ProviderConfig,
-    api_key: Option<String>,
+    auth: Option<crate::domain::models::ResolvedAuth>,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     #[cfg(feature = "anthropic")]
     {
         use crate::adapters::anthropic::{AnthropicAdapter, AuthMode};
-        use crate::domain::models::SecretString;
 
-        let auth_mode = match api_key {
-            Some(key) if cfg.api_key_env.contains("API_KEY") => {
-                AuthMode::ApiKey(SecretString::new(key))
+        let auth_mode = match auth {
+            Some(crate::domain::models::ResolvedAuth::OAuth { access }) => {
+                AuthMode::BearerToken(access)
             }
-            Some(token) => AuthMode::BearerToken(SecretString::new(token)),
+            // Without an env-var name only stored/runtime keys can serve, and those
+            // are x-api-key keys, as on the legacy startup path.
+            Some(crate::domain::models::ResolvedAuth::ApiKey(key))
+                if cfg.api_key_env.is_empty() || cfg.api_key_env.contains("API_KEY") =>
+            {
+                AuthMode::ApiKey(key)
+            }
+            Some(crate::domain::models::ResolvedAuth::ApiKey(token)) => {
+                AuthMode::BearerToken(token)
+            }
             None => {
                 return Err(ProviderError::AuthenticationFailed);
             }
@@ -348,11 +372,7 @@ pub fn build_openai_for_discovery(
             // Fallback: build a fresh adapter (e.g., when called from tests).
             use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
             // Story 13.4a AC7/P-5: env var → auth.json → empty (was env-only).
-            let api_key = if cfg.api_key_env.is_empty() {
-                String::new()
-            } else {
-                resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default()
-            };
+            let api_key = resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default();
             let variant = match kind {
                 "openai" => OpenAiCompatibleVariant::OpenAI,
                 "openrouter" => OpenAiCompatibleVariant::OpenRouter,

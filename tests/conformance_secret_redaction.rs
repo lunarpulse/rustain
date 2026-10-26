@@ -119,7 +119,6 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         // journal row, a log line or a `Debug`; `HeaderValue::from_str` failing is
         // reported as "no usable credential", ⛔ never as the rejected bytes.
         "adapters/a2a/client.rs",
-        "adapters/auth_store.rs",
         "adapters/anthropic/mod.rs",
         "adapters/openai/mod.rs",
         "domain/models/credential.rs",
@@ -142,10 +141,10 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 15,
-        "expose_secret() pinned count changed: got {count}, expected 15. \
-         If you added a legitimate call site, update the allowlist AND this count. \
-         (14 → 15 in Story 19.14: `adapters/a2a/client.rs::credential_header`.)"
+        count, 14,
+        "expose_secret() pinned count changed: got {count}, expected 14. \
+         Story 20.1a removed the FileAuthStore raw-string lookup; disk serialization \
+         uses expose_secret_string instead of adding direct exposure."
     );
 }
 
@@ -153,10 +152,13 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
 fn expose_secret_per_sink_positive_control() {
     let (files, _) = scan_src_for_pattern(".expose_secret()");
 
-    // Per-sink positive control — each of the 6 allowlisted files is asserted present.
+    // Store snapshots no longer expose strings. Its disk serializer still routes
+    // through the single audited serialization chokepoint (all credential kinds);
+    // the attribute form, so an import alone cannot satisfy the control.
+    let (disk_files, _) = scan_src_for_pattern(r#"serialize_with = "expose_secret_string""#);
     assert!(
-        files.contains("adapters/auth_store.rs"),
-        "auth_store.rs must call expose_secret()"
+        disk_files.contains("adapters/auth_store.rs"),
+        "auth_store.rs must serialize secrets through the expose_secret_string chokepoint"
     );
     assert!(
         files.contains("adapters/anthropic/mod.rs"),

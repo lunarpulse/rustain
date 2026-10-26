@@ -86,9 +86,14 @@ pub async fn run_auth_login(
         anyhow::bail!("auth login requires a TTY");
     }
 
-    // AC5 — overwrite warning: if a credential already exists, confirm.
-    let existing = store.get(&provider_id).await?;
-    let proceed = if existing.is_some() {
+    // AC5 — overwrite warning: confirm when the upsert would replace an enabled
+    // API key. OAuth rows and disabled tombstones are not overwritten by a paste.
+    let existing = store.snapshot().await?;
+    let replaces_key = existing.rows(&provider_id).iter().any(|row| {
+        row.disabled_cause.is_none()
+            && matches!(row.credential, crate::domain::models::Credential::ApiKey(_))
+    });
+    let proceed = if replaces_key {
         eprintln!(
             "⚠  A credential for {} already exists. Overwrite?",
             meta.display_name
@@ -258,8 +263,16 @@ async fn execute_login(
 
     // AC3 — store via port (P-3: record the validation outcome for last_validated).
     let cred = Credential::new_api_key(key);
-    match store.set_validated(&meta.id, cred, validated).await {
-        Ok(()) => {
+    match store
+        .upsert(
+            &meta.id,
+            cred,
+            crate::domain::models::CredentialOrigin::Stored,
+            validated,
+        )
+        .await
+    {
+        Ok(_) => {
             // AC6 — success output never echoes the key.
             let output = if json {
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -342,7 +355,7 @@ fn atty_stdin() -> bool {
 mod tests {
     use super::*;
     use crate::domain::errors::AuthError;
-    use crate::domain::models::credential::ProviderStatus;
+    use crate::domain::models::{AuthSnapshot, CasOutcome, CredentialId, CredentialOrigin};
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -354,8 +367,7 @@ mod tests {
         last_validated: AtomicBool,
     }
 
-    /// `AuthStorePort` double that counts `set`/`set_validated` calls and records
-    /// the last `validated` flag — the seam the P-10..P-14 tests assert against.
+    /// Counts upserts and records validation, preserving the validation-before-write seam.
     struct CountingStore {
         counts: Arc<Counts>,
     }
@@ -371,31 +383,43 @@ mod tests {
     }
     #[async_trait]
     impl AuthStorePort for CountingStore {
-        async fn get(&self, _provider: &str) -> Result<Option<Credential>, AuthError> {
-            Ok(None)
+        async fn snapshot(&self) -> Result<AuthSnapshot, AuthError> {
+            Ok(AuthSnapshot::default())
         }
-        async fn set(&self, _provider: &str, _cred: Credential) -> Result<(), AuthError> {
-            self.counts.set_calls.fetch_add(1, Ordering::SeqCst);
-            self.counts.last_validated.store(true, Ordering::SeqCst);
-            Ok(())
-        }
-        async fn set_validated(
+        async fn upsert(
             &self,
             _provider: &str,
             _cred: Credential,
+            origin: CredentialOrigin,
             validated: bool,
-        ) -> Result<(), AuthError> {
+        ) -> Result<CredentialId, AuthError> {
+            assert_eq!(origin, CredentialOrigin::Stored);
             self.counts.set_calls.fetch_add(1, Ordering::SeqCst);
             self.counts
                 .last_validated
                 .store(validated, Ordering::SeqCst);
-            Ok(())
+            Ok(CredentialId(1))
         }
         async fn remove(&self, _provider: &str) -> Result<(), AuthError> {
             Ok(())
         }
-        async fn list(&self) -> Result<Vec<ProviderStatus>, AuthError> {
-            Ok(vec![])
+        async fn replace_if_matches(
+            &self,
+            _provider: &str,
+            _id: CredentialId,
+            _rev: u64,
+            _cred: Credential,
+        ) -> Result<CasOutcome, AuthError> {
+            Ok(CasOutcome::Stale)
+        }
+        async fn disable_if_matches(
+            &self,
+            _provider: &str,
+            _id: CredentialId,
+            _rev: u64,
+            _cause: &str,
+        ) -> Result<CasOutcome, AuthError> {
+            Ok(CasOutcome::Stale)
         }
     }
 

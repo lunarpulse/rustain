@@ -14,9 +14,49 @@ use rustain::domain::models::{AppConfig, CompletionOptions, Message, ProviderCon
 use rustain::domain::ports::StreamingProvider;
 use rustain::infrastructure::startup::{ProviderLayer, init_provider_layer};
 
+/// Isolate startup from real credentials and other serialized auth fixtures.
+struct AuthEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl AuthEnvironment {
+    fn empty(data_dir: &std::path::Path) -> Self {
+        let saved = [
+            "RUSTAIN_DATA_DIR",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+        ]
+        .into_iter()
+        .map(|name| (name, std::env::var_os(name)))
+        .collect();
+        // SAFETY: both callers hold the auth fixtures' unkeyed serial lock.
+        unsafe {
+            std::env::set_var("RUSTAIN_DATA_DIR", data_dir);
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for AuthEnvironment {
+    fn drop(&mut self) {
+        // SAFETY: the serial guard outlives this environment guard.
+        for (name, value) in &self.0 {
+            unsafe {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
+
 #[test]
 #[cfg(feature = "ollama")]
+#[serial_test::serial]
 fn test_startup_registers_configured_providers() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let _environment = AuthEnvironment::empty(data_dir.path());
     let mut config = AppConfig::default();
     config.provider = BTreeMap::from([
         (
@@ -88,69 +128,42 @@ fn test_startup_registers_configured_providers() {
         "deepseek is disabled and should NOT be registered"
     );
 
-    // Anthropic registration depends on env key presence
-    let has_anthropic_key =
-        std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
-
-    if has_anthropic_key {
-        assert!(
-            ids.contains("anthropic"),
-            "anthropic should be registered when env key present"
-        );
-        assert_eq!(active_id, "anthropic");
-        assert_eq!(router.active_delegate_id(), "anthropic");
-        assert!(deferred.is_empty());
-    } else {
-        // Anthropic fails construction — deferred captures it, ollama becomes active
-        assert!(
-            !ids.contains("anthropic"),
-            "anthropic should NOT be registered when no env key"
-        );
-        assert_eq!(active_id, "ollama");
-        assert_eq!(router.active_delegate_id(), "ollama");
-        assert!(
-            deferred.iter().any(|(id, _)| id == "anthropic"),
-            "anthropic construction failure should be deferred"
-        );
-    }
+    // No credentials: defer Anthropic's failure and use the keyless provider.
+    assert!(
+        !ids.contains("anthropic"),
+        "anthropic should NOT be registered without credentials"
+    );
+    assert_eq!(active_id, "ollama");
+    assert_eq!(router.active_delegate_id(), "ollama");
+    assert!(
+        deferred.iter().any(|(id, _)| id == "anthropic"),
+        "anthropic construction failure should be deferred"
+    );
 }
 
 #[test]
+#[serial_test::serial]
 fn test_startup_legacy_fallback_when_provider_map_empty() {
+    let data_dir = tempfile::tempdir().unwrap();
+    let _environment = AuthEnvironment::empty(data_dir.path());
     let config = AppConfig::default();
-    assert!(config.provider.is_empty());
 
     let ProviderLayer {
         router: _,
         registry,
         deferred_notices: deferred,
-        active_id,
         ..
     } = init_provider_layer(&config);
 
     // Should fall back to legacy Anthropic path
     let ids = registry.provider_ids();
 
-    // If ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is set, anthropic is registered.
-    // Otherwise, the fallback fails and deferred contains the failure.
-    let has_anthropic_key =
-        std::env::var("ANTHROPIC_API_KEY").is_ok() || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
-
-    if has_anthropic_key {
-        assert!(
-            ids.contains("anthropic"),
-            "anthropic should be registered when env key present"
-        );
-        assert_eq!(active_id, "anthropic");
-        assert!(deferred.is_empty(), "no failures when key is present");
-    } else {
-        // Fallback fails — deferred should contain the failure
-        assert!(
-            !deferred.is_empty(),
-            "fallback should fail when no anthropic key set"
-        );
-        assert_eq!(deferred[0].0, "anthropic");
-    }
+    assert!(
+        !ids.contains("anthropic"),
+        "legacy startup must not register a provider without credentials"
+    );
+    assert!(!deferred.is_empty(), "missing credentials must be reported");
+    assert_eq!(deferred[0].0, "anthropic");
 }
 
 struct FailingHealthCheckProvider {

@@ -27,6 +27,9 @@ mod cli_flags;
 #[path = "../cli_team_consent.rs"]
 mod cli_team_consent;
 
+#[path = "../conformance_20_1a_auth_store_v2.rs"]
+mod conformance_20_1a_auth_store_v2;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

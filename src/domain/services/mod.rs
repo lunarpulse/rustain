@@ -18,6 +18,7 @@ pub use fork_join_validation::validate_nested_request;
 pub mod history_rebuild;
 pub mod identity_color;
 pub mod import;
+pub mod key_cascade;
 pub mod message_builder;
 pub mod meta_search;
 pub mod normalize;

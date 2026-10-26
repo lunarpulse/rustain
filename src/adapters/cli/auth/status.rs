@@ -1,10 +1,8 @@
 //! `auth status` handler (Story 13.4b).
 //!
-//! Read-only reporter over the 13.4a auth store.  Mirrors the live
-//! env -> auth.json resolution order without constructing providers or probing
-//! the network.
+//! Offline provenance reporter over the shared credential cascade.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,10 +10,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::adapters::cli::auth::providers;
-use crate::domain::models::credential::{AuthSource, AuthStatus, ProviderStatus};
+use crate::domain::models::credential::{AuthSnapshot, AuthSource, AuthStatus};
 use crate::domain::ports::AuthStorePort;
+use crate::domain::services::key_cascade::SelectionMaterial;
 
-pub const AUTH_STATUS_SCHEMA_VERSION: &str = "1.0";
+pub const AUTH_STATUS_SCHEMA_VERSION: &str = "2.0";
 const NO_PROVIDERS_MESSAGE: &str =
     "No providers configured. Run `rustain auth login <provider>` to add one.";
 
@@ -25,7 +24,8 @@ struct StatusRow {
     provider: String,
     display_name: String,
     status: AuthStatus,
-    source: AuthSource,
+    source: Option<AuthSource>,
+    disabled_cause: Option<String>,
     last_validated: Option<DateTime<Utc>>,
     requires_key: bool,
 }
@@ -37,7 +37,7 @@ struct StatusRow {
 /// Returns `Err` only for auth-store read errors or JSON serialization failures.
 /// It never builds a provider and never performs network validation.
 pub async fn run_auth_status(json: bool, store: &Arc<dyn AuthStorePort>) -> Result<()> {
-    let entries = store.list().await?;
+    let entries = store.snapshot().await?;
     let rows = build_status_rows(providers::all_providers(), &entries, |key| {
         crate::infrastructure::utils::env_var_trimmed(key)
     });
@@ -54,62 +54,66 @@ pub async fn run_auth_status(json: bool, store: &Arc<dyn AuthStorePort>) -> Resu
     Ok(())
 }
 
-/// Pure: combine the static provider table, an injected env lookup, and the
-/// auth.json entries (from `AuthStorePort::list`) into rows to render.
-///
-/// `env_lookup(env_var_name) -> Option<String>` is injected so tests assert
-/// env precedence without mutating process environment.
+/// Combine the static provider table and snapshot without provider construction.
 fn build_status_rows(
     providers: &[providers::ProviderMeta],
-    auth_json: &[ProviderStatus],
+    snapshot: &AuthSnapshot,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<StatusRow> {
-    let auth_by_provider: HashMap<&str, &ProviderStatus> = auth_json
-        .iter()
-        .map(|status| (status.provider.as_str(), status))
-        .collect();
-    let known_ids: HashSet<&str> = providers.iter().map(|provider| provider.id).collect();
+    let known_ids: HashSet<&str> = providers.iter().map(|p| p.id).collect();
     let mut rows = Vec::new();
-
-    for meta in providers {
-        if !meta.requires_key {
-            continue;
-        }
-
-        if let Some((source, last_validated)) =
-            super::detect_source(meta, &auth_by_provider, &env_lookup)
+    let mut append = |id: &str, display: &str, env_vars: &[&str]| {
+        let selected = super::source_for(id, env_vars, snapshot, &env_lookup);
+        let (source, status, last_validated, disabled_cause) = if let Some(selection) = selected {
+            let stale = matches!(selection.material, SelectionMaterial::NeedsRefresh { .. });
+            (
+                Some(selection.source),
+                if !stale && selection.last_validated.is_some() {
+                    AuthStatus::Authenticated
+                } else {
+                    AuthStatus::Unknown
+                },
+                selection.last_validated,
+                None,
+            )
+        } else if let Some(row) = snapshot
+            .rows(id)
+            .iter()
+            .find(|row| row.disabled_cause.is_some())
         {
-            let status = if last_validated.is_some() {
-                AuthStatus::Authenticated
-            } else {
-                AuthStatus::Unknown
-            };
-            rows.push(StatusRow {
-                provider: meta.id.to_string(),
-                display_name: meta.display_name.to_string(),
-                status,
-                source,
-                last_validated,
-                requires_key: meta.requires_key,
-            });
-        }
+            (
+                None,
+                AuthStatus::Invalid,
+                row.last_validated,
+                row.disabled_cause.clone(),
+            )
+        } else {
+            return;
+        };
+        rows.push(StatusRow {
+            provider: id.to_owned(),
+            display_name: display.to_owned(),
+            source,
+            status,
+            last_validated,
+            disabled_cause,
+            requires_key: true,
+        });
+    };
+    for meta in providers.iter().filter(|meta| meta.requires_key) {
+        append(
+            meta.id,
+            meta.display_name,
+            &super::env_vars_for(meta.id, meta.api_key_env),
+        );
     }
-    let unknown_ids: BTreeSet<&str> = auth_json
-        .iter()
-        .map(|status| status.provider.as_str())
-        .filter(|provider| !known_ids.contains(provider))
-        .collect();
-    for provider in unknown_ids {
-        if let Some(stored) = auth_by_provider.get(provider) {
-            rows.push(auth_json_row(
-                provider,
-                provider,
-                true,
-                stored.last_validated,
-            ));
-        }
+    for id in snapshot
+        .providers
+        .keys()
+        .filter(|id| !known_ids.contains(id.as_str()))
+    {
+        append(id, id, &[]);
     }
-
     rows
 }
 
@@ -118,33 +122,13 @@ fn build_status_rows(
 #[cfg(test)]
 pub fn build_status_rows_for_test(
     providers: &[providers::ProviderMeta],
-    auth_json: &[ProviderStatus],
+    auth_json: &AuthSnapshot,
     env_lookup: impl Fn(&str) -> Option<String>,
 ) -> Vec<(String, bool)> {
     build_status_rows(providers, auth_json, env_lookup)
         .into_iter()
         .map(|r| (r.provider, r.requires_key))
         .collect()
-}
-
-fn auth_json_row(
-    provider: &str,
-    display_name: &str,
-    requires_key: bool,
-    last_validated: Option<DateTime<Utc>>,
-) -> StatusRow {
-    StatusRow {
-        provider: provider.to_string(),
-        display_name: display_name.to_string(),
-        status: if last_validated.is_some() {
-            AuthStatus::Authenticated
-        } else {
-            AuthStatus::Unknown
-        },
-        source: AuthSource::AuthJson,
-        last_validated,
-        requires_key,
-    }
 }
 
 fn render_human(rows: &[StatusRow]) -> String {
@@ -188,6 +172,8 @@ struct StatusProviderJson {
     source: &'static str,
     last_validated: Option<String>,
     requires_key: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disabled_cause: Option<String>,
 }
 
 impl From<&StatusRow> for StatusProviderJson {
@@ -198,6 +184,7 @@ impl From<&StatusRow> for StatusProviderJson {
             source: source_json_token(&row.source),
             last_validated: row.last_validated.map(|ts| ts.to_rfc3339()),
             requires_key: row.requires_key,
+            disabled_cause: row.disabled_cause.clone(),
         }
     }
 }
@@ -218,21 +205,25 @@ fn status_json_token(status: &AuthStatus) -> &'static str {
     }
 }
 
-fn source_human_label(source: &AuthSource) -> &'static str {
+fn source_human_label(source: &Option<AuthSource>) -> &'static str {
     match source {
-        AuthSource::Env => "env",
-        AuthSource::AuthJson => "auth.json",
-        AuthSource::Config => "config",
-        AuthSource::None => "none",
+        Some(AuthSource::Runtime) => "runtime",
+        Some(AuthSource::StoredOAuth) => "oauth",
+        Some(AuthSource::LoginKey) => "login",
+        Some(AuthSource::Env { .. }) => "env",
+        Some(AuthSource::StoredKey) => "stored",
+        None => "disabled",
     }
 }
 
-fn source_json_token(source: &AuthSource) -> &'static str {
+fn source_json_token(source: &Option<AuthSource>) -> &'static str {
     match source {
-        AuthSource::Env => "env",
-        AuthSource::AuthJson => "auth_json",
-        AuthSource::Config => "config",
-        AuthSource::None => "none",
+        Some(AuthSource::Runtime) => "runtime",
+        Some(AuthSource::StoredOAuth) => "oauth",
+        Some(AuthSource::LoginKey) => "login_key",
+        Some(AuthSource::Env { .. }) => "env",
+        Some(AuthSource::StoredKey) => "stored_key",
+        None => "disabled",
     }
 }
 
@@ -249,12 +240,80 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    fn status(provider: &str, last_validated: Option<DateTime<Utc>>) -> ProviderStatus {
-        ProviderStatus {
-            provider: provider.to_string(),
-            status: AuthStatus::Authenticated,
-            source: AuthSource::AuthJson,
-            last_validated,
+    fn status(
+        provider: &str,
+        last_validated: Option<DateTime<Utc>>,
+    ) -> (String, crate::domain::models::StoredCredential) {
+        use crate::domain::models::{
+            Credential, CredentialId, CredentialOrigin, SecretString, StoredCredential,
+        };
+        (
+            provider.to_owned(),
+            StoredCredential {
+                id: CredentialId(1),
+                rev: 1,
+                origin: CredentialOrigin::Stored,
+                credential: Credential::ApiKey(SecretString::new(
+                    "stored-status-secret".to_owned(),
+                )),
+                last_validated,
+                disabled_cause: None,
+            },
+        )
+    }
+
+    fn build_status_rows(
+        providers: &[providers::ProviderMeta],
+        entries: &[(String, crate::domain::models::StoredCredential)],
+        env_lookup: impl Fn(&str) -> Option<String>,
+    ) -> Vec<StatusRow> {
+        let mut snapshot = AuthSnapshot::default();
+        for (provider, row) in entries {
+            snapshot
+                .providers
+                .entry(provider.clone())
+                .or_default()
+                .push(row.clone());
+        }
+        super::build_status_rows(providers, &snapshot, env_lookup)
+    }
+
+    #[test]
+    fn disabled_and_stale_oauth_are_literal_and_secret_free() {
+        use crate::domain::models::{
+            Credential, CredentialIdentity, OAuthCredential, SecretString,
+        };
+        let mut disabled = status("openai", Some(fixed_time()));
+        disabled.1.disabled_cause = Some("oauth refresh failed: revoked".to_owned());
+        let mut stale = status("anthropic", Some(fixed_time()));
+        stale.1.credential = Credential::OAuth(OAuthCredential {
+            access: SecretString::new("status-stale-access".to_owned()),
+            refresh: SecretString::new("status-stale-refresh".to_owned()),
+            expires_at_ms: 0,
+            identity: CredentialIdentity::default(),
+        });
+        let rows = build_status_rows(providers::all_providers(), &[disabled, stale], |_| None);
+        let human = render_human(&rows);
+        let json = render_json(&rows).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["schema_version"], "2.0");
+        assert_eq!(value["providers"][0]["source"], "oauth");
+        assert_eq!(value["providers"][0]["status"], "unknown");
+        assert_eq!(value["providers"][1]["source"], "disabled");
+        assert_eq!(value["providers"][1]["status"], "invalid");
+        assert_eq!(
+            value["providers"][1]["disabled_cause"],
+            "oauth refresh failed: revoked"
+        );
+        assert!(human.contains("oauth") && human.contains("⚠"));
+        assert!(human.contains("disabled") && human.contains("✗"));
+        for secret in [
+            "stored-status-secret",
+            "status-stale-access",
+            "status-stale-refresh",
+        ] {
+            assert!(!human.contains(secret));
+            assert!(!json.contains(secret));
         }
     }
 
@@ -270,12 +329,12 @@ mod tests {
         let with_env = build_status_rows(providers::all_providers(), &entries, |name| {
             (name == "OPENAI_API_KEY").then(|| "sk-env".to_string())
         });
-        assert!(matches!(with_env[0].source, AuthSource::Env));
+        assert!(matches!(with_env[0].source, Some(AuthSource::Env { .. })));
         assert!(matches!(with_env[0].status, AuthStatus::Unknown));
         assert!(with_env[0].last_validated.is_none());
 
         let without_env = build_status_rows(providers::all_providers(), &entries, |_| None);
-        assert!(matches!(without_env[0].source, AuthSource::AuthJson));
+        assert!(matches!(without_env[0].source, Some(AuthSource::StoredKey)));
         assert!(matches!(without_env[0].status, AuthStatus::Authenticated));
         assert_eq!(without_env[0].last_validated, Some(fixed_time()));
     }
@@ -287,7 +346,7 @@ mod tests {
         });
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].provider, "anthropic");
-        assert!(matches!(rows[0].source, AuthSource::Env));
+        assert!(matches!(rows[0].source, Some(AuthSource::Env { .. })));
     }
 
     #[test]
@@ -296,7 +355,7 @@ mod tests {
         let rows = build_status_rows(providers::all_providers(), &entries, |name| {
             (name == "ANTHROPIC_AUTH_TOKEN").then(|| "   ".to_string())
         });
-        assert!(matches!(rows[0].source, AuthSource::AuthJson));
+        assert!(matches!(rows[0].source, Some(AuthSource::StoredKey)));
     }
 
     #[test]
@@ -306,7 +365,7 @@ mod tests {
         assert!(NO_PROVIDERS_MESSAGE.contains("auth login"));
 
         let json = render_json(&rows).unwrap();
-        assert!(json.contains("\"schema_version\": \"1.0\""));
+        assert!(json.contains("\"schema_version\": \"2.0\""));
         assert!(json.contains("\"providers\": []"));
     }
 
@@ -346,7 +405,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.display_name, "custom-provider");
         assert!(row.requires_key);
-        assert!(matches!(row.source, AuthSource::AuthJson));
+        assert!(matches!(row.source, Some(AuthSource::StoredKey)));
     }
 
     #[test]
@@ -358,10 +417,10 @@ mod tests {
         );
         let json = render_json(&rows).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(value["schema_version"], "1.0");
+        assert_eq!(value["schema_version"], "2.0");
         assert_eq!(value["providers"][0]["provider"], "anthropic");
         assert_eq!(value["providers"][0]["status"], "authenticated");
-        assert_eq!(value["providers"][0]["source"], "auth_json");
+        assert_eq!(value["providers"][0]["source"], "stored_key");
         assert_eq!(value["providers"][0]["requires_key"], true);
         assert!(value["providers"][0].get("api_key").is_none());
         assert!(value["providers"][0].get("key").is_none());

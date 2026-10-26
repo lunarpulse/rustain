@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 
 /// Resolve the `~/.rustain/` data directory, creating it if it doesn't exist.
 pub fn data_dir() -> Result<PathBuf> {
-    if let Ok(dir) = std::env::var("RUSTAIN_DATA_DIR") {
-        // CONFORMANCE_EXCEPTION: bootstrapping path resolution
+    let override_dir = std::env::var("RUSTAIN_DATA_DIR"); // CONFORMANCE_EXCEPTION: path bootstrap
+    if let Some(dir) = override_dir.ok().filter(|dir| !dir.trim().is_empty()) {
         let path = PathBuf::from(dir);
         std::fs::create_dir_all(&path)?;
         return Ok(path);

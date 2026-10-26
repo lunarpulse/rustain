@@ -120,9 +120,9 @@ mod epic_numbering_hygiene {
             .expect("scan of src/ must succeed; a read error would hide OAuth-epic mentions");
         assert_eq!(
             current.len(),
-            10,
-            "expected exactly 10 OAuth-epic mentions under the new number in src/ (Story \
-             19.6 A6 rewrote ten comments); found:\n{}",
+            7,
+            "expected exactly 7 OAuth-epic mentions under the new number in src/ (Story \
+             20.1a realises three scaffold promises); found:\n{}",
             current.join("\n")
         );
     }

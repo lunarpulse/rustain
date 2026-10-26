@@ -4,6 +4,7 @@ pub mod clock_util;
 pub mod composition;
 pub mod config;
 pub mod context;
+pub mod key_resolver;
 pub mod logging;
 pub mod orchestrator;
 pub mod paths;

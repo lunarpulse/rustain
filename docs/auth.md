@@ -23,22 +23,51 @@ rustain auth login ollama       # reports "no API key required"
    before storage. An invalid key is never written to disk.
 3. **Storage** — credentials are persisted to `~/.rustain/auth.json` (mode `0600`,
    advisory-locked writes, atomic temp+rename) via the `AuthStorePort`.
-4. **Overwrite warning** — if a credential already exists for the provider, a
-   confirmation prompt is shown before replacing it.
+4. **Overwrite warning** — if an enabled API key already exists for the
+   provider, a confirmation prompt is shown before replacing it.
 
 ### Key resolution precedence
 
-When constructing a provider, the key is resolved in this order (highest wins):
+The shared cascade resolves credentials in this order (highest wins):
 
-1. **Environment variable** (e.g. `ANTHROPIC_API_KEY`) — always takes precedence.
-   Anthropic also accepts `ANTHROPIC_AUTH_TOKEN`; either env credential wins.
-2. **`auth.json`** — the stored credential from `rustain auth login`.
-3. **Config** — reserved for future auth sources; current config stores env var
-   names, not plaintext keys.
+1. **Runtime** — explicit candidate passed by the login validation probe.
+2. **Stored OAuth** — first enabled OAuth row in file order.
+3. **Login key** — enabled API key with `origin: "login"`.
+4. **Environment variable** — trimmed, non-empty value.
+5. **Stored key** — enabled API key with `origin: "stored"`.
 
-This means `auth.json` is a convenient alternative to env vars, but an env var
-will always override it (AC7, backward compatible). `auth status` reports the
-same winning source the provider construction path uses.
+Current paste-based `auth login` writes `stored` origin; migrated v1 keys also
+have `stored` origin, so environment variables still override existing API keys.
+The OAuth and login-origin stages prepare for future login engines; this release
+does not create those rows through the CLI. Config stores env-var names, never
+plaintext credentials. Anthropic status/list and legacy startup check
+`ANTHROPIC_AUTH_TOKEN` before `ANTHROPIC_API_KEY`; config-driven construction
+uses the configured env-var name.
+
+Status, list and ACP availability include stale OAuth rows. Synchronous provider
+construction cannot refresh: it skips stale rows (expiry within 60 seconds) and
+tries the next row or stage. Thus stale-only OAuth reports configured with `⚠`,
+but cannot construct a provider until refreshed. Disabled rows never serve.
+
+### Store migration and downgrade safety
+
+The v2 store keeps provider arrays with stable row IDs, revisions, origin,
+validation timestamps and optional `disabled_cause`. OAuth access and refresh
+tokens are secret-wrapped in memory. v1 reads migrate in memory without writing;
+the first write persists v2. Unknown credential types survive unrelated writes
+verbatim and never participate in selection. Files newer than v2 are rejected,
+never overwritten; synchronous startup warns and ignores their stored credentials.
+Older binaries cannot read a v2 store that holds credentials, and their
+read-before-write guard prevents clobbering it. An empty v2 store (every
+provider removed) is readable by an older binary, which rewrites it as v1; the
+next v2 read migrates it again. Back up the store before downgrading; do not
+expect an older binary to use v2 credentials.
+
+OAuth refresh (live once login engines create OAuth rows) is lazy and elects one
+refresher across processes: the refresher holds an advisory lock on
+`auth.json.refresh.lock` while it re-reads the row, runs the bounded (10 s) token
+exchange and writes the revision-checked result, so two rustain processes never
+spend the same refresh token. The kernel releases the lock if its holder exits.
 
 ### Supported providers
 
@@ -83,29 +112,32 @@ Example:
 
 ```text
 PROVIDER         STATUS SOURCE     LAST VALIDATED
-Anthropic        ✓      auth.json  2026-06-15T22:00:00+00:00
+Anthropic        ✓      stored     2026-06-15T22:00:00+00:00
 OpenAI           ⚠      env        —
 ```
 
 Status markers:
 
 - `✓` — stored credential was validated by `auth login`.
-- `⚠` — credential is present but rustain has no validation record, usually
-  because it came from an env var.
-- `✗` — reserved for invalid credentials; `status` does not probe, so it does
-  not produce this today.
+- `⚠` — no validation record, or the winning OAuth token needs refresh.
+- `✗` — all available stored rows are disabled and no other cascade stage serves.
+  SOURCE is `disabled`, with the cause included in JSON.
+
+Human sources are `oauth`, `login`, `env`, and `stored`. JSON schema 2.0 uses
+`oauth`, `login_key`, `env`, and `stored_key`; disabled rows use `disabled`
+and add `disabled_cause`. Tokens are never included.
 
 Use `--json` for scripts:
 
 ```bash
 rustain auth status --json
 # → {
-#     \"schema_version\": \"1.0\",
+#     \"schema_version\": \"2.0\",
 #     \"providers\": [
 #       {
 #         \"provider\": \"anthropic\",
 #         \"status\": \"authenticated\",
-#         \"source\": \"auth_json\",
+#         \"source\": \"stored_key\",
 #         \"last_validated\": \"2026-06-15T22:00:00+00:00\",
 #         \"requires_key\": true
 #       }
@@ -113,8 +145,8 @@ rustain auth status --json
 #   }
 ```
 
-`auth status` lists configured providers only. Use `auth list` (below) for the
-full provider catalog.
+`auth status` lists configured providers and providers with only disabled rows.
+Use `auth list` (below) for the full provider catalog.
 
 ## `rustain auth list`
 
@@ -152,8 +184,8 @@ Run `rustain auth status` for credential sources, or `rustain auth login <provid
   blank if absent; `n/a` for keyless providers (no credential concept).
 - **SIGNUP URL** — where to create/manage API keys for this provider.
 
-The env-var credential always wins over `auth.json` (same precedence as
-`auth status` and the runtime provider construction).
+Configured means the shared cascade finds a credential, including stale OAuth;
+disabled-only providers are not configured. `auth status` reports provenance.
 
 ### JSON output
 

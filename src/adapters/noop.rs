@@ -10,7 +10,9 @@ use futures::stream::BoxStream;
 
 use crate::domain::errors::{AuthError, PermissionError, ProviderError, StorageError, ToolError};
 use crate::domain::models::ApprovalScope;
-use crate::domain::models::credential::{Credential, ProviderStatus};
+use crate::domain::models::credential::{
+    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin,
+};
 use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::usage::UsageLedgerEntry;
 use crate::domain::models::{
@@ -277,17 +279,38 @@ pub struct NoOpAuthStore;
 
 #[async_trait]
 impl AuthStorePort for NoOpAuthStore {
-    async fn get(&self, _provider: &str) -> Result<Option<Credential>, AuthError> {
-        Ok(None)
+    async fn snapshot(&self) -> Result<AuthSnapshot, AuthError> {
+        Ok(AuthSnapshot::default())
     }
-    async fn set(&self, _provider: &str, _cred: Credential) -> Result<(), AuthError> {
-        Ok(())
+    async fn upsert(
+        &self,
+        _provider: &str,
+        _cred: Credential,
+        _origin: CredentialOrigin,
+        _validated: bool,
+    ) -> Result<CredentialId, AuthError> {
+        Ok(CredentialId(0))
+    }
+    async fn replace_if_matches(
+        &self,
+        _provider: &str,
+        _id: CredentialId,
+        _expected_rev: u64,
+        _cred: Credential,
+    ) -> Result<CasOutcome, AuthError> {
+        Ok(CasOutcome::Stale)
+    }
+    async fn disable_if_matches(
+        &self,
+        _provider: &str,
+        _id: CredentialId,
+        _expected_rev: u64,
+        _cause: &str,
+    ) -> Result<CasOutcome, AuthError> {
+        Ok(CasOutcome::Stale)
     }
     async fn remove(&self, _provider: &str) -> Result<(), AuthError> {
         Ok(())
-    }
-    async fn list(&self) -> Result<Vec<ProviderStatus>, AuthError> {
-        Ok(vec![])
     }
 }
 

@@ -41,6 +41,8 @@ mod memory;
 #[allow(unused_imports)]
 mod node_orchestrator;
 #[allow(unused_imports)]
+mod oauth_refresh;
+#[allow(unused_imports)]
 mod patch_applier;
 #[allow(unused_imports)]
 mod patch_apply_executor;
@@ -108,7 +110,7 @@ pub use agent_transport::{AgentTransport, AgentTransportError};
 pub use approval_persistence::ApprovalPersistencePort;
 pub use artifact_sink::{ArtifactSink, ArtifactSinkError};
 pub use artifact_store::{ArtifactError, ArtifactStore};
-pub use auth_store::AuthStorePort;
+pub use auth_store::{AuthStorePort, RefreshLease};
 pub use authority_provider::{AuthorityError, AuthorityProvider};
 pub use capability_provider::CapabilityProvider;
 pub use catalog_observer::CatalogObserver;
@@ -131,6 +133,7 @@ pub use isolation_provider::IsolationProvider;
 pub use ledger_journal_sink::{LedgerJournalError, LedgerJournalSink};
 pub use memory::MemoryPort;
 pub use node_orchestrator::{ForkJoinRequest, Orchestrator};
+pub use oauth_refresh::{OAuthRefreshPort, RefreshFailure, RefreshedTokens};
 pub use patch_applier::{PatchApplier, PatchApplyError};
 pub use patch_apply_executor::{PatchApplyExecutor, PatchApplyPortError};
 pub use patch_apply_resolver::{PatchApplyResolver, PatchResolvePortError};

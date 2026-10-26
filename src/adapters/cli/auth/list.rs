@@ -1,18 +1,17 @@
 //! `auth list` handler (Story 13.4c).
 //!
 //! Enumerates **all** supported providers from the static table with auth
-//! methods, configured status (env → auth.json precedence via the shared
-//! `detect_source`), active-default marker (config-intent only), and signup
+//! methods, configured status via the shared cascade, active-default marker
+//! (config-intent only), and signup
 //! URLs.  Never builds a provider, never probes the network (AC5).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
 
 use crate::adapters::cli::auth::providers;
-use crate::domain::models::credential::{AuthMethod, ProviderStatus};
+use crate::domain::models::{AuthSnapshot, credential::AuthMethod};
 use crate::domain::ports::AuthStorePort;
 
 pub const AUTH_LIST_SCHEMA_VERSION: &str = "1.0";
@@ -46,18 +45,23 @@ fn build_list_rows(
         String,
         crate::domain::models::ProviderConfig,
     >,
-    auth_json: &[ProviderStatus],
+    auth_json: &AuthSnapshot,
     env_lookup: impl Fn(&str) -> Option<String>,
     default_provider_id: &str,
 ) -> Vec<ListRow> {
-    let auth_by_provider: HashMap<&str, &ProviderStatus> =
-        auth_json.iter().map(|s| (s.provider.as_str(), s)).collect();
-
     let mut rows: Vec<ListRow> = providers
         .iter()
         .map(|meta| {
             let configured = if meta.requires_key {
-                Some(super::detect_source(meta, &auth_by_provider, &env_lookup).is_some())
+                Some(
+                    super::source_for(
+                        meta.id,
+                        &super::env_vars_for(meta.id, meta.api_key_env),
+                        auth_json,
+                        &env_lookup,
+                    )
+                    .is_some(),
+                )
             } else {
                 // Keyless (e.g. ollama) — no credential concept (Q2).
                 None
@@ -89,8 +93,13 @@ fn build_list_rows(
             continue;
         }
         let configured = Some(
-            super::detect_source_for(id, &cfg.api_key_env, &auth_by_provider, &env_lookup)
-                .is_some(),
+            super::source_for(
+                id,
+                &super::env_vars_for(id, &cfg.api_key_env),
+                auth_json,
+                &env_lookup,
+            )
+            .is_some(),
         );
         rows.push(ListRow {
             provider: id.clone(),
@@ -162,7 +171,7 @@ pub async fn run_auth_list(
     app_config: &crate::domain::models::AppConfig,
     store: &Arc<dyn AuthStorePort>,
 ) -> Result<()> {
-    let entries = store.list().await?;
+    let entries = store.snapshot().await?;
     let default_id = active_default_provider_id(app_config);
     let rows = build_list_rows(
         providers::all_providers(),
@@ -331,16 +340,82 @@ impl From<&ListRow> for ListProviderJson {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::credential::{AuthSource, AuthStatus, ProviderStatus};
     use crate::domain::models::{AppConfig, ProviderConfig};
+    use crate::domain::models::{
+        Credential, CredentialId, CredentialOrigin, SecretString, StoredCredential,
+    };
     use chrono::{DateTime, Utc};
 
-    fn status(provider: &str, last_validated: Option<DateTime<Utc>>) -> ProviderStatus {
-        ProviderStatus {
-            provider: provider.to_string(),
-            status: AuthStatus::Authenticated,
-            source: AuthSource::AuthJson,
-            last_validated,
+    fn status(provider: &str, last_validated: Option<DateTime<Utc>>) -> (String, StoredCredential) {
+        (
+            provider.to_owned(),
+            StoredCredential {
+                id: CredentialId(1),
+                rev: 1,
+                origin: CredentialOrigin::Stored,
+                credential: Credential::ApiKey(SecretString::new("stored-test-key".to_owned())),
+                last_validated,
+                disabled_cause: None,
+            },
+        )
+    }
+
+    fn build_list_rows(
+        providers: &[providers::ProviderMeta],
+        configured: &std::collections::BTreeMap<String, ProviderConfig>,
+        entries: &[(String, StoredCredential)],
+        env_lookup: impl Fn(&str) -> Option<String>,
+        default: &str,
+    ) -> Vec<ListRow> {
+        let mut snapshot = AuthSnapshot::default();
+        for (provider, row) in entries {
+            snapshot
+                .providers
+                .entry(provider.clone())
+                .or_default()
+                .push(row.clone());
+        }
+        super::build_list_rows(providers, configured, &snapshot, env_lookup, default)
+    }
+
+    #[test]
+    fn disabled_is_unconfigured_but_stale_oauth_is_configured() {
+        use crate::domain::models::{CredentialIdentity, OAuthCredential};
+        let mut disabled = status("openai", Some(fixed_time()));
+        disabled.1.disabled_cause = Some("revoked".to_owned());
+        let mut stale = status("anthropic", Some(fixed_time()));
+        stale.1.credential = Credential::OAuth(OAuthCredential {
+            access: SecretString::new("list-stale-access".to_owned()),
+            refresh: SecretString::new("list-stale-refresh".to_owned()),
+            expires_at_ms: 0,
+            identity: CredentialIdentity::default(),
+        });
+        let rows = build_list_rows(
+            providers::all_providers(),
+            &Default::default(),
+            &[disabled, stale],
+            |_| None,
+            "anthropic",
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.provider == "anthropic")
+                .unwrap()
+                .configured,
+            Some(true)
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.provider == "openai")
+                .unwrap()
+                .configured,
+            Some(false)
+        );
+        let human = render_human(&rows);
+        let json = render_json(&rows).unwrap();
+        for secret in ["stored-test-key", "list-stale-access", "list-stale-refresh"] {
+            assert!(!human.contains(secret));
+            assert!(!json.contains(secret));
         }
     }
 
@@ -735,12 +810,7 @@ api_key_env = "DEEPSEEK_API_KEY"
         use crate::adapters::cli::auth::status;
 
         // Fixed fixture: anthropic via env, openai via auth.json.
-        let auth_entries = vec![ProviderStatus {
-            provider: "openai".to_string(),
-            status: AuthStatus::Authenticated,
-            source: AuthSource::AuthJson,
-            last_validated: Some(fixed_time()),
-        }];
+        let auth_entries = vec![status("openai", Some(fixed_time()))];
         let env_lookup = |name: &str| -> Option<String> {
             (name == "ANTHROPIC_API_KEY").then(|| "sk-test".to_string())
         };
@@ -752,11 +822,16 @@ api_key_env = "DEEPSEEK_API_KEY"
             env_lookup,
             "anthropic",
         );
-        let status_rows = status::build_status_rows_for_test(
-            providers::all_providers(),
-            &auth_entries,
-            env_lookup,
-        );
+        let mut snapshot = AuthSnapshot::default();
+        for (provider, row) in &auth_entries {
+            snapshot
+                .providers
+                .entry(provider.clone())
+                .or_default()
+                .push(row.clone());
+        }
+        let status_rows =
+            status::build_status_rows_for_test(providers::all_providers(), &snapshot, env_lookup);
         let status_configured: std::collections::HashSet<&str> =
             status_rows.iter().map(|(pid, _)| pid.as_str()).collect();
 
