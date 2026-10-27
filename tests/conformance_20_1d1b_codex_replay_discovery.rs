@@ -6,7 +6,7 @@
 #[path = "conformance_20_1d1b_codex_replay_discovery/cli.rs"]
 mod cli;
 #[path = "conformance_20_1d1b_codex_replay_discovery/common.rs"]
-mod common;
+pub(crate) mod common;
 #[path = "conformance_20_1d1b_codex_replay_discovery/daemon.rs"]
 mod daemon;
 #[path = "conformance_20_1d1b_codex_replay_discovery/discovery.rs"]

@@ -22,7 +22,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use super::token::{self, Values};
+use super::token::{self, Grant, Values};
 use crate::domain::{
     models::OAuthCredential,
     ports::{OAuthRefreshPort, RefreshFailure, RefreshedTokens},
@@ -65,9 +65,15 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
             refresh: token::refresh_secret(&credential.refresh),
             ..Default::default()
         };
-        let value = token::request(&self.http, policy.request, &values, true)
+        // Resolved per refresh: a discovered endpoint is rediscovered and revalidated,
+        // and a refused one sends no refresh token anywhere.
+        let url = token::resolve_url(&self.http, policy.request.url)
             .await
-            .map_err(classify)?;
+            .map_err(RefreshFailure::Transient)?;
+        let value = token::request(&self.http, policy.request, &url, Grant::Refresh, &values)
+            .await
+            .map_err(classify)?
+            .body;
         let mut projected = token::project(
             &value,
             policy.projection,

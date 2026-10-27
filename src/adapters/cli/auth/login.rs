@@ -98,11 +98,8 @@ async fn run(
         Ok(result) => {
             if json {
                 println!("{}", result_json(&result));
-            } else if result.method == "oauth" {
-                let AuthMethod::OAuthCode(policy) = method else {
-                    unreachable!("OAuth login result requires an OAuth method");
-                };
-                println!("{}", oauth_success(policy.login_name, &result.identity));
+            } else if let Some(login_name) = method.login_name() {
+                println!("{}", oauth_success(login_name, &result.identity));
             } else if result.validated {
                 println!("✓ {display} credentials stored successfully.");
             } else {
@@ -150,6 +147,7 @@ fn select_method_with_input(
                     (requested, *method),
                     (AuthLoginMethod::ApiKey, AuthMethod::ApiKey)
                         | (AuthLoginMethod::Oauth, AuthMethod::OAuthCode(_))
+                        | (AuthLoginMethod::Device, AuthMethod::Device(_))
                 )
             })
             .ok_or_else(|| {
@@ -160,18 +158,14 @@ fn select_method_with_input(
         return Ok(&methods[0]);
     }
     if !tty {
-        bail!("Multiple login methods are available; choose --method oauth or --method api-key.");
+        bail!(
+            "Multiple login methods are available; choose {}.",
+            method_choices(methods)
+        );
     }
     eprintln!("Choose a login method:");
     for (index, method) in methods.iter().enumerate() {
-        eprintln!(
-            "  {}. {}",
-            index + 1,
-            match method {
-                AuthMethod::ApiKey => "API key",
-                AuthMethod::OAuthCode(policy) => policy.label,
-            }
-        );
+        eprintln!("  {}. {}", index + 1, method.label());
     }
     eprint!("Method [1-{}]: ", methods.len());
     std::io::stderr().flush()?;
@@ -184,6 +178,17 @@ fn select_method_with_input(
         .filter(|i| *i < methods.len())
         .ok_or_else(|| anyhow::anyhow!("Invalid login method selection"))?;
     Ok(&methods[index])
+}
+/// `--method a or --method b` (`, ` before earlier choices), in `auth_methods` order.
+fn method_choices(methods: &[AuthMethod]) -> String {
+    let choices: Vec<_> = methods
+        .iter()
+        .map(|method| format!("--method {}", super::list::auth_method_token(method)))
+        .collect();
+    match choices.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+        _ => choices.concat(),
+    }
 }
 fn result_json(result: &LoginResult) -> serde_json::Value {
     let mut identity = serde_json::Map::new();
@@ -256,15 +261,20 @@ fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, Pr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::models::auth_policy::{DeviceFlow, DevicePolicy};
+    static DEVICE: DevicePolicy = DevicePolicy {
+        label: "Subscription (device code)",
+        login_name: "Device Product",
+        flow: DeviceFlow::OpenAiCodex,
+    };
     #[test]
     fn method_override_and_non_tty_picker_boundary() {
         let methods = providers::lookup("anthropic").unwrap().auth_methods;
-        assert!(
-            select_method(methods, None, false)
-                .unwrap_err()
-                .to_string()
-                .contains("--method")
+        assert_eq!(
+            select_method(methods, None, false).unwrap_err().to_string(),
+            "Multiple login methods are available; choose --method oauth or --method api-key."
         );
+        assert!(select_method(methods, Some(AuthLoginMethod::Device), false).is_err());
         assert!(matches!(
             select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
             AuthMethod::OAuthCode(_)
@@ -309,23 +319,56 @@ mod tests {
     #[test]
     fn codex_success_uses_product_name_and_single_method_needs_no_picker() {
         let methods = providers::lookup("openai-codex").unwrap().auth_methods;
-        let AuthMethod::OAuthCode(policy) = select_method(methods, None, false).unwrap() else {
-            panic!("Codex has browser OAuth only");
-        };
+        let method = select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
+        assert!(matches!(method, AuthMethod::OAuthCode(_)));
+        let login_name = method.login_name().unwrap();
         let identity = CredentialIdentity {
             email: Some("user@example.com".into()),
             org_name: Some("plus".into()),
             ..Default::default()
         };
         assert_eq!(
-            oauth_success(policy.login_name, &identity),
+            oauth_success(login_name, &identity),
             "Logged in to ChatGPT Plus/Pro (Codex Subscription) as user@example.com (plus)"
         );
         assert_eq!(
-            oauth_success(policy.login_name, &CredentialIdentity::default()),
+            oauth_success(login_name, &CredentialIdentity::default()),
             "Logged in to ChatGPT Plus/Pro (Codex Subscription)"
         );
         assert!(select_method(methods, Some(AuthLoginMethod::ApiKey), false).is_err());
+        let single = [AuthMethod::Device(&DEVICE)];
+        assert!(matches!(
+            select_method_with_input(&single, None, false, || panic!("no picker")).unwrap(),
+            AuthMethod::Device(_)
+        ));
+        assert_eq!(AuthMethod::ApiKey.login_name(), None);
+    }
+    #[test]
+    fn device_method_is_selected_by_flag_picker_label_and_named_on_success() {
+        let methods = [
+            providers::lookup("anthropic").unwrap().auth_methods[0].clone(),
+            AuthMethod::Device(&DEVICE),
+        ];
+        assert!(matches!(
+            select_method(&methods, Some(AuthLoginMethod::Device), false).unwrap(),
+            AuthMethod::Device(_)
+        ));
+        assert!(matches!(
+            select_method(&methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
+            AuthMethod::OAuthCode(_)
+        ));
+        assert_eq!(
+            select_method(&methods, None, false)
+                .unwrap_err()
+                .to_string(),
+            "Multiple login methods are available; choose --method oauth or --method device."
+        );
+        let picked = select_method_with_input(&methods, None, true, || Ok("2\n".into())).unwrap();
+        assert_eq!(picked.label(), "Subscription (device code)");
+        assert_eq!(
+            oauth_success(picked.login_name().unwrap(), &CredentialIdentity::default()),
+            "Logged in to Device Product"
+        );
     }
     #[test]
     fn provider_identity_cannot_inject_terminal_controls() {

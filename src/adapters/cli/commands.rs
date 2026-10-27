@@ -270,6 +270,7 @@ pub enum AcpClientProfile {
 pub enum AuthLoginMethod {
     Oauth,
     ApiKey,
+    Device,
 }
 
 /// Auth subcommand actions (Story 13.4a login; 13.4b status; 13.4c adds list).

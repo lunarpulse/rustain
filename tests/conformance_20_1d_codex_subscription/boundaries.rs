@@ -46,7 +46,7 @@ impl Env {
             "RUSTAIN_DATA_DIR",
             "RUSTAIN_TEST_AUTH_ORIGIN",
             "RUSTAIN_TEST_AUTH_CALLBACK_PORT",
-            "RUSTAIN_TEST_CODEX_RETRY_SCALE",
+            "RUSTAIN_TEST_RESPONSES_RETRY_SCALE",
             "RUSTAIN_TEST_NOW_MS",
             "OPENAI_CODEX_OAUTH_TOKEN",
             "OPENAI_API_KEY",
@@ -65,7 +65,7 @@ impl Env {
             }
             std::env::set_var("RUSTAIN_DATA_DIR", dir);
             std::env::set_var("RUSTAIN_TEST_AUTH_ORIGIN", origin);
-            std::env::set_var("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0");
+            std::env::set_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0");
             std::env::set_var("RUSTAIN_TEST_NOW_MS", NOW.to_string());
             let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             std::env::set_var(
@@ -411,7 +411,7 @@ async fn assert_abort_during_in_band_retry(reopen: bool) {
     let (listener, origin) = raw_listener().await;
     Env::set("RUSTAIN_TEST_AUTH_ORIGIN", &origin);
     // Env normally disables retry delays. This proof requires the real 500 ms wait.
-    Env::set("RUSTAIN_TEST_CODEX_RETRY_SCALE", "1");
+    Env::set("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "1");
     let provider = build();
     let (release_tx, release_rx) = oneshot::channel();
     let mut first = tokio::spawn(async move {
@@ -1072,7 +1072,7 @@ async fn stream_first_event_and_idle_timeouts_use_the_scaled_clock_and_commit_bo
         login(&auth, &access("timeout-account", "eu")).await;
         let (listener, origin) = raw_listener().await;
         Env::set("RUSTAIN_TEST_AUTH_ORIGIN", &origin);
-        Env::set("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0.001");
+        Env::set("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0.001");
         let provider = build();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();

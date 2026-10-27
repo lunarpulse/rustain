@@ -5,7 +5,8 @@ entry, logout, and offline status inspection.
 
 ## Provider availability
 
-The built-in Anthropic, ChatGPT Codex, OpenAI, OpenRouter, Google AI, DeepSeek and Moonshot
+The built-in Anthropic, ChatGPT Codex, OpenAI, OpenRouter, Google AI, DeepSeek, Moonshot,
+xAI and xAI Grok OAuth
 catalogues are visible without adding provider configuration. A home
 `auth.json` credential or a non-empty provider environment variable unlocks its
 provider from any working directory. Workspace configuration remains an explicit
@@ -61,8 +62,9 @@ neither stored nor environment credentials can serve.
 ## `rustain auth login <provider>`
 
 Anthropic supports Claude Pro/Max browser subscription login and API keys.
-ChatGPT Codex supports browser subscription login. Other keyed providers use
-masked API-key entry with pre-storage validation.
+ChatGPT Codex supports browser and device-code subscription login. xAI Grok OAuth
+(`xai-oauth`) supports device-code subscription login only. Other keyed providers,
+including `xai`, use masked API-key entry with pre-storage validation.
 
 ### Usage
 
@@ -70,12 +72,17 @@ masked API-key entry with pre-storage validation.
 rustain auth login anthropic --method oauth     # Claude Pro/Max browser login
 rustain auth login anthropic --method api-key   # Anthropic console key or subscription token
 rustain auth login openai                      # store an OpenAI API key
-rustain auth login openai-codex                 # ChatGPT Plus/Pro browser login
+rustain auth login openai-codex --method oauth  # ChatGPT Plus/Pro browser login
+rustain auth login openai-codex --method device # ChatGPT Plus/Pro device code (headless)
+rustain auth login xai-oauth                    # SuperGrok / X Premium+ device code
+rustain auth login xai                          # store an xAI API key
 rustain auth login ollama       # reports "no API key required"
 ```
 
 With multiple methods, an interactive terminal offers a numbered picker. Without
-a terminal, choose `--method oauth` explicitly; API-key entry still requires a TTY.
+a terminal, choose `--method oauth` or `--method device` explicitly (the error names
+the provider's choices); API-key entry still requires a TTY. Device-code login needs
+no TTY.
 The Anthropic browser flow prints its authorization URL to stderr, listens on localhost
 port 54545 (falling back to a free port when necessary), and uses PKCE and a
 separate CSRF state. In a terminal it also accepts the final redirect URL, a
@@ -100,13 +107,41 @@ access or put your account at risk. rustain does not refuse subscription
 tokens. Use the separate `openai` API-key provider if you do not
 accept subscription-client risk.
 
+**xAI subscription policy risk:** This third-party client uses SuperGrok / X
+Premium+ subscription credentials obtained through xAI's device login, with an
+omp-compatible request profile (`User-Agent: omp/18.12.6`); its availability does
+not imply xAI approval. Provider policies or backend changes may restrict access
+or put your account at risk. rustain does not refuse subscription tokens. Use the
+separate `xai` API-key provider if you do not accept subscription-client risk.
+
 ### ChatGPT Plus/Pro (Codex Subscription)
 
-Run `rustain auth login openai-codex` and finish the browser authorization.
-There is one login method, so no method picker is needed. The PKCE callback is
-`http://localhost:1455/auth/callback`: port **1455 is pinned**. If it is busy,
-release the port and retry; rustain never substitutes a random callback port.
-The shared state checking, paste fallback and cancellation rules apply.
+Run `rustain auth login openai-codex` and finish the authorization. Codex offers
+two methods: `--method oauth` (browser) and `--method device` (device code, see
+below); an interactive terminal shows the picker when no `--method` is given.
+The browser PKCE callback is `http://localhost:1455/auth/callback`: port **1455 is
+pinned**. If it is busy, release the port or use `--method device`; rustain never
+substitutes a random callback port. The shared state checking, paste fallback and
+cancellation rules apply to the browser method.
+
+**Device code (`--method device`).** The device method suits headless and remote
+machines: it opens no local listener,
+so port 1455 is never used. rustain requests a user code from
+`https://auth.openai.com/api/accounts/deviceauth/usercode` and prints, on stderr,
+`Enter code: <code>` followed by `https://auth.openai.com/codex/device`; open that
+page on any device, sign in and enter the code. In an interactive terminal the page
+is also opened in a browser (best-effort). It then polls: the first poll waits at
+most 5 seconds, later polls wait the server's interval (default 5 s) plus 3 seconds,
+and a pending authorization (HTTP 403/404) keeps polling. After **120 polls** the
+login fails with `Device authorization timed out — user did not complete login in
+time`; the browser method's 300-second deadline does not apply. Ctrl-C cancels the
+login (`Login cancelled`) and no further poll is sent. Any other polling status
+fails the login.
+
+On approval, the server-issued authorization code and verifier are exchanged
+through the browser method's token endpoint, so the stored row has the same shape,
+identity and refresh rules as a browser login and is served by the same Codex
+transport. The success line names `ChatGPT Plus/Pro (Codex Subscription)`.
 
 Codex uses the Responses SSE backend, not OpenAI Chat Completions. Stored OAuth
 tokens refresh lazily and can recover once after a rejected request. Alternatively,
@@ -151,6 +186,82 @@ identity without prompting; another organization or account adds a separate row.
 The success line identifies your account, never a token. API-key overwrite
 confirmation applies only to enabled API-key rows.
 
+### xAI Grok OAuth (SuperGrok or X Premium+)
+
+Run `rustain auth login xai-oauth`. It uses the RFC 8628 device authorization
+grant, the provider's only method, so no picker or `--method` is needed and no TTY
+or local listener is required. rustain requests a code from
+`https://auth.x.ai/oauth2/device/code` (scope `openid profile email offline_access
+grok-cli:access api:access`) and prints `Enter code: <code>` and xAI's
+verification URL on stderr (the complete URL with the code embedded when xAI
+returns one). An interactive terminal also opens it (best-effort).
+
+The token endpoint is discovered, not hard-coded: once per login (after the code
+is shown, before the first poll) and again for every refresh, rustain reads
+`https://auth.x.ai/.well-known/openid-configuration` and accepts its
+`token_endpoint` only when it is an `https` URL on `x.ai` or a `*.x.ai` host.
+Anything else fails with `Invalid xAI token_endpoint: …`; a failed or malformed
+discovery fails the login. The result is never cached.
+
+Polling starts immediately and then waits the server's `interval` (default 5 s,
+never below 1 s); each `slow_down` adds 5 seconds. Polling ends at the device
+code's `expires_in` with `Device flow timed out` (after any `slow_down`, the
+message adds a clock-drift hint for WSL/VM hosts). `expired_token` and
+`access_denied` end the login with a restart/denied message; other failures name
+only the HTTP status and a recognised OAuth error id, never the response body.
+Ctrl-C cancels the login. The browser flow's 300-second deadline does not apply.
+
+The account identity comes from the access token's JWT `sub`, then OIDC userinfo
+(`https://auth.x.ai/oauth2/userinfo`: `email`, `sub`); a userinfo failure keeps
+what the token supplied and does not fail the login. xAI identities are never
+organization-scoped. The success line is `Logged in to xAI Grok OAuth (SuperGrok or
+X Premium+)` plus the account. The stored expiry is the token's `expires_in` minus
+300 seconds. Stored rows refresh lazily through the rediscovered token endpoint
+(userinfo runs again; fields it omits keep their stored values) and a stored
+row's HTTP 401 forces one refresh-and-retry, as for the other subscriptions.
+
+Alternatively, set `XAI_OAUTH_TOKEN` to an OAuth access token: a static bearer,
+not an API key, never refreshed. With neither source the selector shows
+``Set XAI_OAUTH_TOKEN or run `rustain auth login xai-oauth` ``. Stored OAuth rows
+are sent only to the official `https://api.x.ai` origin; `xai-oauth` ignores
+`XAI_BASE_URL`, and a configured `base_url` on another origin makes stored rows
+ineligible (an explicitly set `XAI_OAUTH_TOKEN` is still sent there).
+`xai-oauth` has no API-key method; use `xai` for keys.
+
+### xAI API key
+
+Run `rustain auth login xai` for masked key entry (TTY required) or set
+`XAI_API_KEY`; without either the selector shows
+``Set XAI_API_KEY or run `rustain auth login xai` ``. Validation sends only the
+candidate key (never env or stored keys) to `GET <base>/models`, by default
+`https://api.x.ai/v1/models`. HTTP 401/403 rejects the key; a base without
+`/models` (HTTP 404/405) stores it unvalidated with
+`⚠  Could not confirm key via /models endpoint — xAI credentials stored unvalidated.`;
+offline or other failures store nothing. The `xai` base is a non-default configured
+`base_url`, else `XAI_BASE_URL`, else `https://api.x.ai/v1`, for validation,
+requests and discovery alike.
+
+### xAI requests and model discovery
+
+Both kinds stream from the xAI Responses API (`POST <base>/responses`) with Bearer
+auth and the omp wire identity `User-Agent: omp/18.12.6`. The requested output
+limit is clamped to the model's bundled maximum (when it has one) and to 64,000
+tokens.
+
+Both kinds discover live from `GET <base>/models`; the bundled default model is
+`grok-4.6` for each. `xai` bundles 32 chat models and `xai-oauth` 10 curated ones.
+The live roster keeps every bundled model in bundled order (bundled rows are not
+pruned), then appends live IDs the bundle lacks, sorted by ID, with their live
+names and context lengths; an ID no layer describes gets a 128,000-token context.
+Image, video, speech and voice models (`grok-imagine-image`,
+`grok-imagine-image-quality`, `grok-imagine-image-2.0`, `grok-imagine-video*`,
+`grok-tts`, `grok-stt-*`, `grok-voice-*`; case-insensitive) are never listed.
+`model_filter` applies.
+A stored row's 401 refreshes once; a remaining 401/403 marks the provider
+`⚠ sign in again`. Health checks and login probes classify 404/405 as an
+unsupported endpoint. A login that changes stored rows triggers the post-login
+discovery described above.
+
 ### How it works
 
 1. **Masked entry** — the API key is read with no terminal echo (via `rpassword`).
@@ -177,10 +288,11 @@ beats environment variables. Migrated v1 keys and older paste logins retain
 Bundled Anthropic status/list and startup check `ANTHROPIC_AUTH_TOKEN` before
 `ANTHROPIC_API_KEY`; config-driven availability and construction use the configured env name.
 
-Every Anthropic and Codex request resolves its current credential through one shared
+Every Anthropic, Codex and xAI request resolves its current credential through one shared
 resolver per process. A stale-only subscription builds successfully and refreshes
 on first use; status/list/ACP already consider that row configured. The engine
-subtracts a 300-second expiry margin for Anthropic (zero for Codex), and the resolver applies another 60 seconds.
+subtracts a 300-second expiry margin for Anthropic and xAI OAuth (zero for Codex),
+and the resolver applies another 60 seconds.
 Disabled rows never serve. An unreadable or newer-version store warns and ignores
 stored rows while runtime/env credentials remain usable.
 
@@ -299,6 +411,8 @@ same post-login path, as described above.
 | google     | `GOOGLE_API_KEY`     | ✓            |
 | deepseek   | `DEEPSEEK_API_KEY`   | ✓            |
 | moonshot   | `MOONSHOT_API_KEY`   | ✓            |
+| xai        | `XAI_API_KEY`        | ✓            |
+| xai-oauth  | `XAI_OAUTH_TOKEN`    | ✓            |
 | ollama     | —                    | ✗            |
 
 ### Security
@@ -318,7 +432,8 @@ rustain auth login anthropic --method oauth --json
 # → {"provider":"anthropic","status":"authenticated","method":"oauth","validated":true,"identity":{"email":"you@example.com"}}
 ```
 
-API-key results use `"method":"api_key"`. Identity contains only fields actually
+API-key results use `"method":"api_key"`; device-code logins store an OAuth row and
+report `"method":"oauth"`. Identity contains only fields actually
 learned. Guidance and the credential-file path go to stderr; stdout is reserved
 for the result line or JSON.
 
@@ -333,6 +448,9 @@ Logout removes every stored row for that provider, including disabled tombstones
 without changing environment variables. If a provider env variable is still set,
 the command says that variable will still be used. Repeating logout succeeds and
 reports no stored credentials. Account-specific logout is not offered here.
+`xai` and `xai-oauth` are separate providers: `rustain auth logout xai-oauth`
+removes only the device-login rows (`XAI_OAUTH_TOKEN` stays effective until
+unset), and `rustain auth logout xai` removes only stored xAI API keys.
 
 ## `rustain auth status`
 
@@ -416,15 +534,17 @@ rustain auth list
 Example:
 
 ```text
-PROVIDER                               AUTH METHODS    CONFIGURED  SIGNUP URL
-Anthropic *                            oauth, api-key  ✓           https://console.anthropic.com/
-ChatGPT Plus/Pro (Codex Subscription)  oauth                       https://chatgpt.com/
-OpenAI                                 api-key         ✓           https://platform.openai.com/api-keys
-OpenRouter                             api-key                     https://openrouter.ai/keys
-Google AI                              api-key                     https://aistudio.google.com/apikey
-DeepSeek                               api-key                     https://platform.deepseek.com/api_keys
-Moonshot AI                            api-key                     https://platform.moonshot.cn/console/api-keys
-Ollama                                 none (local)    n/a         https://ollama.com/
+PROVIDER                                  AUTH METHODS    CONFIGURED  SIGNUP URL
+Anthropic *                               oauth, api-key  ✓           https://console.anthropic.com/
+ChatGPT Plus/Pro (Codex Subscription)     oauth, device               https://chatgpt.com/
+OpenAI                                    api-key         ✓           https://platform.openai.com/api-keys
+OpenRouter                                api-key                     https://openrouter.ai/keys
+Google AI                                 api-key                     https://aistudio.google.com/apikey
+DeepSeek                                  api-key                     https://platform.deepseek.com/api_keys
+Moonshot AI                               api-key                     https://platform.moonshot.cn/console/api-keys
+xAI                                       api-key                     https://console.x.ai/team/default/api-keys
+xAI Grok OAuth (SuperGrok or X Premium+)  device                      https://grok.com/
+Ollama                                    none (local)    n/a         https://ollama.com/
 
 * = active default provider
 Run `rustain auth status` for credential sources, or `rustain auth login <provider>` to add one.
@@ -434,8 +554,9 @@ Run `rustain auth status` for credential sources, or `rustain auth login <provid
 
 - **PROVIDER** — display name; `*` suffix marks the active default provider
   (the first enabled `[provider]` entry in config, else `anthropic`).
-- **AUTH METHODS** — `oauth, api-key` for Anthropic, `oauth` for ChatGPT Codex,
-  `api-key` for other keyed providers, and `none (local)` for keyless providers.
+- **AUTH METHODS** — `oauth, api-key` for Anthropic, `oauth, device` for ChatGPT
+  Codex, `device` for xAI Grok OAuth, `api-key` for other keyed providers, and
+  `none (local)` for keyless providers. These are the `--method` values.
 - **CONFIGURED** — `✓` if a credential is found (env var or `auth.json`);
   blank if absent; `n/a` for keyless providers (no credential concept).
 - **SIGNUP URL** — where to create/manage API keys for this provider.
@@ -482,5 +603,5 @@ Notes:
   (`null` ≠ `false` — keyless providers have no credential concept).
 - `is_default` marks the configured default provider (config-intent, not
   build-verified).
-- `auth_methods` tokens are snake_case (`oauth`, `api_key`, `none`).
+- `auth_methods` tokens are snake_case (`oauth`, `api_key`, `device_code`, `none`).
 - No `source` field — use `auth status --json` for credential provenance.

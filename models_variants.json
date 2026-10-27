@@ -305,6 +305,394 @@
           "stale": false
         }
       ]
+    },
+    "xai": {
+      "fetchedAtUnix": 0,
+      "models": [
+        {
+          "modelId": "grok-2",
+          "displayName": "Grok 2",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-2-1212",
+          "displayName": "Grok 2 (1212)",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-2-latest",
+          "displayName": "Grok 2 Latest",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-2-vision",
+          "displayName": "Grok 2 Vision",
+          "providerId": "xai",
+          "contextWindow": 8192,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-2-vision-1212",
+          "displayName": "Grok 2 Vision (1212)",
+          "providerId": "xai",
+          "contextWindow": 8192,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-2-vision-latest",
+          "displayName": "Grok 2 Vision Latest",
+          "providerId": "xai",
+          "contextWindow": 8192,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3",
+          "displayName": "Grok 3",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-fast",
+          "displayName": "Grok 3 Fast",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-fast-latest",
+          "displayName": "Grok 3 Fast Latest",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-latest",
+          "displayName": "Grok 3 Latest",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-mini",
+          "displayName": "Grok 3 Mini",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-mini-fast",
+          "displayName": "Grok 3 Mini Fast",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-mini-fast-latest",
+          "displayName": "Grok 3 Mini Fast Latest",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-3-mini-latest",
+          "displayName": "Grok 3 Mini Latest",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4",
+          "displayName": "Grok 4",
+          "providerId": "xai",
+          "contextWindow": 256000,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4-1-fast",
+          "displayName": "Grok 4.1 Fast",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4-1-fast-non-reasoning",
+          "displayName": "Grok 4.1 Fast (Non-Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4-fast",
+          "displayName": "Grok 4 Fast",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4-fast-non-reasoning",
+          "displayName": "Grok 4 Fast (Non-Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-0309-non-reasoning",
+          "displayName": "Grok 4.20 (Non-Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-0309-reasoning",
+          "displayName": "Grok 4.20 (Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-beta-latest-non-reasoning",
+          "displayName": "Grok 4.20 Beta (Non-Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-beta-latest-reasoning",
+          "displayName": "Grok 4.20 Beta (Reasoning)",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-multi-agent-beta-latest",
+          "displayName": "Grok 4.20 Multi-Agent Beta",
+          "providerId": "xai",
+          "contextWindow": 2000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.3",
+          "displayName": "Grok 4.3",
+          "providerId": "xai",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.5",
+          "displayName": "Grok 4.5",
+          "providerId": "xai",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.6",
+          "displayName": "Grok 4.6",
+          "providerId": "xai",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.7",
+          "displayName": "Grok 4.7",
+          "providerId": "xai",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-beta",
+          "displayName": "Grok Beta",
+          "providerId": "xai",
+          "contextWindow": 131072,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-build-0.1",
+          "displayName": "Grok Build 0.1",
+          "providerId": "xai",
+          "contextWindow": 256000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-code-fast-1",
+          "displayName": "Grok Code Fast 1",
+          "providerId": "xai",
+          "contextWindow": 256000,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-vision-beta",
+          "displayName": "Grok Vision Beta",
+          "providerId": "xai",
+          "contextWindow": 8192,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        }
+      ]
+    },
+    "xai-oauth": {
+      "fetchedAtUnix": 0,
+      "models": [
+        {
+          "modelId": "grok-build",
+          "displayName": "Grok Build",
+          "providerId": "xai-oauth",
+          "contextWindow": 512000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-build-0.1",
+          "displayName": "Grok Build 0.1",
+          "providerId": "xai-oauth",
+          "contextWindow": 256000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.3",
+          "displayName": "Grok 4.3",
+          "providerId": "xai-oauth",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.5",
+          "displayName": "Grok 4.5",
+          "providerId": "xai-oauth",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.6",
+          "displayName": "Grok 4.6",
+          "providerId": "xai-oauth",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.7",
+          "displayName": "Grok 4.7",
+          "providerId": "xai-oauth",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-multi-agent-0309",
+          "displayName": "Grok 4.20 (Multi-Agent)",
+          "providerId": "xai-oauth",
+          "contextWindow": 1000000,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-0309-reasoning",
+          "displayName": "Grok 4.20 (Reasoning)",
+          "providerId": "xai-oauth",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.20-0309-non-reasoning",
+          "displayName": "Grok 4.20 (Non-Reasoning)",
+          "providerId": "xai-oauth",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-composer-2.5-fast",
+          "displayName": "Grok Composer 2.5 Fast",
+          "providerId": "xai-oauth",
+          "contextWindow": 200000,
+          "capabilities": ["ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        }
+      ]
     }
   }
 }

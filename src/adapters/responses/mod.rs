@@ -27,16 +27,62 @@
 pub mod events;
 pub mod repair;
 pub mod request;
+pub mod retry;
 pub mod schema;
+pub mod transport;
 
-/// Provider-owned affinity and metadata; the core has no credential/session state.
+/// Request and event shape of one Responses backend family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Dialect {
+    /// ChatGPT Codex backend: developer items, synthetic user item, Codex texts.
+    #[default]
+    Codex,
+    /// Generic `openai-responses` backends (xAI): `instructions`, sampling and limits.
+    Generic,
+}
+
+/// Provider-owned request policy; the core has no credential/session state.
+/// The `Generic`-only methods are never consulted for `Dialect::Codex`.
 pub trait WireProfile {
+    fn dialect(&self) -> Dialect;
     fn prompt_cache_key(&self) -> Option<&str>;
+    /// Sent by `Dialect::Codex` only.
     fn client_metadata(&self) -> Option<&serde_json::Value>;
-    /// Provider kind whose stored replay items this request may carry back
-    /// (Story 20.1d1b); `None` replays nothing.
+    /// Provider kind whose stored replay items this request may carry back,
+    /// and the stamp the transport puts on captured ones; `None` replays nothing.
     fn replay_provider(&self) -> Option<&str> {
         None
+    }
+    /// `Generic`: the model reasons, so `include` requests encrypted reasoning.
+    fn reasoning(&self) -> bool {
+        false
+    }
+    /// `Generic`: the model accepts image input; otherwise images become a placeholder.
+    fn vision(&self) -> bool {
+        true
+    }
+    /// `Generic`: the already clamped `max_output_tokens`.
+    fn max_output_tokens(&self) -> Option<u32> {
+        None
+    }
+    /// `Generic`: the sampling temperature, sent only when present.
+    fn temperature(&self) -> Option<f32> {
+        None
+    }
+    /// `Generic`: flatten typeless required-key root unions and quarantine tools
+    /// whose root still carries a non-object union.
+    fn reject_root_object_union(&self) -> bool {
+        false
+    }
+}
+
+/// omp `normalizeOpenAIPromptCacheKey`: at most 64 UTF-16 units are kept,
+/// longer identities become `pc_` + Bun.hash base 36.
+pub fn prompt_cache_key(id: &str) -> String {
+    if id.encode_utf16().count() <= 64 {
+        id.to_owned()
+    } else {
+        format!("pc_{}", repair::stable_hash(id))
     }
 }
 

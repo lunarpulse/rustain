@@ -31,7 +31,7 @@ pub(crate) struct Fixture {
     pub(crate) home: tempfile::TempDir,
     pub(crate) evidence: PathBuf,
     binary: PathBuf,
-    env: BTreeMap<&'static str, OsString>,
+    pub(crate) env: BTreeMap<&'static str, OsString>,
 }
 
 impl Fixture {
@@ -92,7 +92,7 @@ impl Fixture {
                 callback_port.to_string().into(),
             ),
             ("RUSTAIN_TEST_NOW_MS", NOW.to_string().into()),
-            ("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0".into()),
+            ("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0".into()),
             ("RUSTAIN_MODELS_DEV_URL", server.uri().into()),
             ("NO_PROXY", "*".into()),
         ] {
@@ -127,7 +127,7 @@ impl Fixture {
         .unwrap();
     }
 
-    fn command(&self, label: &str, args: &[&str]) -> tokio::process::Command {
+    pub(crate) fn command(&self, label: &str, args: &[&str]) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.binary);
         command
             .env_clear()
@@ -147,7 +147,7 @@ impl Fixture {
         command
     }
 
-    fn capture(&self, label: &str, output: &Output, stderr: &[u8]) {
+    pub(crate) fn capture(&self, label: &str, output: &Output, stderr: &[u8]) {
         std::fs::write(
             self.evidence.join(format!("{label}.stdout")),
             &output.stdout,
@@ -197,7 +197,10 @@ fn provider_row(value: &Value) -> &Value {
 
 pub(crate) async fn login(fixture: &Fixture, server: &MockServer) -> (Output, String) {
     let mut child = fixture
-        .command("login", &["auth", "login", "openai-codex"])
+        .command(
+            "login",
+            &["auth", "login", "openai-codex", "--method", "oauth"],
+        )
         .spawn()
         .unwrap();
     let mut stderr = BufReader::new(child.stderr.take().unwrap());

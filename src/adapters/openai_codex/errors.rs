@@ -94,15 +94,14 @@ pub(super) fn http_error(
     }
     if status == 429 || code == "rate_limit_exceeded" {
         return ProviderError::RateLimited {
-            retry_after_ms: super::retry::hint(headers, body, now),
+            retry_after_ms: crate::adapters::responses::retry::hint(headers, body, now),
         };
     }
-    let message = error["message"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| body.chars().take(500).collect());
-    let message = redact(&message, request);
+    let message = match error["message"].as_str().filter(|s| !s.is_empty()) {
+        Some(message) => redact(message, request),
+        // Redact before the cut: no prefix of a credential straddling it may survive.
+        None => redact(body, request).chars().take(500).collect(),
+    };
     if status >= 500 {
         ProviderError::ConnectionFailed(format!("Codex server error {status}: {message}"))
     } else {

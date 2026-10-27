@@ -118,25 +118,21 @@ fn build_list_rows(
 }
 
 /// Map `AuthMethod` variants to human-readable tokens.
-/// OAuth and API-key labels are the operator-facing method names.
-fn auth_method_token(m: &crate::domain::models::AuthMethod) -> &'static str {
-    use crate::domain::models::AuthMethod;
+/// These are the operator-facing method names, equal to the `--method` values.
+pub(super) fn auth_method_token(m: &AuthMethod) -> &'static str {
     match m {
         AuthMethod::ApiKey => "api-key",
         AuthMethod::OAuthCode(_) => "oauth",
-        #[allow(unreachable_patterns)]
-        _ => "unknown",
+        AuthMethod::Device(_) => "device",
     }
 }
 
 /// Map `AuthMethod` variants to snake_case JSON tokens.
-fn auth_method_json_token(m: &crate::domain::models::AuthMethod) -> &'static str {
-    use crate::domain::models::AuthMethod;
+fn auth_method_json_token(m: &AuthMethod) -> &'static str {
     match m {
         AuthMethod::ApiKey => "api_key",
         AuthMethod::OAuthCode(_) => "oauth",
-        #[allow(unreachable_patterns)]
-        _ => "unknown",
+        AuthMethod::Device(_) => "device_code",
     }
 }
 
@@ -373,6 +369,26 @@ mod tests {
             value["providers"][0]["auth_methods"],
             serde_json::json!(["oauth", "api_key"])
         );
+    }
+
+    #[test]
+    fn every_auth_method_has_human_and_json_tokens() {
+        use crate::domain::models::auth_policy::{DeviceFlow, DevicePolicy};
+        static DEVICE: DevicePolicy = DevicePolicy {
+            label: "device label",
+            login_name: "device product",
+            flow: DeviceFlow::OpenAiCodex,
+        };
+        let oauth = providers::lookup("anthropic").unwrap().auth_methods[0].clone();
+        assert!(matches!(oauth, AuthMethod::OAuthCode(_)));
+        for (method, human, json) in [
+            (AuthMethod::ApiKey, "api-key", "api_key"),
+            (oauth, "oauth", "oauth"),
+            (AuthMethod::Device(&DEVICE), "device", "device_code"),
+        ] {
+            assert_eq!(auth_method_token(&method), human);
+            assert_eq!(auth_method_json_token(&method), json);
+        }
     }
 
     fn status(provider: &str, last_validated: Option<DateTime<Utc>>) -> (String, StoredCredential) {
@@ -760,7 +776,10 @@ api_key_env = "DEEPSEEK_API_KEY"
             codex["display_name"],
             "ChatGPT Plus/Pro (Codex Subscription)"
         );
-        assert_eq!(codex["auth_methods"], serde_json::json!(["oauth"]));
+        assert_eq!(
+            codex["auth_methods"],
+            serde_json::json!(["oauth", "device_code"])
+        );
 
         let anthropic = &providers_arr[0];
         assert_eq!(anthropic["provider"], "anthropic");

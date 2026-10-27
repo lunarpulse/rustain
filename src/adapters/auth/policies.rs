@@ -1,4 +1,7 @@
 //! Static provider protocol rules, adapted from oh-my-pi's authentication policies.
+//! The xAI device and refresh rules are adapted from oh-my-pi's catalog rules.
+//!
+//! Portions adapted from NousResearch/hermes-agent, Copyright (c) 2025 Nous Research (MIT)
 //!
 //! MIT License
 //!
@@ -28,14 +31,14 @@ use crate::domain::models::auth_policy::*;
 
 const CLIENT: ClientId = ClientId::Base64("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const EXCHANGE: TokenRequestPolicy = TokenRequestPolicy {
-    url: "https://api.anthropic.com/v1/oauth/token",
+    url: TokenUrl::Static("https://api.anthropic.com/v1/oauth/token"),
     encoding: BodyEncoding::Json,
     timeout_ms: 30_000,
     headers: &[],
     extra_params: &[("state", Tpl::State)],
 };
 const REFRESH_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
-    url: "https://api.anthropic.com/v1/oauth/token",
+    url: TokenUrl::Static("https://api.anthropic.com/v1/oauth/token"),
     encoding: BodyEncoding::Json,
     timeout_ms: 30_000,
     headers: &[
@@ -100,7 +103,7 @@ pub static ANTHROPIC_API: OAuthApiPolicy = OAuthApiPolicy {
 pub const CODEX_ORIGINATOR: &str = "omp";
 const CODEX_CLIENT: ClientId = ClientId::Literal("app_EMoamEEZ73f0CkXaXp7hrann");
 const CODEX_TOKEN_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
-    url: "https://auth.openai.com/oauth/token",
+    url: TokenUrl::Static("https://auth.openai.com/oauth/token"),
     encoding: BodyEncoding::Form,
     timeout_ms: 15_000,
     headers: &[],
@@ -147,6 +150,71 @@ pub static CODEX_REFRESH: RefreshPolicy = RefreshPolicy {
 pub static CODEX_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://chatgpt.com",
     refresh: &CODEX_REFRESH,
+};
+
+/// OpenAI's custom device protocol; its endpoints and client are protocol-fixed in
+/// the flow, and the stored row is refreshed by `CODEX_API.refresh`.
+pub static CODEX_DEVICE: DevicePolicy = DevicePolicy {
+    label: "ChatGPT Plus/Pro subscription (device code)",
+    login_name: "ChatGPT Plus/Pro (Codex Subscription)",
+    flow: DeviceFlow::OpenAiCodex,
+};
+
+const XAI_CLIENT: ClientId = ClientId::Literal("b1a00492-073a-47ea-816f-4c329264a828");
+const XAI_PROJECTION: TokenProjection = TokenProjection {
+    access: "/access_token",
+    refresh: "/refresh_token",
+    expires_in: "/expires_in",
+    skew_ms: 300_000,
+    // The access-JWT `sub` and userinfo fill identity (`IdentityHook::XaiUserinfo`).
+    account_id: None,
+    email: None,
+    project_id: None,
+    org_id: None,
+    org_name: None,
+};
+/// Device-code polls; the endpoint is discovered and validated once per login.
+pub static XAI_TOKEN_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
+    url: TokenUrl::XaiOidc,
+    encoding: BodyEncoding::Form,
+    timeout_ms: 30_000,
+    headers: &[("Accept", Tpl::Lit("application/json"))],
+    extra_params: &[],
+};
+/// Refresh sends no extra header; the endpoint is rediscovered per refresh.
+const XAI_REFRESH_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
+    url: TokenUrl::XaiOidc,
+    encoding: BodyEncoding::Form,
+    timeout_ms: 30_000,
+    headers: &[],
+    extra_params: &[],
+};
+pub static XAI_RFC8628: Rfc8628Policy = Rfc8628Policy {
+    client_id: XAI_CLIENT,
+    scope: "openid profile email offline_access grok-cli:access api:access",
+    device_url: "https://auth.x.ai/oauth2/device/code",
+    device_headers: &[("Accept", Tpl::Lit("application/json"))],
+    encoding: BodyEncoding::Form,
+    timeout_ms: 30_000,
+    token: &XAI_TOKEN_REQUEST,
+    projection: &XAI_PROJECTION,
+    identity_hook: Some(IdentityHook::XaiUserinfo),
+    instructions: "Enter code: {user_code}",
+};
+pub static XAI_DEVICE: DevicePolicy = DevicePolicy {
+    label: "xAI Grok subscription (device code)",
+    login_name: "xAI Grok OAuth (SuperGrok or X Premium+)",
+    flow: DeviceFlow::Rfc8628(&XAI_RFC8628),
+};
+pub static XAI_REFRESH: RefreshPolicy = RefreshPolicy {
+    client_id: XAI_CLIENT,
+    request: &XAI_REFRESH_REQUEST,
+    projection: &XAI_PROJECTION,
+    identity_hook: Some(IdentityHook::XaiUserinfo),
+};
+pub static XAI_API: OAuthApiPolicy = OAuthApiPolicy {
+    api_origin: "https://api.x.ai",
+    refresh: &XAI_REFRESH,
 };
 
 pub fn org_scoped_identity(provider: &str) -> bool {
@@ -262,27 +330,40 @@ mod tests {
 
     #[test]
     fn policies_keep_https_endpoints_and_paste_capable_absolute_callbacks() {
+        fn https(url: TokenUrl) {
+            match url {
+                TokenUrl::Static(url) => {
+                    assert_eq!(url::Url::parse(url).unwrap().scheme(), "https");
+                }
+                // Discovered per use; its own validator admits only https `*.x.ai`.
+                TokenUrl::XaiOidc => {}
+            }
+        }
         for provider in crate::adapters::cli::auth::providers::all_providers() {
             for method in provider.auth_methods {
-                if let AuthMethod::OAuthCode(policy) = method {
-                    assert_eq!(
-                        url::Url::parse(policy.authorize_url).unwrap().scheme(),
-                        "https"
-                    );
-                    assert_eq!(
-                        url::Url::parse(policy.exchange.url).unwrap().scheme(),
-                        "https"
-                    );
-                    assert!(policy.callback_path.starts_with('/'));
-                    assert!(policy.paste);
+                match method {
+                    AuthMethod::OAuthCode(policy) => {
+                        assert_eq!(
+                            url::Url::parse(policy.authorize_url).unwrap().scheme(),
+                            "https"
+                        );
+                        https(policy.exchange.url);
+                        assert!(policy.callback_path.starts_with('/'));
+                        assert!(policy.paste);
+                    }
+                    AuthMethod::Device(policy) => {
+                        if let DeviceFlow::Rfc8628(rfc) = policy.flow {
+                            assert_eq!(url::Url::parse(rfc.device_url).unwrap().scheme(), "https");
+                            https(rfc.token.url);
+                            assert!(rfc.instructions.contains("{user_code}"));
+                        }
+                    }
+                    AuthMethod::ApiKey => {}
                 }
             }
             if let Some(api) = provider.oauth_api {
                 assert_eq!(url::Url::parse(api.api_origin).unwrap().scheme(), "https");
-                assert_eq!(
-                    url::Url::parse(api.refresh.request.url).unwrap().scheme(),
-                    "https"
-                );
+                https(api.refresh.request.url);
             }
         }
     }

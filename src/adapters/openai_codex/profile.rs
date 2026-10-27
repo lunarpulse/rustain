@@ -24,11 +24,17 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use super::session::Snapshot;
+use super::{
+    PROVIDER_KIND, errors,
+    session::{Sessions, Snapshot},
+};
+use crate::adapters::responses::{Dialect, WireProfile, transport::Wire};
 use crate::domain::{errors::ProviderError, models::ResolvedAuth};
+use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 pub const CODEX_ORIGINATOR: &str = "omp";
 pub const CODEX_USER_AGENT: &str = "omp/18.12.6";
@@ -120,12 +126,13 @@ fn ascii_json(value: &impl Serialize) -> Result<String, ProviderError> {
 /// Request-scoped Codex identity. It is fixed once a logical request begins, so the
 /// body is encoded once; only headers are rebuilt when auth or turn state changes.
 pub(super) struct Profile {
+    session: Snapshot,
+    sessions: Arc<Sessions>,
     turn: String,
-    cache_key: String,
     metadata: Value,
 }
 impl Profile {
-    pub fn new(session: &Snapshot) -> Result<Self, ProviderError> {
+    pub fn new(session: Snapshot, sessions: Arc<Sessions>) -> Result<Self, ProviderError> {
         let install = crate::adapters::install_id::install_id().map_err(|_| {
             ProviderError::Other("Could not initialize Codex installation identity".into())
         })?;
@@ -140,17 +147,32 @@ impl Profile {
         })?;
         let metadata = json!({"x-codex-installation-id":install,"session_id":session.session_id,"thread_id":session.thread_id,"x-codex-window-id":session.window_id,"turn_id":session.turn_id,"x-codex-turn-metadata":turn});
         Ok(Self {
+            session,
+            sessions,
             turn,
-            cache_key: session.session_id.clone(),
             metadata,
         })
     }
-    pub fn headers(
-        &self,
-        session: &Snapshot,
-        model: &str,
-        auth: &ResolvedAuth,
-    ) -> Result<HeaderMap, ProviderError> {
+}
+impl WireProfile for Profile {
+    fn dialect(&self) -> Dialect {
+        Dialect::Codex
+    }
+    /// The session id never changes within a request, so the body stays fixed.
+    fn prompt_cache_key(&self) -> Option<&str> {
+        Some(&self.session.session_id)
+    }
+    fn client_metadata(&self) -> Option<&Value> {
+        Some(&self.metadata)
+    }
+    fn replay_provider(&self) -> Option<&str> {
+        Some(PROVIDER_KIND)
+    }
+}
+#[async_trait]
+impl Wire for Profile {
+    fn headers(&self, model: &str, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
+        let session = &self.session;
         let mut headers = auth_headers(auth, true)?;
         headers.insert("user-agent", HeaderValue::from_static(CODEX_USER_AGENT));
         headers.insert("accept", HeaderValue::from_static("text/event-stream"));
@@ -179,15 +201,20 @@ impl Profile {
         }
         Ok(headers)
     }
-}
-impl crate::adapters::responses::WireProfile for Profile {
-    fn prompt_cache_key(&self) -> Option<&str> {
-        Some(&self.cache_key)
+    /// Turn state and models etag from response headers or `response.metadata`.
+    async fn capture(&mut self, headers: &HeaderMap) {
+        self.sessions.capture(&mut self.session, headers).await;
     }
-    fn client_metadata(&self) -> Option<&Value> {
-        Some(&self.metadata)
+    fn http_error(
+        &self,
+        status: u16,
+        headers: &HeaderMap,
+        body: &str,
+        request: &HeaderMap,
+    ) -> ProviderError {
+        errors::http_error(status, headers, body, request)
     }
-    fn replay_provider(&self) -> Option<&str> {
-        Some(super::PROVIDER_KIND)
+    fn redact(&self, message: &str, request: &HeaderMap) -> String {
+        errors::redact(message, request)
     }
 }

@@ -1,6 +1,32 @@
 //! Static provider metadata table (Story 13.4a Task 4).
 //!
 //! Canonical source of display names, signup URLs, key requirements and login methods.
+//!
+//! The xAI rows are adapted from oh-my-pi's catalog auth rules.
+//! Portions adapted from NousResearch/hermes-agent, Copyright (c) 2025 Nous Research (MIT)
+//!
+//! MIT License
+//!
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
 use crate::adapters::auth::policies;
 use crate::domain::models::AuthMethod;
@@ -23,6 +49,8 @@ pub struct ProviderMeta {
     pub auth_methods: &'static [AuthMethod],
     pub oauth_api: Option<&'static OAuthApiPolicy>,
     pub org_scoped_identity: bool,
+    /// Bundled default model when it differs from the provider's first seed row.
+    pub default_model: Option<&'static str>,
 }
 
 /// All known providers. Order is display order for `auth list`.
@@ -39,6 +67,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         ],
         oauth_api: Some(&policies::ANTHROPIC_API),
         org_scoped_identity: true,
+        default_model: None,
     },
     ProviderMeta {
         id: "openai-codex",
@@ -46,9 +75,13 @@ static PROVIDERS: &[ProviderMeta] = &[
         signup_url: "https://chatgpt.com/",
         requires_key: true,
         api_key_env: "OPENAI_CODEX_OAUTH_TOKEN",
-        auth_methods: &[AuthMethod::OAuthCode(&policies::CODEX_OAUTH)],
+        auth_methods: &[
+            AuthMethod::OAuthCode(&policies::CODEX_OAUTH),
+            AuthMethod::Device(&policies::CODEX_DEVICE),
+        ],
         oauth_api: Some(&policies::CODEX_API),
         org_scoped_identity: true,
+        default_model: None,
     },
     ProviderMeta {
         id: "openai",
@@ -59,6 +92,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
     },
     ProviderMeta {
         id: "openrouter",
@@ -69,6 +103,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
     },
     ProviderMeta {
         id: "google",
@@ -79,6 +114,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
     },
     ProviderMeta {
         id: "deepseek",
@@ -89,6 +125,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
     },
     ProviderMeta {
         id: "moonshot",
@@ -99,6 +136,29 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
+    },
+    ProviderMeta {
+        id: "xai",
+        display_name: "xAI",
+        signup_url: "https://console.x.ai/team/default/api-keys",
+        requires_key: true,
+        api_key_env: "XAI_API_KEY",
+        auth_methods: &[AuthMethod::ApiKey],
+        oauth_api: None,
+        org_scoped_identity: false,
+        default_model: Some("grok-4.6"),
+    },
+    ProviderMeta {
+        id: "xai-oauth",
+        display_name: "xAI Grok OAuth (SuperGrok or X Premium+)",
+        signup_url: "https://grok.com/",
+        requires_key: true,
+        api_key_env: "XAI_OAUTH_TOKEN",
+        auth_methods: &[AuthMethod::Device(&policies::XAI_DEVICE)],
+        oauth_api: Some(&policies::XAI_API),
+        org_scoped_identity: false,
+        default_model: Some("grok-4.6"),
     },
     ProviderMeta {
         id: "ollama",
@@ -109,6 +169,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         auth_methods: &[AuthMethod::ApiKey], // placeholder — ollama has no auth but ApiKey is the shape
         oauth_api: None,
         org_scoped_identity: false,
+        default_model: None,
     },
 ];
 
@@ -156,5 +217,44 @@ mod tests {
         assert!(ids.contains(&"openai-codex"));
         assert!(ids.contains(&"anthropic"));
         assert!(ids.contains(&"ollama"));
+    }
+
+    #[test]
+    fn provider_ids_are_unique() {
+        let ids: Vec<_> = all_provider_ids().collect();
+        let unique: std::collections::BTreeSet<_> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    }
+
+    #[test]
+    fn codex_offers_browser_then_device_login() {
+        let methods = lookup("openai-codex").unwrap().auth_methods;
+        let labels: Vec<_> = methods.iter().map(AuthMethod::label).collect();
+        assert_eq!(
+            labels,
+            [
+                "ChatGPT Plus/Pro subscription (browser)",
+                "ChatGPT Plus/Pro subscription (device code)"
+            ]
+        );
+    }
+
+    #[test]
+    fn xai_rows_split_api_key_and_device_oauth() {
+        let key = lookup("xai").unwrap();
+        assert!(matches!(key.auth_methods, [AuthMethod::ApiKey]));
+        assert!(key.oauth_api.is_none());
+        assert_eq!(key.api_key_env, "XAI_API_KEY");
+        assert_eq!(key.default_model, Some("grok-4.6"));
+        let oauth = lookup("xai-oauth").unwrap();
+        assert!(matches!(oauth.auth_methods, [AuthMethod::Device(_)]));
+        assert_eq!(
+            oauth.auth_methods[0].login_name(),
+            Some("xAI Grok OAuth (SuperGrok or X Premium+)")
+        );
+        assert_eq!(oauth.api_key_env, "XAI_OAUTH_TOKEN");
+        assert_eq!(oauth.oauth_api.unwrap().api_origin, "https://api.x.ai");
+        assert!(!oauth.org_scoped_identity);
+        assert_eq!(oauth.default_model, Some("grok-4.6"));
     }
 }

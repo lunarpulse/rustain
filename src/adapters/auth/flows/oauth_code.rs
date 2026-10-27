@@ -104,9 +104,19 @@ pub(super) async fn run(
             verifier: &verifier,
             ..Default::default()
         };
-        let response = token::request(&ctx.http, policy.exchange, &values, false)
+        let url = token::resolve_url(&ctx.http, policy.exchange.url)
             .await
-            .map_err(|e| FlowError::configuration(e.safe_message("OAuth token exchange failed")))?;
+            .map_err(FlowError::Message)?;
+        let response = token::request(
+            &ctx.http,
+            policy.exchange,
+            &url,
+            token::Grant::AuthorizationCode,
+            &values,
+        )
+        .await
+        .map_err(|e| FlowError::configuration(e.safe_message("OAuth token exchange failed")))?
+        .body;
         let now = (ctx.clock)();
         let mut projected = token::project(&response, policy.projection, now)?;
         super::identity::fill(

@@ -627,6 +627,8 @@ pub struct CredentialHandle {
     env_vars: Vec<String>,
     oauth_allowed: bool,
     pub auth_header: Option<crate::domain::models::AuthHeaderScheme>,
+    /// A candidate key under validation; it wins the cascade as `Runtime`.
+    runtime: Option<SecretString>,
 }
 
 impl CredentialHandle {
@@ -643,6 +645,20 @@ impl CredentialHandle {
             env_vars,
             oauth_allowed,
             auth_header,
+            runtime: None,
+        }
+    }
+
+    /// A handle over one explicit key, read neither from env nor the store. It
+    /// resolves as `AuthSource::Runtime` without a row, so `recover` is a no-op.
+    pub fn runtime(resolver: Arc<KeyResolver>, provider: String, key: SecretString) -> Self {
+        Self {
+            resolver,
+            provider,
+            env_vars: Vec::new(),
+            oauth_allowed: false,
+            auth_header: None,
+            runtime: Some(key),
         }
     }
 
@@ -690,7 +706,7 @@ impl CredentialHandle {
         self.resolver
             .resolve_tracked_with_policy(
                 &self.provider,
-                None,
+                self.runtime.as_ref(),
                 names,
                 &crate::infrastructure::utils::env_var_trimmed,
                 self.oauth_allowed,
@@ -698,5 +714,41 @@ impl CredentialHandle {
             .await
             .map_err(|error| ProviderError::ConnectionFailed(error.to_string()))?
             .ok_or(ProviderError::AuthenticationFailed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoRefresh;
+    #[async_trait::async_trait]
+    impl OAuthRefreshPort for NoRefresh {
+        async fn refresh(
+            &self,
+            _: &str,
+            _: &OAuthCredential,
+        ) -> Result<crate::domain::ports::RefreshedTokens, RefreshFailure> {
+            Err(RefreshFailure::Transient("never called".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_handle_serves_its_key_without_a_row_or_recovery() {
+        let resolver = compose(
+            Arc::new(crate::adapters::noop::NoOpAuthStore),
+            Arc::new(NoRefresh),
+            Arc::new(|| 0),
+        );
+        let handle = CredentialHandle::runtime(
+            resolver,
+            "xai".into(),
+            SecretString::new("candidate".into()),
+        );
+        let resolved = handle.current().await.unwrap();
+        assert_eq!(resolved.source, AuthSource::Runtime);
+        assert!(resolved.row.is_none());
+        assert!(matches!(resolved.auth, ResolvedAuth::ApiKey(_)));
+        assert!(handle.recover(&resolved).await.unwrap().is_none());
     }
 }

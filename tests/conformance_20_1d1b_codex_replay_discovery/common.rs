@@ -37,7 +37,7 @@ const ENV: &[&str] = &[
     "RUSTAIN_CONFIG_DIR",
     "RUSTAIN_TEST_AUTH_ORIGIN",
     "RUSTAIN_TEST_AUTH_CALLBACK_PORT",
-    "RUSTAIN_TEST_CODEX_RETRY_SCALE",
+    "RUSTAIN_TEST_RESPONSES_RETRY_SCALE",
     "RUSTAIN_TEST_NOW_MS",
     "RUSTAIN_MODELS_DEV_URL",
     "OPENAI_CODEX_OAUTH_TOKEN",
@@ -45,6 +45,13 @@ const ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "GOOGLE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "MOONSHOT_API_KEY",
+    "XAI_API_KEY",
+    "XAI_OAUTH_TOKEN",
+    "XAI_BASE_URL",
 ];
 
 /// Environment guard; callers hold the shared `#[serial]` lock.
@@ -66,7 +73,7 @@ impl World {
             std::env::set_var("RUSTAIN_CONFIG_DIR", dir.path());
             std::env::set_var("RUSTAIN_TEST_AUTH_ORIGIN", server.uri());
             std::env::set_var("RUSTAIN_TEST_AUTH_CALLBACK_PORT", "0");
-            std::env::set_var("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0");
+            std::env::set_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0");
             std::env::set_var("RUSTAIN_TEST_NOW_MS", NOW.to_string());
             std::env::set_var("RUSTAIN_MODELS_DEV_URL", "http://127.0.0.1:1");
         }

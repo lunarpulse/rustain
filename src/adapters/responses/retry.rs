@@ -1,7 +1,9 @@
-//! Retry timing translated from oh-my-pi utils/fetch-retry.ts.
+//! Retry timing translated from oh-my-pi utils/fetch-retry.ts, with the
+//! transport admission rules of ai/src/utils/openai-http.ts.
 //!
 //! MIT License
 //!
+//! Copyright (c) 2025 Mario Zechner
 //! Copyright (c) 2025-2026 Can Bölük
 //! Copyright (c) 2026 Stencil Labs, Inc.
 //!
@@ -27,9 +29,38 @@ use regex::Regex;
 use reqwest::header::HeaderMap;
 use std::{sync::LazyLock, time::Duration};
 
-pub(super) const MAX_DELAY_MS: u64 = 300_000;
+/// Codex: a retry hint above this ends the attempt loop.
+pub(super) const CODEX_MAX_DELAY_MS: u64 = 300_000;
+/// `fetchWithRetry` default `maxDelayMs`: hint ceiling and default-delay cap.
+pub(super) const GENERIC_MAX_DELAY_MS: u64 = 60_000;
 pub(super) fn retry_status(status: u16) -> bool {
     status == 408 || status == 429 || status >= 500
+}
+/// `resolveDefaultDelay` for the `n`-th retry (1-based): `min(500·2^(n-1), 60 000)`.
+pub(super) fn generic_delay(n: u32) -> u64 {
+    500u64
+        .saturating_mul(1u64 << (n.saturating_sub(1)).min(32))
+        .min(GENERIC_MAX_DELAY_MS)
+}
+/// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
+/// reached no model, so the transport surfaces it instead of retrying.
+pub(super) fn admission_rejection(headers: &HeaderMap, body: &str) -> bool {
+    static BODY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#""rate_limit_type"\s*:\s*"max_parallel_requests""#)
+            .expect("fixed admission pattern")
+    });
+    headers
+        .get("rate_limit_type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim() == "max_parallel_requests")
+        || BODY.is_match(body)
+}
+/// omp `isRequestBodyReadTimeout`: a full-replay request is not resent after it.
+pub(super) fn request_body_read_timeout(status: u16, body: &str) -> bool {
+    static BODY: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\btimed out reading request body\b").expect("fixed timeout pattern")
+    });
+    status == 408 && BODY.is_match(body)
 }
 fn finite(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|v| v.is_finite())
@@ -61,7 +92,7 @@ fn leading_integer(s: &str) -> Option<i64> {
         .unwrap_or(digits.len());
     s[..s.len() - digits.len() + end].parse().ok()
 }
-pub(super) fn hint(headers: &HeaderMap, body: &str, now: i64) -> Option<u64> {
+pub fn hint(headers: &HeaderMap, body: &str, now: i64) -> Option<u64> {
     if let Some(v) = header(headers, "retry-after-ms")
         .and_then(finite)
         .filter(|v| *v >= 0.0)
@@ -222,7 +253,7 @@ fn body_hint(body: &str, now: i64) -> Option<u64> {
 }
 #[cfg(feature = "test-instrumentation")]
 fn scale() -> f64 {
-    crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_CODEX_RETRY_SCALE")
+    crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_RESPONSES_RETRY_SCALE")
         .and_then(|v| finite(&v))
         .filter(|v| *v >= 0.0)
         .unwrap_or(1.0)
@@ -290,18 +321,50 @@ mod tests {
                 // SAFETY: unkeyed serial test lock outlives restore.
                 unsafe {
                     match self.0.take() {
-                        Some(v) => std::env::set_var("RUSTAIN_TEST_CODEX_RETRY_SCALE", v),
-                        None => std::env::remove_var("RUSTAIN_TEST_CODEX_RETRY_SCALE"),
+                        Some(v) => std::env::set_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", v),
+                        None => std::env::remove_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE"),
                     }
                 }
             }
         }
-        let _restore = Restore(std::env::var_os("RUSTAIN_TEST_CODEX_RETRY_SCALE"));
+        let _restore = Restore(std::env::var_os("RUSTAIN_TEST_RESPONSES_RETRY_SCALE"));
         // SAFETY: all environment-mutating fixtures take the unkeyed serial lock.
         unsafe {
-            std::env::set_var("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0");
+            std::env::set_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0");
         }
         assert_eq!(delay(500), Duration::from_millis(500));
         assert_eq!(stream_timeout(), Duration::from_secs(300));
+    }
+    #[test]
+    fn generic_backoff_admission_and_body_read_timeout() {
+        let delays: Vec<_> = (1..=9).map(generic_delay).collect();
+        assert_eq!(
+            delays,
+            [500, 1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000]
+        );
+        assert_eq!(generic_delay(u32::MAX), GENERIC_MAX_DELAY_MS);
+        let mut headers = HeaderMap::new();
+        assert!(!admission_rejection(
+            &headers,
+            r#"{"error":{"type":"rate_limit"}}"#
+        ));
+        assert!(admission_rejection(
+            &headers,
+            r#"{"error":{"rate_limit_type" : "max_parallel_requests"}}"#
+        ));
+        headers.insert(
+            "rate_limit_type",
+            " max_parallel_requests ".parse().unwrap(),
+        );
+        assert!(admission_rejection(&headers, ""));
+        assert!(request_body_read_timeout(
+            408,
+            "Timed out reading request body"
+        ));
+        assert!(!request_body_read_timeout(
+            504,
+            "timed out reading request body"
+        ));
+        assert!(!request_body_read_timeout(408, "timed out"));
     }
 }

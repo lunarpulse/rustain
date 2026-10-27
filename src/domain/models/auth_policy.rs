@@ -4,6 +4,26 @@
 pub enum AuthMethod {
     ApiKey,
     OAuthCode(&'static OAuthCodePolicy),
+    /// Headless device login; the stored row is an OAuth credential.
+    Device(&'static DevicePolicy),
+}
+impl AuthMethod {
+    /// Operator-facing name for interactive method pickers.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::ApiKey => "API key",
+            Self::OAuthCode(policy) => policy.label,
+            Self::Device(policy) => policy.label,
+        }
+    }
+    /// Product name in the success line of a subscription login; API keys have none.
+    pub fn login_name(&self) -> Option<&'static str> {
+        match self {
+            Self::ApiKey => None,
+            Self::OAuthCode(policy) => Some(policy.login_name),
+            Self::Device(policy) => Some(policy.login_name),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,9 +51,18 @@ pub enum BodyEncoding {
     Form,
 }
 
+/// Where a token request is sent. Callers resolve it per use (login or refresh), so a
+/// discovered endpoint is never cached across operations.
+#[derive(Debug, Clone, Copy)]
+pub enum TokenUrl {
+    Static(&'static str),
+    /// Discovered from xAI's OpenID configuration and validated before any request.
+    XaiOidc,
+}
+
 #[derive(Debug)]
 pub struct TokenRequestPolicy {
-    pub url: &'static str,
+    pub url: TokenUrl,
     pub encoding: BodyEncoding,
     pub timeout_ms: u64,
     pub headers: &'static [(&'static str, Tpl)],
@@ -57,6 +86,8 @@ pub struct TokenProjection {
 pub enum IdentityHook {
     AnthropicBootstrap,
     CodexJwt,
+    /// Access-JWT `sub`, then a best-effort xAI OIDC userinfo lookup.
+    XaiUserinfo,
 }
 
 /// PKCE is intrinsic: a confidential client secret cannot be represented.
@@ -77,6 +108,39 @@ pub struct OAuthCodePolicy {
     pub exchange: &'static TokenRequestPolicy,
     pub projection: &'static TokenProjection,
     pub identity_hook: Option<IdentityHook>,
+}
+
+/// One login method, two device protocols sharing display, time, cancellation and storage.
+#[derive(Debug)]
+pub struct DevicePolicy {
+    pub label: &'static str,
+    pub login_name: &'static str,
+    pub flow: DeviceFlow,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DeviceFlow {
+    Rfc8628(&'static Rfc8628Policy),
+    /// OpenAI's custom device-authorization protocol; its constants are protocol-fixed.
+    OpenAiCodex,
+}
+
+/// RFC 8628 device authorization grant.
+#[derive(Debug)]
+pub struct Rfc8628Policy {
+    pub client_id: ClientId,
+    /// Already joined by the provider's scope separator.
+    pub scope: &'static str,
+    pub device_url: &'static str,
+    pub device_headers: &'static [(&'static str, Tpl)],
+    /// Encoding of the device-authorization request; polls follow `token.encoding`.
+    pub encoding: BodyEncoding,
+    pub timeout_ms: u64,
+    pub token: &'static TokenRequestPolicy,
+    pub projection: &'static TokenProjection,
+    pub identity_hook: Option<IdentityHook>,
+    /// Displayed instructions; `{user_code}` is replaced by the issued code.
+    pub instructions: &'static str,
 }
 
 #[derive(Debug)]

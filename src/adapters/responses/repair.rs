@@ -1,4 +1,5 @@
-//! Responses history repair, adapted from oh-my-pi request-transformer.ts.
+//! Responses history repair, adapted from oh-my-pi request-transformer.ts and,
+//! for the generic dialect, openai-shared.ts (orphan repair and batch hoist).
 //!
 //! MIT License
 //!
@@ -49,8 +50,9 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 //! THE SOFTWARE.
 
+use super::Dialect;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const CODEX_INTERRUPTED_TOOL_OUTPUT: &str =
     "[No tool output recorded: the tool call was interrupted before it produced a result.]";
@@ -116,7 +118,7 @@ pub fn sanitize_call_id(raw: &str) -> String {
     sanitized
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
     Function,
     Custom,
@@ -143,13 +145,16 @@ fn output_kind(item: &Value) -> Option<Kind> {
 
 enum Action {
     Keep,
-    Orphan,
+    Orphan(Kind),
     Interrupted(Kind),
 }
 
 /// Filter references and stored item IDs, normalize IDs, then repair both halves
 /// of tool exchanges. Values move into the repaired array without tree copies.
-pub fn repair(mut input: Vec<Value>) -> Vec<Value> {
+///
+/// `Codex` pairs a call with an output anywhere in the input; `Generic` follows
+/// omp's ordered rules (an output needs an earlier call, a call a later output).
+pub fn repair(mut input: Vec<Value>, dialect: Dialect) -> Vec<Value> {
     input.retain(|item| item["type"] != "item_reference");
     for item in &mut input {
         if let Some(object) = item.as_object_mut() {
@@ -163,53 +168,41 @@ pub fn repair(mut input: Vec<Value>) -> Vec<Value> {
             }
         }
     }
-    let actions: Vec<_> = {
-        let mut calls = HashMap::new();
-        let mut outputs = HashMap::new();
-        for item in &input {
-            let Some(id) = item["call_id"].as_str() else {
-                continue;
-            };
-            if let Some(kind) = call_kind(item) {
-                calls.insert(id, kind);
-            }
-            if let Some(kind) = output_kind(item) {
-                outputs.insert(id, kind);
-            }
-        }
-        input
-            .iter()
-            .map(|item| {
-                let Some(id) = item["call_id"].as_str() else {
-                    return Action::Keep;
-                };
-                if let Some(kind) = output_kind(item) {
-                    if calls.get(id) != Some(&kind) {
-                        return Action::Orphan;
-                    }
-                }
-                if let Some(kind) = call_kind(item) {
-                    if outputs.get(id) != Some(&kind) {
-                        return Action::Interrupted(kind);
-                    }
-                }
-                Action::Keep
-            })
-            .collect()
+    let actions = match dialect {
+        Dialect::Codex => unordered_actions(&input),
+        Dialect::Generic => ordered_actions(&input),
     };
     let mut repaired = Vec::with_capacity(input.len());
     for (mut item, action) in input.into_iter().zip(actions) {
         match action {
             Action::Keep => repaired.push(item),
-            Action::Orphan => {
+            Action::Orphan(kind) => {
                 let id = item["call_id"].as_str().expect("orphan ID");
-                let name = item["name"].as_str().unwrap_or("tool");
-                let output = if let Some(text) = item["output"].as_str() {
-                    truncate_output(text)
-                } else {
-                    truncate_output(&item["output"].to_string())
+                let note = match dialect {
+                    Dialect::Codex => {
+                        let name = item["name"].as_str().unwrap_or("tool");
+                        let output = if let Some(text) = item["output"].as_str() {
+                            truncate_output(text)
+                        } else {
+                            truncate_output(&item["output"].to_string())
+                        };
+                        format!("[Previous {name} result; call_id={id}]: {output}")
+                    }
+                    Dialect::Generic => {
+                        let name = if kind == Kind::Computer {
+                            "computer"
+                        } else {
+                            "tool"
+                        };
+                        let output = match &item["output"] {
+                            Value::String(text) => truncate_output(text),
+                            Value::Null => String::new(),
+                            other => truncate_output(&other.to_string()),
+                        };
+                        format!("[Orphan {name} result; call_id={id}]: {output}")
+                    }
                 };
-                repaired.push(json!({"type":"message","role":"assistant","content":format!("[Previous {name} result; call_id={id}]: {output}")}));
+                repaired.push(json!({"type":"message","role":"assistant","content":note}));
             }
             Action::Interrupted(Kind::Computer) => {
                 let id = item["call_id"].as_str().expect("computer ID");
@@ -224,6 +217,179 @@ pub fn repair(mut input: Vec<Value>) -> Vec<Value> {
         }
     }
     repaired
+}
+
+fn unordered_actions(input: &[Value]) -> Vec<Action> {
+    let mut calls = HashMap::new();
+    let mut outputs = HashMap::new();
+    for item in input {
+        let Some(id) = item["call_id"].as_str() else {
+            continue;
+        };
+        if let Some(kind) = call_kind(item) {
+            calls.insert(id, kind);
+        }
+        if let Some(kind) = output_kind(item) {
+            outputs.insert(id, kind);
+        }
+    }
+    input
+        .iter()
+        .map(|item| {
+            let Some(id) = item["call_id"].as_str() else {
+                return Action::Keep;
+            };
+            if let Some(kind) = output_kind(item) {
+                if calls.get(id) != Some(&kind) {
+                    return Action::Orphan(kind);
+                }
+            }
+            if let Some(kind) = call_kind(item) {
+                if outputs.get(id) != Some(&kind) {
+                    return Action::Interrupted(kind);
+                }
+            }
+            Action::Keep
+        })
+        .collect()
+}
+
+/// omp `repairOrphanResponsesToolOutputs` then `repairOrphanResponsesToolCalls`:
+/// an output folded into a note no longer pairs a later-checked call.
+fn ordered_actions(input: &[Value]) -> Vec<Action> {
+    let mut actions: Vec<Action> = Vec::with_capacity(input.len());
+    let mut preceding = HashSet::new();
+    for item in input {
+        let id = item["call_id"].as_str();
+        if let (Some(kind), Some(id)) = (call_kind(item), id) {
+            preceding.insert((kind, id));
+        }
+        actions.push(match (output_kind(item), id) {
+            (Some(kind), Some(id)) if !preceding.contains(&(kind, id)) => Action::Orphan(kind),
+            _ => Action::Keep,
+        });
+    }
+    let mut later = HashSet::new();
+    for (item, action) in input.iter().zip(actions.iter_mut()).rev() {
+        let Some(id) = item["call_id"].as_str() else {
+            continue;
+        };
+        if let (Some(kind), Action::Keep) = (output_kind(item), &*action) {
+            later.insert((kind, id));
+        }
+        if let Some(kind) = call_kind(item) {
+            if !later.contains(&(kind, id)) {
+                *action = Action::Interrupted(kind);
+            }
+        }
+    }
+    actions
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Batch {
+    Call,
+    Output,
+    AssistantMessage,
+    Other,
+}
+
+fn batch_kind(item: &Value) -> Batch {
+    if call_kind(item).is_some() {
+        Batch::Call
+    } else if output_kind(item).is_some() {
+        Batch::Output
+    } else if item["type"] == "message" && item["role"] == "assistant" {
+        Batch::AssistantMessage
+    } else {
+        Batch::Other
+    }
+}
+
+/// omp `hoistInterleavedResponsesToolBatchMessages`: assistant messages wedged
+/// inside a call → output batch move ahead of that batch. Idempotent.
+pub fn hoist(items: Vec<Value>) -> Vec<Value> {
+    let kinds: Vec<Batch> = items.iter().map(batch_kind).collect();
+    let call_id = |index: usize| items[index]["call_id"].as_str();
+    // Does a call with `id` precede `index` within the same contiguous batch body?
+    let earlier_batch_call = |index: usize, id: &str| {
+        for probe in (0..index).rev() {
+            match kinds[probe] {
+                Batch::Other => return false,
+                Batch::Call if call_id(probe) == Some(id) => return true,
+                _ => {}
+            }
+        }
+        false
+    };
+    let mut bucket_of: HashMap<usize, usize> = HashMap::new();
+    let mut insert_before: HashMap<usize, Vec<usize>> = HashMap::new();
+    for index in 0..items.len() {
+        // Only anchor on the first output of a run.
+        if kinds[index] != Batch::Output || (index > 0 && kinds[index - 1] == Batch::Output) {
+            continue;
+        }
+        let mut pending: HashSet<&str> = (index..items.len())
+            .take_while(|&probe| kinds[probe] == Batch::Output)
+            .filter_map(call_id)
+            .collect();
+        let mut start = index;
+        let mut saw_call = false;
+        let mut messages = Vec::new();
+        while start > 0 {
+            let probe = start - 1;
+            match kinds[probe] {
+                Batch::Call => {
+                    saw_call = true;
+                    if let Some(id) = call_id(probe) {
+                        pending.remove(id);
+                    }
+                }
+                Batch::Output => {
+                    // Cross an earlier output only when it belongs to this same
+                    // interrupted batch; otherwise it closes a completed round.
+                    let Some(id) = call_id(probe) else {
+                        break;
+                    };
+                    if !earlier_batch_call(probe, id)
+                        || !pending.iter().any(|owned| earlier_batch_call(probe, owned))
+                    {
+                        break;
+                    }
+                    pending.insert(id);
+                }
+                Batch::AssistantMessage => messages.push(probe),
+                Batch::Other => break,
+            }
+            start -= 1;
+        }
+        if !saw_call || messages.is_empty() {
+            continue;
+        }
+        for &message in messages.iter().rev() {
+            // A wider batch can re-collect a message an earlier anchor scheduled.
+            if let Some(previous) = bucket_of.insert(message, start) {
+                if let Some(list) = insert_before.get_mut(&previous) {
+                    list.retain(|&scheduled| scheduled != message);
+                }
+            }
+            insert_before.entry(start).or_default().push(message);
+        }
+    }
+    if bucket_of.is_empty() {
+        return items;
+    }
+    let mut slots: Vec<Option<Value>> = items.into_iter().map(Some).collect();
+    let mut hoisted = Vec::with_capacity(slots.len());
+    for index in 0..slots.len() {
+        if let Some(moved) = insert_before.get(&index) {
+            hoisted.extend(moved.iter().filter_map(|&message| slots[message].take()));
+        }
+        if !bucket_of.contains_key(&index) {
+            hoisted.extend(slots[index].take());
+        }
+    }
+    hoisted
 }
 
 fn truncate_output(text: &str) -> String {

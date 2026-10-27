@@ -1,3 +1,5 @@
+//! Portions adapted from NousResearch/hermes-agent, Copyright (c) 2025 Nous Research (MIT)
+//!
 //! MIT License
 //!
 //! Copyright (c) 2025 Mario Zechner
@@ -41,6 +43,7 @@ pub(super) async fn fill(
     match hook {
         IdentityHook::AnthropicBootstrap => bootstrap(http, access, identity, refresh).await,
         IdentityHook::CodexJwt => codex(access, raw, identity, refresh)?,
+        IdentityHook::XaiUserinfo => xai(http, access, identity).await,
     }
     Ok(())
 }
@@ -147,5 +150,87 @@ async fn bootstrap(
         if identity.org_name.is_none() {
             identity.org_name = field("organization_name");
         }
+    }
+}
+
+/// Same rule on login and refresh: the access-JWT `sub`, then OIDC userinfo. Every
+/// userinfo failure keeps the projected identity; on refresh absent fields stay absent,
+/// so the resolver retains the stored ones. Never org-scoped.
+async fn xai(http: &reqwest::Client, access: &str, identity: &mut CredentialIdentity) {
+    const USERINFO: &str = "https://auth.x.ai/oauth2/userinfo";
+    if let Some(sub) = crate::adapters::auth::codex_jwt::claims(access)
+        .and_then(|claims| scalar_string(claims.get("sub")))
+    {
+        identity.account_id = Some(sub);
+    }
+    // Bearer only; the shared credential client never follows a redirect.
+    let response = http
+        .get(crate::adapters::auth::policies::endpoint(USERINFO))
+        .timeout(std::time::Duration::from_secs(15))
+        .bearer_auth(access)
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return;
+    };
+    if !response.status().is_success() {
+        return;
+    }
+    let Ok(body) = response.json::<serde_json::Value>().await else {
+        return;
+    };
+    if let Some(email) = scalar_string(body.get("email")) {
+        identity.email = Some(email);
+    }
+    if let Some(sub) = scalar_string(body.get("sub")) {
+        identity.account_id = Some(sub);
+    }
+}
+
+/// JavaScript `scalarString`: a non-empty string as-is, or a finite number as `String(n)`.
+fn scalar_string(value: Option<&serde_json::Value>) -> Option<String> {
+    match value? {
+        serde_json::Value::String(value) => (!value.is_empty()).then(|| value.clone()),
+        serde_json::Value::Number(number) if number.is_f64() => {
+            let value = number.as_f64()?;
+            value.is_finite().then(|| js_number(value))
+        }
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// JavaScript `String(n)` for the finite floats JSON can carry.
+fn js_number(value: f64) -> String {
+    if value == 0.0 {
+        "0".to_owned()
+    } else if value.fract() == 0.0 && value.abs() < 1e21 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scalar_string;
+    use serde_json::json;
+
+    #[test]
+    fn scalar_string_follows_javascript_rules() {
+        assert_eq!(
+            scalar_string(Some(&json!("a@x.ai"))).as_deref(),
+            Some("a@x.ai")
+        );
+        assert_eq!(scalar_string(Some(&json!(" "))).as_deref(), Some(" "));
+        assert_eq!(scalar_string(Some(&json!(""))), None);
+        assert_eq!(scalar_string(Some(&json!(42))).as_deref(), Some("42"));
+        assert_eq!(scalar_string(Some(&json!(42.0))).as_deref(), Some("42"));
+        assert_eq!(scalar_string(Some(&json!(1.5))).as_deref(), Some("1.5"));
+        assert_eq!(scalar_string(Some(&json!(-0.0))).as_deref(), Some("0"));
+        assert_eq!(scalar_string(Some(&json!(null))), None);
+        assert_eq!(scalar_string(Some(&json!(true))), None);
+        assert_eq!(scalar_string(Some(&json!({"a": 1}))), None);
+        assert_eq!(scalar_string(None), None);
     }
 }

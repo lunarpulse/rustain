@@ -42,9 +42,15 @@ pub fn effective_providers(config: &AppConfig) -> Vec<EffectiveProvider> {
         {
             continue;
         }
-        let model_id = crate::adapters::model_catalog_cache::load_embedded_seed()
+        let seed = crate::adapters::model_catalog_cache::load_embedded_seed()
             .and_then(|seed| seed.providers.get(meta.id))
-            .and_then(|p| p.models.first())
+            .map(|p| p.models.as_slice())
+            .unwrap_or_default();
+        // The provider's own default when the seed carries it, else the first row.
+        let model_id = meta
+            .default_model
+            .and_then(|id| seed.iter().find(|m| m.descriptor.model_id == id))
+            .or_else(|| seed.first())
             .map(|m| m.descriptor.model_id.clone())
             .unwrap_or_default();
         entries.push(EffectiveProvider {
@@ -154,5 +160,43 @@ pub fn availability(
         None => Availability::Locked {
             hint: entry.sign_in_hint(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bundled(id: &str) -> EffectiveProvider {
+        effective_providers(&AppConfig::default())
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .unwrap_or_else(|| panic!("{id} is bundled"))
+    }
+
+    #[test]
+    fn bundled_default_model_prefers_the_provider_default_in_its_seed() {
+        assert_eq!(bundled("xai").cfg.model_id, "grok-4.6");
+        assert_eq!(bundled("xai-oauth").cfg.model_id, "grok-4.6");
+        // Providers without a declared default keep their first seed row.
+        assert_eq!(bundled("anthropic").cfg.model_id, "claude-opus-4-7");
+        assert_eq!(bundled("openai-codex").cfg.model_id, "gpt-5.6-luna");
+    }
+
+    #[test]
+    fn xai_kinds_read_their_own_env_and_login_ids() {
+        let key = bundled("xai");
+        assert_eq!(key.env_vars(), ["XAI_API_KEY"]);
+        assert_eq!(
+            key.sign_in_hint(),
+            "Set XAI_API_KEY or run `rustain auth login xai`"
+        );
+        let oauth = bundled("xai-oauth");
+        assert_eq!(oauth.env_vars(), ["XAI_OAUTH_TOKEN"]);
+        assert_eq!(oauth.rows_key(), "xai-oauth");
+        assert_eq!(
+            oauth.sign_in_hint(),
+            "Set XAI_OAUTH_TOKEN or run `rustain auth login xai-oauth`"
+        );
     }
 }

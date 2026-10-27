@@ -24,7 +24,10 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use crate::{adapters::auth::flows::LoginUi, domain::models::SecretString};
+use crate::{
+    adapters::{auth::flows::LoginUi, cli::session::list::sanitize_title},
+    domain::models::SecretString,
+};
 use futures::future::BoxFuture;
 use std::{
     io::{IsTerminal, Write},
@@ -51,25 +54,42 @@ impl TerminalUi {
     pub fn shared() -> Arc<Self> {
         Arc::new(Self::new())
     }
-}
-impl LoginUi for TerminalUi {
-    fn on_auth_url(&self, url: &str, launch: &str, instructions: &str) {
-        eprintln!("{instructions}\n{url}\nLocal browser launch: {launch}");
+    fn open(&self, url: &str) {
         if self.interactive {
             #[cfg(target_os = "macos")]
             let program = "open";
             #[cfg(not(target_os = "macos"))]
             let program = "xdg-open";
             let _ = std::process::Command::new(program)
-                .arg(launch)
+                .arg(url)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
     }
+}
+impl LoginUi for TerminalUi {
+    fn on_auth_url(&self, url: &str, launch: &str, instructions: &str) {
+        eprintln!("{instructions}\n{url}\nLocal browser launch: {launch}");
+        self.open(launch);
+    }
+    /// The instructions already carry the code; no loopback launch URL exists.
+    /// Server-supplied text is stripped of terminal controls, and only a web page
+    /// is handed to the opener.
+    fn on_device_code(&self, verification_url: &str, _user_code: &str, instructions: &str) {
+        eprintln!(
+            "{}\n{}",
+            sanitize_title(instructions),
+            sanitize_title(verification_url)
+        );
+        if verification_url.starts_with("https://") || verification_url.starts_with("http://") {
+            self.open(verification_url);
+        }
+    }
+    /// Progress lines may carry a server-issued device code.
     fn on_progress(&self, message: &str) {
-        eprintln!("{message}");
+        eprintln!("{}", sanitize_title(message));
     }
     fn prompt_secret(&self, label: &str) -> BoxFuture<'_, Option<SecretString>> {
         let label = label.to_owned();

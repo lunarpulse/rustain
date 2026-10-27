@@ -1,4 +1,6 @@
-//! Responses event mapping, adapted from oh-my-pi's OpenAI/Codex providers.
+//! Responses event mapping, adapted from oh-my-pi's OpenAI/Codex providers
+//! (generic dialect: openai-shared.ts processResponsesStream, openai-responses.ts
+//! replay-unsafe events, error/flags.ts and error/retryable.ts transient rules).
 //!
 //! MIT License
 //!
@@ -24,6 +26,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
+use super::Dialect;
 use crate::domain::models::{ProviderReplayItem, StopReason, StreamChunk, UsageInfo};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -73,6 +76,55 @@ pub struct EventMapper {
     replay_owner: Option<(String, String)>,
     /// This attempt's reduced reasoning items, released only at a terminal event.
     replay: Vec<Value>,
+    dialect: Dialect,
+}
+
+/// omp `isOpenAIResponsesReplayUnsafeEvent`: once one is seen, the generic
+/// transport never replays the attempt.
+pub fn replay_unsafe(event: &Value) -> bool {
+    match event["type"].as_str() {
+        Some(
+            "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_text.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta",
+        ) => event["delta"]
+            .as_str()
+            .is_some_and(|delta| !delta.is_empty()),
+        Some("response.reasoning_summary_part.done" | "response.output_item.done") => true,
+        _ => false,
+    }
+}
+
+/// omp `isOpenAIResponsesProgressEvent`: only these count as the generic first
+/// event or restart its idle timer.
+pub(super) fn progress(event: &Value) -> bool {
+    matches!(
+        event["type"].as_str(),
+        Some(
+            "response.created"
+                | "response.output_item.added"
+                | "response.reasoning_summary_part.added"
+                | "response.reasoning_summary_text.delta"
+                | "response.reasoning_summary_text.done"
+                | "response.reasoning_summary_part.done"
+                | "response.reasoning_text.delta"
+                | "response.content_part.added"
+                | "response.output_text.delta"
+                | "response.refusal.delta"
+                | "response.function_call_arguments.delta"
+                | "response.function_call_arguments.done"
+                | "response.custom_tool_call_input.delta"
+                | "response.custom_tool_call_input.done"
+                | "response.output_item.done"
+                | "response.completed"
+                | "response.incomplete"
+                | "response.failed"
+                | "error"
+        )
+    )
 }
 
 impl EventMapper {
@@ -85,6 +137,11 @@ impl EventMapper {
             replay_owner: Some((provider.to_owned(), model.to_owned())),
             ..Self::default()
         }
+    }
+    /// Event texts and terminal rules of `dialect`; the default is `Codex`.
+    pub fn with_dialect(mut self, dialect: Dialect) -> Self {
+        self.dialect = dialect;
+        self
     }
     pub fn terminal(&self) -> bool {
         self.terminal
@@ -146,7 +203,10 @@ impl EventMapper {
                 let delta = value["delta"].as_str().unwrap_or("");
                 // Observe even detached/unknown items: otherwise a degenerate
                 // stream could keep idle timers alive indefinitely after done.
-                self.observe_whitespace(&value, delta)?;
+                // The whitespace-loop guard is Codex policy only.
+                if self.dialect == Dialect::Codex {
+                    self.observe_whitespace(&value, delta)?;
+                }
                 if let Some(index) = self.find_tool(&value) {
                     let tool = &mut self.tools[index];
                     if !tool.emitted {
@@ -198,7 +258,21 @@ impl EventMapper {
                     value["response"]["status"].as_str(),
                     Some("failed" | "cancelled")
                 ) {
-                    return Err(failure(&value));
+                    return Err(failure(&value, self.dialect));
+                }
+                let response = &value["response"];
+                let incomplete =
+                    value["type"] == "response.incomplete" || response["status"] == "incomplete";
+                let reason = response["incomplete_details"]["reason"]
+                    .as_str()
+                    .unwrap_or("");
+                // A filtered turn is a failure, never a length stop to recover from.
+                if self.dialect == Dialect::Generic && incomplete && reason == "content_filter" {
+                    return Err(EventError {
+                        message: "incomplete: content_filter".into(),
+                        retryable: false,
+                        whitespace_loop: false,
+                    });
                 }
                 self.terminal = true;
                 for index in 0..self.tools.len() {
@@ -206,8 +280,10 @@ impl EventMapper {
                         self.emit_tool(index, &mut chunks);
                     }
                 }
-                // The stream finishes right after this event, so no retry can follow
-                // a released item: only the attempt that reached it persists.
+                // Released only here, in the terminal batch. The one retry that can
+                // follow a terminal event (the generic empty-completion retry) is
+                // decided by the transport before this batch is forwarded and
+                // discards it whole, so only the attempt that is kept persists.
                 if let Some((provider, model)) = &self.replay_owner {
                     chunks.extend(self.replay.drain(..).map(|payload| {
                         StreamChunk::ProviderReplay {
@@ -219,19 +295,14 @@ impl EventMapper {
                         }
                     }));
                 }
-                let response = &value["response"];
                 if let Some(usage) = response.get("usage").filter(|usage| usage.is_object()) {
                     chunks.push(StreamChunk::Usage {
                         usage: parse_usage(usage),
                         session_id: None,
                     });
                 }
-                let incomplete =
-                    value["type"] == "response.incomplete" || response["status"] == "incomplete";
-                let reason = response["incomplete_details"]["reason"]
-                    .as_str()
-                    .unwrap_or("");
-                let completed = !incomplete || reason == "steered";
+                let completed =
+                    !incomplete || (self.dialect == Dialect::Codex && reason == "steered");
                 let stop_reason =
                     if self.tool_emitted && (completed || reason == "max_output_tokens") {
                         StopReason::ToolUse
@@ -242,7 +313,7 @@ impl EventMapper {
                     };
                 chunks.push(StreamChunk::TurnComplete { stop_reason });
             }
-            "response.failed" | "error" => return Err(failure(&value)),
+            "response.failed" | "error" => return Err(failure(&value, self.dialect)),
             // Includes response.metadata: profile captures its headers separately.
             _ => {}
         }
@@ -405,25 +476,171 @@ fn tokens(value: &Value) -> Option<u32> {
     value.as_u64().map(|n| n.min(u64::from(u32::MAX)) as u32)
 }
 
+/// omp `populateResponsesUsageFromResponse`: when the reported total shows the
+/// primary counts already include orchestration tokens, those are subtracted.
+/// Without orchestration fields this is the plain mapping.
 fn parse_usage(usage: &Value) -> UsageInfo {
     let details = &usage["input_tokens_details"];
-    let cached =
-        tokens(&details["cached_tokens"]).or_else(|| tokens(&usage["prompt_cache_hit_tokens"]));
+    let output_details = &usage["output_tokens_details"];
+    let input = tokens(&usage["input_tokens"]).unwrap_or(0);
+    let output = tokens(&usage["output_tokens"]).unwrap_or(0);
+    let orchestration_input = tokens(&details["orchestration_input_tokens"]).unwrap_or(0);
+    let orchestration_output = tokens(&output_details["orchestration_output_tokens"]).unwrap_or(0);
+    let orchestration_cached = tokens(&details["orchestration_input_cached_tokens"])
+        .unwrap_or(0)
+        .min(orchestration_input);
+    let primary = i64::from(input) + i64::from(output);
+    let separate = primary + i64::from(orchestration_input) + i64::from(orchestration_output);
+    let included = usage["total_tokens"].as_f64().is_some_and(|total| {
+        (orchestration_input > 0 || orchestration_output > 0)
+            && (total - primary as f64).abs() <= (total - separate as f64).abs()
+    });
+    let (input, output, orchestration_cached) = if included {
+        (
+            input.saturating_sub(orchestration_input),
+            output.saturating_sub(orchestration_output),
+            orchestration_cached,
+        )
+    } else {
+        (input, output, 0)
+    };
+    let cached = tokens(&details["cached_tokens"])
+        .or_else(|| tokens(&usage["prompt_cache_hit_tokens"]))
+        .map(|cached| cached.saturating_sub(orchestration_cached));
     let written = tokens(&details["cache_write_tokens"])
         .or_else(|| tokens(&usage["prompt_cache_miss_tokens"]));
     UsageInfo {
-        input_tokens: tokens(&usage["input_tokens"])
-            .unwrap_or(0)
+        input_tokens: input
             .saturating_sub(cached.unwrap_or(0))
             .saturating_sub(written.unwrap_or(0)),
-        output_tokens: tokens(&usage["output_tokens"]).unwrap_or(0),
+        output_tokens: output,
         cache_read_input_tokens: cached,
         cache_creation_input_tokens: written,
-        reasoning_tokens: tokens(&usage["output_tokens_details"]["reasoning_tokens"]),
+        reasoning_tokens: tokens(&output_details["reasoning_tokens"]),
     }
 }
 
-fn failure(value: &Value) -> EventError {
+fn failure(value: &Value, dialect: Dialect) -> EventError {
+    match dialect {
+        Dialect::Codex => codex_failure(value),
+        Dialect::Generic => {
+            let message = generic_failure_text(value);
+            EventError {
+                retryable: generic_retryable(&message),
+                message,
+                whitespace_loop: false,
+            }
+        }
+    }
+}
+
+/// omp `isProviderRetryableError` over a provider stream message: transient
+/// transport/overload wording (`TRANSIENT_TRANSPORT_PATTERN`,
+/// `PROVIDER_TRANSIENT_EXTRA_PATTERN`, unexpected socket close), never an
+/// account usage limit.
+fn generic_retryable(message: &str) -> bool {
+    static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?i)\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b",
+            r"|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?:[:\s]|$)",
+            r"|\b(?:429|500|502|503|504)\b|service.?unavailable|temporar(?:y|ily)[ _-]?unavailable|server.?error|internal.?error",
+            r"|retry your request|network.?error|connection.?error|connection.?refused",
+            r"|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|use of closed network connection",
+            r"|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout",
+            r"|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)",
+            r"|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)",
+            r"|\bE(?:TIMEOUT|NOTFOUND|NETUNREACH|HOSTUNREACH)\b|\bFailedToOpenSocket\b|no internet connection|couldn.?t reach",
+            r"|couldn.?t connect to|tls certificate verification failed|malformed.?function.?call",
+            r"|bad record mac|stream error.*received from peer|1302",
+            r"|\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b|^\s*(?:error:\s*)?socket is closed\.?\s*$",
+        ))
+        .expect("fixed transient expression")
+    });
+    static USAGE_LIMIT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?i)usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)",
+            r"|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)",
+            r"|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit",
+            r"|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error",
+        ))
+        .expect("fixed usage-limit expression")
+    });
+    !USAGE_LIMIT.is_match(message) && TRANSIENT.is_match(message)
+}
+
+fn nullish(value: &Value) -> Option<&Value> {
+    (!value.is_null()).then_some(value)
+}
+
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(_) | Value::Object(_) => true,
+    }
+}
+
+/// JavaScript template-literal text of a JSON value.
+fn js_text(value: &Value) -> String {
+    match value {
+        Value::Null => "null".into(),
+        Value::String(text) => text.clone(),
+        Value::Bool(_) | Value::Number(_) => value.to_string(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                if item.is_null() {
+                    String::new()
+                } else {
+                    js_text(item)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Object(_) => "[object Object]".into(),
+    }
+}
+
+/// omp generic texts: `error` → `Error Code <code>: <message>`; `response.failed`
+/// and failed/cancelled terminals → `<code>: <message>`, `incomplete: <reason>`,
+/// (terminals only) `status_details: <reason>`, else the unknown-error text.
+fn generic_failure_text(value: &Value) -> String {
+    if value["type"] == "error" {
+        let error = nullish(&value["error"]).unwrap_or(value);
+        let code = nullish(&error["code"]).map_or_else(|| "unknown".into(), js_text);
+        let message = nullish(&error["message"]).map_or_else(|| "no message".into(), js_text);
+        return format!("Error Code {code}: {message}");
+    }
+    let response = &value["response"];
+    let error =
+        nullish(&response["error"]).or_else(|| nullish(&response["status_details"]["error"]));
+    if let Some(error) = error.filter(|error| truthy(error)) {
+        let code = Some(&error["code"])
+            .filter(|code| truthy(code))
+            .map_or_else(|| "unknown".into(), js_text);
+        let message = Some(&error["message"])
+            .filter(|message| truthy(message))
+            .map_or_else(|| "no message".into(), js_text);
+        return format!("{code}: {message}");
+    }
+    let reason = &response["incomplete_details"]["reason"];
+    if truthy(reason) {
+        return format!("incomplete: {}", js_text(reason));
+    }
+    if value["type"] != "response.failed" {
+        if let Some(reason) = response["status_details"]["reason"]
+            .as_str()
+            .filter(|reason| !reason.is_empty())
+        {
+            return format!("status_details: {reason}");
+        }
+    }
+    "Unknown error (no error details in response)".into()
+}
+
+fn codex_failure(value: &Value) -> EventError {
     static RETRYABLE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i:processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error)|<StreamReset stream_id:\d+, error_code:(?:2|7), remote_reset:True>|peer closed connection without sending complete message body \(incomplete chunked read\)").expect("fixed retry expression")
     });

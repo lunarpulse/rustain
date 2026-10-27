@@ -46,6 +46,7 @@ pub(super) struct Values<'a> {
     pub code: &'a str,
     pub verifier: &'a str,
     pub refresh: &'a str,
+    pub device_code: &'a str,
 }
 impl Values<'_> {
     pub fn render(&self, tpl: Tpl) -> &str {
@@ -108,32 +109,71 @@ impl TokenFailure {
         }
     }
 }
+/// Grant fields in each grant's exact wire order; policy `extra_params` follow them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Grant {
+    /// `grant_type, client_id, code, redirect_uri, code_verifier` (browser exchange).
+    AuthorizationCode,
+    /// `grant_type=authorization_code, client_id, code, code_verifier, redirect_uri`.
+    CodexDeviceExchange,
+    /// `grant_type, client_id, refresh_token`.
+    Refresh,
+    /// `grant_type=urn:ietf:params:oauth:grant-type:device_code, client_id, device_code`.
+    DeviceCode,
+}
+impl Grant {
+    fn fields<'a>(self, values: &Values<'a>) -> Vec<(&'static str, &'a str)> {
+        match self {
+            Self::AuthorizationCode => vec![
+                ("grant_type", "authorization_code"),
+                ("client_id", values.client_id),
+                ("code", values.code),
+                ("redirect_uri", values.redirect),
+                ("code_verifier", values.verifier),
+            ],
+            Self::CodexDeviceExchange => vec![
+                ("grant_type", "authorization_code"),
+                ("client_id", values.client_id),
+                ("code", values.code),
+                ("code_verifier", values.verifier),
+                ("redirect_uri", values.redirect),
+            ],
+            Self::Refresh => vec![
+                ("grant_type", "refresh_token"),
+                ("client_id", values.client_id),
+                ("refresh_token", values.refresh),
+            ],
+            Self::DeviceCode => vec![
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("client_id", values.client_id),
+                ("device_code", values.device_code),
+            ],
+        }
+    }
+}
+/// A token endpoint reply. Only `Grant::DeviceCode` returns non-2xx statuses here (the
+/// poll classifies them); its unparsable bodies become `Value::Null`.
+pub(super) struct TokenReply {
+    pub status: u16,
+    pub body: serde_json::Value,
+}
+/// Resolves a policy URL for one operation. The result is the logical endpoint, which
+/// `request` rebases like every other auth endpoint; a discovered endpoint is validated
+/// before it is returned. `Err` carries an operator-safe message.
+pub(super) async fn resolve_url(http: &reqwest::Client, url: TokenUrl) -> Result<String, String> {
+    match url {
+        TokenUrl::Static(url) => Ok(url.to_owned()),
+        TokenUrl::XaiOidc => crate::adapters::auth::xai_oidc::token_endpoint(http).await,
+    }
+}
 pub(super) async fn request(
     http: &reqwest::Client,
     policy: &TokenRequestPolicy,
+    url: &str,
+    grant: Grant,
     values: &Values<'_>,
-    refresh: bool,
-) -> Result<serde_json::Value, TokenFailure> {
-    let mut fields = vec![
-        (
-            "grant_type",
-            if refresh {
-                "refresh_token"
-            } else {
-                "authorization_code"
-            },
-        ),
-        ("client_id", values.client_id),
-    ];
-    if refresh {
-        fields.push(("refresh_token", values.refresh));
-    } else {
-        fields.extend([
-            ("code", values.code),
-            ("redirect_uri", values.redirect),
-            ("code_verifier", values.verifier),
-        ]);
-    }
+) -> Result<TokenReply, TokenFailure> {
+    let mut fields = grant.fields(values);
     fields.extend(
         policy
             .extra_params
@@ -141,7 +181,7 @@ pub(super) async fn request(
             .map(|(key, tpl)| (*key, values.render(*tpl))),
     );
     let mut request = http
-        .post(crate::adapters::auth::policies::endpoint(policy.url))
+        .post(crate::adapters::auth::policies::endpoint(url))
         .timeout(std::time::Duration::from_millis(policy.timeout_ms));
     for (name, tpl) in policy.headers {
         request = request.header(*name, values.render(*tpl));
@@ -161,6 +201,13 @@ pub(super) async fn request(
         body: String::new(),
     })?;
     let status = response.status();
+    if grant == Grant::DeviceCode {
+        let body = response.text().await.unwrap_or_default();
+        return Ok(TokenReply {
+            status: status.as_u16(),
+            body: serde_json::from_str(&body).unwrap_or(serde_json::Value::Null),
+        });
+    }
     let body = response.text().await.map_err(|_| TokenFailure {
         status: Some(status.as_u16()),
         body: String::new(),
@@ -171,13 +218,18 @@ pub(super) async fn request(
             body,
         });
     }
-    serde_json::from_str(&body).map_err(|_| TokenFailure {
-        status: Some(status.as_u16()),
-        body: String::new(),
-    })
+    serde_json::from_str(&body)
+        .map(|body| TokenReply {
+            status: status.as_u16(),
+            body,
+        })
+        .map_err(|_| TokenFailure {
+            status: Some(status.as_u16()),
+            body: String::new(),
+        })
 }
 /// JSON object in policy order; omp sends grant fields as written, not sorted.
-struct Ordered<'a>(&'a [(&'a str, &'a str)]);
+struct Ordered<'a>(&'a [(&'static str, &'a str)]);
 impl serde::Serialize for Ordered<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;

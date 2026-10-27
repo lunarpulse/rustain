@@ -102,5 +102,8 @@ pub mod openai_codex;
 #[cfg(feature = "openai")]
 pub mod responses;
 
+#[cfg(feature = "openai")]
+pub mod xai;
+
 #[cfg(feature = "ollama")]
 pub mod ollama;

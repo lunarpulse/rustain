@@ -68,6 +68,10 @@ pub fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
     if kind == "openai-codex" {
         return codex_base_url(cfg);
     }
+    #[cfg(feature = "openai")]
+    if let Some(xai) = crate::adapters::xai::XaiKind::from_id(kind) {
+        return xai_base_url(xai, cfg);
+    }
     let base = cfg
         .base_url
         .as_ref()
@@ -169,6 +173,7 @@ pub fn build_provider_for_config(
     let adapter: Result<Arc<dyn StreamingProvider>, ProviderError> = match kind {
         "anthropic" => build_anthropic_from_config(cfg, None),
         "openai-codex" => build_codex_from_config(cfg),
+        "xai" | "xai-oauth" => build_xai_from_config(provider_id, cfg, kind),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
@@ -233,7 +238,7 @@ pub fn build_provider_for_config_with_key(
     key: &str,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    let auth = (kind != "openai-codex").then(|| {
+    let auth = (!matches!(kind, "openai-codex" | "xai" | "xai-oauth")).then(|| {
         crate::domain::models::ResolvedAuth::ApiKey(crate::domain::models::SecretString::new(
             key.to_owned(),
         ))
@@ -242,6 +247,10 @@ pub fn build_provider_for_config_with_key(
         "anthropic" => build_anthropic_from_config(cfg, auth),
         "openai-codex" => Err(ProviderError::Other(
             "openai-codex has no API-key login".into(),
+        )),
+        "xai" => build_xai_with_key(provider_id, cfg, key),
+        "xai-oauth" => Err(ProviderError::Other(
+            "xai-oauth has no API-key login".into(),
         )),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
@@ -465,6 +474,109 @@ fn build_codex_from_config(
     }
 }
 
+/// The one exposure of an xAI entry's configured base: its actual HTTP endpoint.
+#[cfg(feature = "openai")]
+fn xai_configured_base(cfg: &ProviderConfig) -> Option<&str> {
+    cfg.base_url.as_ref().map(|url| url.expose_url())
+}
+
+/// One base for construction, availability, origin guard and cache identity.
+#[cfg(feature = "openai")]
+fn xai_base_url(kind: crate::adapters::xai::XaiKind, cfg: &ProviderConfig) -> String {
+    crate::infrastructure::utils::normalize_base_url(&crate::adapters::xai::base_url(
+        kind,
+        xai_configured_base(cfg),
+    ))
+}
+
+fn build_xai_from_config(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+    kind: &str,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        use crate::adapters::xai::{XaiAdapter, XaiKind};
+        let xai = XaiKind::from_id(kind)
+            .ok_or_else(|| ProviderError::Other(format!("unknown xAI kind '{kind}'")))?;
+        // Rows are read under the same key availability reads.
+        let rows_key = if crate::adapters::auth::policies::oauth_api(kind).is_some() {
+            cfg.provider_id.as_str()
+        } else {
+            provider_id
+        };
+        // A subscription row keeps its own origin rule under any kind:
+        // `[provider.xai-oauth] kind = "xai"` must not carry it to another origin.
+        let base = xai_base_url(xai, cfg);
+        let allowed = oauth_allowed(kind, &base) && oauth_allowed(rows_key, &base);
+        let env_vars = if cfg.api_key_env.is_empty() {
+            vec![]
+        } else {
+            vec![cfg.api_key_env.clone()]
+        };
+        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+        let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
+        if crate::adapters::cli::auth::source_for(
+            rows_key,
+            &names,
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+            allowed,
+        )
+        .is_none()
+        {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            rows_key.to_owned(),
+            env_vars,
+            allowed,
+            None,
+        );
+        Ok(Arc::new(XaiAdapter::new(
+            handle,
+            xai,
+            xai_configured_base(cfg).map(str::to_owned),
+        )?))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = (provider_id, cfg, kind);
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
+/// The API-key engine's probe: the candidate key alone, never env or stored rows.
+fn build_xai_with_key(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+    key: &str,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::runtime(
+            crate::infrastructure::key_resolver::shared(),
+            provider_id.to_owned(),
+            crate::domain::models::SecretString::new(key.to_owned()),
+        );
+        Ok(Arc::new(crate::adapters::xai::XaiAdapter::new(
+            handle,
+            crate::adapters::xai::XaiKind::Xai,
+            xai_configured_base(cfg).map(str::to_owned),
+        )?))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = (provider_id, cfg, key);
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
 /// Keep endpoint identity and endpoint restrictions outside transport-specific policy.
 struct ConfiguredProvider {
     id: String,
@@ -647,4 +759,96 @@ fn build_ollama_from_config(
     )
     .map_err(|e| ProviderError::Other(format!("Failed to create Ollama adapter: {}", e)))?;
     Ok(Arc::new(adapter))
+}
+
+#[cfg(all(test, feature = "openai"))]
+mod tests {
+    use super::*;
+
+    fn xai_config(kind: &str, base_url: Option<&str>) -> ProviderConfig {
+        ProviderConfig {
+            provider_id: kind.into(),
+            kind: Some(kind.into()),
+            model_id: "grok-4.6".into(),
+            api_key_env: String::new(),
+            auth_header: None,
+            enabled: true,
+            base_url: base_url.map(|url| url.to_owned().into()),
+            context_window: None,
+            supports_tools: None,
+            discover_models: true,
+            model_filter: vec!["*".into()],
+            cache_ttl_seconds: 3600,
+        }
+    }
+
+    /// Restores the variables the xAI base rules read.
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl EnvGuard {
+        fn new(base: Option<&str>) -> Self {
+            let names = ["XAI_BASE_URL", "RUSTAIN_TEST_AUTH_ORIGIN"];
+            let saved = names.map(|name| (name, std::env::var_os(name))).to_vec();
+            // SAFETY: the test holds `#[serial]`.
+            unsafe {
+                std::env::remove_var("RUSTAIN_TEST_AUTH_ORIGIN");
+                match base {
+                    Some(base) => std::env::set_var("XAI_BASE_URL", base),
+                    None => std::env::remove_var("XAI_BASE_URL"),
+                }
+            }
+            Self(saved)
+        }
+    }
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                // SAFETY: the test holds `#[serial]`.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn xai_oauth_has_no_api_key_login() {
+        let cfg = xai_config("xai-oauth", None);
+        match build_provider_for_config_with_key("xai-oauth", &cfg, "key") {
+            Err(ProviderError::Other(message)) => {
+                assert_eq!(message, "xai-oauth has no API-key login");
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(_) => panic!("xai-oauth must refuse a static key"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn xai_bases_follow_kind_rules_and_guard_the_oauth_origin() {
+        let _env = EnvGuard::new(Some(" http://127.0.0.1:9/v1/ "));
+        let base = |kind: &str, configured: Option<&str>| {
+            discovery_base_url(kind, &xai_config(kind, configured))
+        };
+        // The key provider follows the env override, also over a default-valued config.
+        assert_eq!(base("xai", None), "http://127.0.0.1:9/v1");
+        assert_eq!(
+            base("xai", Some("https://api.x.ai/v1/")),
+            "http://127.0.0.1:9/v1"
+        );
+        assert_eq!(
+            base("xai", Some("https://gateway.example/v1/")),
+            "https://gateway.example/v1"
+        );
+        // The OAuth provider never follows it; a foreign configured origin locks the row.
+        assert_eq!(base("xai-oauth", None), "https://api.x.ai/v1");
+        assert!(oauth_allowed("xai-oauth", &base("xai-oauth", None)));
+        let foreign = base("xai-oauth", Some("https://gateway.example/v1"));
+        assert_eq!(foreign, "https://gateway.example/v1");
+        assert!(!oauth_allowed("xai-oauth", &foreign));
+        // API keys have no stored-OAuth origin rule.
+        assert!(oauth_allowed("xai", &foreign));
+    }
 }

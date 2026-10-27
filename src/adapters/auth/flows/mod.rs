@@ -26,6 +26,10 @@
 
 mod api_key;
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+mod codex_device;
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+mod device_code;
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
 mod identity;
 mod loopback;
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
@@ -41,12 +45,18 @@ use crate::domain::{
     models::{AuthMethod, Credential, CredentialIdentity, CredentialOrigin, ProviderConfig},
     ports::AuthStorePort,
 };
-use std::sync::Arc;
+use futures::future::BoxFuture;
+use std::{sync::Arc, time::Duration};
 pub use ui::LoginUi;
+
+/// Injected wait used by device polling; tests record delays and advance `clock`.
+pub type Sleeper = Arc<dyn Fn(Duration) -> BoxFuture<'static, ()> + Send + Sync>;
 
 pub struct FlowCtx {
     pub ui: Arc<dyn LoginUi>,
     pub clock: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Every device-flow wait goes through here; deadlines are computed from `clock`.
+    pub sleep: Sleeper,
     /// Private: every login host gets the same no-redirect client (`token::client`).
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
     http: reqwest::Client,
@@ -58,6 +68,7 @@ impl FlowCtx {
         Self {
             ui,
             clock,
+            sleep: Arc::new(real_sleep),
             #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
             http: token::client(),
             validation_config: None,
@@ -67,6 +78,31 @@ impl FlowCtx {
         self.validation_config = Some(config);
         self
     }
+    pub fn with_sleeper(mut self, sleep: Sleeper) -> Self {
+        self.sleep = sleep;
+        self
+    }
+}
+fn real_sleep(duration: Duration) -> BoxFuture<'static, ()> {
+    let duration = scaled(duration);
+    Box::pin(async move {
+        if !duration.is_zero() {
+            tokio::time::sleep(duration).await;
+        }
+    })
+}
+/// Read per use, like the Responses retry knob: 0 removes every wait.
+#[cfg(feature = "test-instrumentation")]
+fn scaled(duration: Duration) -> Duration {
+    let scale = crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_AUTH_SLEEP_SCALE")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(1.0);
+    Duration::from_secs_f64((duration.as_secs_f64() * scale).min(86_400.0))
+}
+#[cfg(not(feature = "test-instrumentation"))]
+fn scaled(duration: Duration) -> Duration {
+    duration
 }
 #[derive(Debug, thiserror::Error)]
 pub enum FlowError {
@@ -123,6 +159,25 @@ pub async fn login(
                     ));
                 }
             }
+            // Self-bounded (Codex: 120 polls; RFC 8628: `expires_in`), so never wrapped
+            // in the browser timeout.
+            AuthMethod::Device(policy) => {
+                #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+                {
+                    use crate::domain::models::auth_policy::DeviceFlow;
+                    match policy.flow {
+                        DeviceFlow::Rfc8628(rfc) => device_code::run(provider_id, rfc, ctx).await?,
+                        DeviceFlow::OpenAiCodex => codex_device::run(ctx).await?,
+                    }
+                }
+                #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
+                {
+                    let _ = policy;
+                    return Err(FlowError::configuration(
+                        "this build has no HTTP client; rebuild with default features",
+                    ));
+                }
+            }
         };
         let identity = match &credential {
             Credential::OAuth(o) => o.identity.clone(),
@@ -136,7 +191,8 @@ pub async fn login(
             provider: provider_id.into(),
             method: match method {
                 AuthMethod::ApiKey => "api_key",
-                AuthMethod::OAuthCode(_) => "oauth",
+                // The stored row is an OAuth credential for both subscription methods.
+                AuthMethod::OAuthCode(_) | AuthMethod::Device(_) => "oauth",
             },
             validated,
             identity,
@@ -146,6 +202,36 @@ pub async fn login(
         biased;
         ()=cancel.cancelled()=>Err(FlowError::Cancelled),
         result=run=>result,
+    }
+}
+
+#[cfg(all(test, not(feature = "test-instrumentation")))]
+mod sleep_tests {
+    use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn auth_sleep_knob_is_absent_in_normal_build() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the unkeyed serial guard outlives this restoration.
+                unsafe {
+                    match self.0.take() {
+                        Some(v) => std::env::set_var("RUSTAIN_TEST_AUTH_SLEEP_SCALE", v),
+                        None => std::env::remove_var("RUSTAIN_TEST_AUTH_SLEEP_SCALE"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RUSTAIN_TEST_AUTH_SLEEP_SCALE"));
+        // SAFETY: all environment-mutating fixtures take the unkeyed serial lock.
+        unsafe {
+            std::env::set_var("RUSTAIN_TEST_AUTH_SLEEP_SCALE", "0");
+        }
+        assert_eq!(
+            scaled(Duration::from_millis(5_000)),
+            Duration::from_millis(5_000)
+        );
     }
 }
 
@@ -159,6 +245,9 @@ mod no_http_tests {
     impl LoginUi for Ui {
         fn on_auth_url(&self, _: &str, _: &str, _: &str) {
             panic!("no HTTP build must fail before publishing a URL");
+        }
+        fn on_device_code(&self, _: &str, _: &str, _: &str) {
+            panic!("no HTTP build must fail before publishing a device code");
         }
         fn on_progress(&self, _: &str) {}
         fn prompt_secret(

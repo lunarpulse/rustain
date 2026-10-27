@@ -20,6 +20,9 @@ impl LoginUi for Ui {
     fn on_auth_url(&self, _: &str, _: &str, _: &str) {
         panic!("API-key login cannot launch OAuth")
     }
+    fn on_device_code(&self, _: &str, _: &str, _: &str) {
+        panic!("API-key login cannot show a device code")
+    }
     fn on_progress(&self, _: &str) {}
     fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {
         Box::pin(async move { self.0.lock().await.pop_front().map(SecretString::new) })
@@ -151,6 +154,9 @@ struct PatientUi(Mutex<Option<tokio::sync::oneshot::Receiver<String>>>);
 impl LoginUi for PatientUi {
     fn on_auth_url(&self, _: &str, _: &str, _: &str) {
         panic!("API-key login cannot launch OAuth")
+    }
+    fn on_device_code(&self, _: &str, _: &str, _: &str) {
+        panic!("API-key login cannot show a device code")
     }
     fn on_progress(&self, _: &str) {}
     fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {

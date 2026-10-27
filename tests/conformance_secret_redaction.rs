@@ -132,6 +132,8 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         "adapters/openai/mod.rs",
         // One boundary builds the sensitive bearer header and decodes its request JWT.
         "adapters/openai_codex/profile.rs",
+        // One boundary builds the sensitive xAI bearer header (`profile::bearer`).
+        "adapters/xai/profile.rs",
         "domain/models/credential.rs",
         "domain/models/secret.rs",
         // Recovery compares the rejected bearer once to refuse same-token replay.
@@ -154,9 +156,9 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 20,
-        "expose_secret() pinned count changed: got {count}, expected 20. \
-         Codex adds one consolidated bearer-header/JWT boundary; \
+        count, 21,
+        "expose_secret() pinned count changed: got {count}, expected 21. \
+         Codex and xAI each add one consolidated bearer-header boundary; \
          stored credentials otherwise retain their secret wrappers."
     );
 }
@@ -222,7 +224,8 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
         // a failed connect and greps every surfaced string for the password.
         "adapters/mcp/client.rs",
-        // Codex's distinct configured base is exposed only for its actual HTTP endpoint.
+        // Codex's and xAI's distinct configured bases are each exposed once, only
+        // for their actual HTTP endpoint (`xai_configured_base`).
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -239,9 +242,9 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 7,
-        "expose_url() pinned count changed: got {count}, expected 7. \
-         Codex adds one construction-consistent configured-base boundary."
+        count, 8,
+        "expose_url() pinned count changed: got {count}, expected 8. \
+         Codex and xAI each add one construction-consistent configured-base boundary."
     );
 }
 

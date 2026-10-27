@@ -150,13 +150,56 @@ An explicitly supplied environment bearer is operator-directed.
 
 Configured aliases may use another map key with `kind = "openai-codex"` and
 `provider_id = "openai-codex"`: the map key identifies the runtime entry while
-`provider_id` selects the login credential rows. Codex serves its eight bundled
-models through the catalogue-merge path; models.dev currently has no Codex source,
-so that layer is empty (OpenAI API-only models are not promoted).
-`discover_models = true` does not enable live discovery or produce an
-unsupported-discovery warning. Live roster discovery and encrypted
-reasoning replay are scheduled for 20-1d1b. Upstream's 128,000-token maximum-output
-metadata has no rustain descriptor consumer and is not a transmitted limit.
+`provider_id` selects the login credential rows. Codex seeds eight bundled
+models and models.dev currently has no Codex source (OpenAI API-only models are
+not promoted). With `discover_models = true` a signed Codex entry discovers its
+live roster (`/codex/models`, then `/models`) and encrypted reasoning items are
+replayed privately to the same provider and model; see `docs/auth.md`.
+Upstream's 128,000-token maximum-output metadata has no rustain descriptor
+consumer and is not a transmitted limit.
+
+### xAI (API key and Grok subscription)
+
+xAI has two built-in providers that need no configuration: `xai` (API key) and
+`xai-oauth` (SuperGrok / X Premium+ device login). Both default to `grok-4.6`.
+An explicit entry looks like:
+
+```toml
+model = "grok-4.6"
+
+[provider.xai]
+provider_id = "xai"
+kind = "xai"
+model_id = "grok-4.6"
+api_key_env = "XAI_API_KEY"
+enabled = true
+
+[provider.xai-oauth]
+provider_id = "xai-oauth"
+kind = "xai-oauth"
+model_id = "grok-4.6"
+api_key_env = "XAI_OAUTH_TOKEN"
+enabled = true
+```
+
+Authenticate with `rustain auth login xai` (key) or `rustain auth login xai-oauth`
+(device code); `XAI_OAUTH_TOKEN` is a static OAuth bearer, not an API key.
+Requests go to `<base>/responses`; discovery and key validation use
+`<base>/models`. The default base is `https://api.x.ai/v1`; trailing slashes are
+stripped, and a `base_url` equal to the default counts as unset. The base is
+resolved per kind:
+
+- `kind = "xai"`: a non-default `base_url`, else `XAI_BASE_URL`, else the default.
+- `kind = "xai-oauth"`: a non-default `base_url`, else the default.
+  `XAI_BASE_URL` is never read, so a shell override cannot redirect subscription
+  tokens.
+
+Stored `xai-oauth` credentials are eligible only when the effective base has the
+official `https://api.x.ai` origin; another origin never receives a stored
+subscription token (an explicitly set `XAI_OAUTH_TOKEN` is operator-directed and
+is still sent). `xai` keys have no origin rule. For `xai-oauth`, `provider_id`
+selects the login credential rows, so an alias map key with
+`provider_id = "xai-oauth"` uses the same login.
 
 ### Field-level merge
 

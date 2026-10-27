@@ -43,7 +43,7 @@ impl Env {
             "RUSTAIN_DATA_DIR",
             "RUSTAIN_TEST_AUTH_ORIGIN",
             "RUSTAIN_TEST_AUTH_CALLBACK_PORT",
-            "RUSTAIN_TEST_CODEX_RETRY_SCALE",
+            "RUSTAIN_TEST_RESPONSES_RETRY_SCALE",
             "RUSTAIN_TEST_NOW_MS",
             "OPENAI_CODEX_OAUTH_TOKEN",
             "OPENAI_API_KEY",
@@ -62,7 +62,7 @@ impl Env {
             }
             std::env::set_var("RUSTAIN_DATA_DIR", dir);
             std::env::set_var("RUSTAIN_TEST_AUTH_ORIGIN", origin);
-            std::env::set_var("RUSTAIN_TEST_CODEX_RETRY_SCALE", "0");
+            std::env::set_var("RUSTAIN_TEST_RESPONSES_RETRY_SCALE", "0");
             std::env::set_var("RUSTAIN_TEST_NOW_MS", NOW.to_string());
             let callback = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             std::env::set_var(

@@ -54,16 +54,9 @@ struct State {
 #[derive(Default)]
 pub(super) struct Sessions(Mutex<State>);
 
-pub(super) fn normalise(id: &str) -> String {
-    if id.encode_utf16().count() <= 64 {
-        id.to_owned()
-    } else {
-        format!("pc_{}", crate::adapters::responses::repair::stable_hash(id))
-    }
-}
 impl Sessions {
     pub async fn begin(&self, messages: &[Message], options: &CompletionOptions) -> Snapshot {
-        let id = normalise(
+        let id = crate::adapters::responses::prompt_cache_key(
             options
                 .session_id
                 .as_deref()
@@ -165,11 +158,5 @@ mod tests {
         sessions.begin(&[], &options(Some("258".into()))).await;
         assert!(sessions.0.lock().await.entries.contains_key("1"));
         assert!(!sessions.0.lock().await.entries.contains_key("2"));
-    }
-    #[test]
-    fn wire_limit_counts_utf16_and_uses_reference_hash() {
-        assert_eq!(normalise("short"), "short");
-        assert!(normalise(&"🦀".repeat(33)).starts_with("pc_"));
-        assert!(normalise(&"a".repeat(65)).len() < 64);
     }
 }

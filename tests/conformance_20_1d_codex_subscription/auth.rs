@@ -73,6 +73,9 @@ impl LoginUi for Ui {
     fn on_auth_url(&self, url: &str, launch: &str, _: &str) {
         self.urls.send((url.into(), launch.into())).unwrap();
     }
+    fn on_device_code(&self, _: &str, _: &str, _: &str) {
+        panic!("browser login cannot show a device code");
+    }
     fn on_progress(&self, _: &str) {}
     fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {
         Box::pin(async { None })

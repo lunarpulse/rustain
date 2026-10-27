@@ -24,7 +24,9 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use super::{WireProfile, events::EventMapper, repair, request::ResponsesRequest, schema};
+use super::{
+    Dialect, WireProfile, events, events::EventMapper, repair, request::ResponsesRequest, schema,
+};
 use crate::domain::models::{
     CompletionOptions, ImageAttachment, Message, MessageRole, StopReason, StreamChunk,
     ToolDefinition, ToolResultMessage, ToolUseMessage,
@@ -46,6 +48,9 @@ fn message(role: MessageRole, content: &str) -> Message {
 
 struct Profile(Value);
 impl WireProfile for Profile {
+    fn dialect(&self) -> Dialect {
+        Dialect::Codex
+    }
     fn prompt_cache_key(&self) -> Option<&str> {
         Some("conversation")
     }
@@ -150,6 +155,9 @@ fn request_instruction_only_fallback_and_blank_content() {
     assert!(value.get("tools").is_none());
     struct Bare;
     impl WireProfile for Bare {
+        fn dialect(&self) -> Dialect {
+            Dialect::Codex
+        }
         fn prompt_cache_key(&self) -> Option<&str> {
             None
         }
@@ -296,13 +304,16 @@ fn bun_hash_and_call_id_vectors_are_stable_and_bounded() {
 
 #[test]
 fn repair_pairs_orphans_item_ids_and_utf16_truncation() {
-    let repaired = repair::repair(vec![
-        json!({"type":"item_reference","id":"drop"}),
-        json!({"type":"function_call","id":"strip","call_id":"missing|first","name":"read","arguments":"{}"}),
-        json!({"type":"function_call_output","call_id":"orphan","name":"read","output":"🦀".repeat(8001)}),
-        json!({"type":"computer_call","id":"keep","call_id":"computer"}),
-        json!({"type":"message","id":null,"content":"keep null"}),
-    ]);
+    let repaired = repair::repair(
+        vec![
+            json!({"type":"item_reference","id":"drop"}),
+            json!({"type":"function_call","id":"strip","call_id":"missing|first","name":"read","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"orphan","name":"read","output":"🦀".repeat(8001)}),
+            json!({"type":"computer_call","id":"keep","call_id":"computer"}),
+            json!({"type":"message","id":null,"content":"keep null"}),
+        ],
+        Dialect::Codex,
+    );
     assert_eq!(
         repaired[0],
         json!({"type":"function_call","call_id":"missing","name":"read","arguments":"{}"})
@@ -323,15 +334,21 @@ fn repair_pairs_orphans_item_ids_and_utf16_truncation() {
         "[Computer call interrupted before a screenshot was recorded; call_id=computer]"
     );
     assert!(repaired[4]["id"].is_null());
-    let paired = repair::repair(vec![
-        json!({"type":"function_call","call_id":"same|a"}),
-        json!({"type":"function_call_output","call_id":"same|b","output":"ok"}),
-    ]);
+    let paired = repair::repair(
+        vec![
+            json!({"type":"function_call","call_id":"same|a"}),
+            json!({"type":"function_call_output","call_id":"same|b","output":"ok"}),
+        ],
+        Dialect::Codex,
+    );
     assert_eq!(paired.len(), 2);
     assert_eq!(paired[0]["call_id"], paired[1]["call_id"]);
-    let split_surrogate = repair::repair(vec![
-        json!({"type":"function_call_output","call_id":"x","output":format!("{}🦀", "a".repeat(15999))}),
-    ]);
+    let split_surrogate = repair::repair(
+        vec![
+            json!({"type":"function_call_output","call_id":"x","output":format!("{}🦀", "a".repeat(15999))}),
+        ],
+        Dialect::Codex,
+    );
     assert_eq!(
         split_surrogate[0]["content"],
         format!(
@@ -349,7 +366,7 @@ fn repair_preserves_computer_ids_and_matches_exchange_kinds() {
         json!({"type":"custom_tool_call","id":"removed","call_id":"custom","name":"patch"}),
         json!({"type":"function_call_output","call_id":"custom","output":{"n":1}}),
     ];
-    let output = repair::repair(input);
+    let output = repair::repair(input, Dialect::Codex);
     assert_eq!(output[0]["id"], "preserved");
     assert_eq!(output[1]["type"], "computer_call_output");
     assert!(output[2].get("id").is_none());
@@ -665,4 +682,540 @@ fn events_calls_without_ids_are_not_deduplicated_together() {
         .count();
     }
     assert_eq!(tools, 2);
+}
+
+#[test]
+fn prompt_cache_key_counts_utf16_and_uses_reference_hash() {
+    assert_eq!(super::prompt_cache_key("short"), "short");
+    assert!(super::prompt_cache_key(&"🦀".repeat(33)).starts_with("pc_"));
+    assert_eq!(super::prompt_cache_key(&"🦀".repeat(32)), "🦀".repeat(32));
+    assert!(super::prompt_cache_key(&"a".repeat(65)).len() < 64);
+}
+
+struct Generic {
+    reasoning: bool,
+    vision: bool,
+    max_output_tokens: Option<u32>,
+    temperature: Option<f32>,
+    metadata: Value,
+}
+impl WireProfile for Generic {
+    fn dialect(&self) -> Dialect {
+        Dialect::Generic
+    }
+    fn prompt_cache_key(&self) -> Option<&str> {
+        Some("conversation")
+    }
+    fn client_metadata(&self) -> Option<&Value> {
+        Some(&self.metadata)
+    }
+    fn replay_provider(&self) -> Option<&str> {
+        Some("xai")
+    }
+    fn reasoning(&self) -> bool {
+        self.reasoning
+    }
+    fn vision(&self) -> bool {
+        self.vision
+    }
+    fn max_output_tokens(&self) -> Option<u32> {
+        self.max_output_tokens
+    }
+    fn temperature(&self) -> Option<f32> {
+        self.temperature
+    }
+    fn reject_root_object_union(&self) -> bool {
+        true
+    }
+}
+
+fn generic(reasoning: bool, vision: bool, sampling: bool) -> Generic {
+    Generic {
+        reasoning,
+        vision,
+        max_output_tokens: sampling.then_some(8192),
+        temperature: sampling.then_some(0.5),
+        metadata: json!({"never":"sent"}),
+    }
+}
+
+fn tool(name: &str, input_schema: Value) -> ToolDefinition {
+    ToolDefinition {
+        name: name.into(),
+        description: format!("{name} tool"),
+        input_schema,
+        parallel_safe: true,
+    }
+}
+
+fn replay(model: &str, provider: &str, marker: &str) -> crate::domain::models::ProviderReplayItem {
+    crate::domain::models::ProviderReplayItem {
+        provider: provider.into(),
+        model: model.into(),
+        payload: std::sync::Arc::new(json!({"type":"reasoning","encrypted_content":marker})),
+    }
+}
+
+#[test]
+fn generic_request_reasoning_literal_and_wire_order() {
+    let mut user = message(MessageRole::User, "question");
+    user.images.push(ImageAttachment {
+        media_type: "image/png".into(),
+        data: "YWJj".into(),
+    });
+    let mut assistant = message(MessageRole::Assistant, "answer");
+    assistant.provider_replay = vec![
+        replay("grok-4.6", "xai", "keep"),
+        replay("grok-4.3", "xai", "other model"),
+        replay("grok-4.6", "openai-codex", "other provider"),
+    ];
+    assistant.tool_uses.push(ToolUseMessage {
+        id: "call_1".into(),
+        name: "read".into(),
+        input: json!({"path":"a"}),
+    });
+    let mut result = message(MessageRole::User, "");
+    result.tool_results.push(ToolResultMessage {
+        tool_use_id: "call_1".into(),
+        content: "ok".into(),
+        is_error: false,
+    });
+    let mut options = options();
+    options.model = "grok-4.6".into();
+    options.tools = vec![
+        tool(
+            "read",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"anyOf":[{"required":["path"]},{"required":["glob"],"description":"d"}]}),
+        ),
+        tool(
+            "contradiction",
+            json!({"type":"object","properties":{"mode":{"type":"string","enum":["a",1]}}}),
+        ),
+        tool(
+            "union",
+            json!({"type":"object","properties":{},"anyOf":[{"type":"string"}]}),
+        ),
+    ];
+    let profile = generic(true, true, true);
+    let encoded = serde_json::to_string(&ResponsesRequest::new(
+        &[
+            message(MessageRole::System, "history policy"),
+            user,
+            assistant,
+            result,
+            message(MessageRole::System, "  "),
+        ],
+        &options,
+        &profile,
+    ))
+    .unwrap();
+    let value: Value = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "model":"grok-4.6",
+            "input":[
+                {"role":"user","content":[{"type":"input_text","text":"question"},{"type":"input_image","detail":"auto","image_url":"data:image/png;base64,YWJj"}]},
+                {"type":"reasoning","encrypted_content":"keep"},
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":"answer","annotations":[]}]},
+                {"type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a\"}"},
+                {"type":"function_call_output","call_id":"call_1","output":"ok"}
+            ],
+            "instructions":"policy\n\nhistory policy",
+            "stream":true,
+            "prompt_cache_key":"conversation",
+            "store":false,
+            "max_output_tokens":8192,
+            "temperature":0.5,
+            "tools":[{"type":"function","name":"read","description":"read tool","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}],
+            "include":["reasoning.encrypted_content"]
+        })
+    );
+    let positions: Vec<_> = [
+        "\"model\":",
+        "\"input\":",
+        "\"instructions\":",
+        "\"stream\":",
+        "\"prompt_cache_key\":",
+        "\"store\":",
+        "\"max_output_tokens\":",
+        "\"temperature\":",
+        "\"tools\":",
+        "\"include\":",
+    ]
+    .into_iter()
+    .map(|key| encoded.find(key).unwrap())
+    .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[test]
+fn generic_request_non_reasoning_non_vision_and_no_synthetic_user_item() {
+    let mut look = message(MessageRole::User, "look");
+    let mut only_image = message(MessageRole::User, " ");
+    for _ in 0..2 {
+        let image = ImageAttachment {
+            media_type: "image/png".into(),
+            data: "YWJj".into(),
+        };
+        look.images.push(image.clone());
+        only_image.images.push(image);
+    }
+    let mut options = options();
+    options.model = "grok-composer-2.5-fast".into();
+    let profile = generic(false, false, false);
+    let value = serde_json::to_value(ResponsesRequest::new(
+        &[look, only_image],
+        &options,
+        &profile,
+    ))
+    .unwrap();
+    let placeholder =
+        json!({"type":"input_text","text":"[image omitted: model does not support vision]"});
+    assert_eq!(
+        value,
+        json!({
+            "model":"grok-composer-2.5-fast",
+            "input":[
+                {"role":"user","content":[{"type":"input_text","text":"look"},placeholder]},
+                {"role":"user","content":[placeholder]}
+            ],
+            "instructions":"policy",
+            "stream":true,
+            "prompt_cache_key":"conversation",
+            "store":false
+        })
+    );
+    options.system_prompt = String::new();
+    let value = serde_json::to_value(ResponsesRequest::new(
+        &[message(MessageRole::System, "only system")],
+        &options,
+        &profile,
+    ))
+    .unwrap();
+    assert_eq!(value["input"], json!([]));
+    assert_eq!(value["instructions"], "only system");
+    let value = serde_json::to_value(ResponsesRequest::new(&[], &options, &profile)).unwrap();
+    assert!(value.get("instructions").is_none());
+}
+
+#[test]
+fn generic_repair_orders_orphans_and_codex_keeps_unordered_pairing() {
+    let input = || {
+        vec![
+            json!({"type":"function_call_output","call_id":"early","output":null}),
+            json!({"type":"function_call","call_id":"early","name":"x","arguments":"{}"}),
+            json!({"type":"computer_call_output","call_id":"cmp","output":{"k":1}}),
+        ]
+    };
+    assert_eq!(
+        repair::repair(input(), Dialect::Generic),
+        vec![
+            json!({"type":"message","role":"assistant","content":"[Orphan tool result; call_id=early]: "}),
+            json!({"type":"function_call","call_id":"early","name":"x","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"early","output":repair::CODEX_INTERRUPTED_TOOL_OUTPUT}),
+            json!({"type":"message","role":"assistant","content":"[Orphan computer result; call_id=cmp]: {\"k\":1}"}),
+        ]
+    );
+    let codex = repair::repair(input(), Dialect::Codex);
+    assert_eq!(codex[0]["type"], "function_call_output");
+    assert_eq!(codex[1]["type"], "function_call");
+    assert_eq!(
+        codex[2]["content"],
+        "[Previous tool result; call_id=cmp]: {\"k\":1}"
+    );
+}
+
+#[test]
+fn generic_hoist_moves_wedged_messages_ahead_of_the_batch_only() {
+    let call = |id: &str| json!({"type":"function_call","call_id":id,"name":"t","arguments":"{}"});
+    let output = |id: &str| json!({"type":"function_call_output","call_id":id,"output":"ok"});
+    let note = |text: &str| json!({"type":"message","role":"assistant","content":text});
+    let wedged = vec![call("a"), note("m"), call("b"), output("a"), output("b")];
+    let hoisted = repair::hoist(wedged);
+    assert_eq!(
+        hoisted,
+        vec![note("m"), call("a"), call("b"), output("a"), output("b")]
+    );
+    assert_eq!(repair::hoist(hoisted.clone()), hoisted);
+    let rounds = vec![call("a"), output("a"), note("m"), call("b"), output("b")];
+    assert_eq!(repair::hoist(rounds.clone()), rounds);
+    let user = json!({"role":"user","content":"u"});
+    let fenced = vec![call("a"), user.clone(), note("m"), output("a")];
+    assert_eq!(repair::hoist(fenced.clone()), fenced);
+}
+
+#[test]
+fn schema_root_union_flatten_and_strict_quarantine_table() {
+    for (input, expected) in [
+        (
+            json!({"type":"object","properties":{},"anyOf":[{"required":["a"]},{"required":["b"],"title":"t"}]}),
+            json!({"type":"object","properties":{}}),
+        ),
+        (
+            json!({"properties":{},"oneOf":[{"required":["a"],"description":"d"}]}),
+            json!({"properties":{}}),
+        ),
+        (
+            json!({"type":["object","null"],"anyOf":[{"required":["a"]}]}),
+            json!({"type":["object","null"]}),
+        ),
+        (
+            json!({"type":"object","anyOf":[{"type":"object","required":["a"]}]}),
+            json!({"type":"object","anyOf":[{"type":"object","required":["a"]}]}),
+        ),
+        (
+            json!({"anyOf":[{"required":["a"]}]}),
+            json!({"anyOf":[{"required":["a"]}]}),
+        ),
+        (
+            json!({"type":"object","anyOf":[{"required":[]}]}),
+            json!({"type":"object","anyOf":[{"required":[]}]}),
+        ),
+        (
+            json!({"type":"object","anyOf":[{"required":["a"],"minProperties":1}]}),
+            json!({"type":"object","anyOf":[{"required":["a"],"minProperties":1}]}),
+        ),
+        (
+            json!({"type":"object","anyOf":[]}),
+            json!({"type":"object","anyOf":[]}),
+        ),
+        (json!(true), json!(true)),
+    ] {
+        assert_eq!(
+            schema::flatten_exclusive_required_root_union(input.clone()),
+            expected,
+            "input={input}"
+        );
+    }
+    for (input, reject, expected) in [
+        (
+            json!({"type":"string","enum":["a",1]}),
+            false,
+            Some("#/enum"),
+        ),
+        (
+            json!({"type":"integer","const":1.5}),
+            false,
+            Some("#/const"),
+        ),
+        (json!({"type":"integer","const":2.0}), false, None),
+        (
+            json!({"type":["integer","null"],"enum":[1,null]}),
+            false,
+            None,
+        ),
+        (json!({"type":"unknown","enum":[1]}), false, None),
+        (
+            json!({"type":"object","properties":{"x":{"type":"null","enum":["no"]}}}),
+            false,
+            Some("#/properties/x/enum"),
+        ),
+        (
+            json!({"items":[{"type":"boolean"},{"type":"boolean","const":"x"}]}),
+            false,
+            Some("#/items/1/const"),
+        ),
+        (
+            json!({"allOf":[{"type":"array","enum":[[]]},{"type":"array","enum":[{}]}]}),
+            false,
+            Some("#/allOf/1/enum"),
+        ),
+        (
+            json!({"type":"object","anyOf":[{"type":"string"}]}),
+            true,
+            Some("#/anyOf"),
+        ),
+        (
+            json!({"type":"object","anyOf":[{"type":"string"}]}),
+            false,
+            None,
+        ),
+        (
+            json!({"properties":{},"oneOf":[true]}),
+            true,
+            Some("#/oneOf"),
+        ),
+        (
+            json!({"properties":null,"anyOf":[{}]}),
+            true,
+            Some("#/anyOf"),
+        ),
+        (
+            json!({"properties":{},"oneOf":[{"type":"object"}]}),
+            true,
+            None,
+        ),
+        (json!({"anyOf":[{"type":"string"}]}), true, None),
+        (
+            json!({"type":"object","properties":{"p":{"type":"object","anyOf":[{"type":"string"}]}}}),
+            true,
+            None,
+        ),
+    ] {
+        assert_eq!(
+            schema::strict_violation(&input, reject).as_deref(),
+            expected,
+            "input={input} reject={reject}"
+        );
+    }
+}
+
+#[test]
+fn replay_unsafe_event_table() {
+    for (event, unsafe_event) in [
+        (
+            json!({"type":"response.output_text.delta","delta":"x"}),
+            true,
+        ),
+        (
+            json!({"type":"response.output_text.delta","delta":""}),
+            false,
+        ),
+        (json!({"type":"response.refusal.delta","delta":"x"}), true),
+        (
+            json!({"type":"response.reasoning_summary_text.delta","delta":"x"}),
+            true,
+        ),
+        (
+            json!({"type":"response.reasoning_text.delta","delta":"x"}),
+            true,
+        ),
+        (
+            json!({"type":"response.function_call_arguments.delta","delta":" "}),
+            true,
+        ),
+        (
+            json!({"type":"response.function_call_arguments.delta"}),
+            false,
+        ),
+        (
+            json!({"type":"response.custom_tool_call_input.delta","delta":"x"}),
+            true,
+        ),
+        (json!({"type":"response.reasoning_summary_part.done"}), true),
+        (
+            json!({"type":"response.output_item.done","item":{"type":"reasoning"}}),
+            true,
+        ),
+        (
+            json!({"type":"response.output_item.added","item":{"type":"message"}}),
+            false,
+        ),
+        (json!({"type":"response.created"}), false),
+        (json!({"type":"response.completed"}), false),
+    ] {
+        assert_eq!(events::replay_unsafe(&event), unsafe_event, "{event}");
+    }
+}
+
+#[test]
+fn generic_event_texts_retry_classes_and_terminal_rules() {
+    let generic = || EventMapper::new().with_dialect(Dialect::Generic);
+    for (event, message, retryable) in [
+        (
+            json!({"type":"error","code":"rate_limit_exceeded","message":"Slow down"}),
+            "Error Code rate_limit_exceeded: Slow down",
+            true,
+        ),
+        (
+            json!({"type":"error","error":{"message":"bad input"}}),
+            "Error Code unknown: bad input",
+            false,
+        ),
+        (
+            json!({"type":"error"}),
+            "Error Code unknown: no message",
+            false,
+        ),
+        (
+            json!({"type":"response.failed","response":{"error":{"code":"server_error","message":"boom"}}}),
+            "server_error: boom",
+            true,
+        ),
+        (
+            json!({"type":"response.failed","response":{"error":{"code":"","message":"You exceeded your usage limit"}}}),
+            "unknown: You exceeded your usage limit",
+            false,
+        ),
+        (
+            json!({"type":"response.failed","response":{"status_details":{"error":{"code":"overloaded"}}}}),
+            "overloaded: no message",
+            true,
+        ),
+        (
+            json!({"type":"response.failed","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
+            "incomplete: max_output_tokens",
+            false,
+        ),
+        (
+            json!({"type":"response.failed","response":{"status_details":{"reason":"moderation"}}}),
+            "Unknown error (no error details in response)",
+            true,
+        ),
+        (
+            json!({"type":"response.completed","response":{"status":"failed","status_details":{"reason":"moderation"}}}),
+            "status_details: moderation",
+            false,
+        ),
+        (
+            json!({"type":"response.done","response":{"status":"cancelled"}}),
+            "Unknown error (no error details in response)",
+            true,
+        ),
+        (
+            json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"content_filter"}}}),
+            "incomplete: content_filter",
+            false,
+        ),
+    ] {
+        let mut mapper = generic();
+        let error = mapper.event(event.clone()).unwrap_err();
+        assert_eq!(error.message, message, "{event}");
+        assert_eq!(error.retryable, retryable, "{event}");
+        assert!(!error.whitespace_loop && !mapper.terminal());
+    }
+    // `steered` stays Codex-only: a generic incomplete turn is a length stop.
+    let chunks = feed(
+        &mut generic(),
+        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"steered"}}}),
+    );
+    assert!(matches!(
+        &chunks[..],
+        [StreamChunk::TurnComplete {
+            stop_reason: StopReason::MaxTokens
+        }]
+    ));
+    // No whitespace-loop guard for the generic dialect.
+    let mut mapper = generic();
+    for _ in 0..300 {
+        assert!(feed(&mut mapper,json!({"type":"response.function_call_arguments.delta","output_index":0,"delta":" "})).is_empty());
+    }
+}
+
+#[test]
+fn usage_orchestration_subtraction_only_when_the_total_includes_it() {
+    let usage = |total: Option<u64>| {
+        let mut usage = json!({"input_tokens":120,"output_tokens":30,"input_tokens_details":{"cached_tokens":50,"orchestration_input_tokens":20,"orchestration_input_cached_tokens":30},"output_tokens_details":{"orchestration_output_tokens":5}});
+        if let Some(total) = total {
+            usage["total_tokens"] = json!(total);
+        }
+        let chunks = feed(
+            &mut EventMapper::new().with_dialect(Dialect::Generic),
+            json!({"type":"response.completed","response":{"usage":usage}}),
+        );
+        match &chunks[0] {
+            StreamChunk::Usage { usage, .. } => (
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.cache_read_input_tokens,
+            ),
+            other => panic!("{other:?}"),
+        }
+    };
+    // Total 150 equals the primary counts: orchestration (20 in, 20 cached, 5 out) is inside them.
+    assert_eq!(usage(Some(150)), (70, 25, Some(30)));
+    // Total 175 reports orchestration separately: the primary counts stand.
+    assert_eq!(usage(Some(175)), (70, 30, Some(50)));
+    assert_eq!(usage(None), (70, 30, Some(50)));
 }

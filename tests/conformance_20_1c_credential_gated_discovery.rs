@@ -15,6 +15,9 @@ const KEYS: &[&str] = &[
     "GOOGLE_API_KEY",
     "DEEPSEEK_API_KEY",
     "MOONSHOT_API_KEY",
+    "XAI_API_KEY",
+    "XAI_OAUTH_TOKEN",
+    "XAI_BASE_URL",
     "ANTHROPIC_BASE_URL",
     "GW_TOKEN",
     "RUSTAIN_DATA_DIR",
@@ -116,12 +119,32 @@ async fn k01_home_key_provisions_without_config_and_env_unlocks() {
             "google",
             "moonshot",
             "openai",
-            "openai-codex"
+            "openai-codex",
+            "xai",
+            "xai-oauth"
         ]
         .into_iter()
         .map(str::to_owned)
         .collect()
     );
+    for (provider, hint) in [
+        ("xai", "Set XAI_API_KEY or run `rustain auth login xai`"),
+        (
+            "xai-oauth",
+            "Set XAI_OAUTH_TOKEN or run `rustain auth login xai-oauth`",
+        ),
+    ] {
+        assert_eq!(
+            layer
+                .registry
+                .list_locked()
+                .iter()
+                .find(|p| p.provider_id == provider)
+                .unwrap()
+                .sign_in_hint,
+            hint
+        );
+    }
     assert_eq!(
         layer
             .registry
@@ -628,6 +651,9 @@ async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision()
     impl LoginUi for KeyUi {
         fn on_auth_url(&self, _: &str, _: &str, _: &str) {
             panic!("API-key login must not open a browser");
+        }
+        fn on_device_code(&self, _: &str, _: &str, _: &str) {
+            panic!("API-key login must not show a device code");
         }
         fn on_progress(&self, _: &str) {}
         fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {
