@@ -259,12 +259,6 @@ pub fn seed_target(target: &DiscoveryTarget, cache: &ModelCatalogCache) {
 }
 
 pub fn rejected_notice(target: &DiscoveryTarget) -> String {
-    if target.kind == "openai-codex" {
-        return format!(
-            "{} rejected its credential (HTTP 401/403). {}",
-            target.display_name, target.sign_in_hint
-        );
-    }
     format!(
         "{} rejected its credential (HTTP 401/403) — models could not be discovered. {}",
         target.display_name, target.sign_in_hint
@@ -277,6 +271,9 @@ pub async fn refresh_target(
     registry: Option<&ProviderRegistry>,
     force: bool,
 ) -> RefreshReport {
+    // A refresh started later always wins publication, so a delayed response
+    // for a replaced account never overwrites the newer roster or status.
+    let ticket = target.refresh_order.ticket();
     // Re-read the scope now through the adapter's own request path, so a
     // credential changed or removed since startup never reuses another roster.
     let scope = target.provider.discovery_scope(&target.scope_context).await;
@@ -299,6 +296,9 @@ pub async fn refresh_target(
             DiscoveryStatus::Empty => LiveOutcome::Success(vec![]),
             DiscoveryStatus::Unauthenticated => LiveOutcome::Failed(true),
             _ => LiveOutcome::NotAttempted,
+        };
+        let Some(_slot) = target.refresh_order.publish(ticket).await else {
+            return superseded(target, registry);
         };
         let publish = || {
             let merged = merge_catalog(layers(target, entry), outcome);
@@ -374,6 +374,9 @@ pub async fn refresh_target(
             )),
         ),
     };
+    let Some(_slot) = target.refresh_order.publish(ticket).await else {
+        return superseded(target, registry);
+    };
     // Persist before publishing: a concurrent models.dev remerge must never
     // replace a new authoritative roster with an older disk snapshot.
     if let LiveOutcome::Success(models) = &outcome
@@ -411,6 +414,18 @@ pub async fn refresh_target(
         status,
         model_count,
         notice: notice.filter(|_| previous != Some(status)),
+    }
+}
+
+/// A later-started refresh of this target already published: its catalogue,
+/// cache entries and status stand.
+fn superseded(target: &DiscoveryTarget, registry: Option<&ProviderRegistry>) -> RefreshReport {
+    RefreshReport {
+        status: registry
+            .and_then(|registry| registry.discovery_status(&target.provider_id))
+            .unwrap_or(DiscoveryStatus::Idle),
+        model_count: target.provider.list_models().len(),
+        notice: None,
     }
 }
 

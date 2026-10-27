@@ -2,11 +2,11 @@
 #![cfg(all(feature = "test-instrumentation", feature = "openai"))]
 
 #[path = "conformance_20_1d_codex_subscription/auth.rs"]
-mod auth;
+pub(crate) mod auth;
 #[path = "conformance_20_1d_codex_subscription/boundaries.rs"]
 mod boundaries;
 #[path = "conformance_20_1d_codex_subscription/cli.rs"]
-mod cli;
+pub(crate) mod cli;
 #[path = "conformance_20_1d_codex_subscription/credential_binding.rs"]
 mod credential_binding;
 #[path = "conformance_20_1d_codex_subscription/gate.rs"]

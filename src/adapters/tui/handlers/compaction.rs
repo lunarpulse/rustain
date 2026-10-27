@@ -263,6 +263,7 @@ async fn generate_compaction_summary(
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let options = CompletionOptions {
         session_id: Some(format!("{conversation_id}:compaction")),

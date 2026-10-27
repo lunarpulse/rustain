@@ -303,6 +303,7 @@ async fn test_generate_title_via_mock_provider() {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let options = CompletionOptions {
         session_id: None,
@@ -343,6 +344,7 @@ async fn test_title_generation_failure_silent() {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             }],
             CompletionOptions {
                 session_id: None,

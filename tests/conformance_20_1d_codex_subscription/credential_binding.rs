@@ -152,6 +152,7 @@ fn private_request(
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         };
         let options = CompletionOptions {
             model: "gpt-5.6-luna".into(),

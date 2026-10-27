@@ -42,6 +42,9 @@ mod conformance_20_1c_credential_gated_discovery;
 #[path = "../conformance_20_1d_codex_subscription.rs"]
 mod conformance_20_1d_codex_subscription;
 
+#[path = "../conformance_20_1d1b_codex_replay_discovery.rs"]
+mod conformance_20_1d1b_codex_replay_discovery;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

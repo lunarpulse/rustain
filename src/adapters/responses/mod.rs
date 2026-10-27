@@ -33,6 +33,11 @@ pub mod schema;
 pub trait WireProfile {
     fn prompt_cache_key(&self) -> Option<&str>;
     fn client_metadata(&self) -> Option<&serde_json::Value>;
+    /// Provider kind whose stored replay items this request may carry back
+    /// (Story 20.1d1b); `None` replays nothing.
+    fn replay_provider(&self) -> Option<&str> {
+        None
+    }
 }
 
 #[cfg(test)]

@@ -45,8 +45,9 @@ bundled seed and existing pricing-cache compatibility are unchanged.
 
 After login actually changes stored rows, rustain immediately discovers that
 provider again when it supports live discovery and reports its result on stderr.
-Codex uses its seeded catalogue through the same catalogue-merge path and prints
-no discovery line after login. models.dev currently has no Codex provider source;
+Codex is included: a successful login prints, for example,
+`Discovered N models for ChatGPT Plus/Pro (Codex Subscription).`
+models.dev currently has no Codex provider source;
 unrelated OpenAI API models are not promoted into the subscription catalogue.
 Login stdout and success exit status are unchanged even if discovery fails.
 
@@ -123,11 +124,23 @@ Claude Code share the private, locked `install-id` file in rustain's data direct
 The wire compatibility identity is pinned to omp (`originator: omp`,
 `User-Agent: omp/18.12.6`), not rustain branding.
 
-Encrypted reasoning replay/continuity and live Codex roster discovery are not
-implemented here; they are scheduled for successor story **20-1d1b**. The picker
-serves the eight bundled models through the catalogue-merge path. models.dev has no
-Codex provider source today, so that layer is empty; health checks inspect only the
-models endpoint's status. Reasoning output items are not persisted or replayed.
+Codex discovers its live roster from `GET <codex>/models`, falling back to
+`<root>/models` after a non-auth failure. Bundled models keep their bundled
+names; `gpt-5.6-luna`, `gpt-5.6-sol` and `gpt-5.6-terra` get a 1,000,000-token
+context floor, and rows marked hidden are excluded. The discovery cache is
+scoped to the credential actually sent, so switching accounts never serves the
+previous account's roster. A stored login's 401 refreshes once; a remaining
+401/403 is final, with no fallback request: the picker marks the provider
+`⚠ sign in again` and a rejected-credential notice names the login command.
+models.dev has no Codex provider source today, so that layer is empty; health checks
+inspect only the models endpoint's status.
+
+Encrypted reasoning items are captured privately from each response that reaches
+its terminal completion event, persisted with the session (local sessions,
+`rustain --session <id> ask` resume and the daemon), and replayed only to the same
+provider kind and model; as in omp, they are not bound to the account. They are
+never shown in transcripts, observers, ACP, `ask` output or logs. A failed or
+cancelled attempt discards its items, so it replays nothing.
 Upstream lists a 128,000-token maximum output, but rustain has no descriptor field
 or runtime consumer for that metadata: it does not send an output-token limit.
 
@@ -273,8 +286,8 @@ the row. Cancellation still lets an in-flight forced refresh persist its rotated
 token. Auth recovery and strictly-newer version retries have independent budgets.
 For providers that support live model discovery, the post-login refresh also
 compares the full grant stamp: recreating the store cannot suppress rediscovery
-merely because a row ID and revision repeat. Codex live discovery remains separate,
-as described below.
+merely because a row ID and revision repeat. Codex live discovery follows the
+same post-login path, as described above.
 
 ### Supported providers
 

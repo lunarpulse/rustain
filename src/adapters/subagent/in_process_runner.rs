@@ -932,6 +932,7 @@ async fn run_child(
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let mut abandonment_retry_count: u8 = 0;
     let mut parked_queue: VecDeque<crate::domain::models::AgentDelivery> = VecDeque::new();
@@ -1063,6 +1064,7 @@ async fn run_child(
                                         tool_uses: vec![],
                                         context_prefix: None,
                                         reasoning_content: None,
+                                        provider_replay: vec![],
                                     });
                                     pending_injected += 1;
                                 }
@@ -1131,6 +1133,7 @@ async fn run_child(
                                                 tool_uses: vec![],
                                                 context_prefix: None,
                                                 reasoning_content: None,
+                                                provider_replay: vec![],
                                             });
                                             pending_injected += 1;
                                         }
@@ -1365,6 +1368,7 @@ async fn run_child(
                                     tool_uses: vec![],
                                     context_prefix: None,
                                     reasoning_content: None,
+                                    provider_replay: vec![],
                                 });
                                 pending_injected += 1;
                             }
@@ -1458,6 +1462,8 @@ async fn run_child(
 
         let mut accumulated_text = String::new();
         let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
+        // Story 20.1d1b: replayed on this subagent's next request, never spooled.
+        let mut provider_replay = Vec::new();
         let mut received_turn_complete = false;
         let mut stop_reason = StopReason::EndTurn;
 
@@ -1572,6 +1578,7 @@ async fn run_child(
                                             tool_uses: vec![],
                                             context_prefix: None,
                                             reasoning_content: None,
+                                            provider_replay: vec![],
                                         });
                                         pending_injected += 1;
                                     }
@@ -1632,6 +1639,9 @@ async fn run_child(
                     if let Err(e) = spool.append(&task_id, content.as_bytes()).await {
                         tracing::warn!(task_id = %task_id, error = %e, "Spool append failed for thinking chunk");
                     }
+                }
+                StreamChunk::ProviderReplay { item } => {
+                    provider_replay.push(item.clone());
                 }
                 StreamChunk::Error { content } => {
                     if let Err(e) = spool
@@ -1730,6 +1740,7 @@ async fn run_child(
                     tool_uses: tool_use_msgs,
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: std::mem::take(&mut provider_replay),
                 });
 
                 // Dispatch tool calls through scheduler with ForegroundSubagent source
@@ -1786,6 +1797,7 @@ async fn run_child(
                         tool_uses: vec![],
                         context_prefix: None,
                         reasoning_content: None,
+                        provider_replay: vec![],
                     });
                     accumulated_text.clear();
                     continue;
@@ -1866,6 +1878,7 @@ async fn run_child(
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 });
 
                 // Loop back for next turn

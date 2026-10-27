@@ -40,6 +40,7 @@ fn message(role: MessageRole, content: &str) -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }
 

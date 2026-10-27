@@ -27,15 +27,15 @@ const CODE: &str = "CODEX-CLI-FIXTURE-CODE";
 const REFRESH: &str = "CODEX-CLI-FIXTURE-REFRESH";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
-struct Fixture {
-    home: tempfile::TempDir,
-    evidence: PathBuf,
+pub(crate) struct Fixture {
+    pub(crate) home: tempfile::TempDir,
+    pub(crate) evidence: PathBuf,
     binary: PathBuf,
     env: BTreeMap<&'static str, OsString>,
 }
 
 impl Fixture {
-    fn new(server: &MockServer) -> Self {
+    pub(crate) fn new(server: &MockServer) -> Self {
         let home = tempfile::tempdir().unwrap();
         let evidence = std::env::var_os("RUSTAIN_TEST_CODEX_EVIDENCE_DIR")
             .map(PathBuf::from)
@@ -119,7 +119,7 @@ impl Fixture {
         fixture
     }
 
-    fn json(&self, file: &str, value: &Value) {
+    pub(crate) fn json(&self, file: &str, value: &Value) {
         std::fs::write(
             self.evidence.join(file),
             serde_json::to_vec_pretty(value).unwrap(),
@@ -160,7 +160,7 @@ impl Fixture {
         );
     }
 
-    async fn run(&self, label: &str, args: &[&str]) -> Output {
+    pub(crate) async fn run(&self, label: &str, args: &[&str]) -> Output {
         let output = tokio::time::timeout(COMMAND_TIMEOUT, self.command(label, args).output())
             .await
             .unwrap_or_else(|_| panic!("{label} exceeded {COMMAND_TIMEOUT:?}"))
@@ -174,7 +174,7 @@ impl Fixture {
         output
     }
 
-    async fn requests(&self, server: &MockServer, label: &str) -> Vec<Request> {
+    pub(crate) async fn requests(&self, server: &MockServer, label: &str) -> Vec<Request> {
         let requests = server.received_requests().await.unwrap();
         let values: Vec<_> = requests.iter().map(|request| json!({
             "method": request.method.as_str(), "url": request.url.as_str(),
@@ -195,7 +195,7 @@ fn provider_row(value: &Value) -> &Value {
         .expect("Codex row")
 }
 
-async fn login(fixture: &Fixture, server: &MockServer) -> (Output, String) {
+pub(crate) async fn login(fixture: &Fixture, server: &MockServer) -> (Output, String) {
     let mut child = fixture
         .command("login", &["auth", "login", "openai-codex"])
         .spawn()
@@ -302,15 +302,6 @@ async fn login(fixture: &Fixture, server: &MockServer) -> (Output, String) {
         String::from_utf8_lossy(&output.stdout).trim(),
         "Logged in to ChatGPT Plus/Pro (Codex Subscription) as operator@example.test (plus)"
     );
-    let lower = transcript.to_ascii_lowercase();
-    assert!(
-        !lower.contains("discovered"),
-        "unexpected discovery output: {transcript}"
-    );
-    assert!(
-        !lower.contains("unavailable"),
-        "unexpected discovery output: {transcript}"
-    );
     (output, transcript)
 }
 
@@ -332,7 +323,7 @@ async fn k10_real_debug_binary_login_status_ask_logout() {
         Mock::given(method("GET")).and(path("/api.json"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({}))).mount(&server).await;
         Mock::given(method("GET")).and(path("/backend-api/codex/models"))
-            .respond_with(ResponseTemplate::new(200)).mount(&server).await;
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models":[{"slug":"gpt-5.6-luna"}]}))).mount(&server).await;
         let sse = format!("data: {}\n\ndata: {}\n\n",
             json!({"type":"response.output_text.delta","delta":FIXTURE_TEXT}),
             json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":2}}}));
@@ -341,9 +332,14 @@ async fn k10_real_debug_binary_login_status_ask_logout() {
             .mount(&server).await;
 
         let (login, transcript) = login(&fixture, &server).await;
+        // Story 20.1d1b: login now refreshes the live Codex roster exactly once.
+        assert!(
+            transcript.contains("Discovered 1 models for ChatGPT Plus/Pro (Codex Subscription)."),
+            "missing post-login discovery line: {transcript}"
+        );
         let requests = fixture.requests(&server, "login").await;
         assert_eq!(requests.iter().filter(|request| request.method == "POST").count(), 1);
-        assert_eq!(requests.iter().filter(|request| request.method == "GET" && request.url.path().ends_with("/models")).count(), 0, "login must not discover models");
+        assert_eq!(requests.iter().filter(|request| request.method == "GET" && request.url.path().ends_with("/models")).count(), 1, "login discovers models once");
         let token = requests.iter().find(|request| request.url.path() == "/oauth/token").unwrap();
         assert_eq!(token.headers["content-type"], "application/x-www-form-urlencoded");
         let fields: Vec<_> = url::form_urlencoded::parse(&token.body).into_owned().collect();
@@ -431,7 +427,7 @@ async fn k10_real_debug_binary_login_status_ask_logout() {
             "logout_exit": logout.status.code(), "list_exit": list.status.code(),
             "response": ask_json["response"], "status_source": provider_row(&status_json)["source"],
             "configured_after_logout": provider_row(&list_json)["configured"],
-            "codex_response_posts": responses.len(), "login_model_gets": 0, "chat_completions_requests": 0,
+            "codex_response_posts": responses.len(), "login_model_gets": 1, "chat_completions_requests": 0,
             "fixture_secrets_only": true,
         }));
     }).await.expect("CLI fixture exceeded its structural 120-second deadline");

@@ -19,6 +19,9 @@ pub enum ContentBlockType {
 
     // v0.5
     Thinking(String),
+    /// Operator-private provider replay state (Story 20.1d1b). Persisted for
+    /// replay only; every renderer and outward projection skips it.
+    ProviderReplay(super::stream::ProviderReplayItem),
     PlanCard,
     PlanSummary,
     PlanDeviation,

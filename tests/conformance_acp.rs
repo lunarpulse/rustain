@@ -2362,6 +2362,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let options = CompletionOptions {
         session_id: None,

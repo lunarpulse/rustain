@@ -315,6 +315,8 @@ pub fn stream_chunk_to_session_update(
                 ),
             ))
         }
+        // Operator-private provider replay state: never a session update.
+        StreamChunk::ProviderReplay { .. } => None,
         _ => None,
     }
 }

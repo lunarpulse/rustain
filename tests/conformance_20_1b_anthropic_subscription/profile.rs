@@ -23,6 +23,7 @@ fn message(text: &str) -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }
 fn pin() {

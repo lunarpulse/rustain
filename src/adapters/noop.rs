@@ -83,6 +83,7 @@ impl StreamingProvider for NoOpProvider {
 #[derive(Default)]
 pub(crate) struct RecordingProvider {
     pub requests: tokio::sync::Mutex<Vec<CompletionOptions>>,
+    pub messages: tokio::sync::Mutex<Vec<Vec<Message>>>,
 }
 
 #[cfg(test)]
@@ -90,10 +91,11 @@ pub(crate) struct RecordingProvider {
 impl StreamingProvider for RecordingProvider {
     async fn stream_completion(
         &self,
-        _messages: Vec<Message>,
+        messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         self.requests.lock().await.push(options);
+        self.messages.lock().await.push(messages);
         Ok(Box::pin(futures::stream::iter([
             StreamChunk::Text {
                 content: "Recorded response".into(),

@@ -119,6 +119,7 @@ fn user(text: &str) -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }
 async fn provider(
@@ -414,8 +415,38 @@ async fn k05_interleaved_final_tool_arguments_usage_and_missing_terminal() {
             .count(),
         1
     );
-    // Text, two tool calls, usage and stop: the reasoning item adds no chunk.
-    assert_eq!(out.len(), 5);
+    // Story 20.1d1b: the reasoning item is released as exactly one
+    // operator-private replay chunk, after both tools and before usage/stop;
+    // it is never a visible Thinking chunk.
+    let kinds: Vec<_> = out
+        .iter()
+        .map(|c| match c {
+            StreamChunk::Text { .. } => "text",
+            StreamChunk::ToolUse { .. } => "tool",
+            StreamChunk::ProviderReplay { .. } => "replay",
+            StreamChunk::Usage { .. } => "usage",
+            StreamChunk::TurnComplete { .. } => "complete",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["text", "tool", "tool", "replay", "usage", "complete"]
+    );
+    let replay: Vec<_> = out
+        .iter()
+        .filter_map(|c| match c {
+            StreamChunk::ProviderReplay { item } => Some(item),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].provider, "openai-codex");
+    assert_eq!(replay[0].model, "gpt-5.6-luna");
+    assert_eq!(
+        *replay[0].payload,
+        json!({"type":"reasoning","encrypted_content":"not-exposed"})
+    );
     assert!(
         !out.iter()
             .any(|c| matches!(c, StreamChunk::Thinking { .. }))

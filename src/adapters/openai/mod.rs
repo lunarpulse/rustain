@@ -408,6 +408,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let opts = CompletionOptions {
             session_id: None,
@@ -689,6 +690,7 @@ mod tests {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
                 Message {
                     role: MessageRole::Assistant,
@@ -698,6 +700,7 @@ mod tests {
                     tool_uses: vec![tool_use],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
                 Message {
                     role: MessageRole::User,
@@ -707,6 +710,7 @@ mod tests {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
             ];
 
@@ -761,6 +765,7 @@ mod tests {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
                 Message {
                     role: MessageRole::Assistant,
@@ -770,6 +775,7 @@ mod tests {
                     tool_uses: vec![tool_use],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
                 Message {
                     role: MessageRole::User,
@@ -779,6 +785,7 @@ mod tests {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
             ];
 
@@ -818,6 +825,7 @@ mod tests {
                     tool_uses: vec![tool_use],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
                 Message {
                     role: MessageRole::User,
@@ -827,6 +835,7 @@ mod tests {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 },
             ];
 

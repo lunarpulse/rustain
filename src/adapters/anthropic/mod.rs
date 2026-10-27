@@ -402,7 +402,10 @@ impl StreamingProvider for AnthropicAdapter {
     /// Credentials resolve per request, so the scope is read through that same path.
     async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
         let (resolved, _) = self.current_auth().await.ok()?;
-        Some(discovery::request_scope(scope_context, &resolved))
+        Some(crate::adapters::model_catalog_cache::request_scope(
+            scope_context,
+            &resolved,
+        ))
     }
 
     fn set_discovered_models(&self, models: Vec<crate::domain::models::ModelDescriptor>) {
@@ -440,6 +443,7 @@ impl StreamingProvider for AnthropicAdapter {
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }];
                 let mut body = AnthropicRequest::from((messages.as_slice(), &options));
                 body.stream = false;

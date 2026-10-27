@@ -245,6 +245,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::Assistant,
@@ -254,6 +255,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::User,
@@ -263,6 +265,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
         ];
         shape_compacted_messages(&conv, &mut api_msgs);
@@ -297,6 +300,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         shape_compacted_messages(&conv, &mut api_msgs);
         assert_eq!(api_msgs.len(), 1); // untouched

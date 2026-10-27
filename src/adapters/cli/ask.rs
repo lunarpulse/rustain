@@ -16,8 +16,9 @@ use serde::Serialize;
 use serde_json;
 
 use crate::domain::models::{
-    AppConfig, CompletionOptions, FileContextProvenance, MessageRole, Plan, SkillActivationSet,
-    StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin, UsageInfo,
+    AppConfig, CompletionOptions, ContentBlockType, FileContextProvenance, MessageRole, Plan,
+    SkillActivationSet, StopReason, StreamChunk, ToolCallInfo, ToolResultInfo, TurnOrigin,
+    UsageInfo,
 };
 use crate::domain::ports::StreamingProvider;
 use crate::domain::services::message_builder::{self, ResolvedFileContext};
@@ -404,6 +405,8 @@ impl<'a> AskRenderer<'a> {
                 tools_would_use: None,
                 error: None,
             },
+            // Operator-private replay state is persisted, never printed.
+            StreamChunk::ProviderReplay { .. } => return Ok(()),
             _ => return Ok(()),
         };
         let line = serde_json::to_string(&event)?;
@@ -915,6 +918,8 @@ pub async fn run_ask_core(
     let mut turn_stop_reason = StopReason::EndTurn;
     let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
     let mut turn_usage: Option<UsageInfo> = None;
+    // Story 20.1d1b: replay items persist on the assistant row, never on stdout.
+    let mut provider_replay = Vec::new();
     // Story 13.1c: accumulate the last proposed plan (last-wins, AC6).
     let mut proposed_plan: Option<Plan> = None;
     let mut renderer = AskRenderer::new(output_format, out);
@@ -1004,6 +1009,11 @@ pub async fn run_ask_core(
                 }
                 StreamChunk::Usage { usage, .. } => {
                     turn_usage = Some(usage.clone());
+                }
+                StreamChunk::ProviderReplay { item } => {
+                    if !turn_complete {
+                        provider_replay.push(ContentBlockType::ProviderReplay(item.clone()));
+                    }
                 }
                 StreamChunk::Error { content } => {
                     let parsed = parse_provider_error_display(content);
@@ -1104,7 +1114,7 @@ pub async fn run_ask_core(
             id: generate_message_id(),
             role: MessageRole::Assistant,
             content: outcome.assistant_text,
-            content_blocks: vec![],
+            content_blocks: provider_replay,
             tool_calls: outcome.tool_calls,
             created_at: now_unix(),
             token_count: None,

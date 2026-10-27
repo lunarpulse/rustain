@@ -24,7 +24,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use crate::domain::models::{StopReason, StreamChunk, UsageInfo};
+use crate::domain::models::{ProviderReplayItem, StopReason, StreamChunk, UsageInfo};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -69,11 +69,22 @@ pub struct EventMapper {
     terminal: bool,
     committed: bool,
     tool_emitted: bool,
+    /// `(provider, model)` stamping captured reasoning; `None` captures nothing.
+    replay_owner: Option<(String, String)>,
+    /// This attempt's reduced reasoning items, released only at a terminal event.
+    replay: Vec<Value>,
 }
 
 impl EventMapper {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// A mapper that keeps reasoning items for replay to `provider` and `model`.
+    pub fn with_replay(provider: &str, model: &str) -> Self {
+        Self {
+            replay_owner: Some((provider.to_owned(), model.to_owned())),
+            ..Self::default()
+        }
     }
     pub fn terminal(&self) -> bool {
         self.terminal
@@ -82,8 +93,17 @@ impl EventMapper {
         self.committed
     }
 
-    pub fn event(&mut self, value: Value) -> Result<Vec<StreamChunk>, EventError> {
+    pub fn event(&mut self, mut value: Value) -> Result<Vec<StreamChunk>, EventError> {
         if self.terminal {
+            return Ok(Vec::new());
+        }
+        // Private replay state: no chunk and no commit, so it never closes the
+        // safe-retry window; a discarded attempt drops its buffer with the mapper.
+        if value["type"] == "response.output_item.done" && value["item"]["type"] == "reasoning" {
+            self.whitespace = None;
+            if self.replay_owner.is_some() {
+                self.replay.push(replay_payload(value["item"].take()));
+            }
             return Ok(Vec::new());
         }
         let mut chunks = Vec::new();
@@ -171,7 +191,6 @@ impl EventMapper {
                         self.current = None;
                     }
                 }
-                // Reasoning item signatures/replay intentionally produce no chunk.
             }
             "response.completed" | "response.done" | "response.incomplete" => {
                 // omp maps these terminal statuses to an error stop, never a normal turn.
@@ -186,6 +205,19 @@ impl EventMapper {
                     if self.tools[index].arguments_done && !self.tools[index].emitted {
                         self.emit_tool(index, &mut chunks);
                     }
+                }
+                // The stream finishes right after this event, so no retry can follow
+                // a released item: only the attempt that reached it persists.
+                if let Some((provider, model)) = &self.replay_owner {
+                    chunks.extend(self.replay.drain(..).map(|payload| {
+                        StreamChunk::ProviderReplay {
+                            item: ProviderReplayItem {
+                                provider: provider.clone(),
+                                model: model.clone(),
+                                payload: std::sync::Arc::new(payload),
+                            },
+                        }
+                    }));
                 }
                 let response = &value["response"];
                 if let Some(usage) = response.get("usage").filter(|usage| usage.is_object()) {
@@ -338,6 +370,26 @@ impl EventMapper {
             whitespace_loop: true,
         })
     }
+}
+
+/// omp's replay reduction of a reasoning item (`utils.ts`
+/// `sanitizeOpenAIResponsesReasoningItemForReplay`): `id` is dropped, array
+/// `summary`/`content` are kept, and `encrypted_content` is kept verbatim when it
+/// is a string or `null`.
+fn replay_payload(item: Value) -> Value {
+    let mut reduced = serde_json::Map::with_capacity(4);
+    reduced.insert("type".into(), Value::String("reasoning".into()));
+    if let Value::Object(mut item) = item {
+        for key in ["summary", "content"] {
+            if let Some(value @ Value::Array(_)) = item.remove(key) {
+                reduced.insert(key.into(), value);
+            }
+        }
+        if let Some(value @ (Value::String(_) | Value::Null)) = item.remove("encrypted_content") {
+            reduced.insert("encrypted_content".into(), value);
+        }
+    }
+    Value::Object(reduced)
 }
 
 fn integer(value: &Value) -> Option<i64> {

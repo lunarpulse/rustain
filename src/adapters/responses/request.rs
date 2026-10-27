@@ -100,6 +100,19 @@ impl<'a> ResponsesRequest<'a> {
                     }
                 }
                 MessageRole::Assistant => {
+                    // omp replays native items only to the producing provider
+                    // and model, ahead of that turn's output and calls.
+                    if let Some(provider) = profile.replay_provider() {
+                        input.extend(
+                            message
+                                .provider_replay
+                                .iter()
+                                .filter(|item| {
+                                    item.provider == provider && item.model == options.model
+                                })
+                                .map(|item| item.payload.as_ref().clone()),
+                        );
+                    }
                     if !text.is_empty() {
                         input.push(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text,"annotations":[]}]}));
                     }

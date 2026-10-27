@@ -89,6 +89,7 @@ fn messages() -> Vec<Message> {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }]
 }
 async fn complete(origin: &str) -> Result<(), ProviderError> {

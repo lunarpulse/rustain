@@ -928,6 +928,10 @@ fn expanded_turn_height_attached(
     let mut running_count: usize = 0;
 
     for part in &turn.parts {
+        // Operator-private replay state has no rows and no spacing.
+        if let TurnPart::ProviderReplay { .. } = part {
+            continue;
+        }
         // Inter-part spacing
         let blanks = inter_part_blank_lines(prev, part);
         height += blanks;
@@ -968,6 +972,7 @@ fn expanded_turn_height_attached(
             TurnPart::ToolResult { .. } => {
                 // Skip — rendered as part of ToolInvocation
             }
+            TurnPart::ProviderReplay { .. } => {}
         }
         prev = Some(part);
     }
@@ -1161,6 +1166,8 @@ pub fn build_layout_metrics(
 fn inter_part_blank_lines(prev: Option<&TurnPart>, next: &TurnPart) -> usize {
     match (prev, next) {
         (None, _) => 0,
+        // Never rendered, so never spaced.
+        (Some(TurnPart::ProviderReplay { .. }), _) | (_, TurnPart::ProviderReplay { .. }) => 0,
         (
             Some(TurnPart::Prose { .. } | TurnPart::Reasoning { .. }),
             TurnPart::ToolInvocation { .. } | TurnPart::ToolResult { .. },
@@ -1285,6 +1292,10 @@ fn render_expanded_turn<'a>(
     let mut match_cursor = 0;
 
     for part in &turn.parts {
+        // Operator-private replay state is never rendered (Story 20.1d1b).
+        if let TurnPart::ProviderReplay { .. } = part {
+            continue;
+        }
         // Inter-part spacing
         let blanks = inter_part_blank_lines(prev, part);
         for _ in 0..blanks {
@@ -1390,6 +1401,7 @@ fn render_expanded_turn<'a>(
                 // Already rendered as part of the matching ToolInvocation's
                 // expanded view — tool_block reads tc.result to decide shape.
             }
+            TurnPart::ProviderReplay { .. } => {}
         }
         if matches!(part, TurnPart::Prose { .. }) {
             highlight_content_lines(

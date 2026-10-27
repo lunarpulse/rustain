@@ -159,7 +159,8 @@ impl EventBus {
     }
 }
 
-/// Keep the retained transcript intact while projecting only public tools.
+/// Keep the retained transcript intact while projecting only public tools and
+/// never the operator-private provider replay state (Story 20.1d1b).
 pub(crate) fn public_transcript_message(
     message: &crate::domain::models::ChatMessage,
 ) -> crate::domain::models::ChatMessage {
@@ -167,7 +168,17 @@ pub(crate) fn public_transcript_message(
         id: message.id.clone(),
         role: message.role,
         content: message.content.clone(),
-        content_blocks: message.content_blocks.clone(),
+        content_blocks: message
+            .content_blocks
+            .iter()
+            .filter(|block| {
+                !matches!(
+                    block,
+                    crate::domain::models::ContentBlockType::ProviderReplay(_)
+                )
+            })
+            .cloned()
+            .collect(),
         tool_calls: message
             .tool_calls
             .iter()

@@ -492,12 +492,16 @@ impl RustainAcpAgent {
         content: String,
         tool_calls: Vec<ToolCallInfo>,
         stop_reason: DomainStopReason,
+        provider_replay: Vec<crate::domain::models::ProviderReplayItem>,
     ) -> ChatMessage {
         ChatMessage {
             id: crate::domain::models::conversation::generate_message_id(),
             role: MessageRole::Assistant,
             content,
-            content_blocks: vec![],
+            content_blocks: provider_replay
+                .into_iter()
+                .map(crate::domain::models::ContentBlockType::ProviderReplay)
+                .collect(),
             tool_calls,
             created_at: now_unix(),
             token_count: None,
@@ -772,6 +776,8 @@ impl RustainAcpAgent {
         let mut assistant_text = String::new();
         let mut assistant_tool_calls: Vec<ToolCallInfo> = Vec::new();
         let mut assistant_messages: Vec<ChatMessage> = Vec::new();
+        // Story 20.1d1b: persisted for replay on the next prompt, never sent as an update.
+        let mut assistant_replay = Vec::new();
         let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
             match mcp_event_rx.try_recv() {
@@ -840,6 +846,7 @@ impl RustainAcpAgent {
                                         std::mem::take(&mut assistant_text),
                                         std::mem::take(&mut assistant_tool_calls),
                                         DomainStopReason::ToolUse,
+                                        std::mem::take(&mut assistant_replay),
                                     ));
                                     assistant_messages.push(Self::tool_result_boundary_message());
                                 }
@@ -919,6 +926,9 @@ impl RustainAcpAgent {
                                                 }
                                             }
                                         }
+                                    }
+                                    StreamChunk::ProviderReplay { item } => {
+                                        assistant_replay.push(item.clone());
                                     }
                                     _ => {}
                                 }
@@ -1019,6 +1029,7 @@ impl RustainAcpAgent {
                 std::mem::take(&mut assistant_text),
                 std::mem::take(&mut assistant_tool_calls),
                 assistant_stop_reason.clone(),
+                std::mem::take(&mut assistant_replay),
             ));
         }
         let should_save =

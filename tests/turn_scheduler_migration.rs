@@ -335,6 +335,7 @@ async fn turn_scheduler_migration() {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }],
         CompletionOptions {
             session_id: None,
@@ -432,6 +433,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }],
         CompletionOptions {
             session_id: None,

@@ -95,9 +95,18 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
 
             // Interrupted calls remain in the audit history, but an unmatched
             // invocation (or its otherwise empty row) is not a valid API message.
+            // Replay state alone never keeps a row: other providers drop it.
             if cm.content.is_empty() && tool_uses.is_empty() && reasoning_content.is_none() {
                 continue;
             }
+            let provider_replay = cm
+                .content_blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlockType::ProviderReplay(item) => Some(item.clone()),
+                    _ => None,
+                })
+                .collect();
             if !pending_tool_results.is_empty() {
                 messages.push(tool_results_message(std::mem::take(
                     &mut pending_tool_results,
@@ -112,6 +121,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 tool_uses,
                 context_prefix: None,
                 reasoning_content,
+                provider_replay,
             });
 
             pending_tool_results.extend(cm.tool_calls.iter().filter_map(|tc| {
@@ -137,6 +147,7 @@ pub fn build_api_messages(conversation: &Conversation) -> Vec<Message> {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             });
         }
     }
@@ -158,5 +169,6 @@ fn tool_results_message(tool_results: Vec<ToolResultMessage>) -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }

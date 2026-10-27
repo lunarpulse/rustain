@@ -1,10 +1,9 @@
 //! Anthropic Models API over the adapter's shared request authentication.
 use super::AnthropicAdapter;
+use crate::adapters::model_catalog_cache::request_scope;
 use crate::adapters::model_filter::{compile_filter_patterns, is_noise_model_id, matches_any};
 use crate::domain::errors::ProviderError;
-use crate::domain::models::AuthSource;
 use crate::domain::models::provider::{DiscoveredModels, ModelRecord};
-use crate::infrastructure::key_resolver::Resolved;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -19,22 +18,6 @@ struct Page {
 struct Item {
     id: String,
     display_name: Option<String>,
-}
-
-/// Cache scope of the credential a request resolved: a stored OAuth login by
-/// the account identity of that same row (stable across access rotation),
-/// otherwise — including an identity-less OAuth row — the exact bearer sent.
-pub(super) fn request_scope(context: &str, resolved: &Resolved) -> String {
-    use crate::adapters::model_catalog_cache::{ScopeCredential, credential_scope};
-    match (&resolved.source, resolved.identity.as_deref()) {
-        (AuthSource::StoredOAuth, Some(identity)) => {
-            credential_scope(context, ScopeCredential::OAuthIdentity(identity))
-        }
-        _ => credential_scope(
-            context,
-            ScopeCredential::Secret(resolved.auth.bearer_secret()),
-        ),
-    }
 }
 
 impl AnthropicAdapter {

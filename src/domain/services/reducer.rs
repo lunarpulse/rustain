@@ -295,6 +295,17 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             ChunkAction::NeedsRedraw
         }
 
+        // ── ProviderReplay (Story 20.1d1b) ───────────────────────────────
+        // Committed for persistence only: no render, no redraw.
+        StreamChunk::ProviderReplay { item } => {
+            state.ensure_open_turn(clock);
+            state.flush_all();
+            if let Some(turn) = state.open_turn.as_mut() {
+                turn.push_part(|id| TurnPart::ProviderReplay { id, item });
+            }
+            ChunkAction::None
+        }
+
         // ── ToolUse ──────────────────────────────────────────────────────
         StreamChunk::ToolUse { id, name, input } => {
             state.ensure_open_turn(clock);
@@ -547,6 +558,11 @@ pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState
                         .push(crate::domain::models::ContentBlockType::Thinking(
                             text.clone(),
                         ));
+                }
+                TurnPart::ProviderReplay { item, .. } => {
+                    mirror.current_blocks.push(
+                        crate::domain::models::ContentBlockType::ProviderReplay(item.clone()),
+                    );
                 }
                 TurnPart::ToolInvocation {
                     id: pid,

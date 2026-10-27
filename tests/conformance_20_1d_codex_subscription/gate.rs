@@ -374,7 +374,7 @@ async fn tool_restriction_survives_live_cache_modelsdev_and_remerge() {
 
 #[tokio::test]
 #[serial]
-async fn codex_seed_is_locked_then_signed_without_live_discovery_or_api_key_construction() {
+async fn codex_seed_is_locked_then_signed_with_live_discovery_and_no_api_key_construction() {
     let world = World::new();
     let server = MockServer::start().await;
     world.set("RUSTAIN_TEST_AUTH_ORIGIN", &server.uri());
@@ -468,8 +468,9 @@ async fn codex_seed_is_locked_then_signed_without_live_discovery_or_api_key_cons
         layer.registry.sign_in_hint("work").as_deref(),
         Some(locked.sign_in_hint.as_str())
     );
+    // Story 20.1d1b: the signed Codex entry is now a live discovery target.
     assert!(
-        !layer
+        layer
             .discovery_targets
             .iter()
             .any(|t| t.provider_id == "work")
@@ -486,20 +487,29 @@ async fn codex_seed_is_locked_then_signed_without_live_discovery_or_api_key_cons
             .iter()
             .any(|t| t.provider_id == "work")
     );
-    // The login changed the row versions, so `None` comes from the missing live target.
     assert!(
-        rediscover_after_login("openai-codex", &cfg, &before)
-            .await
-            .is_none()
+        server.received_requests().await.unwrap().is_empty(),
+        "startup seeds without a live request"
     );
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.url.path().ends_with("/codex/models"))
-    );
+    Mock::given(method("GET"))
+        .and(path("/backend-api/codex/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"models":[{"slug":"gpt-5.6-luna"},{"slug":"gpt-6.1-sol"}]})),
+        )
+        .mount(&server)
+        .await;
+    // The login changed the row versions, so the live target is refreshed.
+    let report = rediscover_after_login("openai-codex", &cfg, &before)
+        .await
+        .expect("signed Codex entry is rediscovered after login");
+    assert_eq!(report.status, DiscoveryStatus::Ok);
+    assert_eq!(report.model_count, 2);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/backend-api/codex/models");
+    assert_eq!(requests[0].url.query(), Some("client_version=0.159.0"));
+    server.reset().await;
     assert_eq!(
         provider_factory::build_provider_for_config_with_key("work", &provider, "candidate")
             .err()

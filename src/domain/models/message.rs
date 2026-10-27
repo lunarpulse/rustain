@@ -32,6 +32,10 @@ pub struct Message {
     /// on assistant messages so the API can validate continuity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// Provider-native items replayed only to the same provider kind and model
+    /// (Codex encrypted reasoning, Story 20.1d1b).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_replay: Vec<super::stream::ProviderReplayItem>,
 }
 
 /// A tool use block from an assistant message, sent back for multi-turn tool conversations.

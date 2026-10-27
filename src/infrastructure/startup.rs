@@ -2760,6 +2760,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                         provider.as_ref(),
                     ),
                     last_live: Default::default(),
+                    refresh_order: Default::default(),
                     provider: provider.clone(),
                     cache_ttl_seconds: cfg.cache_ttl_seconds,
                     model_filter: cfg.model_filter.clone(),
@@ -2784,7 +2785,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                 if cfg.discover_models {
                     if entry.kind() == "ollama" {
                         unsupported_discovery.push((id.clone(), entry.kind().to_owned()));
-                    } else if entry.kind() != "openai-codex" {
+                    } else {
                         discovery_targets.push(target);
                     }
                 }

@@ -232,6 +232,9 @@ pub async fn run_turn(
                 let mut tool_calls: Vec<ToolCallInfo> = Vec::new();
                 let mut accumulated_text = String::new();
                 let mut accumulated_thinking = String::new();
+                // Story 20.1d1b: provider replay items ride the in-turn assistant
+                // message; the stream emits them only after a terminal event.
+                let mut accumulated_replay = Vec::new();
 
                 let mut iteration_usage: Option<crate::domain::models::UsageInfo> = None;
 
@@ -257,6 +260,9 @@ pub async fn run_turn(
                         }
                         StreamChunk::Thinking { content, .. } => {
                             accumulated_thinking.push_str(content);
+                        }
+                        StreamChunk::ProviderReplay { item } => {
+                            accumulated_replay.push(item.clone());
                         }
                         StreamChunk::Usage { usage, .. } => {
                             iteration_usage = Some(usage.clone());
@@ -363,6 +369,7 @@ pub async fn run_turn(
                             } else {
                                 Some(std::mem::take(&mut accumulated_thinking))
                             },
+                            provider_replay: std::mem::take(&mut accumulated_replay),
                         });
 
                         // Create a checkpoint BEFORE executing any tools in this turn (AC2, Story 4-3b).
@@ -692,6 +699,7 @@ pub async fn run_turn(
                             tool_uses: vec![],
                             context_prefix: None,
                             reasoning_content: None,
+                            provider_replay: vec![],
                         });
 
                         // Loop back to stream_completion

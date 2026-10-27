@@ -29,6 +29,7 @@ async fn test_noop_provider_returns_error() {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let options = CompletionOptions {
         session_id: None,

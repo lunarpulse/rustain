@@ -282,7 +282,7 @@ pub use story_manifest::{
     selection_line, story_summary,
 };
 #[allow(unused_imports)]
-pub use stream::{StopReason, StreamChunk, StreamingPhase, StreamingState};
+pub use stream::{ProviderReplayItem, StopReason, StreamChunk, StreamingPhase, StreamingState};
 pub use subagent_error::{SpawnLimitKind, SubagentError};
 pub use subagent_view::{AgentRowView, OwnershipKind, WireOwnershipKind};
 pub use task_handle::{Op, TaskHandle};

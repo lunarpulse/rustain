@@ -311,6 +311,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -348,6 +349,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -382,6 +384,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -454,6 +457,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::Assistant,
@@ -463,6 +467,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
         ];
         let options = CompletionOptions {
@@ -513,6 +518,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::Assistant,
@@ -526,6 +532,7 @@ mod tests {
                 }],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::User,
@@ -539,6 +546,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
         ];
         let options = CompletionOptions {
@@ -585,6 +593,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -634,6 +643,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -668,6 +678,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,

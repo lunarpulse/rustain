@@ -348,6 +348,7 @@ mod tests {
                 }],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::User,
@@ -361,6 +362,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: Some("[selected-recipient-item]".into()),
                 reasoning_content: None,
+                provider_replay: vec![],
             },
         ];
         let options = CompletionOptions {

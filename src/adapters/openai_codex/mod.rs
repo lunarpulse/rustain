@@ -24,6 +24,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
+mod discovery;
 mod errors;
 pub mod profile;
 mod retry;
@@ -54,6 +55,9 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+/// The adapter kind: replay items are stamped with it and replayed only to it.
+const PROVIDER_KIND: &str = "openai-codex";
 
 /// Normalise a configured API base or explicit Codex response URL once.
 pub fn responses_url(base: &str) -> String {
@@ -297,12 +301,13 @@ impl StreamingProvider for CodexAdapter {
             headers: HeaderMap::new(),
         };
         let opened = self.inner.open(&mut ctx).await?;
+        let mapper = EventMapper::with_replay(PROVIDER_KIND, &ctx.model);
         let state = StreamState {
             inner: self.inner.clone(),
             ctx,
             bytes: Some(Box::pin(opened.response.bytes_stream())),
             buffer: SseLineBuffer::new(),
-            mapper: EventMapper::new(),
+            mapper,
             pending: VecDeque::new(),
             deadline: opened.deadline,
             retries: 0,
@@ -434,7 +439,9 @@ impl StreamingProvider for CodexAdapter {
                                 state.bytes = Some(Box::pin(opened.response.bytes_stream()));
                                 state.deadline = opened.deadline;
                                 state.buffer = SseLineBuffer::new();
-                                state.mapper = EventMapper::new();
+                                // A fresh mapper discards the failed attempt's replay buffer.
+                                state.mapper =
+                                    EventMapper::with_replay(PROVIDER_KIND, &state.ctx.model);
                                 continue;
                             }
                             // An abort during backoff or reopen ends like any other abort.
@@ -469,19 +476,37 @@ impl StreamingProvider for CodexAdapter {
         Ok(())
     }
     fn provider_id(&self) -> String {
-        "openai-codex".into()
+        PROVIDER_KIND.into()
     }
     fn list_models(&self) -> Vec<ModelDescriptor> {
         if let Some(models) = &**self.inner.discovered_models.load() {
             return models.clone();
         }
         crate::adapters::model_catalog_cache::load_embedded_seed()
-            .and_then(|catalog| catalog.providers.get("openai-codex"))
+            .and_then(|catalog| catalog.providers.get(PROVIDER_KIND))
             .map(|entry| entry.models.iter().map(|m| m.descriptor.clone()).collect())
             .unwrap_or_default()
     }
     fn set_discovered_models(&self, models: Vec<ModelDescriptor>) {
         self.inner.discovered_models.store(Arc::new(Some(models)));
+    }
+    async fn discover_models(
+        &self,
+        model_filter: &[String],
+        scope_context: &str,
+    ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        Some(self.inner.discover(model_filter, scope_context).await)
+    }
+    /// Credentials resolve per request, so the scope is read through that same path.
+    async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
+        let resolved = self.inner.handle.current().await.ok()?;
+        Some(crate::adapters::model_catalog_cache::request_scope(
+            scope_context,
+            &resolved,
+        ))
+    }
+    fn default_context_window(&self, model_id: &str) -> Option<u32> {
+        Some(discovery::default_context_window(model_id))
     }
     async fn health_check(&self) -> Result<(), ProviderError> {
         let (status, _) = tokio::time::timeout(Duration::from_secs(5), self.inner.probe_status())

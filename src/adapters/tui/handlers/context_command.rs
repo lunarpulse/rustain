@@ -235,6 +235,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: Some(historical_prefix.clone()),
                 reasoning_content: None,
+                provider_replay: vec![],
             },
             Message {
                 role: MessageRole::Assistant,
@@ -244,6 +245,7 @@ mod tests {
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             },
         ];
 
@@ -257,6 +259,7 @@ mod tests {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         });
 
         let bundle = ContextBundle {

@@ -321,6 +321,14 @@ impl Conversation {
             let mut tool_calls = Vec::new();
             let mut tool_results: std::collections::HashMap<super::turn::PartId, &TurnPart> =
                 std::collections::HashMap::new();
+            // Turn-backed replay state (Story 20.1d1b) replaces any earlier copy,
+            // so repeated rebuilds never duplicate it.
+            let mut content_blocks: Vec<ContentBlockType> = old_blocks
+                .remove(&turn.id.0)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|block| !matches!(block, ContentBlockType::ProviderReplay(_)))
+                .collect();
 
             // First pass: collect results, prose, and reasoning
             for part in &turn.parts {
@@ -340,7 +348,10 @@ impl Conversation {
                             );
                         }
                     }
-                    _ => {}
+                    TurnPart::ProviderReplay { item, .. } => {
+                        content_blocks.push(ContentBlockType::ProviderReplay(item.clone()));
+                    }
+                    TurnPart::ToolInvocation { .. } => {}
                 }
             }
 
@@ -405,7 +416,7 @@ impl Conversation {
                 id: turn.id.0.clone(),
                 role: turn.role,
                 content,
-                content_blocks: old_blocks.remove(&turn.id.0).unwrap_or_default(),
+                content_blocks,
                 tool_calls,
                 created_at,
                 history_source: turn.history_source,
@@ -639,6 +650,50 @@ mod tests {
             SendAuthorization::Automatic
         );
         assert_eq!(loaded.messages[1].retracted_at_ms, Some(123));
+    }
+
+    /// Story 20.1d1b: `ask`, ACP and the daemon persist messages only; a session
+    /// reopened by the turn-backed TUI keeps their replay state for the next request.
+    #[test]
+    fn legacy_migration_keeps_provider_replay_across_mirror_rebuilds() {
+        let item = crate::domain::models::ProviderReplayItem {
+            provider: "openai-codex".into(),
+            model: "gpt-5.6-luna".into(),
+            payload: std::sync::Arc::new(serde_json::json!({
+                "type": "reasoning", "summary": [], "encrypted_content": "ENC"
+            })),
+        };
+        let mut conversation = Conversation::default();
+        conversation.messages = vec![
+            ChatMessage {
+                id: "u".into(),
+                role: MessageRole::User,
+                content: "hello".into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                id: "a".into(),
+                role: MessageRole::Assistant,
+                content: "answer".into(),
+                content_blocks: vec![ContentBlockType::ProviderReplay(item.clone())],
+                ..Default::default()
+            },
+        ];
+        let saved = serde_json::to_string(&PersistedConversation::from_conversation(&conversation))
+            .unwrap();
+        let mut loaded = serde_json::from_str::<PersistedConversation>(&saved)
+            .unwrap()
+            .to_conversation();
+        loaded.rebuild_messages_mirror();
+        loaded.rebuild_messages_mirror();
+        let replay: Vec<_> = loaded.messages[1]
+            .content_blocks
+            .iter()
+            .filter(|block| matches!(block, ContentBlockType::ProviderReplay(_)))
+            .collect();
+        assert_eq!(replay.len(), 1, "kept once across repeated rebuilds");
+        let api = crate::domain::services::message_builder::build_api_messages(&loaded);
+        assert_eq!(api[1].provider_replay, vec![item]);
     }
 
     use super::*;

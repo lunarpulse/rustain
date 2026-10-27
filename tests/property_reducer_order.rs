@@ -126,6 +126,7 @@ fn property_arrival_order_preserved() {
                 TurnPart::ToolInvocation { .. } => "ToolInv",
                 TurnPart::ToolResult { .. } => "ToolRes",
                 TurnPart::Reasoning { .. } => "Reason",
+                TurnPart::ProviderReplay { .. } => "Replay",
             })
             .collect();
 

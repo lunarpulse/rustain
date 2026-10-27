@@ -350,6 +350,7 @@ data: {\"type\":\"message_stop\"}\n\
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }];
         let options = CompletionOptions {
             session_id: None,
@@ -427,6 +428,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -480,6 +482,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -534,6 +537,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -611,6 +615,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -759,6 +764,7 @@ data: {\"type\":\"message_stop\"}\n\
                 tool_uses: vec![],
                 context_prefix: None,
                 reasoning_content: None,
+                provider_replay: vec![],
             }],
             CompletionOptions {
                 session_id: None,
@@ -915,6 +921,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -985,6 +992,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,
@@ -1035,6 +1043,7 @@ data: {\"type\":\"message_stop\"}\n\
                     tool_uses: vec![],
                     context_prefix: None,
                     reasoning_content: None,
+                    provider_replay: vec![],
                 }],
                 CompletionOptions {
                     session_id: None,

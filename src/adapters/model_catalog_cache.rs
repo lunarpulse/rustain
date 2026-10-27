@@ -44,6 +44,25 @@ pub fn credential_scope(context: &str, credential: ScopeCredential<'_>) -> Strin
     }
 }
 
+/// Cache scope of the credential a request resolved: a stored OAuth login by
+/// the account identity of that same row (stable across access rotation),
+/// otherwise — including an identity-less OAuth row — the exact bearer sent.
+/// Every request-resolving adapter stamps its discovery with this one function.
+pub fn request_scope(
+    context: &str,
+    resolved: &crate::infrastructure::key_resolver::Resolved,
+) -> String {
+    match (&resolved.source, resolved.identity.as_deref()) {
+        (crate::domain::models::AuthSource::StoredOAuth, Some(identity)) => {
+            credential_scope(context, ScopeCredential::OAuthIdentity(identity))
+        }
+        _ => credential_scope(
+            context,
+            ScopeCredential::Secret(resolved.auth.bearer_secret()),
+        ),
+    }
+}
+
 /// In-memory representation of the cached catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -292,9 +311,40 @@ pub struct DiscoveryTarget {
     pub scope_context: String,
     /// The newest live roster this process discovered, even if persisting failed.
     pub last_live: Arc<arc_swap::ArcSwapOption<CachedDiscoveryEntry>>,
+    /// Publication order of overlapping refreshes, shared by every clone.
+    pub refresh_order: Arc<RefreshOrder>,
     pub bundled: Vec<ModelDescriptor>,
     pub sign_in_hint: String,
     pub display_name: String,
+}
+
+/// Orders overlapping refreshes of one target (Story 20.1d1b): a refresh that
+/// started earlier never publishes, persists or sets status over one that
+/// started later, e.g. a delayed response for an account that was replaced.
+#[derive(Default)]
+pub struct RefreshOrder {
+    started: std::sync::atomic::AtomicU64,
+    published: Mutex<u64>,
+}
+
+impl RefreshOrder {
+    /// Ticket taken when a refresh starts; later starts get larger tickets.
+    pub fn ticket(&self) -> u64 {
+        self.started
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    /// The publication slot for `ticket`, held across persist and publish, or
+    /// `None` once a later-started refresh has published.
+    pub async fn publish(&self, ticket: u64) -> Option<tokio::sync::MutexGuard<'_, u64>> {
+        let mut published = self.published.lock().await;
+        if *published > ticket {
+            return None;
+        }
+        *published = ticket;
+        Some(published)
+    }
 }
 
 // ── Embedded seed catalog (Story 7.7 AC1) ────────────────────────────────

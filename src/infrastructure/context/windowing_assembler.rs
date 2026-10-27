@@ -239,6 +239,7 @@ fn gist_message(content: String) -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }
 
@@ -267,8 +268,8 @@ fn active_message_slice(
 }
 
 /// Estimated tokens of a single wire message (content + tool payloads +
-/// prefix/reasoning). Used identically for passthrough, active, and gist counts
-/// so `tokens_saved_*` is apples-to-apples (AC-11.6.6).
+/// prefix/reasoning + provider replay). Used identically for passthrough,
+/// active, and gist counts so `tokens_saved_*` is apples-to-apples (AC-11.6.6).
 fn message_tokens(m: &Message) -> usize {
     let mut n = estimate_tokens(&m.content);
     if let Some(p) = &m.context_prefix {
@@ -276,6 +277,10 @@ fn message_tokens(m: &Message) -> usize {
     }
     if let Some(r) = &m.reasoning_content {
         n += estimate_tokens(r);
+    }
+    // Same bytes/4 estimate as `estimate_tokens`, without encoding the payload.
+    for item in &m.provider_replay {
+        n += item.encoded_len() / 4;
     }
     for tr in &m.tool_results {
         n += estimate_tokens(&tr.content);

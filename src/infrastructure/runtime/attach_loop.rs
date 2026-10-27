@@ -272,6 +272,8 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
                 });
             }
             TurnPart::ToolResult { .. } => {}
+            // Never forwarded to attach clients; never part of their view.
+            TurnPart::ProviderReplay { .. } => {}
         }
     }
     ChatMessage {

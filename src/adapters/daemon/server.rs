@@ -53,6 +53,8 @@ use crate::domain::ports::StoragePort;
 use crate::domain::services::approval_runtime::{ApprovalRuntime, ApprovalRuntimeEvent};
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 
+mod assistant_turn;
+use assistant_turn::AssistantTurnBuffer;
 mod frame_decode;
 mod inbound_turn;
 use inbound_turn::{InboundTurnContext, spawn_turn_collector};
@@ -2075,7 +2077,7 @@ impl AttachServer {
         let fwd = self.clone();
         let fwd_shutdown = shutdown.clone();
         let forwarder = tokio::spawn(async move {
-            let mut assistant_buf = String::new();
+            let mut assistant_buf = AssistantTurnBuffer::default();
             let mut channel_rx = channel_rx;
             let mut cron_completion_rx = cron_completion_rx;
             loop {
@@ -2332,66 +2334,9 @@ impl AttachServer {
         }
     }
 
-    /// Retain exact proposal evidence without folding its private arguments or
-    /// result into the public prose transcript. Snapshots project these tools
-    /// out; the stored conversation and model continuation remain complete.
-    async fn retain_operator_private_chunk(&self, chunk: &StreamChunk) {
-        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
-        let mut conversation = self.conversation.lock().await;
-        match chunk {
-            StreamChunk::ToolUse { id, name, input } => {
-                conversation.messages.push(ChatMessage {
-                    id: generate_message_id(),
-                    role: MessageRole::Assistant,
-                    tool_calls: vec![ToolCallInfo {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: input.clone(),
-                        result: None,
-                        started_at_ms: None,
-                        completed_at_ms: None,
-                        status: None,
-                    }],
-                    created_at: crate::domain::models::session_meta::now_unix(),
-                    ..Default::default()
-                });
-            }
-            StreamChunk::ToolResult {
-                id,
-                content,
-                is_error,
-                diff,
-                ..
-            } => {
-                if let Some(tool) = conversation
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .flat_map(|message| message.tool_calls.iter_mut())
-                    .find(|tool| {
-                        tool.id == *id
-                            && tool.name
-                                == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
-                    })
-                {
-                    tool.result = Some(ToolResultInfo {
-                        content: content.clone(),
-                        is_error: *is_error,
-                        diff: diff.clone(),
-                    });
-                }
-            }
-            _ => return,
-        }
-        conversation.updated_at = crate::domain::models::session_meta::now_unix();
-        if let Err(error) = self.core.storage.save_conversation(&conversation).await {
-            tracing::warn!(%error, "persisting operator-private tool evidence failed");
-        }
-    }
-
     /// Fold an assistant turn into the conversation (persist on completion) and
     /// fan the projected event out to all attachments.
-    async fn handle_bus_event(&self, event: &AppEvent, assistant_buf: &mut String) {
+    async fn handle_bus_event(&self, event: &AppEvent, assistant_buf: &mut AssistantTurnBuffer) {
         match event {
             AppEvent::PeerProviderChunk { node, chunk, .. } => {
                 self.collect_peer_chunk(node, chunk).await;
@@ -2407,52 +2352,10 @@ impl AttachServer {
             }
             _ => {}
         }
-        if let AppEvent::ProviderChunk { chunk, .. } = event {
-            if chunk.is_operator_private() {
-                self.retain_operator_private_chunk(chunk).await;
-                self.operator_turn_active.store(true, Ordering::Release);
-                return;
-            }
-            match chunk {
-                StreamChunk::Text { content, .. } => {
-                    self.operator_turn_active.store(true, Ordering::Release);
-                    assistant_buf.push_str(content);
-                }
-                StreamChunk::TurnComplete { stop_reason } => {
-                    self.operator_turn_active.store(false, Ordering::Release);
-                    if *stop_reason == StopReason::Cancelled {
-                        // A cancelled turn has no committed assistant answer. In
-                        // particular, an aborted inbound turn can have already
-                        // streamed text, which must not become the prefix of the
-                        // next turn's answer.
-                        assistant_buf.clear();
-                    } else {
-                        self.commit_assistant_turn(assistant_buf, stop_reason).await;
-                        assistant_buf.clear();
-                        self.turn_complete.notify_waiters();
-                    }
-                    if let Some(router) = &self.urgency_router {
-                        let queued = router.idle_queue_snapshot().await;
-                        let count = queued.len();
-                        match self.surface_queued_interactions(queued).await {
-                            Ok(()) => router.drain_idle_queue(count).await,
-                            Err(error) => tracing::error!(
-                                %error,
-                                "failed to surface queued peer interactions; will retry at next idle"
-                            ),
-                        }
-                    }
-                }
-                StreamChunk::ToolUse { id, name, .. } => {
-                    assistant_buf.push_str(&format!("\n[tool use: {name} (id: {id})]\n"));
-                    self.operator_turn_active.store(true, Ordering::Release);
-                }
-                StreamChunk::ToolResult { content, .. } => {
-                    assistant_buf.push_str(&format!("[tool result: {content}]\n"));
-                    self.operator_turn_active.store(true, Ordering::Release);
-                }
-                _ => {}
-            }
+        if let AppEvent::ProviderChunk { chunk, .. } = event
+            && self.fold_operator_chunk(chunk, assistant_buf).await
+        {
+            return;
         }
         // 18.9b-a review patch (owner ruling 2026-09-06) — daemon-side
         // self-heal mirroring the TUI handler (tui/handlers/a2a_catalog.rs):
@@ -2494,42 +2397,6 @@ impl AttachServer {
         // Project → fan out (reusing the single `from_app_event` mapping).
         if let Some(raw) = RawEvent::from_app_event(event) {
             self.fanout(DaemonFrame::Event(raw)).await;
-        }
-    }
-
-    /// Append the accumulated assistant message (origin-tagged) and persist (AC4).
-    async fn commit_assistant_turn(&self, text: &str, stop_reason: &StopReason) {
-        if text.is_empty() {
-            return;
-        }
-        let origin = *self.active_channel_origin.lock().await;
-        let mut conv = self.conversation.lock().await;
-        conv.messages.push(ChatMessage {
-            id: generate_message_id(),
-            role: MessageRole::Assistant,
-            content: text.to_string(),
-            content_blocks: vec![],
-            tool_calls: vec![],
-            created_at: crate::domain::models::session_meta::now_unix(),
-            token_count: None,
-            stop_reason: Some(stop_reason.clone()),
-            synthetic: false,
-            images: vec![],
-            origin,
-            authorship: crate::domain::models::Authorship::HumanWritten,
-            send_authorization: crate::domain::models::SendAuthorization::Unknown,
-            retracted_at_ms: None,
-            history_source: Default::default(),
-        });
-        let now = crate::domain::models::session_meta::now_unix();
-        conv.updated_at = now;
-        conv.last_response_at = Some(now);
-        if let Err(e) = self.core.storage.save_conversation(&conv).await {
-            tracing::warn!(error = %e, "daemon: persisting conversation after turn failed");
-        }
-        drop(conv);
-        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
-            let _ = tx.send(text.to_string());
         }
     }
 
@@ -7025,7 +6892,7 @@ mod tests {
                         },
                     },
                 },
-                &mut String::new(),
+                &mut AssistantTurnBuffer::default(),
             )
             .await;
         for (index, socket) in sockets.iter_mut().enumerate() {
@@ -11097,7 +10964,7 @@ mod tests {
             journaled_server_with_urgency(core, conversation.clone(), domain_tx, journal, router);
         assert!(conversation.lock().await.messages.is_empty());
 
-        let mut assistant_buf = String::new();
+        let mut assistant_buf = AssistantTurnBuffer::default();
         server
             .handle_bus_event(
                 &AppEvent::ProviderChunk {
@@ -14083,7 +13950,7 @@ mod tests {
             tier: ConnectionTier::TrustedLocal,
             approval_ready: true,
         });
-        let mut assistant_buf = String::new();
+        let mut assistant_buf = AssistantTurnBuffer::default();
         server
             .handle_bus_event(
                 &AppEvent::DomainEvent(crate::domain::events::DomainEventPayload::Room(
@@ -14131,7 +13998,7 @@ mod tests {
         }));
         let (domain_tx, _domain_rx) = mpsc::unbounded_channel();
         let server = AttachServer::new(core, conversation.clone(), domain_tx);
-        let mut assistant_buf = String::new();
+        let mut assistant_buf = AssistantTurnBuffer::default();
 
         server
             .handle_bus_event(

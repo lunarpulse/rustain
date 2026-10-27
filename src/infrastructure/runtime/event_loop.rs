@@ -9852,6 +9852,7 @@ async fn generate_title(
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }];
     let options = CompletionOptions {
         session_id: Some(format!("{conversation_id}:title")),
@@ -10403,6 +10404,15 @@ mod tests {
             Some("conversation-b:title")
         );
         assert!(requests.iter().all(|request| request.tools.is_empty()));
+        // Story 20.1d1b: a title side request never carries provider replay state.
+        let messages = provider.messages.lock().await;
+        assert_eq!(messages.len(), 2);
+        assert!(
+            messages
+                .iter()
+                .flatten()
+                .all(|message| message.provider_replay.is_empty())
+        );
     }
 
     // `warning_notice_does_not_transfer_focus` moved to `handlers/notice.rs`

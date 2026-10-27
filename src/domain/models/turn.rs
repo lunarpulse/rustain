@@ -234,6 +234,11 @@ pub enum TurnPart {
         id: PartId,
         text: String,
     },
+    /// Operator-private provider replay state; never rendered.
+    ProviderReplay {
+        id: PartId,
+        item: super::stream::ProviderReplayItem,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +390,17 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
             id,
             text: msg.content.clone(),
         });
+    }
+
+    // Story 20.1d1b: replay state written by messages-only persisters (`ask`,
+    // ACP, the daemon) must survive the first turn-backed mirror rebuild.
+    for block in &msg.content_blocks {
+        if let super::ContentBlockType::ProviderReplay(item) = block {
+            turn.push_part(|id| TurnPart::ProviderReplay {
+                id,
+                item: item.clone(),
+            });
+        }
     }
 
     // One invocation per tool call

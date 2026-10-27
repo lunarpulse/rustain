@@ -187,4 +187,7 @@ impl crate::adapters::responses::WireProfile for Profile {
     fn client_metadata(&self) -> Option<&Value> {
         Some(&self.metadata)
     }
+    fn replay_provider(&self) -> Option<&str> {
+        Some(super::PROVIDER_KIND)
+    }
 }

@@ -136,6 +136,7 @@ fn user() -> Message {
         tool_uses: vec![],
         context_prefix: None,
         reasoning_content: None,
+        provider_replay: vec![],
     }
 }
 async fn login(server: &MockServer, token: &str) -> Arc<dyn AuthStorePort> {

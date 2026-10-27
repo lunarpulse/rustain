@@ -263,6 +263,7 @@ async fn ac2_keystone_run_turn_emits_the_real_overwrite_diff() {
             tool_uses: vec![],
             context_prefix: None,
             reasoning_content: None,
+            provider_replay: vec![],
         }],
         CompletionOptions {
             session_id: None,

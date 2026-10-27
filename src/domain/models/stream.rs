@@ -63,6 +63,11 @@ pub enum StreamChunk {
         usage: UsageInfo,
         session_id: Option<String>,
     },
+    /// Provider-owned replay state from a completed response (Story 20.1d1b
+    /// E1). Operator-private: kept in the operator's own history only.
+    ProviderReplay {
+        item: ProviderReplayItem,
+    },
     // v0.5+:
     // CompactBoundary,
     // SdkUserUuid { uuid: String },
@@ -73,15 +78,80 @@ pub enum StreamChunk {
 
 impl StreamChunk {
     /// Proposal arguments and results belong to the operator review surface,
-    /// not the tier-agnostic observer stream.
+    /// not the tier-agnostic observer stream. Provider replay state is
+    /// account-bound model state that never leaves the operator's history.
     pub fn is_operator_private(&self) -> bool {
         match self {
             Self::ToolUse { name, .. } => name == super::team_proposal::TEAM_PROPOSAL_TOOL_NAME,
             Self::ToolResult {
                 operator_private, ..
             } => *operator_private,
+            Self::ProviderReplay { .. } => true,
             _ => false,
         }
+    }
+}
+
+/// One provider-native response item kept for replay to the same provider kind
+/// and model (Story 20.1d1b E1). `payload` is the provider's reduced item, e.g.
+/// Codex `{type, summary, content, encrypted_content}`. It is shared, not
+/// copied, as the item moves through the turn loop, reducer mirror and keepers.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderReplayItem {
+    pub provider: String,
+    pub model: String,
+    #[serde(with = "shared_value")]
+    pub payload: std::sync::Arc<serde_json::Value>,
+}
+
+mod shared_value {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S: Serializer>(
+        value: &Arc<serde_json::Value>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Arc<serde_json::Value>, D::Error> {
+        serde_json::Value::deserialize(deserializer).map(Arc::new)
+    }
+}
+
+impl ProviderReplayItem {
+    /// Encoded payload size in bytes, measured without materialising the JSON.
+    pub fn encoded_len(&self) -> usize {
+        struct Count(usize);
+        impl std::io::Write for Count {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0 += bytes.len();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut count = Count(0);
+        let _ = serde_json::to_writer(&mut count, self.payload.as_ref());
+        count.0
+    }
+}
+
+/// Never prints `summary`, `content` or `encrypted_content`, so `tracing` and
+/// panic messages cannot leak the replayed reasoning.
+impl std::fmt::Debug for ProviderReplayItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderReplayItem")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("type", &self.payload["type"].as_str().unwrap_or(""))
+            .field("bytes", &self.encoded_len())
+            .finish()
     }
 }
 
