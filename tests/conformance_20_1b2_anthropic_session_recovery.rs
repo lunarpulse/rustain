@@ -171,7 +171,7 @@ async fn tracked_handle_forces_fresh_row_and_declines_same_bearer_or_disabled_ro
         let recovered = handle.recover(&rejected).await.unwrap();
         assert_eq!(recovered.is_some(), retried);
         if let Some(auth) = recovered {
-            assert_eq!(auth.bearer_secret().expose_secret(), "ROTATED-ACCESS");
+            assert_eq!(auth.auth.bearer_secret().expose_secret(), "ROTATED-ACCESS");
         }
         assert_eq!(store.snapshot().await.unwrap().rows("anthropic")[0].rev, 2);
         assert!(
@@ -189,7 +189,14 @@ async fn tracked_handle_forces_fresh_row_and_declines_same_bearer_or_disabled_ro
             1
         );
         store
-            .disable_if_matches("anthropic", rejected.row.unwrap().0, 2, "operator disabled")
+            .disable_if_matches(
+                "anthropic",
+                rustain::domain::models::CredentialStamp {
+                    rev: 2,
+                    ..rejected.row.unwrap()
+                },
+                "operator disabled",
+            )
             .await
             .unwrap();
         assert!(handle.recover(&rejected).await.unwrap().is_none());
@@ -258,7 +265,12 @@ async fn k03_concurrent_recovery_adopts_one_rotation_in_process_and_across_store
         send.send(()).unwrap();
         for result in [one.await.unwrap(), two.await] {
             assert_eq!(
-                result.unwrap().unwrap().bearer_secret().expose_secret(),
+                result
+                    .unwrap()
+                    .unwrap()
+                    .auth
+                    .bearer_secret()
+                    .expose_secret(),
                 "PEER-ACCESS"
             );
         }
@@ -322,6 +334,7 @@ fn messages() -> Vec<Message> {
 }
 fn options() -> CompletionOptions {
     CompletionOptions {
+        session_id: None,
         model: "test-model".into(),
         max_tokens: 8,
         system_prompt: String::new(),
@@ -834,7 +847,7 @@ async fn grant_warning_window_duration_branches_disabled_rows_and_empty_json() {
     let snapshot = store.snapshot().await.unwrap();
     let row = &snapshot.rows("anthropic")[0];
     store
-        .disable_if_matches("anthropic", row.id, row.rev, "operator disabled")
+        .disable_if_matches("anthropic", row.stamp(), "operator disabled")
         .await
         .unwrap();
     let human = cli_status(dir.path(), &server, deadline, false).await;
@@ -854,8 +867,20 @@ async fn removed_row_and_new_stale_revision_are_rechecked_under_the_lease() {
     login(&server, &store, NOW, 3600).await;
     let handle = handle(store.clone());
     let rejected = handle.current().await.unwrap();
-    // A real re-login writes a newer but stale revision before recovery wins its lease.
-    login(&server, &store, NOW - 3_600_000, 3600).await;
+    // A peer refresh writes a newer but stale revision in the same login epoch.
+    let snapshot = store.snapshot().await.unwrap();
+    let row = &snapshot.rows("anthropic")[0];
+    let Credential::OAuth(mut stale) = row.credential.clone() else {
+        panic!("real login must produce OAuth");
+    };
+    stale.expires_at_ms = NOW;
+    assert_eq!(
+        store
+            .replace_if_matches("anthropic", row.stamp(), Credential::OAuth(stale))
+            .await
+            .unwrap(),
+        rustain::domain::models::CasOutcome::Applied
+    );
     refresh(&server, "NEW-REV-ACCESS", 200).await;
     assert_eq!(
         handle
@@ -863,6 +888,7 @@ async fn removed_row_and_new_stale_revision_are_rechecked_under_the_lease() {
             .await
             .unwrap()
             .unwrap()
+            .auth
             .bearer_secret()
             .expose_secret(),
         "NEW-REV-ACCESS"
@@ -953,26 +979,24 @@ impl AuthStorePort for FailingWrites {
     async fn replace_if_matches(
         &self,
         provider: &str,
-        id: rustain::domain::models::CredentialId,
-        expected_rev: u64,
+        expected: rustain::domain::models::CredentialStamp,
         cred: Credential,
     ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(rustain::domain::errors::AuthError::Io("injected".into()));
         }
         self.inner
-            .replace_if_matches(provider, id, expected_rev, cred)
+            .replace_if_matches(provider, expected, cred)
             .await
     }
     async fn disable_if_matches(
         &self,
         provider: &str,
-        id: rustain::domain::models::CredentialId,
-        expected_rev: u64,
+        expected: rustain::domain::models::CredentialStamp,
         cause: &str,
     ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
         self.inner
-            .disable_if_matches(provider, id, expected_rev, cause)
+            .disable_if_matches(provider, expected, cause)
             .await
     }
     async fn remove(&self, provider: &str) -> Result<(), rustain::domain::errors::AuthError> {
@@ -1007,6 +1031,7 @@ async fn unpersisted_mint_leaves_the_unchanged_stored_bearer_recoverable() {
             .await
             .unwrap()
             .unwrap()
+            .auth
             .bearer_secret()
             .expose_secret(),
         "ROTATED-ACCESS"
@@ -1021,6 +1046,7 @@ async fn unpersisted_mint_leaves_the_unchanged_stored_bearer_recoverable() {
             .await
             .unwrap()
             .unwrap()
+            .auth
             .bearer_secret()
             .expose_secret(),
         "ROTATED-ACCESS"

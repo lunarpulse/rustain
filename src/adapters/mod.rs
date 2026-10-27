@@ -20,6 +20,7 @@ pub mod daily_log_memory;
 pub mod file_scanner;
 pub mod filesystem;
 pub mod importers;
+pub mod install_id;
 #[cfg(feature = "p2p")]
 pub mod iroh;
 pub mod isolation;
@@ -94,6 +95,12 @@ pub mod anthropic;
 
 #[cfg(feature = "openai")]
 pub mod openai;
+
+#[cfg(feature = "openai")]
+pub mod openai_codex;
+
+#[cfg(feature = "openai")]
+pub mod responses;
 
 #[cfg(feature = "ollama")]
 pub mod ollama;

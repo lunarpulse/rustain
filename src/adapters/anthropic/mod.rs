@@ -156,10 +156,10 @@ impl AnthropicAdapter {
         }
         *used = true;
         if let AnthropicCredential::Resolved(handle) = &self.credential
-            && let Some(auth) = handle.recover(resolved).await?
+            && let Some(refreshed) = handle.recover(resolved).await?
         {
-            validate_auth(&auth)?;
-            resolved.auth = auth;
+            validate_auth(&refreshed.auth)?;
+            *resolved = refreshed;
             return Ok(true);
         }
         Ok(false)
@@ -193,7 +193,7 @@ impl AnthropicAdapter {
     }
 
     fn official(&self) -> bool {
-        crate::infrastructure::provider_factory::anthropic_oauth_allowed(&self.base_url)
+        crate::infrastructure::provider_factory::oauth_allowed("anthropic", &self.base_url)
     }
 }
 
@@ -425,6 +425,7 @@ impl StreamingProvider for AnthropicAdapter {
                 .timeout(std::time::Duration::from_secs(5));
             let bytes = if let Some(profile) = &profile {
                 let options = CompletionOptions {
+                    session_id: None,
                     model: self.model.clone(),
                     max_tokens: 1,
                     system_prompt: String::new(),

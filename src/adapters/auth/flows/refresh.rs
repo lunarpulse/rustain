@@ -78,10 +78,12 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
             &self.http,
             policy.identity_hook,
             &projected.access,
+            &value,
             &mut projected.identity,
             true,
         )
-        .await;
+        .await
+        .map_err(|_| RefreshFailure::Transient("oauth refresh identity invalid".into()))?;
         Ok(RefreshedTokens {
             access: projected.access,
             refresh: (!token::refresh_secret(&projected.refresh).is_empty())

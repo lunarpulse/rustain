@@ -313,6 +313,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: "You are helpful.".into(),
@@ -349,6 +350,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 1024,
             system_prompt: String::new(),
@@ -382,6 +384,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -463,6 +466,7 @@ mod tests {
             },
         ];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -538,6 +542,7 @@ mod tests {
             },
         ];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -582,6 +587,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -630,6 +636,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -663,6 +670,7 @@ mod tests {
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 8192,
             system_prompt: String::new(),

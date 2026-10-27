@@ -10,6 +10,7 @@ const KEYS: &[&str] = &[
     "ANTHROPIC_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
+    "OPENAI_CODEX_OAUTH_TOKEN",
     "OPENROUTER_API_KEY",
     "GOOGLE_API_KEY",
     "DEEPSEEK_API_KEY",
@@ -109,10 +110,17 @@ async fn k01_home_key_provisions_without_config_and_env_unlocks() {
         .collect();
     assert_eq!(
         locked,
-        ["anthropic", "deepseek", "google", "moonshot", "openai"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect()
+        [
+            "anthropic",
+            "deepseek",
+            "google",
+            "moonshot",
+            "openai",
+            "openai-codex"
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     );
     assert_eq!(
         layer
@@ -606,6 +614,102 @@ async fn k12_login_rediscovery_bypasses_a_matching_fresh_cache_only_after_rows_c
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+#[serial]
+async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision() {
+    use futures::future::BoxFuture;
+    use rustain::adapters::auth::flows::{self, FlowCtx, LoginUi};
+    use rustain::domain::models::{AuthMethod, SecretString};
+    use rustain::infrastructure::model_discovery::rediscover_after_login;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    struct KeyUi(&'static str);
+    impl LoginUi for KeyUi {
+        fn on_auth_url(&self, _: &str, _: &str, _: &str) {
+            panic!("API-key login must not open a browser");
+        }
+        fn on_progress(&self, _: &str) {}
+        fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {
+            Box::pin(async { Some(SecretString::new(self.0.into())) })
+        }
+        fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
+            None
+        }
+        fn cancel_token(&self) -> CancellationToken {
+            CancellationToken::new()
+        }
+    }
+    async fn login_key(key: &'static str, cfg: &AppConfig) {
+        let store: Arc<dyn AuthStorePort> = Arc::new(FileAuthStore::new());
+        let context = FlowCtx::new(Arc::new(KeyUi(key)), Arc::new(|| 0))
+            .with_validation_config(cfg.provider["openai"].clone());
+        assert!(
+            flows::login("openai", &AuthMethod::ApiKey, &context, &store)
+                .await
+                .unwrap()
+                .validated
+        );
+    }
+
+    let world = World::new();
+    let server = MockServer::start().await;
+    let cfg = remote_config("openai", format!("{}/v1", server.uri()));
+    models(&server, 200, json!([{"id":"account-A-model"}])).await;
+    login_key("login-A", &cfg).await;
+    let before = FileAuthStore::new().snapshot().await.unwrap();
+    let original = &before.rows("openai")[0];
+    let layer = init_provider_layer(&cfg);
+    let cache = ModelCatalogCache::new();
+    assert_eq!(
+        refresh_target(
+            &layer.discovery_targets[0],
+            &cache,
+            Some(&layer.registry),
+            true
+        )
+        .await
+        .status,
+        DiscoveryStatus::Ok
+    );
+
+    std::fs::remove_file(world.dir.path().join("auth.json")).unwrap();
+    models(&server, 200, json!([{"id":"account-B-model"}])).await;
+    login_key("login-B", &cfg).await;
+    let after = FileAuthStore::new().snapshot().await.unwrap();
+    let replacement = &after.rows("openai")[0];
+    assert_eq!(replacement.id, original.id);
+    assert_eq!(replacement.rev, original.rev);
+
+    // Exclude B's completed validation probe; observe only the post-login refresh.
+    models(&server, 200, json!([{"id":"account-B-model"}])).await;
+    let report = rediscover_after_login("openai", &cfg, &before)
+        .await
+        .expect("a recreated store's new grant must rediscover despite repeated id/rev");
+    assert_eq!(report.status, DiscoveryStatus::Ok);
+    assert_eq!(report.model_count, 1);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url.path(), "/v1/models");
+    assert_eq!(requests[0].headers["authorization"], "Bearer login-B");
+    assert_eq!(
+        cache.load().await.providers["openai"]
+            .models
+            .iter()
+            .map(|model| model.model_id.as_str())
+            .collect::<Vec<_>>(),
+        ["account-B-model"]
+    );
+
+    server.reset().await;
+    assert!(
+        rediscover_after_login("openai", &cfg, &after)
+            .await
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
 #[cfg(all(feature = "anthropic", feature = "models-dev"))]
 #[tokio::test]
 #[serial]
@@ -784,7 +888,7 @@ async fn explicit_overrides_disabled_rows_unknown_kinds_and_locked_router_are_di
     );
     world.set("GW_TOKEN", "gateway-key");
     let layer = init_provider_layer(&cfg);
-    assert!(layer.registry.provider_ids().contains("anthropic"));
+    assert!(layer.registry.provider_ids().contains("zai"));
     assert!(
         !layer
             .registry
@@ -796,7 +900,7 @@ async fn explicit_overrides_disabled_rows_unknown_kinds_and_locked_router_are_di
         layer
             .discovery_targets
             .iter()
-            .any(|t| t.provider_id == "anthropic")
+            .any(|t| t.provider_id == "zai")
     );
     cfg.provider.clear();
     let mut hidden = config("openai", "openai", "OPENAI_API_KEY", None);
@@ -824,6 +928,7 @@ async fn explicit_overrides_disabled_rows_unknown_kinds_and_locked_router_are_di
         .stream_completion(
             vec![],
             rustain::domain::models::CompletionOptions {
+                session_id: None,
                 model: "claude-sonnet-4-6".into(),
                 max_tokens: 1,
                 system_prompt: String::new(),
@@ -863,7 +968,7 @@ async fn explicit_overrides_disabled_rows_unknown_kinds_and_locked_router_are_di
     );
     assert_eq!(
         layer.router.abort().await.unwrap_err().to_string(),
-        "router: no active provider 'anthropic' — Anthropic has no credentials configured. \
+        "router: no active provider 'zai' — Anthropic has no credentials configured. \
          Run `rustain auth login anthropic`"
     );
 }

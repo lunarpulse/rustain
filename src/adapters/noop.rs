@@ -11,7 +11,7 @@ use futures::stream::BoxStream;
 use crate::domain::errors::{AuthError, PermissionError, ProviderError, StorageError, ToolError};
 use crate::domain::models::ApprovalScope;
 use crate::domain::models::credential::{
-    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin,
+    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin, CredentialStamp,
 };
 use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::usage::UsageLedgerEntry;
@@ -75,6 +75,58 @@ impl StreamingProvider for NoOpProvider {
             model_count: 0,
             display_name: "NoOp".to_string(),
         }
+    }
+}
+
+/// Recording test double for production request-frontdoor tests.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RecordingProvider {
+    pub requests: tokio::sync::Mutex<Vec<CompletionOptions>>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl StreamingProvider for RecordingProvider {
+    async fn stream_completion(
+        &self,
+        _messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+        self.requests.lock().await.push(options);
+        Ok(Box::pin(futures::stream::iter([
+            StreamChunk::Text {
+                content: "Recorded response".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: crate::domain::models::StopReason::EndTurn,
+            },
+        ])))
+    }
+
+    async fn abort(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    fn provider_id(&self) -> String {
+        "recording".into()
+    }
+
+    fn list_models(&self) -> Vec<ModelDescriptor> {
+        Vec::new()
+    }
+
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        Ok(crate::domain::ports::ProbeOutcome {
+            latency: std::time::Duration::ZERO,
+        })
     }
 }
 
@@ -294,8 +346,7 @@ impl AuthStorePort for NoOpAuthStore {
     async fn replace_if_matches(
         &self,
         _provider: &str,
-        _id: CredentialId,
-        _expected_rev: u64,
+        _expected: CredentialStamp,
         _cred: Credential,
     ) -> Result<CasOutcome, AuthError> {
         Ok(CasOutcome::Stale)
@@ -303,8 +354,7 @@ impl AuthStorePort for NoOpAuthStore {
     async fn disable_if_matches(
         &self,
         _provider: &str,
-        _id: CredentialId,
-        _expected_rev: u64,
+        _expected: CredentialStamp,
         _cause: &str,
     ) -> Result<CasOutcome, AuthError> {
         Ok(CasOutcome::Stale)

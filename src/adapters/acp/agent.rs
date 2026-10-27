@@ -709,6 +709,7 @@ impl RustainAcpAgent {
             &self.app_config.router,
         );
         let options = CompletionOptions {
+            session_id: Some(conversation.id.clone()),
             model: resolved.model.clone(),
             max_tokens: 8192,
             system_prompt,

@@ -171,6 +171,8 @@ fn reduce_pricing(catalog: &Catalog) -> Result<HashMap<String, PricingConfig>> {
 }
 
 /// Supported rustain provider ids and their models.dev source keys.
+/// Codex has no source key in models.dev; OpenAI API-only rows are not a
+/// subscription roster and must not be mapped into its bundled catalogue.
 pub const MODELS_DEV_PROVIDERS: &[(&str, &str)] = &[
     ("anthropic", "anthropic"),
     ("openai", "openai"),

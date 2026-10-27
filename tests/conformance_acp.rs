@@ -467,8 +467,7 @@ impl rustain::domain::ports::AuthStorePort for StaticAuthStore {
     async fn replace_if_matches(
         &self,
         _provider: &str,
-        _id: rustain::domain::models::CredentialId,
-        _rev: u64,
+        _expected: rustain::domain::models::CredentialStamp,
         _cred: rustain::domain::models::Credential,
     ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
         Ok(rustain::domain::models::CasOutcome::Stale)
@@ -476,8 +475,7 @@ impl rustain::domain::ports::AuthStorePort for StaticAuthStore {
     async fn disable_if_matches(
         &self,
         _provider: &str,
-        _id: rustain::domain::models::CredentialId,
-        _rev: u64,
+        _expected: rustain::domain::models::CredentialStamp,
         _cause: &str,
     ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
         Ok(rustain::domain::models::CasOutcome::Stale)
@@ -733,6 +731,7 @@ async fn acp_authenticate_checks_credential_presence() {
     let row = StoredCredential {
         id: CredentialId(1),
         rev: 1,
+        generation: rustain::domain::models::CredentialGeneration([1; 16]),
         origin: CredentialOrigin::Stored,
         credential: Credential::ApiKey(SecretString::new("acp-stored-secret".to_owned())),
         last_validated: None,
@@ -2365,6 +2364,7 @@ async fn run_direct_turn_collect_text(workspace: &Path) -> String {
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: None,
         model: "test".into(),
         max_tokens: 8192,
         system_prompt: String::new(),

@@ -132,7 +132,7 @@ pub static RUN_TURN_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub async fn run_turn(
     provider: Arc<dyn StreamingProvider>,
     mut messages: Vec<Message>,
-    options: CompletionOptions,
+    mut options: CompletionOptions,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     _security: Arc<dyn SecurityPort>,
     tools: Arc<dyn ToolSetPort>,
@@ -169,6 +169,9 @@ pub async fn run_turn(
     // this handle refreshes scheduler enforcement between tool calls.
     skill_activator: Option<Arc<crate::adapters::skill_activation::SkillActivator>>,
 ) {
+    if options.session_id.as_deref() != Some(conversation_id.as_str()) {
+        options.session_id = Some(conversation_id.clone());
+    }
     #[cfg(any(test, feature = "test-instrumentation"))]
     RUN_TURN_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Persist the conversation before the first API call so that

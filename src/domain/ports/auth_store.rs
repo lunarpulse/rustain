@@ -1,12 +1,12 @@
 //! Provider credential lifecycle. Implementations serialize read-modify-write,
-//! fence refresh writes by stable row identity and revision, and elect one
-//! refresher across processes (ADR-19-1-03 no-daemon path).
+//! fence refresh writes by row identity, revision, and login generation, and
+//! elect one refresher across processes (ADR-19-1-03 no-daemon path).
 
 use async_trait::async_trait;
 
 use crate::domain::errors::AuthError;
 use crate::domain::models::credential::{
-    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin,
+    AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin, CredentialStamp,
 };
 
 /// Cross-process refresh election, held across one bounded refresh exchange so
@@ -43,15 +43,13 @@ pub trait AuthStorePort: Send + Sync {
     async fn replace_if_matches(
         &self,
         provider: &str,
-        id: CredentialId,
-        expected_rev: u64,
+        expected: CredentialStamp,
         cred: Credential,
     ) -> Result<CasOutcome, AuthError>;
     async fn disable_if_matches(
         &self,
         provider: &str,
-        id: CredentialId,
-        expected_rev: u64,
+        expected: CredentialStamp,
         cause: &str,
     ) -> Result<CasOutcome, AuthError>;
     async fn remove(&self, provider: &str) -> Result<(), AuthError>;

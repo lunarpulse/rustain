@@ -280,6 +280,8 @@ impl ModelCatalogCache {
 #[derive(Clone)]
 pub struct DiscoveryTarget {
     pub provider_id: String,
+    /// Transport/catalogue kind, independent of the configured runtime map key.
+    pub kind: String,
     pub provider: Arc<dyn StreamingProvider>,
     pub cache_ttl_seconds: u64,
     pub model_filter: Vec<String>,

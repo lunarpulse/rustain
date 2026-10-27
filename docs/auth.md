@@ -5,7 +5,7 @@ entry, logout, and offline status inspection.
 
 ## Provider availability
 
-The built-in Anthropic, OpenAI, OpenRouter, Google AI, DeepSeek and Moonshot
+The built-in Anthropic, ChatGPT Codex, OpenAI, OpenRouter, Google AI, DeepSeek and Moonshot
 catalogues are visible without adding provider configuration. A home
 `auth.json` credential or a non-empty provider environment variable unlocks its
 provider from any working directory. Workspace configuration remains an explicit
@@ -44,8 +44,11 @@ rebuilt once as v3;
 bundled seed and existing pricing-cache compatibility are unchanged.
 
 After login actually changes stored rows, rustain immediately discovers that
-provider again and reports its result on stderr. Login stdout and success exit
-status are unchanged even if discovery fails.
+provider again when it supports live discovery and reports its result on stderr.
+Codex uses its seeded catalogue through the same catalogue-merge path and prints
+no discovery line after login. models.dev currently has no Codex provider source;
+unrelated OpenAI API models are not promoted into the subscription catalogue.
+Login stdout and success exit status are unchanged even if discovery fails.
 
 An unreadable or future-version `auth.json` produces a warning and falls back to
 environment credentials in startup, `auth status`, `auth list`, and ACP.
@@ -56,8 +59,9 @@ neither stored nor environment credentials can serve.
 
 ## `rustain auth login <provider>`
 
-Anthropic supports Claude Pro/Max browser subscription login and API keys. Other
-keyed providers use masked API-key entry with pre-storage validation.
+Anthropic supports Claude Pro/Max browser subscription login and API keys.
+ChatGPT Codex supports browser subscription login. Other keyed providers use
+masked API-key entry with pre-storage validation.
 
 ### Usage
 
@@ -65,12 +69,13 @@ keyed providers use masked API-key entry with pre-storage validation.
 rustain auth login anthropic --method oauth     # Claude Pro/Max browser login
 rustain auth login anthropic --method api-key   # Anthropic console key or subscription token
 rustain auth login openai                      # store an OpenAI API key
+rustain auth login openai-codex                 # ChatGPT Plus/Pro browser login
 rustain auth login ollama       # reports "no API key required"
 ```
 
 With multiple methods, an interactive terminal offers a numbered picker. Without
 a terminal, choose `--method oauth` explicitly; API-key entry still requires a TTY.
-The browser flow prints its authorization URL to stderr, listens on localhost
+The Anthropic browser flow prints its authorization URL to stderr, listens on localhost
 port 54545 (falling back to a free port when necessary), and uses PKCE and a
 separate CSRF state. In a terminal it also accepts the final redirect URL, a
 `code=…&state=…` query (any parameter order, optional leading `?` or `#`),
@@ -86,6 +91,46 @@ prohibit third-party applications from offering Claude.ai login or routing
 Free/Pro/Max subscription credentials. Using this flow can put your account at
 risk of provider action. Its availability here is not a claim of Anthropic
 approval; use an Anthropic console API key if you do not accept that risk.
+
+**Codex subscription policy risk:** This third-party client uses ChatGPT
+subscription credentials with an omp-compatible request profile; its availability
+does not imply OpenAI approval. Provider policies or backend changes may restrict
+access or put your account at risk. rustain does not refuse subscription
+tokens. Use the separate `openai` API-key provider if you do not
+accept subscription-client risk.
+
+### ChatGPT Plus/Pro (Codex Subscription)
+
+Run `rustain auth login openai-codex` and finish the browser authorization.
+There is one login method, so no method picker is needed. The PKCE callback is
+`http://localhost:1455/auth/callback`: port **1455 is pinned**. If it is busy,
+release the port and retry; rustain never substitutes a random callback port.
+The shared state checking, paste fallback and cancellation rules apply.
+
+Codex uses the Responses SSE backend, not OpenAI Chat Completions. Stored OAuth
+tokens refresh lazily and can recover once after a rejected request. Alternatively,
+set `OPENAI_CODEX_OAUTH_TOKEN` to an OAuth access token; this is a static bearer,
+not an API key, and is not refreshed after a 401. Access-token claims supply the
+request's account identity. With neither source configured, the model selector
+keeps the public catalogue locked and shows
+``Set OPENAI_CODEX_OAUTH_TOKEN or run `rustain auth login openai-codex` ``.
+`rustain auth logout openai-codex` removes Codex's stored credentials only;
+an environment token remains effective until you unset it.
+
+Conversation IDs keep prompt-cache and turn-state affinity stable across restarts;
+title and compaction requests use separate conversation-scoped sessions. Codex and
+Claude Code share the private, locked `install-id` file in rustain's data directory.
+The wire compatibility identity is pinned to omp (`originator: omp`,
+`User-Agent: omp/18.12.6`), not rustain branding.
+
+Encrypted reasoning replay/continuity and live Codex roster discovery are not
+implemented here; they are scheduled for successor story **20-1d1b**. The picker
+serves the eight bundled models through the catalogue-merge path. models.dev has no
+Codex provider source today, so that layer is empty; health checks inspect only the
+models endpoint's status. Reasoning output items are not persisted or replayed.
+Upstream lists a 128,000-token maximum output, but rustain has no descriptor field
+or runtime consumer for that metadata: it does not send an output-token limit.
+
 
 OAuth login stores an enabled subscription credential with the login instant,
 account and organization identity when available. Re-login replaces the same
@@ -119,10 +164,10 @@ beats environment variables. Migrated v1 keys and older paste logins retain
 Bundled Anthropic status/list and startup check `ANTHROPIC_AUTH_TOKEN` before
 `ANTHROPIC_API_KEY`; config-driven availability and construction use the configured env name.
 
-Every Anthropic request resolves its current credential through one shared
+Every Anthropic and Codex request resolves its current credential through one shared
 resolver per process. A stale-only subscription builds successfully and refreshes
 on first use; status/list/ACP already consider that row configured. The engine
-subtracts a 300-second expiry margin and the resolver applies another 60 seconds.
+subtracts a 300-second expiry margin for Anthropic (zero for Codex), and the resolver applies another 60 seconds.
 Disabled rows never serve. An unreadable or newer-version store warns and ignores
 stored rows while runtime/env credentials remain usable.
 
@@ -168,24 +213,36 @@ fingerprint, not rustain's own version.
 
 ### Store migration and downgrade safety
 
-The v2 store keeps provider arrays with stable row IDs, revisions, origin,
-validation timestamps and optional `disabled_cause`. OAuth access and refresh
-tokens are secret-wrapped in memory. v1 reads migrate in memory without writing;
-the first write persists v2. Unknown credential types survive unrelated writes
-verbatim and never participate in selection. Files newer than v2 are rejected,
-never overwritten; synchronous startup warns and ignores their stored credentials.
-Older binaries cannot read a v2 store that holds credentials, and their
+The v2 store keeps provider arrays with row IDs, revisions, an opaque grant
+generation, origin, validation timestamps and optional `disabled_cause`. A login
+creates a new generation even when it updates an existing row for the same
+identity. Refresh preserves the generation and advances the revision. OAuth access
+and refresh tokens are secret-wrapped in memory. Legacy v2 rows without a generation
+remain readable without writing: their initial generation is derived from the
+provider and original row, then persisted on the next write. v1 reads likewise
+migrate in memory; the first write persists v2. Unknown credential types survive
+unrelated writes verbatim and never participate in selection. Files newer than v2
+are rejected, never overwritten; synchronous startup warns and ignores their
+stored credentials.
+Binaries predating the v2 store cannot read it when it holds credentials; their
 read-before-write guard prevents clobbering it. An empty v2 store (every
 provider removed) is readable by an older binary, which rewrites it as v1; the
 next v2 read migrates it again. Back up the store before downgrading; do not
 expect an older binary to use v2 credentials.
 
+Do not run pre-generation v2 writers alongside this version. They can drop the
+`generation` field, causing an in-flight fenced refresh to discard its stale
+write and potentially require signing in again. Stop older rustain processes
+before upgrading. Mixed-version writers are unsupported; this version fails
+closed rather than switching accounts.
+
 OAuth refresh is lazy and elects one refresher per store across processes:
 the refresher holds an advisory lock on `auth.json.refresh.lock` while it
-re-reads the row, runs the bounded (10 s) exchange and writes the revision-checked
-result. Two rustain processes therefore never spend one rotating refresh token
-concurrently. The lease wait is bounded at 15 s. A peer's already-fresh rotation
-is adopted. Transient errors retain the row; definitive revocation disables it
+re-reads the exact grant, runs the bounded (10 s) exchange and writes the
+generation- and revision-checked result. Two rustain processes therefore never
+spend one rotating refresh token concurrently. The lease wait is bounded at 15 s.
+A peer's already-fresh rotation of the same grant is adopted. Transient errors
+retain the row; definitive revocation disables it
 with a sanitized cause. The kernel releases the lease if its holder exits.
 
 Writes fsync the temporary file and parent directory around atomic rename.
@@ -200,16 +257,24 @@ redirects, so a code, verifier or refresh token is only ever sent to its policy
 origin; a redirect fails the login or leaves the refresh transient.
 
 For stored OAuth subscriptions only, an HTTP 401 before streaming content can
-force a refresh of the **same row** and retry once with a different bearer.
+force a refresh of the **same grant** and retry once with a different bearer.
 Streaming completions, health checks, connectivity probes and discovery share this policy.
 A second 401 ends the request; HTTP 403 never triggers refresh or account
 rotation. Runtime/login/env/stored API keys (including pasted/env `sk-ant-oat`
 tokens) do not receive this auth retry. A removed/disabled row, unchanged bearer,
 or fresh token this process minted within five minutes is not retried. A peer's
-newer fresh revision is adopted under the store lease rather than minted again.
+newer fresh revision of the same generation is adopted under the store lease
+rather than minted again. Re-login or deleting/recreating `auth.json` cannot make
+an already-running request switch grants, even if row ID, revision or identity
+are reused. A replacement grant is neither refreshed on that request's behalf nor
+overwritten by an older in-flight refresh; start a new request after login.
 Transient refresh failure surfaces as a connection failure without disabling
 the row. Cancellation still lets an in-flight forced refresh persist its rotated
 token. Auth recovery and strictly-newer version retries have independent budgets.
+For providers that support live model discovery, the post-login refresh also
+compares the full grant stamp: recreating the store cannot suppress rediscovery
+merely because a row ID and revision repeat. Codex live discovery remains separate,
+as described below.
 
 ### Supported providers
 
@@ -338,14 +403,15 @@ rustain auth list
 Example:
 
 ```text
-PROVIDER       AUTH METHODS  CONFIGURED  SIGNUP URL
-Anthropic *    oauth, api-key ✓          https://console.anthropic.com/
-OpenAI         api-key       ✓           https://platform.openai.com/api-keys
-OpenRouter     api-key                   https://openrouter.ai/keys
-Google AI      api-key                   https://aistudio.google.com/apikey
-DeepSeek       api-key                   https://platform.deepseek.com/api_keys
-Moonshot AI    api-key                   https://platform.moonshot.cn/console/api-keys
-Ollama         none (local)  n/a         https://ollama.com/
+PROVIDER                               AUTH METHODS    CONFIGURED  SIGNUP URL
+Anthropic *                            oauth, api-key  ✓           https://console.anthropic.com/
+ChatGPT Plus/Pro (Codex Subscription)  oauth                       https://chatgpt.com/
+OpenAI                                 api-key         ✓           https://platform.openai.com/api-keys
+OpenRouter                             api-key                     https://openrouter.ai/keys
+Google AI                              api-key                     https://aistudio.google.com/apikey
+DeepSeek                               api-key                     https://platform.deepseek.com/api_keys
+Moonshot AI                            api-key                     https://platform.moonshot.cn/console/api-keys
+Ollama                                 none (local)    n/a         https://ollama.com/
 
 * = active default provider
 Run `rustain auth status` for credential sources, or `rustain auth login <provider>` to add one.
@@ -355,8 +421,8 @@ Run `rustain auth status` for credential sources, or `rustain auth login <provid
 
 - **PROVIDER** — display name; `*` suffix marks the active default provider
   (the first enabled `[provider]` entry in config, else `anthropic`).
-- **AUTH METHODS** — `oauth, api-key` for Anthropic, `api-key` for other
-  key-requiring providers, and `none (local)` for keyless providers like Ollama.
+- **AUTH METHODS** — `oauth, api-key` for Anthropic, `oauth` for ChatGPT Codex,
+  `api-key` for other keyed providers, and `none (local)` for keyless providers.
 - **CONFIGURED** — `✓` if a credential is found (env var or `auth.json`);
   blank if absent; `n/a` for keyless providers (no credential concept).
 - **SIGNUP URL** — where to create/manage API keys for this provider.
@@ -403,5 +469,5 @@ Notes:
   (`null` ≠ `false` — keyless providers have no credential concept).
 - `is_default` marks the configured default provider (config-intent, not
   build-verified).
-- `auth_methods` tokens are snake_case (`api_key`, `none`).
+- `auth_methods` tokens are snake_case (`oauth`, `api_key`, `none`).
 - No `source` field — use `auth status --json` for credential provenance.

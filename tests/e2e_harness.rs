@@ -511,6 +511,7 @@ impl TestHarness {
 
         let messages = self.build_api_messages();
         let options = CompletionOptions {
+            session_id: None,
             model: "test-model".into(),
             max_tokens: 8192,
             system_prompt: String::new(),
@@ -1142,6 +1143,7 @@ fn test_e2e_empty_system_prompt_no_crash() {
     // The API messages should not include a system field
     let messages = h.build_api_messages();
     let options = CompletionOptions {
+        session_id: None,
         model: "test".into(),
         max_tokens: 8192,
         system_prompt: String::new(), // Empty — no CLAUDE.md

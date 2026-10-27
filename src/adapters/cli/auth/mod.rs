@@ -21,7 +21,6 @@ pub(crate) struct SourceSelection {
     pub source: AuthSource,
     pub material: SelectionMaterial,
     pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
-    pub row: Option<(crate::domain::models::CredentialId, u64)>,
     pub identity: Option<String>,
 }
 
@@ -44,7 +43,6 @@ impl SourceSelection {
             source: selection.source,
             material: selection.material,
             last_validated: selection.last_validated,
-            row: selection.row.map(|row| (row.id, row.rev)),
             identity,
         }
     }
@@ -100,7 +98,7 @@ pub(crate) fn source_for_configured(
     });
     if let Some((id, cfg)) = configured {
         let kind = cfg.kind.as_deref().unwrap_or(id);
-        let rows_key = if kind == "anthropic" {
+        let rows_key = if crate::adapters::auth::policies::oauth_api(kind).is_some() {
             &cfg.provider_id
         } else {
             id
@@ -111,16 +109,23 @@ pub(crate) fn source_for_configured(
         } else {
             std::slice::from_ref(&env_name)
         };
-        let oauth_allowed = kind != "anthropic"
-            || crate::infrastructure::provider_factory::anthropic_oauth_allowed(
-                &crate::infrastructure::provider_factory::anthropic_base_url(Some(cfg), env_lookup),
-            );
+        let base = if kind == "anthropic" {
+            crate::infrastructure::provider_factory::anthropic_base_url(Some(cfg), env_lookup)
+        } else {
+            crate::infrastructure::provider_factory::discovery_base_url(id, cfg)
+        };
+        let oauth_allowed = crate::infrastructure::provider_factory::oauth_allowed(kind, &base);
         source_for(rows_key, env_vars, snapshot, env_lookup, oauth_allowed)
     } else {
-        let oauth_allowed = provider_id != "anthropic"
-            || crate::infrastructure::provider_factory::anthropic_oauth_allowed(
-                &crate::infrastructure::provider_factory::anthropic_base_url(None, env_lookup),
-            );
+        let base = if provider_id == "anthropic" {
+            crate::infrastructure::provider_factory::anthropic_base_url(None, env_lookup)
+        } else {
+            crate::adapters::auth::policies::oauth_api(provider_id)
+                .map(|policy| crate::adapters::auth::policies::endpoint(policy.api_origin))
+                .unwrap_or_default()
+        };
+        let oauth_allowed =
+            crate::infrastructure::provider_factory::oauth_allowed(provider_id, &base);
         source_for(
             provider_id,
             &env_vars_for(provider_id, default_env),

@@ -148,6 +148,7 @@ fn config(base: &str, env: &str) -> ProviderConfig {
 }
 fn options() -> CompletionOptions {
     CompletionOptions {
+        session_id: None,
         model: "test-model".into(),
         max_tokens: 32,
         system_prompt: "Be concise.".into(),

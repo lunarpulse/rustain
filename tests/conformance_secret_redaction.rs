@@ -124,11 +124,14 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         "adapters/anthropic/claude_code.rs",
         // Candidate keys go directly to the fixed validation adapter, never env.
         "adapters/auth/flows/api_key.rs",
-        // Bootstrap bearer is exposed only at the outbound HTTP boundary.
+        // The identity hook exposes the access token once: the Anthropic bootstrap
+        // header or local Codex JWT claim decoding, never logs or stored identity.
         "adapters/auth/flows/identity.rs",
         // Refresh bearer is exposed only into the token grant body.
         "adapters/auth/flows/token.rs",
         "adapters/openai/mod.rs",
+        // One boundary builds the sensitive bearer header and decodes its request JWT.
+        "adapters/openai_codex/profile.rs",
         "domain/models/credential.rs",
         "domain/models/secret.rs",
         // Recovery compares the rejected bearer once to refuse same-token replay.
@@ -151,9 +154,9 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 19,
-        "expose_secret() pinned count changed: got {count}, expected 19. \
-         Recovery adds one consolidated same-bearer comparison; \
+        count, 20,
+        "expose_secret() pinned count changed: got {count}, expected 20. \
+         Codex adds one consolidated bearer-header/JWT boundary; \
          stored credentials otherwise retain their secret wrappers."
     );
 }
@@ -219,6 +222,7 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
         // a failed connect and greps every surfaced string for the password.
         "adapters/mcp/client.rs",
+        // Codex's distinct configured base is exposed only for its actual HTTP endpoint.
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -235,9 +239,9 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 6,
-        "expose_url() pinned count changed: got {count}, expected 6. \
-         If you added a legitimate call site, update the allowlist AND this count."
+        count, 7,
+        "expose_url() pinned count changed: got {count}, expected 7. \
+         Codex adds one construction-consistent configured-base boundary."
     );
 }
 

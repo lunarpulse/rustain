@@ -22,9 +22,14 @@
 
 #![cfg(unix)]
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use assert_cmd::cargo::cargo_bin;
@@ -80,6 +85,7 @@ const ENV_UNBOUND_3: &str = "RUSTAIN_19_18D_PROCESS_RUNS_UNBOUND_3";
 const SHORT_BUDGET: Duration = Duration::from_secs(60);
 const LOG_BUDGET: Duration = Duration::from_secs(60);
 const INDIVIDUAL_POLICY_FILE: &str = "a2a-interaction.toml";
+const LISTENER_BOUND_LOG: &str = "A2A listener bound";
 
 /// RFC 8032 test-vector 1 public key: a valid Ed25519 point, which the daemon's
 /// egress composition requires of every pinned roster peer.
@@ -96,21 +102,99 @@ fn pin_of(key: [u8; 32]) -> PeerId {
     PeerId::from_jwk_ed25519_x(&b64(key)).expect("32-byte ed25519 x")
 }
 
-/// A pinned roster entry (`p1`) and an unpinned one (`u`).
-fn pinned_agent(key: [u8; 32]) -> serde_json::Value {
-    serde_json::json!({
-        "url": "https://p1.example/a2a",
-        "pinnedKey": { "alg": "EdDSA", "x": b64(key) },
-    })
+/// An exclusively owned peer endpoint. Discovery gets a local 404 rather than
+/// attempting external egress; the roster still carries real pinned/unpinned
+/// entries through the production resolver.
+struct PeerFixture {
+    address: SocketAddr,
+    stopping: Arc<AtomicBool>,
+    requests: Receiver<String>,
+    worker: Option<JoinHandle<()>>,
 }
 
-fn unpinned_agent() -> serde_json::Value {
-    serde_json::json!({ "url": "https://u.example/a2a" })
+impl PeerFixture {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind owned roster endpoint");
+        let address = listener.local_addr().expect("roster endpoint address");
+        let stopping = Arc::new(AtomicBool::new(false));
+        let worker_stopping = stopping.clone();
+        let (request_tx, requests) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else {
+                    break;
+                };
+                if worker_stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Ok(request) = Self::respond(stream) {
+                    let _ = request_tx.send(request);
+                }
+            }
+        });
+        Self {
+            address,
+            stopping,
+            requests,
+            worker: Some(worker),
+        }
+    }
+
+    fn respond(mut stream: TcpStream) -> std::io::Result<String> {
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        let mut request = String::new();
+        {
+            let mut reader = BufReader::new(&mut stream);
+            reader.read_line(&mut request)?;
+            let mut header = String::new();
+            loop {
+                header.clear();
+                if reader.read_line(&mut header)? == 0 {
+                    return Err(std::io::ErrorKind::UnexpectedEof.into());
+                }
+                if header == "\r\n" {
+                    break;
+                }
+            }
+        }
+        stream.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )?;
+        Ok(request)
+    }
+
+    fn expect_card_requests(&self, aliases: &[&str]) {
+        let mut actual = aliases
+            .iter()
+            .map(|_| {
+                self.requests
+                    .recv_timeout(LOG_BUDGET)
+                    .expect("child must discover its owned loopback roster endpoint")
+            })
+            .collect::<Vec<_>>();
+        let mut expected = aliases
+            .iter()
+            .map(|alias| format!("GET /{alias}/a2a/.well-known/agent-card.json HTTP/1.1\r\n"))
+            .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(
+            actual, expected,
+            "boot discovery must stay on the local roster fixture"
+        );
+    }
 }
 
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a free port");
-    listener.local_addr().expect("local addr").port()
+impl Drop for PeerFixture {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        // Wake the blocking accept, then join before releasing the bound socket.
+        let _ = TcpStream::connect_timeout(&self.address, Duration::from_secs(1));
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 // ── One isolated run: workspace, HOME, data dir, config dir ─────────────────
@@ -119,6 +203,7 @@ struct Run {
     data_dir: tempfile::TempDir,
     config_dir: tempfile::TempDir,
     home: tempfile::TempDir,
+    peers: PeerFixture,
 }
 
 impl Run {
@@ -128,7 +213,19 @@ impl Run {
             data_dir: tempfile::tempdir().expect("data dir"),
             config_dir: tempfile::tempdir().expect("config dir"),
             home: tempfile::tempdir().expect("home"),
+            peers: PeerFixture::new(),
         }
+    }
+
+    fn pinned_agent(&self, key: [u8; 32]) -> serde_json::Value {
+        serde_json::json!({
+            "url": format!("http://{}/p1/a2a", self.peers.address),
+            "pinnedKey": { "alg": "EdDSA", "x": b64(key) },
+        })
+    }
+
+    fn unpinned_agent(&self) -> serde_json::Value {
+        serde_json::json!({ "url": format!("http://{}/u/a2a", self.peers.address) })
     }
 
     fn write_rustain_file(&self, name: &str, body: &str) {
@@ -147,7 +244,7 @@ impl Run {
 
     /// Spawn `rustain <args>` with every location isolated. Copied from
     /// `conformance_18_3b_policy.rs:122-133` (+ HOME/XDG isolation).
-    fn spawn(&self, args: &[String], env: &[(&str, &str)], stderr: Stdio) -> Guard {
+    fn spawn(&self, args: &[String], env: &[(&str, &str)], stderr: Stdio) -> Guard<'_> {
         let mut command = Command::new(cargo_bin("rustain"));
         command
             .args(args)
@@ -157,13 +254,15 @@ impl Run {
             .env("XDG_DATA_HOME", self.home.path().join("xdg-data"))
             .env("RUSTAIN_DATA_DIR", self.data_dir.path())
             .env("RUSTAIN_CONFIG_DIR", self.config_dir.path())
+            .env("RUSTAIN_LOG_PATH", self.data_dir.path().join("rustain.log"))
+            .env("RUST_LOG", "rustain=info")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(stderr);
         for (name, value) in env {
             command.env(name, value);
         }
-        Guard::new(command.spawn().expect("spawn rustain"))
+        Guard::new(command.spawn().expect("spawn rustain"), self)
     }
 
     fn daemon_args(&self, serve: Option<u16>) -> Vec<String> {
@@ -178,8 +277,8 @@ impl Run {
         args
     }
 
-    fn standalone_args(port: u16) -> Vec<String> {
-        vec![format!("--serve-a2a=127.0.0.1:{port}")]
+    fn standalone_args() -> Vec<String> {
+        vec!["--serve-a2a=127.0.0.1:0".to_owned()]
     }
 
     fn log(&self) -> String {
@@ -192,13 +291,19 @@ impl Run {
 }
 
 // ── Child guard: terminate + reap on every exit path ────────────────────────
-struct Guard {
+struct Guard<'run> {
     child: Option<Child>,
+    // The child must be terminated and reaped before its peer socket or dirs
+    // can be released, including when an assertion unwinds.
+    _run: &'run Run,
 }
 
-impl Guard {
-    fn new(child: Child) -> Self {
-        Self { child: Some(child) }
+impl<'run> Guard<'run> {
+    fn new(child: Child, run: &'run Run) -> Self {
+        Self {
+            child: Some(child),
+            _run: run,
+        }
     }
 
     fn child(&mut self) -> &mut Child {
@@ -251,7 +356,7 @@ impl Guard {
     }
 }
 
-impl Drop for Guard {
+impl Drop for Guard<'_> {
     fn drop(&mut self) {
         self.terminate();
     }
@@ -324,12 +429,21 @@ fn wait_for_pid(pid_path: &Path, budget: Duration) -> Option<u32> {
 /// Start the daemon and wait for its readiness marker (the PID file, written
 /// only after the A2A listener handshake). Fails early with the log when the
 /// child exits instead.
-fn start_ready_daemon(run: &Run, serve: Option<u16>, env: &[(&str, &str)]) -> Guard {
+fn start_ready_daemon<'run>(
+    run: &'run Run,
+    serve: Option<u16>,
+    env: &[(&str, &str)],
+) -> Guard<'run> {
     let mut guard = run.spawn(&run.daemon_args(serve), env, Stdio::null());
+    wait_ready_daemon(run, &mut guard);
+    guard
+}
+
+fn wait_ready_daemon(run: &Run, guard: &mut Guard<'_>) {
     let deadline = Instant::now() + LOG_BUDGET;
     loop {
         if wait_for_pid(&run.pid_path(), Duration::from_millis(200)).is_some() {
-            return guard;
+            return;
         }
         if let Some(status) = guard.child().try_wait().expect("poll daemon") {
             panic!(
@@ -343,6 +457,29 @@ fn start_ready_daemon(run: &Run, serve: Option<u16>, env: &[(&str, &str)]) -> Gu
             run.log()
         );
     }
+}
+
+/// Discover the kernel-assigned socket from this child's isolated log. The
+/// address publication follows the bind safety gates; HTTP remains the
+/// standalone readiness assertion.
+fn wait_for_listener_addr(run: &Run) -> SocketAddr {
+    let log = wait_for_log(run.data_dir.path(), &[LISTENER_BOUND_LOG], LOG_BUDGET)
+        .unwrap_or_else(|log| panic!("child never published its bound listener address:\n{log}"));
+    let mut publications = log.lines().filter(|line| line.contains(LISTENER_BOUND_LOG));
+    let line = publications.next().expect("bound-address log is present");
+    assert!(
+        publications.next().is_none(),
+        "one child must publish exactly one bound listener address:\n{log}"
+    );
+    let address: SocketAddr = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("bound_addr="))
+        .expect("listener publication must contain bound_addr")
+        .parse()
+        .expect("listener publication must contain a socket address");
+    assert!(address.ip().is_loopback(), "listener must remain loopback");
+    assert_ne!(address.port(), 0, "listener must publish its actual port");
+    address
 }
 
 fn assert_contains(log: &str, needle: &str, what: &str) {
@@ -363,11 +500,10 @@ fn assert_absent(log: &str, needle: &str, what: &str) {
 fn k10p_run(server: serde_json::Value, env: &[(&str, &str)]) -> String {
     let run = Run::new();
     run.write_a2a(
-        Some(serde_json::json!({ "p1": pinned_agent(VALID_PIN_KEY) })),
+        Some(serde_json::json!({ "p1": run.pinned_agent(VALID_PIN_KEY) })),
         server,
     );
-    let port = free_port();
-    let mut daemon = start_ready_daemon(&run, Some(port), env);
+    let mut daemon = start_ready_daemon(&run, Some(0), env);
     let outcome = wait_for_log(
         run.data_dir.path(),
         &[PEER_BINDING_LOOPBACK_WARNING],
@@ -512,21 +648,24 @@ fn k12_an_unpinned_alias_is_refused_with_r2_on_both_roots() {
 
     let standalone = Run::new();
     standalone.write_a2a(
-        Some(serde_json::json!({ "u": unpinned_agent() })),
+        Some(serde_json::json!({ "u": standalone.unpinned_agent() })),
         server.clone(),
     );
     expect_refusal(
         &standalone,
-        &Run::standalone_args(free_port()),
+        &Run::standalone_args(),
         &expected,
         "standalone R2",
     );
 
     let daemon = Run::new();
-    daemon.write_a2a(Some(serde_json::json!({ "u": unpinned_agent() })), server);
+    daemon.write_a2a(
+        Some(serde_json::json!({ "u": daemon.unpinned_agent() })),
+        server,
+    );
     expect_refusal(
         &daemon,
-        &daemon.daemon_args(Some(free_port())),
+        &daemon.daemon_args(Some(0)),
         &expected,
         "daemon R2",
     );
@@ -544,7 +683,7 @@ fn k12_an_alias_absent_from_the_roster_is_refused_with_r1_on_both_roots() {
     standalone.write_a2a(None, server.clone());
     expect_refusal(
         &standalone,
-        &Run::standalone_args(free_port()),
+        &Run::standalone_args(),
         &expected,
         "standalone R1 (absent roster)",
     );
@@ -553,7 +692,7 @@ fn k12_an_alias_absent_from_the_roster_is_refused_with_r1_on_both_roots() {
     daemon.write_a2a(Some(serde_json::json!({})), server);
     expect_refusal(
         &daemon,
-        &daemon.daemon_args(Some(free_port())),
+        &daemon.daemon_args(Some(0)),
         &expected,
         "daemon R1 (empty roster)",
     );
@@ -566,11 +705,10 @@ fn k12_an_alias_absent_from_the_roster_is_refused_with_r1_on_both_roots() {
 fn k12_a_pinned_roster_starts_the_daemon_root() {
     let run = Run::new();
     run.write_a2a(
-        Some(serde_json::json!({ "p1": pinned_agent(VALID_PIN_KEY) })),
+        Some(serde_json::json!({ "p1": run.pinned_agent(VALID_PIN_KEY) })),
         serde_json::json!({ "peerKeys": { ENV_BOUND_A: "p1" } }),
     );
-    let port = free_port();
-    let mut daemon = start_ready_daemon(&run, Some(port), &[(ENV_BOUND_A, "k12-bound-a")]);
+    let mut daemon = start_ready_daemon(&run, Some(0), &[(ENV_BOUND_A, "k12-bound-a")]);
     assert!(
         daemon.child().try_wait().expect("poll daemon").is_none(),
         "the daemon must still be alive once ready:\n{}",
@@ -587,12 +725,12 @@ fn k12_a_pinned_roster_starts_the_daemon_root() {
 
 /// Fetch `GET path` over plain HTTP/1.1 from a loopback listener; `None` while
 /// nothing answers.
-fn http_get_status(port: u16, path: &str) -> Option<String> {
-    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+fn http_get_status(address: SocketAddr, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(address).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
     )
     .ok()?;
     let mut text = String::new();
@@ -600,25 +738,25 @@ fn http_get_status(port: u16, path: &str) -> Option<String> {
     text.lines().next().map(str::to_owned)
 }
 
-/// Positive control, standalone root: readiness is the served agent card (no
-/// new readiness string). `M47` (standalone forwards an empty roster) turns
-/// this into an `R1` refusal.
+/// Positive control, standalone root: the log locates the kernel-assigned
+/// address, but readiness still requires the real served AgentCard. `M47`
+/// (standalone forwards an empty roster) turns this into an `R1` refusal.
 #[test]
 fn k12_a_pinned_roster_starts_the_standalone_root() {
     let run = Run::new();
     run.write_a2a(
-        Some(serde_json::json!({ "p1": pinned_agent(VALID_PIN_KEY) })),
+        Some(serde_json::json!({ "p1": run.pinned_agent(VALID_PIN_KEY) })),
         serde_json::json!({ "peerKeys": { ENV_BOUND_A: "p1" } }),
     );
-    let port = free_port();
     let mut server = run.spawn(
-        &Run::standalone_args(port),
+        &Run::standalone_args(),
         &[(ENV_BOUND_A, "k12-bound-a")],
         Stdio::piped(),
     );
+    let address = wait_for_listener_addr(&run);
     let deadline = Instant::now() + LOG_BUDGET;
     let status_line = loop {
-        if let Some(line) = http_get_status(port, "/.well-known/agent-card.json") {
+        if let Some(line) = http_get_status(address, "/.well-known/agent-card.json") {
             break line;
         }
         if let Some(status) = server.child().try_wait().expect("poll standalone") {
@@ -644,6 +782,94 @@ fn k12_a_pinned_roster_starts_the_standalone_root() {
         status_line.contains(" 200"),
         "agent card fetch must succeed, got `{status_line}`"
     );
+}
+
+/// Both real children start before either readiness wait. Their listener ports
+/// stay allocated by the children, and both pinned and unpinned boot discovery
+/// requests are observed on each run's still-owned loopback peer fixture.
+#[test]
+fn child_daemons_bind_distinct_kernel_assigned_ports_concurrently() {
+    let first = Run::new();
+    let second = Run::new();
+    for run in [&first, &second] {
+        run.write_a2a(
+            Some(serde_json::json!({
+                "p1": run.pinned_agent(VALID_PIN_KEY),
+                "u": run.unpinned_agent(),
+            })),
+            serde_json::json!({ "peerKeys": { ENV_BOUND_A: "p1" } }),
+        );
+    }
+    let env = [(ENV_BOUND_A, "concurrent-bound-a")];
+    let mut first_child = first.spawn(&first.daemon_args(Some(0)), &env, Stdio::null());
+    let mut second_child = second.spawn(&second.daemon_args(Some(0)), &env, Stdio::null());
+    wait_ready_daemon(&first, &mut first_child);
+    wait_ready_daemon(&second, &mut second_child);
+    let first_address = wait_for_listener_addr(&first);
+    let second_address = wait_for_listener_addr(&second);
+    assert_ne!(
+        first_address, second_address,
+        "live children must own distinct loopback sockets"
+    );
+    for (run, child, address) in [
+        (&first, &mut first_child, first_address),
+        (&second, &mut second_child, second_address),
+    ] {
+        assert!(
+            child.child().try_wait().expect("poll child").is_none(),
+            "child must remain alive after its PID readiness marker"
+        );
+        assert_contains(
+            &run.log(),
+            PEER_BINDING_LOOPBACK_WARNING,
+            "loopback binding warning (concurrent child)",
+        );
+        run.peers.expect_card_requests(&["p1", "u"]);
+        let status = http_get_status(address, "/.well-known/agent-card.json")
+            .expect("real child must serve its AgentCard");
+        assert!(status.contains(" 200"), "AgentCard fetch failed: {status}");
+    }
+    first_child.terminate();
+    second_child.terminate();
+}
+
+/// A genuinely occupied socket must fail the production bind handshake, not
+/// publish a PID or a successful listener address.
+#[test]
+fn an_occupied_a2a_address_refuses_daemon_readiness_without_a_pid() {
+    let occupied = TcpListener::bind("127.0.0.1:0").expect("hold occupied address");
+    let address = occupied.local_addr().expect("occupied address");
+    let run = Run::new();
+    run.write_a2a(
+        Some(serde_json::json!({ "p1": run.pinned_agent(VALID_PIN_KEY) })),
+        serde_json::json!({ "peerKeys": { ENV_BOUND_A: "p1" } }),
+    );
+    let mut child = run.spawn(
+        &run.daemon_args(Some(address.port())),
+        &[(ENV_BOUND_A, "occupied-bound-a")],
+        Stdio::piped(),
+    );
+    let status = child
+        .wait_exit(SHORT_BUDGET)
+        .expect("occupied listener must cause daemon startup to exit");
+    let stderr = child.stderr_after_exit();
+    let bind_error = std::io::Error::from_raw_os_error(libc::EADDRINUSE).to_string();
+    assert!(!status.success(), "occupied-address startup must fail");
+    assert!(
+        stderr.contains("A2A listener failed to start") && stderr.contains(&bind_error),
+        "the real bind failure must reach stderr: {stderr}"
+    );
+    assert!(
+        !run.pid_path().exists(),
+        "failed startup must not publish a PID"
+    );
+    assert_absent(
+        &run.log(),
+        LISTENER_BOUND_LOG,
+        "successful bound-address publication (occupied address)",
+    );
+    child.terminate();
+    drop(occupied);
 }
 
 // ═════════════════════════════════════════════════════════════════════════
@@ -691,7 +917,10 @@ fn widening_log(case: &WideningCase) -> String {
     if case.peer_keys {
         server["peerKeys"] = serde_json::json!({ ENV_BOUND_A: "p1" });
     }
-    run.write_a2a(Some(serde_json::json!({ "p1": pinned_agent(key) })), server);
+    run.write_a2a(
+        Some(serde_json::json!({ "p1": run.pinned_agent(key) })),
+        server,
+    );
     let mut policy = String::from("[interaction.defaults]\nresponse_mode = \"notify-and-auto\"\n");
     if case.p1_override {
         policy.push_str("[interaction.overrides.\"p1\"]\nresponse_mode = \"notify-and-auto\"\n");

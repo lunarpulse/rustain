@@ -1297,6 +1297,7 @@ pub async fn run() -> Result<()> {
         active_id: _active_id,
         unsupported_discovery,
         discovery_targets,
+        catalogue_targets,
     } = init_provider_layer(&app_config);
     // ArcSwap hot-swap holder wraps the router (not a bare adapter)
     let provider_swap = Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -1426,7 +1427,7 @@ pub async fn run() -> Result<()> {
                     }
                     provider.set_discovered_models(models);
                 }
-                let message = discovery_targets.iter().find(|target| target.provider_id == id)
+                let message = catalogue_targets.iter().find(|target| target.provider_id == id)
                     .map(crate::infrastructure::model_discovery::rejected_notice)
                     .unwrap_or_else(|| format!("Provider '{id}' rejected its credential (HTTP 401/403) — run `rustain auth login {id}`"));
                 (NoticeLevel::Warning, message)
@@ -2589,7 +2590,7 @@ pub async fn run() -> Result<()> {
     #[cfg(feature = "models-dev")]
     {
         let registry = provider_registry.clone();
-        let targets = discovery_targets.clone();
+        let targets = catalogue_targets.clone();
         let events = app_state.event_bus.clone();
         let config = app_config.clone();
         tokio::spawn(async move {
@@ -2662,6 +2663,8 @@ pub struct ProviderLayer {
     /// Providers where `discover_models = true` but the kind doesn't support it (Story 7.6 AC7).
     pub unsupported_discovery: Vec<(String, String)>, // (provider_id, kind)
     pub discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
+    /// Seeded catalogues republished after models.dev updates, without advertising discovery.
+    pub catalogue_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
 }
 
 pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
@@ -2670,22 +2673,38 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         Availability, ProviderOrigin, availability, effective_providers,
     };
     let provider_registry = Arc::new(crate::adapters::provider::ProviderRegistry::new());
-    let router = Arc::new(crate::adapters::provider::ProviderRouter::new(
-        "anthropic".into(),
-    ));
     let (snapshot, store_warning) =
         match crate::adapters::auth_store::FileAuthStore::try_snapshot_sync() {
             Ok(snapshot) => (snapshot, None),
             Err(error) => (Default::default(), Some(error.to_string())),
         };
+    let entries = effective_providers(app_config);
+    let initial_id = entries
+        .iter()
+        .find(|entry| {
+            entry.origin == ProviderOrigin::Config
+                && entry.cfg.enabled
+                && matches!(
+                    availability(
+                        entry,
+                        &snapshot,
+                        &crate::infrastructure::utils::env_var_trimmed
+                    ),
+                    Availability::Locked { .. }
+                )
+        })
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| "anthropic".into());
+    let router = Arc::new(crate::adapters::provider::ProviderRouter::new(
+        initial_id.clone(),
+    ));
     let mut deferred_notices = Vec::new();
     let mut unsupported_discovery = Vec::new();
     let mut discovery_targets = Vec::new();
+    let mut catalogue_targets = Vec::new();
     let mut first_config = None;
-    for entry in effective_providers(app_config)
-        .into_iter()
-        .filter(|entry| entry.cfg.enabled)
-    {
+    let mut anthropic_routed = false;
+    for entry in entries.into_iter().filter(|entry| entry.cfg.enabled) {
         let id = &entry.id;
         let cfg = &entry.cfg;
         if let Availability::Locked { hint } = availability(
@@ -2695,16 +2714,15 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         ) {
             let display_name = entry.display_name();
             let message = format!("{display_name} has no credentials configured. {hint}");
-            // An available Anthropic-kind entry routes as `anthropic`; keep the
-            // headless default's "no active provider" error actionable for aliases.
-            if entry.kind() == "anthropic" && id != "anthropic" {
-                router.register_locked("anthropic".into(), message.clone());
-            }
             router.register_locked(id.clone(), message);
-            let models = crate::infrastructure::model_discovery::public_catalog(
+            let mut models = crate::infrastructure::model_discovery::public_catalog(
                 id,
                 entry.kind(),
                 &cfg.model_filter,
+            );
+            crate::infrastructure::provider_factory::restrict_tools(
+                &mut models,
+                cfg.supports_tools == Some(false),
             );
             provider_registry.register_locked(LockedProvider {
                 provider_id: id.clone(),
@@ -2727,6 +2745,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                 }
                 let target = crate::adapters::model_catalog_cache::DiscoveryTarget {
                     provider_id: provider.provider_id(),
+                    kind: entry.kind().into(),
                     bundled: provider.list_models(),
                     credential_fingerprint:
                         crate::infrastructure::provider_factory::discovery_fingerprint(
@@ -2758,12 +2777,14 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                 // The rejected-credential pane offers the same actionable hint.
                 provider_registry
                     .set_sign_in_hint(&target.provider_id, target.sign_in_hint.clone());
+                anthropic_routed |= provider.provider_id() == "anthropic";
                 router.register(provider.clone());
                 provider_registry.register_arc(provider);
+                catalogue_targets.push(target.clone());
                 if cfg.discover_models {
                     if entry.kind() == "ollama" {
                         unsupported_discovery.push((id.clone(), entry.kind().to_owned()));
-                    } else {
+                    } else if entry.kind() != "openai-codex" {
                         discovery_targets.push(target);
                     }
                 }
@@ -2771,7 +2792,15 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
             Err(error) => deferred_notices.push((id.clone(), error)),
         }
     }
-    let active_id = first_config.unwrap_or_else(|| "anthropic".into());
+    // A routable default keeps serving; a locked configured entry names the
+    // missing login only when nothing usable would otherwise be active.
+    let active_id = first_config.unwrap_or_else(|| {
+        if anthropic_routed {
+            "anthropic".into()
+        } else {
+            initial_id
+        }
+    });
     if let Err(error) = router.set_active(&active_id) {
         tracing::debug!("Default provider is not available: {error}");
     }
@@ -2783,6 +2812,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
         active_id,
         unsupported_discovery,
         discovery_targets,
+        catalogue_targets,
     }
 }
 
@@ -2825,7 +2855,7 @@ fn build_anthropic_provider_from_env(
                 &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
                 &crate::adapters::auth_store::FileAuthStore::snapshot_sync(),
                 &lookup,
-                crate::infrastructure::provider_factory::anthropic_oauth_allowed(&base_url),
+                crate::infrastructure::provider_factory::oauth_allowed("anthropic", &base_url),
             )
             .is_some_and(|selected| {
                 matches!(

@@ -99,7 +99,10 @@ async fn run(
             if json {
                 println!("{}", result_json(&result));
             } else if result.method == "oauth" {
-                println!("{}", oauth_success(&display, &result.identity));
+                let AuthMethod::OAuthCode(policy) = method else {
+                    unreachable!("OAuth login result requires an OAuth method");
+                };
+                println!("{}", oauth_success(policy.login_name, &result.identity));
             } else if result.validated {
                 println!("✓ {display} credentials stored successfully.");
             } else {
@@ -209,8 +212,8 @@ pub(super) fn oauth_who(identity: &CredentialIdentity) -> Option<String> {
     // Provider-supplied identity reaches the terminal; strip controls as other CLI labels do.
     Some(crate::adapters::cli::session::list::sanitize_title(&who))
 }
-fn oauth_success(display: &str, identity: &CredentialIdentity) -> String {
-    let prefix = format!("Logged in to {display} (Claude Pro/Max)");
+fn oauth_success(login_name: &str, identity: &CredentialIdentity) -> String {
+    let prefix = format!("Logged in to {login_name}");
     oauth_who(identity).map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
 }
 fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, ProviderConfig)> {
@@ -288,7 +291,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            oauth_success("Anthropic", &identity),
+            oauth_success(
+                crate::adapters::auth::policies::ANTHROPIC_OAUTH.login_name,
+                &identity
+            ),
             "Logged in to Anthropic (Claude Pro/Max) as me@example.com (My Org)"
         );
         let json = result_json(&LoginResult {
@@ -301,13 +307,37 @@ mod tests {
         assert!(json["identity"].get("account_id").is_none());
     }
     #[test]
+    fn codex_success_uses_product_name_and_single_method_needs_no_picker() {
+        let methods = providers::lookup("openai-codex").unwrap().auth_methods;
+        let AuthMethod::OAuthCode(policy) = select_method(methods, None, false).unwrap() else {
+            panic!("Codex has browser OAuth only");
+        };
+        let identity = CredentialIdentity {
+            email: Some("user@example.com".into()),
+            org_name: Some("plus".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            oauth_success(policy.login_name, &identity),
+            "Logged in to ChatGPT Plus/Pro (Codex Subscription) as user@example.com (plus)"
+        );
+        assert_eq!(
+            oauth_success(policy.login_name, &CredentialIdentity::default()),
+            "Logged in to ChatGPT Plus/Pro (Codex Subscription)"
+        );
+        assert!(select_method(methods, Some(AuthLoginMethod::ApiKey), false).is_err());
+    }
+    #[test]
     fn provider_identity_cannot_inject_terminal_controls() {
         let identity = CredentialIdentity {
             email: Some("me@example.com\u{1b}]0;title\u{7}".into()),
             org_name: Some("Org\n  ⚠ forged".into()),
             ..Default::default()
         };
-        let line = oauth_success("Anthropic", &identity);
+        let line = oauth_success(
+            crate::adapters::auth::policies::ANTHROPIC_OAUTH.login_name,
+            &identity,
+        );
         assert!(!line.chars().any(char::is_control), "{line:?}");
     }
     #[test]

@@ -352,6 +352,7 @@ data: {\"type\":\"message_stop\"}\n\
             reasoning_content: None,
         }];
         let options = CompletionOptions {
+            session_id: None,
             model: "claude-sonnet-4-6".into(),
             max_tokens: 4096,
             system_prompt: "Be concise.".into(),
@@ -428,6 +429,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 1024,
                     system_prompt: String::new(),
@@ -480,6 +482,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 1024,
                     system_prompt: String::new(),
@@ -533,6 +536,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 1024,
                     system_prompt: String::new(),
@@ -609,6 +613,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 1024,
                     system_prompt: String::new(),
@@ -756,6 +761,7 @@ data: {\"type\":\"message_stop\"}\n\
                 reasoning_content: None,
             }],
             CompletionOptions {
+                session_id: None,
                 model: "test".into(),
                 max_tokens: 100,
                 system_prompt: String::new(),
@@ -853,6 +859,7 @@ data: {\"type\":\"message_stop\"}\n\
             .stream_completion(
                 vec![], // Empty messages
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 1024,
                     system_prompt: String::new(),
@@ -910,6 +917,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 100,
                     system_prompt: "Respond with exactly what the user asks.".into(),
@@ -979,6 +987,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "claude-sonnet-4-6".into(),
                     max_tokens: 100,
                     system_prompt: String::new(),
@@ -1028,6 +1037,7 @@ data: {\"type\":\"message_stop\"}\n\
                     reasoning_content: None,
                 }],
                 CompletionOptions {
+                    session_id: None,
                     model: "glm-4.7".into(),
                     max_tokens: 100,
                     system_prompt: String::new(),

@@ -402,6 +402,7 @@ fn retained_proposal_result_precedes_later_assistant_prose() {
     #[cfg(feature = "openai")]
     {
         let options = rustain::domain::models::CompletionOptions {
+            session_id: None,
             model: "history-contract".into(),
             max_tokens: 128,
             system_prompt: String::new(),

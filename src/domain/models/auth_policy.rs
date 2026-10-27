@@ -35,6 +35,7 @@ pub enum BodyEncoding {
 pub struct TokenRequestPolicy {
     pub url: &'static str,
     pub encoding: BodyEncoding,
+    pub timeout_ms: u64,
     pub headers: &'static [(&'static str, Tpl)],
     pub extra_params: &'static [(&'static str, Tpl)],
 }
@@ -55,12 +56,14 @@ pub struct TokenProjection {
 #[derive(Debug, Clone, Copy)]
 pub enum IdentityHook {
     AnthropicBootstrap,
+    CodexJwt,
 }
 
 /// PKCE is intrinsic: a confidential client secret cannot be represented.
 #[derive(Debug)]
 pub struct OAuthCodePolicy {
     pub label: &'static str,
+    pub login_name: &'static str,
     pub instructions: &'static str,
     pub paste_prompt: &'static str,
     pub client_id: ClientId,

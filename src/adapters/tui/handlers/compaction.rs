@@ -211,7 +211,7 @@ pub async fn run_compaction(payload: CompactionPayload) {
 
     let result = tokio::time::timeout(
         COMPACTION_TIMEOUT,
-        generate_compaction_summary(&*provider, &model, &history_text),
+        generate_compaction_summary(&*provider, &model, &conversation_id, &history_text),
     )
     .await;
 
@@ -250,6 +250,7 @@ pub async fn run_compaction(payload: CompactionPayload) {
 async fn generate_compaction_summary(
     provider: &dyn StreamingProvider,
     model: &str,
+    conversation_id: &str,
     history_text: &str,
 ) -> anyhow::Result<String> {
     use crate::domain::models::{CompletionOptions, Message, MessageRole as MsgRole};
@@ -264,6 +265,7 @@ async fn generate_compaction_summary(
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: Some(format!("{conversation_id}:compaction")),
         model: model.to_string(),
         max_tokens: 2048,
         system_prompt: crate::domain::services::compaction::COMPACTION_SYSTEM_PROMPT.to_string(),
@@ -281,3 +283,32 @@ async fn generate_compaction_summary(
 
 // `collect_text_chunks` consolidated to `domain/services/streaming_collect::collect_text`
 // per Story 8.0a Phase 4 (Winston Decision Gate amendment 2026-05-17).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn compaction_summary_uses_isolated_conversation_session() {
+        let provider = crate::adapters::noop::RecordingProvider::default();
+        assert_eq!(
+            generate_compaction_summary(&provider, "model", "conversation-a", "history")
+                .await
+                .unwrap(),
+            "Recorded response"
+        );
+        generate_compaction_summary(&provider, "model", "conversation-b", "history")
+            .await
+            .unwrap();
+        let requests = provider.requests.lock().await;
+        assert_eq!(
+            requests[0].session_id.as_deref(),
+            Some("conversation-a:compaction")
+        );
+        assert_eq!(
+            requests[1].session_id.as_deref(),
+            Some("conversation-b:compaction")
+        );
+        assert!(requests.iter().all(|request| request.tools.is_empty()));
+    }
+}

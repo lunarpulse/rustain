@@ -384,13 +384,15 @@ mod tests {
         last_validated: Option<DateTime<Utc>>,
     ) -> (String, crate::domain::models::StoredCredential) {
         use crate::domain::models::{
-            Credential, CredentialId, CredentialOrigin, SecretString, StoredCredential,
+            Credential, CredentialGeneration, CredentialId, CredentialOrigin, SecretString,
+            StoredCredential,
         };
         (
             provider.to_owned(),
             StoredCredential {
                 id: CredentialId(1),
                 rev: 1,
+                generation: CredentialGeneration([1; 16]),
                 origin: CredentialOrigin::Stored,
                 credential: Credential::ApiKey(SecretString::new(
                     "stored-status-secret".to_owned(),

@@ -410,6 +410,7 @@ mod tests {
             reasoning_content: None,
         }];
         let opts = CompletionOptions {
+            session_id: None,
             model: "gpt-4o".to_string(),
             max_tokens: 4096,
             system_prompt: String::new(),
@@ -653,6 +654,7 @@ mod tests {
 
         fn make_options() -> CompletionOptions {
             CompletionOptions {
+                session_id: None,
                 model: "test-model".to_string(),
                 max_tokens: 4096,
                 system_prompt: String::new(),

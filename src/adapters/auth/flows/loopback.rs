@@ -58,6 +58,12 @@ impl Loopback {
                             FlowError::configuration("Cannot bind OAuth callback listener")
                         })?
                 }
+                // A registered redirect cannot move: tell the user which port to free.
+                Err(e) if !fallback && e.kind() == io::ErrorKind::AddrInUse => {
+                    return Err(FlowError::configuration(format!(
+                        "Cannot bind: OAuth callback port {requested} is in use and the provider accepts only this callback port. Free port {requested} and retry."
+                    )));
+                }
                 Err(_) => {
                     return Err(FlowError::configuration(
                         "Cannot bind OAuth callback listener",

@@ -351,7 +351,8 @@ mod tests {
     use super::*;
     use crate::domain::models::{AppConfig, ProviderConfig};
     use crate::domain::models::{
-        Credential, CredentialId, CredentialOrigin, SecretString, StoredCredential,
+        Credential, CredentialGeneration, CredentialId, CredentialOrigin, SecretString,
+        StoredCredential,
     };
     use chrono::{DateTime, Utc};
 
@@ -380,6 +381,7 @@ mod tests {
             StoredCredential {
                 id: CredentialId(1),
                 rev: 1,
+                generation: CredentialGeneration([1; 16]),
                 origin: CredentialOrigin::Stored,
                 credential: Credential::ApiKey(SecretString::new("stored-test-key".to_owned())),
                 last_validated,
@@ -511,9 +513,9 @@ mod tests {
         assert!(!json.contains(SECRET), "json output leaked secret: {json}");
     }
 
-    // P0-2: All 7 providers listed
+    // All providers listed, including the browser-only subscription.
     #[test]
-    fn all_seven_providers_listed() {
+    fn all_providers_listed() {
         let rows = build_list_rows(
             providers::all_providers(),
             &std::collections::BTreeMap::new(),
@@ -521,7 +523,7 @@ mod tests {
             |_| None,
             "anthropic",
         );
-        assert_eq!(rows.len(), 7, "expected 7 providers from static table");
+        assert!(rows.iter().any(|r| r.provider == "openai-codex"));
         assert!(
             rows.iter().any(|r| r.provider == "ollama"),
             "keyless ollama should be present"
@@ -702,7 +704,6 @@ api_key_env = "DEEPSEEK_API_KEY"
             |_| None,
             &default_id,
         );
-        assert_eq!(rows.len(), 7, "still 7 static rows");
         let default_count = rows.iter().filter(|r| r.is_default).count();
         assert_eq!(
             default_count, 0,
@@ -751,7 +752,15 @@ api_key_env = "DEEPSEEK_API_KEY"
 
         assert_eq!(value["schema_version"], "1.0");
         let providers_arr = value["providers"].as_array().unwrap();
-        assert_eq!(providers_arr.len(), 7);
+        let codex = providers_arr
+            .iter()
+            .find(|row| row["provider"] == "openai-codex")
+            .unwrap();
+        assert_eq!(
+            codex["display_name"],
+            "ChatGPT Plus/Pro (Codex Subscription)"
+        );
+        assert_eq!(codex["auth_methods"], serde_json::json!(["oauth"]));
 
         let anthropic = &providers_arr[0];
         assert_eq!(anthropic["provider"], "anthropic");

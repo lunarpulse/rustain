@@ -126,12 +126,13 @@ pub fn select_ready<'a>(inputs: &CascadeInputs<'a>) -> Option<Selection<'a>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{CredentialIdentity, OAuthCredential};
+    use crate::domain::models::{CredentialGeneration, CredentialIdentity, OAuthCredential};
 
     fn oauth(id: u64, expires_at_ms: i64) -> StoredCredential {
         StoredCredential {
             id: CredentialId(id),
             rev: 1,
+            generation: CredentialGeneration([1; 16]),
             origin: CredentialOrigin::Stored,
             credential: Credential::OAuth(OAuthCredential {
                 access: format!("access-{id}").into(),

@@ -23,6 +23,7 @@ LIVE_IDS = ("account/native-chat-a", "account/native-chat-b")
 KEYS = {"openrouter": "sk-native-openrouter-account", "deepseek": "sk-native-rejected-deepseek"}
 PROVIDER_ENV = {
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY",
+    "OPENAI_CODEX_OAUTH_TOKEN",
     "OPENROUTER_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
     "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY", "XAI_API_KEY",
     "GROQ_API_KEY", "MISTRAL_API_KEY", "ZAI_API_KEY", "VOYAGE_API_KEY",

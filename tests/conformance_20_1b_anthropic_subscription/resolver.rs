@@ -5,7 +5,7 @@ use rustain::domain::{
     errors::{AuthError, ProviderError},
     models::{
         AuthSnapshot, CasOutcome, CompletionOptions, Credential, CredentialId, CredentialOrigin,
-        Message, MessageRole, ProviderConfig,
+        CredentialStamp, Message, MessageRole, ProviderConfig,
     },
     ports::{AuthStorePort, RefreshLease},
 };
@@ -72,6 +72,7 @@ fn identity() -> Value {
 }
 fn options() -> CompletionOptions {
     CompletionOptions {
+        session_id: None,
         model: "claude-test".into(),
         max_tokens: 8,
         system_prompt: String::new(),
@@ -273,8 +274,7 @@ impl AuthStorePort for FailingWrites {
     async fn replace_if_matches(
         &self,
         p: &str,
-        id: CredentialId,
-        rev: u64,
+        expected: CredentialStamp,
         c: Credential,
     ) -> Result<CasOutcome, AuthError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -285,16 +285,15 @@ impl AuthStorePort for FailingWrites {
         {
             return Err(AuthError::Io("injected disk outage".into()));
         }
-        self.inner.replace_if_matches(p, id, rev, c).await
+        self.inner.replace_if_matches(p, expected, c).await
     }
     async fn disable_if_matches(
         &self,
         p: &str,
-        id: CredentialId,
-        rev: u64,
+        expected: CredentialStamp,
         cause: &str,
     ) -> Result<CasOutcome, AuthError> {
-        self.inner.disable_if_matches(p, id, rev, cause).await
+        self.inner.disable_if_matches(p, expected, cause).await
     }
     async fn remove(&self, p: &str) -> Result<(), AuthError> {
         self.inner.remove(p).await

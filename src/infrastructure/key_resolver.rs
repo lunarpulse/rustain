@@ -1,6 +1,6 @@
-//! Lazy OAuth refresh: one flight per row within a resolver instance, one
+//! Lazy OAuth refresh: one flight per grant within a resolver instance, one
 //! refresher per store across processes (`AuthStorePort::refresh_lease`),
-//! revision-fenced writes.
+//! generation- and revision-fenced writes.
 //!
 //! Recovery policy adapted from oh-my-pi.
 //!
@@ -36,8 +36,8 @@ use tokio::sync::Mutex;
 
 use crate::domain::errors::{AuthError, ProviderError};
 use crate::domain::models::{
-    AuthSource, CasOutcome, Credential, CredentialId, CredentialIdentity, OAuthCredential,
-    ResolvedAuth, SecretString, StoredCredential,
+    AuthSource, CasOutcome, Credential, CredentialGeneration, CredentialId, CredentialIdentity,
+    CredentialStamp, OAuthCredential, ResolvedAuth, SecretString, StoredCredential,
 };
 use crate::domain::ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure};
 use crate::domain::services::key_cascade::{self, CascadeInputs, SelectionMaterial};
@@ -54,10 +54,9 @@ pub enum ResolveError {
 pub struct Resolved {
     pub source: AuthSource,
     pub auth: ResolvedAuth,
-    pub row: Option<(CredentialId, u64)>,
-    /// Account/org/project identity key of the stored OAuth row that produced
-    /// `auth` (the policy's scoping); row ids alone are reissued after a store
-    /// is recreated, identities are not.
+    /// Exact grant epoch and revision, not a reusable row id.
+    pub row: Option<CredentialStamp>,
+    /// Account/org/project identity key of the grant that actually produced `auth`.
     pub identity: Option<String>,
 }
 
@@ -74,6 +73,32 @@ fn oauth_identity(provider: &str, row: &StoredCredential) -> Option<String> {
     }
 }
 
+fn resolved_oauth(
+    provider: &str,
+    row: CredentialStamp,
+    access: SecretString,
+    identity: &CredentialIdentity,
+) -> Resolved {
+    Resolved {
+        source: AuthSource::StoredOAuth,
+        auth: ResolvedAuth::OAuth {
+            access,
+            account_id: identity.account_id.clone(),
+        },
+        row: Some(row),
+        identity: identity.key(crate::adapters::auth::policies::org_scoped_identity(
+            provider,
+        )),
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct RowKey {
+    provider: String,
+    id: CredentialId,
+    generation: CredentialGeneration,
+}
+
 /// One refresh exchange (omp `refresh.ts:43-44`).
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
 /// A peer process holds the lease for one bounded exchange plus its write.
@@ -86,8 +111,8 @@ pub struct KeyResolver {
     store: Arc<dyn AuthStorePort>,
     refresh: Arc<dyn OAuthRefreshPort>,
     clock: Arc<dyn Fn() -> i64 + Send + Sync>,
-    flights: Mutex<HashMap<CredentialId, Arc<RowFlight>>>,
-    recent_mints: Mutex<HashMap<CredentialId, (u64, i64)>>,
+    flights: Mutex<HashMap<RowKey, Arc<RowFlight>>>,
+    recent_mints: Mutex<HashMap<RowKey, (u64, i64)>>,
 }
 
 /// Per-row flight. Callers queued behind an exchange share its transient
@@ -102,7 +127,7 @@ struct RowFlight {
 }
 
 enum Attempt {
-    Ready(ResolvedAuth, u64),
+    Ready(Resolved),
     Skip,
     Transient(String),
 }
@@ -182,7 +207,12 @@ impl KeyResolver {
                 };
                 key_cascade::select(&inputs, &skip).map(|s| {
                     let identity = s.row.and_then(|row| oauth_identity(provider, row));
-                    (s.source, s.material, s.row.map(|r| (r.id, r.rev)), identity)
+                    (
+                        s.source,
+                        s.material,
+                        s.row.map(StoredCredential::stamp),
+                        identity,
+                    )
                 })
             };
             match selected {
@@ -194,30 +224,24 @@ impl KeyResolver {
                         identity,
                     }));
                 }
-                Some((_, SelectionMaterial::NeedsRefresh { id, .. }, _, identity)) => {
+                Some((_, SelectionMaterial::NeedsRefresh { id, .. }, Some(row), _)) => {
                     // Row-scoped, including CAS loss and transient errors. This bounds
                     // each call even when the disk changes while refreshing.
                     skip.insert(id);
-                    let attempt = match self.refresh_row(provider, id, None).await {
+                    let attempt = match self.refresh_row(provider, row, false).await {
                         Ok(attempt) => attempt,
                         Err(ResolveError::RefreshUnavailable { cause, .. }) => {
                             Attempt::Transient(cause)
                         }
                     };
                     match attempt {
-                        Attempt::Ready(auth, rev) => {
-                            return Ok(Some(Resolved {
-                                source: AuthSource::StoredOAuth,
-                                auth,
-                                row: Some((id, rev)),
-                                // The refreshed row is the selected row (same id,
-                                // updated in place only for the same identity).
-                                identity,
-                            }));
-                        }
+                        Attempt::Ready(resolved) => return Ok(Some(resolved)),
                         Attempt::Skip => {}
                         Attempt::Transient(cause) => transient = Some(cause),
                     }
+                }
+                Some((_, SelectionMaterial::NeedsRefresh { .. }, None, _)) => {
+                    unreachable!("a refresh candidate always has a stored row");
                 }
                 None => {
                     return match transient {
@@ -237,18 +261,14 @@ impl KeyResolver {
     pub async fn force_refresh(
         self: &Arc<Self>,
         provider: &str,
-        id: CredentialId,
-        rejected_rev: u64,
-    ) -> Result<Option<ResolvedAuth>, ResolveError> {
+        expected: CredentialStamp,
+    ) -> Result<Option<Resolved>, ResolveError> {
         let resolver = self.clone();
         let name = provider.to_owned();
         let provider = name.clone();
         tokio::spawn(async move {
-            match resolver
-                .refresh_row(&provider, id, Some(rejected_rev))
-                .await?
-            {
-                Attempt::Ready(auth, _) => Ok(Some(auth)),
+            match resolver.refresh_row(&provider, expected, true).await? {
+                Attempt::Ready(resolved) => Ok(Some(resolved)),
                 Attempt::Skip => Ok(None),
                 Attempt::Transient(cause) => {
                     Err(ResolveError::RefreshUnavailable { provider, cause })
@@ -265,28 +285,40 @@ impl KeyResolver {
     async fn refresh_row(
         &self,
         provider: &str,
-        id: CredentialId,
-        rejected_rev: Option<u64>,
+        expected: CredentialStamp,
+        forced: bool,
     ) -> Result<Attempt, ResolveError> {
-        let flight = self.flights.lock().await.entry(id).or_default().clone();
-        let attempt = self.fly(provider, id, &flight, rejected_rev).await;
+        let key = RowKey {
+            provider: provider.to_owned(),
+            id: expected.id,
+            generation: expected.generation,
+        };
+        let flight = self
+            .flights
+            .lock()
+            .await
+            .entry(key.clone())
+            .or_default()
+            .clone();
+        let attempt = self.fly(&key, expected, &flight, forced).await;
         // Forget the row once no other caller holds or awaits its flight.
         let mut flights = self.flights.lock().await;
-        if flights.get(&id).is_some_and(|f| Arc::ptr_eq(f, &flight))
+        if flights.get(&key).is_some_and(|f| Arc::ptr_eq(f, &flight))
             && Arc::strong_count(&flight) == 2
         {
-            flights.remove(&id);
+            flights.remove(&key);
         }
         attempt
     }
 
     async fn fly(
         &self,
-        provider: &str,
-        id: CredentialId,
+        key: &RowKey,
+        expected: CredentialStamp,
         flight: &RowFlight,
-        rejected_rev: Option<u64>,
+        forced: bool,
     ) -> Result<Attempt, ResolveError> {
+        let provider = key.provider.as_str();
         let queued_at = flight.finished.load(Ordering::SeqCst);
         let mut last_transient = flight.last_transient.lock().await;
         let joined = flight.finished.load(Ordering::SeqCst) != queued_at;
@@ -310,32 +342,32 @@ impl KeyResolver {
             Ok(snapshot) => snapshot,
             Err(_) => return Ok(Attempt::Transient("refresh store unavailable".into())),
         };
-        let Some(row) = snapshot
-            .rows(provider)
-            .iter()
-            .find(|row| row.id == id && row.disabled_cause.is_none())
-        else {
-            self.recent_mints.lock().await.remove(&id);
+        let Some(row) = snapshot.rows(provider).iter().find(|row| {
+            row.id == expected.id
+                && row.generation == expected.generation
+                && row.disabled_cause.is_none()
+        }) else {
+            self.recent_mints.lock().await.remove(key);
             return Ok(Attempt::Skip);
         };
         let Credential::OAuth(oauth) = &row.credential else {
-            self.recent_mints.lock().await.remove(&id);
+            self.recent_mints.lock().await.remove(key);
             return Ok(Attempt::Skip);
         };
-        let fresh = self.fresh(row);
+        let fresh = self.fresh(provider, row);
         let mut mints = self.recent_mints.lock().await;
-        let recent = mints.get(&id).is_some_and(|(rev, at)| {
+        let recent = mints.get(key).is_some_and(|(rev, at)| {
             *rev == row.rev
                 && fresh.is_some()
                 && (self.clock)().saturating_sub(*at) < REMINT_COOLDOWN_MS
         });
         if !recent {
-            mints.remove(&id);
+            mints.remove(key);
         }
         drop(mints);
-        if rejected_rev != Some(row.rev) {
-            if let Some(auth) = fresh {
-                return Ok(Attempt::Ready(auth, row.rev));
+        if !forced || expected.rev != row.rev {
+            if let Some(resolved) = fresh {
+                return Ok(Attempt::Ready(resolved));
             }
         } else if recent {
             return Ok(Attempt::Skip);
@@ -348,7 +380,7 @@ impl KeyResolver {
             return Ok(Attempt::Transient(cause.clone()));
         }
         // A stale new revision is refreshed with its current refresh token.
-        let attempt = self.exchange(provider, id, row, oauth).await;
+        let attempt = self.exchange(provider, key, row, oauth).await;
         *last_transient = match &attempt {
             Ok(Attempt::Transient(cause)) => Some((Some(row.rev), cause.clone())),
             _ => None,
@@ -360,7 +392,7 @@ impl KeyResolver {
     async fn exchange(
         &self,
         provider: &str,
-        id: CredentialId,
+        key: &RowKey,
         row: &StoredCredential,
         oauth: &OAuthCredential,
     ) -> Result<Attempt, ResolveError> {
@@ -376,72 +408,76 @@ impl KeyResolver {
         match result {
             Ok(tokens) => {
                 let access = tokens.access;
-                let account_id = tokens
-                    .identity
-                    .account_id
-                    .as_ref()
-                    .or(oauth.identity.account_id.as_ref())
-                    .cloned();
+                let identity = CredentialIdentity {
+                    account_id: tokens
+                        .identity
+                        .account_id
+                        .as_ref()
+                        .or(oauth.identity.account_id.as_ref())
+                        .cloned(),
+                    email: tokens
+                        .identity
+                        .email
+                        .as_ref()
+                        .or(oauth.identity.email.as_ref())
+                        .cloned(),
+                    project_id: tokens
+                        .identity
+                        .project_id
+                        .as_ref()
+                        .or(oauth.identity.project_id.as_ref())
+                        .cloned(),
+                    org_id: oauth.identity.org_id.clone(),
+                    org_name: oauth.identity.org_name.clone(),
+                };
                 let credential = || {
                     Credential::OAuth(OAuthCredential {
                         access: access.clone(),
                         refresh: tokens.refresh.as_ref().unwrap_or(&oauth.refresh).clone(),
                         expires_at_ms: tokens.expires_at_ms,
                         authorized_at_ms: oauth.authorized_at_ms,
-                        identity: CredentialIdentity {
-                            account_id: account_id.clone(),
-                            email: tokens
-                                .identity
-                                .email
-                                .as_ref()
-                                .or(oauth.identity.email.as_ref())
-                                .cloned(),
-                            project_id: tokens
-                                .identity
-                                .project_id
-                                .as_ref()
-                                .or(oauth.identity.project_id.as_ref())
-                                .cloned(),
-                            org_id: oauth.identity.org_id.clone(),
-                            org_name: oauth.identity.org_name.clone(),
-                        },
+                        identity: identity.clone(),
                     })
                 };
                 let mut persisted = self
                     .store
-                    .replace_if_matches(provider, id, row.rev, credential())
+                    .replace_if_matches(provider, row.stamp(), credential())
                     .await;
                 if matches!(persisted, Err(AuthError::Io(_) | AuthError::Locked(_))) {
                     persisted = self
                         .store
-                        .replace_if_matches(provider, id, row.rev, credential())
+                        .replace_if_matches(provider, row.stamp(), credential())
                         .await;
                     if matches!(persisted, Err(AuthError::Io(_) | AuthError::Locked(_))) {
                         tracing::warn!(
                             provider,
-                            row_id = id.0,
+                            row_id = row.id.0,
                             "rotated refresh token not persisted; re-login may be required"
                         );
                         // No revision holds the minted token, so no cooldown is recorded;
                         // the served revision stays the observed one.
-                        return Ok(Attempt::Ready(
-                            ResolvedAuth::OAuth { access, account_id },
-                            row.rev,
-                        ));
+                        return Ok(Attempt::Ready(resolved_oauth(
+                            provider,
+                            row.stamp(),
+                            access,
+                            &identity,
+                        )));
                     }
                 }
                 match persisted {
                     Ok(CasOutcome::Applied) => {
-                        self.remember_mint(id, row.rev + 1).await;
-                        Ok(Attempt::Ready(
-                            ResolvedAuth::OAuth { access, account_id },
-                            row.rev + 1,
-                        ))
+                        self.remember_mint(key, row.rev + 1).await;
+                        Ok(Attempt::Ready(resolved_oauth(
+                            provider,
+                            CredentialStamp {
+                                rev: row.rev + 1,
+                                ..row.stamp()
+                            },
+                            access,
+                            &identity,
+                        )))
                     }
-                    Ok(CasOutcome::Stale) => Ok(match self.peer_fresh(provider, id).await? {
-                        Some((auth, rev)) => Attempt::Ready(auth, rev),
-                        None => Attempt::Transient("concurrent update".into()),
-                    }),
+                    Ok(CasOutcome::Stale) => self.peer_fresh(provider, row.stamp()).await,
                     Err(_) => Ok(Attempt::Transient("refresh write unavailable".into())),
                 }
             }
@@ -451,27 +487,32 @@ impl KeyResolver {
                     Ok(snapshot) => snapshot,
                     Err(_) => return Ok(Attempt::Transient("refresh store unavailable".into())),
                 };
-                let Some(current) = current
-                    .rows(provider)
-                    .iter()
-                    .find(|row| row.id == id && row.disabled_cause.is_none())
-                else {
+                let Some(current) = current.rows(provider).iter().find(|current| {
+                    current.id == row.id
+                        && current.generation == row.generation
+                        && current.disabled_cause.is_none()
+                }) else {
                     return Ok(Attempt::Skip);
                 };
                 if current.rev != row.rev {
-                    return Ok(match self.fresh(current) {
-                        Some(auth) => Attempt::Ready(auth, current.rev),
+                    return Ok(match self.fresh(provider, current) {
+                        Some(resolved) => Attempt::Ready(resolved),
                         None => Attempt::Skip,
                     });
                 }
                 let disabled_cause = format!("oauth refresh failed: {cause}");
                 match self
                     .store
-                    .disable_if_matches(provider, id, row.rev, &disabled_cause)
+                    .disable_if_matches(provider, row.stamp(), &disabled_cause)
                     .await
                 {
                     Ok(CasOutcome::Applied) => {
-                        tracing::warn!(provider, row_id = id.0, cause, "OAuth credential disabled");
+                        tracing::warn!(
+                            provider,
+                            row_id = row.id.0,
+                            cause,
+                            "OAuth credential disabled"
+                        );
                     }
                     Ok(CasOutcome::Stale) => {}
                     Err(_) => return Ok(Attempt::Transient("refresh write unavailable".into())),
@@ -482,14 +523,14 @@ impl KeyResolver {
     }
 
     /// omp `#rememberMint`: expired entries are pruned whenever a mint is recorded.
-    async fn remember_mint(&self, id: CredentialId, rev: u64) {
+    async fn remember_mint(&self, key: &RowKey, rev: u64) {
         let now = (self.clock)();
         let mut mints = self.recent_mints.lock().await;
         mints.retain(|_, (_, at)| now.saturating_sub(*at) < REMINT_COOLDOWN_MS);
-        mints.insert(id, (rev, now));
+        mints.insert(key.clone(), (rev, now));
     }
 
-    fn fresh(&self, row: &StoredCredential) -> Option<ResolvedAuth> {
+    fn fresh(&self, provider: &str, row: &StoredCredential) -> Option<Resolved> {
         if row.disabled_cause.is_some() {
             return None;
         }
@@ -497,10 +538,12 @@ impl KeyResolver {
             Credential::OAuth(oauth)
                 if key_cascade::oauth_is_fresh(oauth.expires_at_ms, (self.clock)()) =>
             {
-                Some(ResolvedAuth::OAuth {
-                    access: oauth.access.clone(),
-                    account_id: oauth.identity.account_id.clone(),
-                })
+                Some(resolved_oauth(
+                    provider,
+                    row.stamp(),
+                    oauth.access.clone(),
+                    &oauth.identity,
+                ))
             }
             _ => None,
         }
@@ -509,20 +552,28 @@ impl KeyResolver {
     async fn peer_fresh(
         &self,
         provider: &str,
-        id: CredentialId,
-    ) -> Result<Option<(ResolvedAuth, u64)>, ResolveError> {
-        Ok(self
-            .store
-            .snapshot()
-            .await
-            .map_err(|_| ResolveError::RefreshUnavailable {
-                provider: provider.into(),
-                cause: "refresh store unavailable".into(),
-            })?
-            .rows(provider)
-            .iter()
-            .find(|row| row.id == id)
-            .and_then(|row| self.fresh(row).map(|auth| (auth, row.rev))))
+        expected: CredentialStamp,
+    ) -> Result<Attempt, ResolveError> {
+        let snapshot =
+            self.store
+                .snapshot()
+                .await
+                .map_err(|_| ResolveError::RefreshUnavailable {
+                    provider: provider.into(),
+                    cause: "refresh store unavailable".into(),
+                })?;
+        // A concurrent login or recreated file is not a peer refresh of this grant.
+        let Some(row) = snapshot.rows(provider).iter().find(|row| {
+            row.id == expected.id
+                && row.generation == expected.generation
+                && row.disabled_cause.is_none()
+        }) else {
+            return Ok(Attempt::Skip);
+        };
+        Ok(match self.fresh(provider, row) {
+            Some(resolved) => Attempt::Ready(resolved),
+            None => Attempt::Transient("concurrent update".into()),
+        })
     }
 }
 
@@ -604,26 +655,23 @@ impl CredentialHandle {
             .map_err(|_| ProviderError::ConnectionFailed("credential resolution stopped".into()))?
     }
 
-    pub async fn recover(
-        &self,
-        rejected: &Resolved,
-    ) -> Result<Option<ResolvedAuth>, ProviderError> {
+    pub async fn recover(&self, rejected: &Resolved) -> Result<Option<Resolved>, ProviderError> {
         if rejected.source != AuthSource::StoredOAuth {
             return Ok(None);
         }
-        let Some((id, rev)) = rejected.row else {
+        let Some(expected) = rejected.row else {
             return Ok(None);
         };
         let auth = self
             .resolver
-            .force_refresh(&self.provider, id, rev)
+            .force_refresh(&self.provider, expected)
             .await
             .map_err(|error| ProviderError::ConnectionFailed(error.to_string()))?;
         // One consolidated exposure boundary: do not retry the bearer already rejected.
         fn bearer(auth: &ResolvedAuth) -> &str {
             auth.bearer_secret().expose_secret()
         }
-        Ok(auth.filter(|auth| bearer(auth) != bearer(&rejected.auth)))
+        Ok(auth.filter(|resolved| bearer(&resolved.auth) != bearer(&rejected.auth)))
     }
 
     async fn resolve(self) -> Result<Resolved, ProviderError> {

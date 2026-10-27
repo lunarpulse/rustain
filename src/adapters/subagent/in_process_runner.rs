@@ -1402,6 +1402,7 @@ async fn run_child(
             .filter(|tool| tool_policy_allows_offer(&policy, &tool.name))
             .collect();
         let options = CompletionOptions {
+            session_id: Some(agent_id.as_str().to_owned()),
             model,
             max_tokens: 4096,
             // Children have no skill activation state or prompt plumbing.
@@ -2636,6 +2637,67 @@ mod tests {
             root_authority,
         );
         (runner, tmp)
+    }
+
+    #[tokio::test]
+    async fn child_launches_send_their_own_conversation_session_identity() {
+        let (mut runner, _tmp) = make_runner().await;
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        runner.provider = provider.clone();
+        let ids = [AgentId::new(), AgentId::new()];
+        let mut handles = Vec::new();
+        for id in &ids {
+            handles.push(
+                runner
+                    .launch(
+                        AgentLaunchSpec {
+                            prompt: "session identity".into(),
+                            effective_model: "test-model".into(),
+                            tier: crate::domain::models::ModelTier::CheapAgentic,
+                            tools_allow: crate::domain::models::ToolPolicy::InheritFromParent,
+                            parent_ctx_tokens: 0,
+                            sandbox_override: None,
+                            parent_trace: None,
+                            isolated: false,
+                            delegation:
+                                crate::domain::models::launch_spec::DelegationProfile::Child,
+                        },
+                        CancellationToken::new(),
+                        None,
+                        id.clone(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+        }
+        for mut handle in handles {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(status) = handle.status_rx.recv().await {
+                    if status.is_terminal() {
+                        assert_eq!(status, NodeState::Completed);
+                        return;
+                    }
+                }
+                panic!("child exited without a terminal status");
+            })
+            .await
+            .unwrap();
+        }
+        let actual: std::collections::HashSet<_> = provider
+            .requests
+            .lock()
+            .await
+            .iter()
+            .map(|options| {
+                options
+                    .session_id
+                    .clone()
+                    .expect("child conversation identity")
+            })
+            .collect();
+        let expected: std::collections::HashSet<_> =
+            ids.iter().map(|id| id.as_str().to_owned()).collect();
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]

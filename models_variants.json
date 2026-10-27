@@ -42,6 +42,83 @@
         }
       ]
     },
+    "openai-codex": {
+      "fetchedAtUnix": 0,
+      "models": [
+        {
+          "modelId": "gpt-5.6-luna",
+          "displayName": "GPT-5.6 Luna",
+          "providerId": "openai-codex",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.6-sol",
+          "displayName": "GPT-5.6 Sol",
+          "providerId": "openai-codex",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.6-terra",
+          "displayName": "GPT-5.6 Terra",
+          "providerId": "openai-codex",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-astra",
+          "displayName": "GPT-6 Astra",
+          "providerId": "openai-codex",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-luna",
+          "displayName": "GPT-6 Luna",
+          "providerId": "openai-codex",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-sol",
+          "displayName": "GPT-6 Sol",
+          "providerId": "openai-codex",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6.1-sol",
+          "displayName": "GPT-6.1 Sol",
+          "providerId": "openai-codex",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-daybreak-blue-latest",
+          "displayName": "Daybreak Blue",
+          "providerId": "openai-codex",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        }
+      ]
+    },
     "openai": {
       "fetchedAtUnix": 0,
       "models": [

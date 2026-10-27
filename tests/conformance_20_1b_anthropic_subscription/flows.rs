@@ -4,7 +4,10 @@ use rustain::adapters::auth::{
     policies::ANTHROPIC_OAUTH,
 };
 use rustain::adapters::auth_store::FileAuthStore;
-use rustain::domain::models::{AuthMethod, Credential, CredentialOrigin, SecretString};
+use rustain::domain::models::{
+    AuthMethod, CasOutcome, Credential, CredentialGeneration, CredentialOrigin, CredentialStamp,
+    SecretString,
+};
 const OAUTH: AuthMethod = AuthMethod::OAuthCode(&ANTHROPIC_OAUTH);
 use rustain::domain::ports::AuthStorePort;
 use serial_test::serial;
@@ -156,6 +159,12 @@ pub(super) async fn login_oauth(
     let login = flows::login("anthropic", &OAUTH, &context, store);
     let browser = async {
         let (url, _) = urls.recv().await.unwrap();
+        let authorize = url::Url::parse(&url).unwrap();
+        assert_eq!(authorize.host_str(), Some("127.0.0.1"));
+        assert_eq!(
+            authorize.origin(),
+            url::Url::parse(&server.uri()).unwrap().origin()
+        );
         reqwest::get(callback(&url, "test-code", Some(&state(&url))))
             .await
             .unwrap();
@@ -405,9 +414,35 @@ async fn k05_projection_origin_and_org_scoped_relogin() {
     server.reset().await;
     login_oauth(&server,&port,123457,3600,serde_json::json!({"account":{"uuid":"acct","email_address":"Me@Example.com"},"organization":{"uuid":"org-2","name":"Two"}})).await;
     assert_eq!(port.snapshot().await.unwrap().rows("anthropic").len(), 2);
+    let before_relogin = port.snapshot().await.unwrap().rows("anthropic")[1].clone();
+    assert_ne!(before_relogin.generation, CredentialGeneration::default());
     server.reset().await;
     login_oauth(&server,&port,123458,3600,serde_json::json!({"account":{"uuid":"acct","email_address":"Me@Example.com"},"organization":{"uuid":"org-2","name":"Two"}})).await;
     assert_eq!(port.snapshot().await.unwrap().rows("anthropic").len(), 2);
+    let after_relogin = port.snapshot().await.unwrap().rows("anthropic")[1].clone();
+    assert_eq!(after_relogin.id, before_relogin.id);
+    assert_eq!(after_relogin.rev, before_relogin.rev + 1);
+    assert_ne!(after_relogin.generation, CredentialGeneration::default());
+    assert_ne!(after_relogin.generation, before_relogin.generation);
+    let stale_generation = CredentialStamp {
+        generation: before_relogin.generation,
+        ..after_relogin.stamp()
+    };
+    let path = temp.path().join("auth.json");
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        port.replace_if_matches("anthropic", stale_generation, before_relogin.credential)
+            .await
+            .unwrap(),
+        CasOutcome::Stale
+    );
+    assert_eq!(
+        port.disable_if_matches("anthropic", stale_generation, "old grant revoked")
+            .await
+            .unwrap(),
+        CasOutcome::Stale
+    );
+    assert_eq!(std::fs::read(path).unwrap(), before);
 }
 
 #[tokio::test]
@@ -936,8 +971,7 @@ async fn k15_logout_removes_every_row_and_is_idempotent_without_changing_env() {
         .clone();
     port.disable_if_matches(
         "anthropic",
-        first.id,
-        first.rev,
+        first.stamp(),
         "oauth refresh failed: invalid_grant",
     )
     .await

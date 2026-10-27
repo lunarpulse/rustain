@@ -34,7 +34,7 @@ pub(super) async fn run(
     ctx: &FlowCtx,
 ) -> Result<(Credential, bool), FlowError> {
     let mut listener = Loopback::bind(
-        policy.port,
+        crate::adapters::auth::policies::callback_port(policy),
         policy.port_fallback,
         policy.callback_path,
         ctx.ui.as_ref(),
@@ -113,10 +113,11 @@ pub(super) async fn run(
             &ctx.http,
             policy.identity_hook,
             &projected.access,
+            &response,
             &mut projected.identity,
             false,
         )
-        .await;
+        .await?;
         Ok((
             Credential::OAuth(OAuthCredential {
                 access: projected.access,

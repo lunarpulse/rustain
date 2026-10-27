@@ -541,6 +541,7 @@ impl DaemonTurnRuntime {
         };
         let resolved = resolve_effective_model(&req, &config.router);
         let options = CompletionOptions {
+            session_id: Some(conversation.id.clone()),
             model: resolved.model.clone(),
             max_tokens: 8192, // TODO: wire max_tokens from model config when available
             system_prompt,
@@ -633,6 +634,125 @@ mod tests {
             #[cfg(feature = "mcp")]
             mcp_task_runtimes: Vec::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn concurrent_turns_keep_conversation_identity_across_runtime_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut rt = noop_runtime(tmp.path().to_path_buf());
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        Arc::get_mut(&mut rt).unwrap().provider = provider.clone();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let a = Conversation {
+            id: "conversation-a".into(),
+            session_id: Some("ephemeral-a".into()),
+            ..Default::default()
+        };
+        let b = Conversation {
+            id: "conversation-b".into(),
+            session_id: Some("ephemeral-b".into()),
+            ..Default::default()
+        };
+        let first = rt.spawn_turn(
+            Vec::new(),
+            &a,
+            &tx,
+            TurnOrigin::Interactive,
+            CancellationToken::new(),
+            false,
+        );
+        let second = rt.spawn_turn(
+            Vec::new(),
+            &b,
+            &tx,
+            TurnOrigin::Interactive,
+            CancellationToken::new(),
+            false,
+        );
+        first.await.unwrap();
+        second.await.unwrap();
+        let mut resumed = a.clone();
+        resumed.session_id = Some("after-restart".into());
+        rt.spawn_turn(
+            Vec::new(),
+            &resumed,
+            &tx,
+            TurnOrigin::Interactive,
+            CancellationToken::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        let requests = provider.requests.lock().await;
+        let mut ids: Vec<_> = requests
+            .iter()
+            .map(|o| o.session_id.as_deref().unwrap())
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["conversation-a", "conversation-a", "conversation-b"]);
+    }
+
+    #[tokio::test]
+    async fn common_turn_overrides_stale_or_missing_provider_session_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rt = noop_runtime(tmp.path().to_path_buf());
+        let provider = Arc::new(crate::adapters::noop::RecordingProvider::default());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let resolved = resolve_effective_model(
+            &ModelResolutionRequest {
+                explicit_override: None,
+                tier_hint: None,
+                step_kind: None,
+                retry_count: 0,
+                input_tokens: 0,
+                fallback_model: "model".into(),
+            },
+            &AppConfig::default().router,
+        );
+        for session_id in [None, Some("stale-session".to_owned())] {
+            turn::run_turn(
+                provider.clone(),
+                Vec::new(),
+                CompletionOptions {
+                    session_id,
+                    model: "model".into(),
+                    max_tokens: 16,
+                    system_prompt: String::new(),
+                    temperature: None,
+                    tools: Vec::new(),
+                },
+                tx.clone(),
+                rt.security.clone(),
+                rt.tools.clone(),
+                rt.tool_scheduler.clone(),
+                "stable-conversation".into(),
+                rt.storage.clone(),
+                Conversation {
+                    id: "stable-conversation".into(),
+                    ..Default::default()
+                },
+                None,
+                None,
+                CancellationToken::new(),
+                rt.usage_ledger.clone(),
+                resolved.clone(),
+                None,
+                0,
+                None,
+                "transient-runtime-session".into(),
+                TurnOrigin::Interactive,
+                false,
+                None,
+            )
+            .await;
+        }
+        let requests = provider.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|o| o.session_id.as_deref() == Some("stable-conversation"))
+        );
     }
 
     fn noop_core() -> DaemonCore {

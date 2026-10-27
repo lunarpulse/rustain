@@ -3138,6 +3138,7 @@ async fn run_inner(
     for line in peer_binding_disclosures(security.auth.as_ref(), loopback) {
         tracing::warn!("{line}");
     }
+    tracing::info!(bound_addr = %bound, "A2A listener bound");
 
     // The listener exists and every pre-serve safety gate has passed. The daemon
     // may now publish readiness; later serving errors belong to its supervised

@@ -24,6 +24,7 @@ impl AuthEnvironment {
             "ANTHROPIC_API_KEY",
             "ANTHROPIC_AUTH_TOKEN",
             "OPENAI_API_KEY",
+            "OPENAI_CODEX_OAUTH_TOKEN",
             "OPENROUTER_API_KEY",
             "GOOGLE_API_KEY",
             "DEEPSEEK_API_KEY",

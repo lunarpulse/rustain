@@ -14,9 +14,11 @@ pub struct SseFrame {
 /// per event (concatenated with `\n`), `event:` lines, comment lines (`:` prefix),
 /// and `id:` lines (ignored).
 pub struct SseLineBuffer {
-    line_buf: String,
+    line_buf: Vec<u8>,
     current_event: String,
     current_data: Vec<String>,
+    /// A CR ended the previous line; a following LF completes the same CRLF.
+    after_cr: bool,
 }
 
 impl Default for SseLineBuffer {
@@ -28,29 +30,52 @@ impl Default for SseLineBuffer {
 impl SseLineBuffer {
     pub fn new() -> Self {
         Self {
-            line_buf: String::new(),
+            line_buf: Vec::new(),
             current_event: String::new(),
             current_data: Vec::new(),
+            after_cr: false,
         }
     }
 
     /// Feed raw bytes into the buffer. Returns any complete SSE frames.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<SseFrame> {
         let mut frames = Vec::new();
-        let text = String::from_utf8_lossy(bytes);
 
-        for ch in text.chars() {
-            if ch == '\n' {
-                let line = std::mem::take(&mut self.line_buf);
-                self.process_line(&line, &mut frames);
-            } else if ch == '\r' {
-                // Skip \r; we handle \n as the delimiter
+        for &byte in bytes {
+            let crlf = self.after_cr && byte == b'\n';
+            self.after_cr = byte == b'\r';
+            if crlf {
+                continue;
+            }
+            if byte == b'\n' || byte == b'\r' {
+                // CR, LF and CRLF all end a line. Decode only a complete line:
+                // HTTP chunks can split a UTF-8 codepoint anywhere. Invalid
+                // sequences remain lossy as before.
+                self.complete_line(&mut frames);
             } else {
-                self.line_buf.push(ch);
+                self.line_buf.push(byte);
             }
         }
 
         frames
+    }
+
+    /// End of stream: a trailing unterminated line and a pending event are
+    /// complete, because services do not always close with a blank line.
+    pub fn finish(&mut self) -> Vec<SseFrame> {
+        let mut frames = Vec::new();
+        if !self.line_buf.is_empty() {
+            self.complete_line(&mut frames);
+        }
+        self.process_line("", &mut frames);
+        frames
+    }
+
+    fn complete_line(&mut self, frames: &mut Vec<SseFrame>) {
+        let mut line = std::mem::take(&mut self.line_buf);
+        self.process_line(&String::from_utf8_lossy(&line), frames);
+        line.clear();
+        self.line_buf = line;
     }
 
     fn process_line(&mut self, line: &str, frames: &mut Vec<SseFrame>) {
@@ -188,6 +213,32 @@ mod tests {
     }
 
     #[test]
+    fn split_utf8_codepoints_survive_every_byte_boundary() {
+        let wire = "event: text\ndata: café 漢字 🦀\r\n\r\n".as_bytes();
+        for split in 0..=wire.len() {
+            let mut buffer = SseLineBuffer::new();
+            let mut frames = buffer.feed(&wire[..split]);
+            frames.extend(buffer.feed(&wire[split..]));
+            assert_eq!(frames.len(), 1, "split={split}");
+            assert_eq!(frames[0].data, "café 漢字 🦀", "split={split}");
+        }
+        let mut buffer = SseLineBuffer::new();
+        let frames: Vec<_> = wire
+            .iter()
+            .flat_map(|byte| buffer.feed(std::slice::from_ref(byte)))
+            .collect();
+        assert_eq!(frames[0].data, "café 漢字 🦀");
+    }
+
+    #[test]
+    fn malformed_utf8_is_lossy_after_complete_line() {
+        let mut buffer = SseLineBuffer::new();
+        assert!(buffer.feed(b"data: \xf0\x9f").is_empty());
+        let frames = buffer.feed(b"\xff\n\n");
+        assert_eq!(frames[0].data, "\u{fffd}\u{fffd}");
+    }
+
+    #[test]
     fn test_sse_buffer_malformed_utf8() {
         let mut buf = SseLineBuffer::new();
         // Invalid UTF-8 bytes get replaced with U+FFFD
@@ -199,5 +250,32 @@ mod tests {
         assert_eq!(frames[0].event, "test");
         // Lossy conversion replaces invalid bytes
         assert!(frames[0].data.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn bare_cr_and_split_crlf_end_lines() {
+        let mut buf = SseLineBuffer::new();
+        let frames = buf.feed(b"event: a\rdata: one\r\rdata: two\r");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event, "a");
+        assert_eq!(frames[0].data, "one");
+        // The LF of a CRLF split across chunks is not a second (blank) line.
+        assert!(buf.feed(b"\n").is_empty());
+        let frames = buf.feed(b"\r\n");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "two");
+    }
+
+    #[test]
+    fn finish_flushes_unterminated_final_event() {
+        let mut buf = SseLineBuffer::new();
+        assert!(buf.feed(b"data: {\"type\":\"done\"}\n").is_empty());
+        let frames = buf.finish();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].data, "{\"type\":\"done\"}");
+        let mut buf = SseLineBuffer::new();
+        assert!(buf.feed(b"data: tail").is_empty());
+        assert_eq!(buf.finish()[0].data, "tail");
+        assert!(SseLineBuffer::new().finish().is_empty());
     }
 }

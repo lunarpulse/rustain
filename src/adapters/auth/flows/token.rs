@@ -142,7 +142,7 @@ pub(super) async fn request(
     );
     let mut request = http
         .post(crate::adapters::auth::policies::endpoint(policy.url))
-        .timeout(std::time::Duration::from_secs(30));
+        .timeout(std::time::Duration::from_millis(policy.timeout_ms));
     for (name, tpl) in policy.headers {
         request = request.header(*name, values.render(*tpl));
     }

@@ -149,6 +149,7 @@ pub async fn generate_proposals(
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: None,
         model: model.to_string(),
         max_tokens: 1024,
         system_prompt: CONSOLIDATION_SYSTEM_PROMPT.to_string(),

@@ -1096,6 +1096,13 @@ listener cannot start, daemon startup fails instead of reporting a ready daemon
 with no listener.
 After that handshake, an unexpected listener exit is recorded as a daemon error.
 
+Use `127.0.0.1:0` to let the operating system allocate a loopback port atomically.
+After binding and passing the listener safety checks, both startup shapes log
+`A2A listener bound` at INFO with `bound_addr=<actual socket address>`. This
+reports the kernel-assigned address, not the requested port `0`; it does not
+replace an HTTP readiness check. The line uses the normal rustain log
+(`RUSTAIN_LOG_PATH` overrides its path) and requires an INFO-enabled log filter.
+
 Standalone discovery-only refusals are also appended through the workspace's
 canonical room journal. They do not use an inert or separate transparency sink.
 

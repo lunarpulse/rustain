@@ -122,6 +122,42 @@ enabled = true
 rustain --config-file /path/to/custom.toml
 ```
 
+### ChatGPT Codex subscription
+
+Codex is separate from the `openai` API-key provider:
+
+```toml
+model = "gpt-5.6-luna"
+
+[provider.openai-codex]
+provider_id = "openai-codex"
+kind = "openai-codex"
+model_id = "gpt-5.6-luna"
+api_key_env = "OPENAI_CODEX_OAUTH_TOKEN"
+enabled = true
+```
+
+Authenticate with `rustain auth login openai-codex`, or supply a static OAuth
+bearer through the named environment variable (not an OpenAI API key).
+The top-level `model` selects the default model for turns; each provider's
+`model_id` configures its entry and does not replace that global turn default.
+The default base URL is `https://chatgpt.com/backend-api`. A `base_url` ending in
+`/codex/responses` is used unchanged; one ending in `/codex` gains `/responses`;
+any other base gains `/codex/responses` (trailing slashes are stripped first).
+Stored OAuth credentials are eligible only on the official ChatGPT origin;
+changing the origin never forwards a stored subscription token to a gateway.
+An explicitly supplied environment bearer is operator-directed.
+
+Configured aliases may use another map key with `kind = "openai-codex"` and
+`provider_id = "openai-codex"`: the map key identifies the runtime entry while
+`provider_id` selects the login credential rows. Codex serves its eight bundled
+models through the catalogue-merge path; models.dev currently has no Codex source,
+so that layer is empty (OpenAI API-only models are not promoted).
+`discover_models = true` does not enable live discovery or produce an
+unsupported-discovery warning. Live roster discovery and encrypted
+reasoning replay are scheduled for 20-1d1b. Upstream's 128,000-token maximum-output
+metadata has no rustain descriptor consumer and is not a transmitted limit.
+
 ### Field-level merge
 
 Setting `[pricing."my-model"]` in user TOML *adds* to the built-in pricing catalog — it does not replace it. The same holds for `[provider.X]` and `[router.step_tiers]`.

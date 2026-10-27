@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::domain::errors::AuthError;
 use rustain::domain::models::{
-    AuthSource, CasOutcome, Credential, CredentialId, CredentialIdentity, CredentialOrigin,
-    OAuthCredential, ResolvedAuth, SecretString,
+    AuthSource, CasOutcome, Credential, CredentialGeneration, CredentialId, CredentialIdentity,
+    CredentialOrigin, CredentialStamp, OAuthCredential, ResolvedAuth, SecretString,
 };
 use rustain::domain::ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure, RefreshedTokens};
 use rustain::infrastructure::key_resolver::{KeyResolver, ResolveError};
@@ -708,8 +708,7 @@ async fn k10_m09_definitive_and_transient_have_distinct_persistence_and_fallback
 
 struct PeerRotation {
     peer: FileAuthStore,
-    id: CredentialId,
-    rev: u64,
+    expected: CredentialStamp,
     calls: AtomicUsize,
     outcome: Result<RefreshedTokens, RefreshFailure>,
     peer_expiry: i64,
@@ -727,8 +726,7 @@ impl OAuthRefreshPort for PeerRotation {
             self.peer
                 .replace_if_matches(
                     "peer",
-                    self.id,
-                    self.rev,
+                    self.expected,
                     oauth("PEER-ROTATED-LITERAL", self.peer_expiry, Some("peer"))
                 )
                 .await
@@ -756,8 +754,11 @@ async fn k11_m10_definitive_failure_adopts_peer_rotation_instead_of_disabling() 
         .unwrap();
     let port = Arc::new(PeerRotation {
         peer: FileAuthStore::at(&path),
-        id,
-        rev: 1,
+        expected: CredentialStamp {
+            id,
+            rev: 1,
+            ..store.snapshot().await.unwrap().rows("peer")[0].stamp()
+        },
         calls: AtomicUsize::new(0),
         outcome: Err(RefreshFailure::Definitive("invalid_grant".into())),
         peer_expiry: FRESH,
@@ -1347,7 +1348,7 @@ async fn api_key_upsert_replaces_enabled_row_across_origins_and_purges_tombstone
     assert_eq!(snapshot.rows("key")[0].origin, CredentialOrigin::Stored);
     assert!(snapshot.rows("key")[0].last_validated.is_none());
     store
-        .disable_if_matches("key", id, 3, "disabled")
+        .disable_if_matches("key", snapshot.rows("key")[0].stamp(), "disabled")
         .await
         .unwrap();
     let new_id = store
@@ -1405,9 +1406,16 @@ async fn oauth_upsert_purges_only_matching_nonnull_identity_tombstones() {
         .await
         .unwrap();
     for id in [same, other, anonymous] {
+        let snapshot = store.snapshot().await.unwrap();
+        let row = snapshot
+            .rows("purge")
+            .iter()
+            .find(|row| row.id == id)
+            .unwrap();
+        assert_eq!(row.rev, 1);
         assert_eq!(
             store
-                .disable_if_matches("purge", id, 1, "disabled")
+                .disable_if_matches("purge", row.stamp(), "disabled")
                 .await
                 .unwrap(),
             CasOutcome::Applied
@@ -1471,15 +1479,29 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
         .await
         .unwrap();
     let before = disk_state(&path);
-    for (provider, candidate, revision) in [
-        ("wrong-provider", id, 1),
-        ("cas", CredentialId(99), 1),
-        ("cas", id, 0),
-        ("cas", id, 2),
+    let expected = store.snapshot().await.unwrap().rows("cas")[0].stamp();
+    for (provider, candidate) in [
+        ("wrong-provider", expected),
+        (
+            "cas",
+            CredentialStamp {
+                id: CredentialId(99),
+                ..expected
+            },
+        ),
+        ("cas", CredentialStamp { rev: 0, ..expected }),
+        ("cas", CredentialStamp { rev: 2, ..expected }),
+        (
+            "cas",
+            CredentialStamp {
+                generation: CredentialGeneration([0; 16]),
+                ..expected
+            },
+        ),
     ] {
         assert_eq!(
             store
-                .replace_if_matches(provider, candidate, revision, api("CAS-STALE-LOSER"))
+                .replace_if_matches(provider, candidate, api("CAS-STALE-LOSER"))
                 .await
                 .unwrap(),
             CasOutcome::Stale
@@ -1487,7 +1509,7 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
         assert_eq!(disk_state(&path), before);
         assert_eq!(
             store
-                .disable_if_matches(provider, candidate, revision, "wrong")
+                .disable_if_matches(provider, candidate, "wrong")
                 .await
                 .unwrap(),
             CasOutcome::Stale
@@ -1496,7 +1518,7 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
     }
     assert_eq!(
         store
-            .replace_if_matches("cas", id, 1, api("CAS-REPLACED"))
+            .replace_if_matches("cas", expected, api("CAS-REPLACED"))
             .await
             .unwrap(),
         CasOutcome::Applied
@@ -1504,13 +1526,18 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
     let snapshot = store.snapshot().await.unwrap();
     assert_eq!(snapshot.rows("cas")[0].id, id);
     assert_eq!(snapshot.rows("cas")[0].rev, 2);
+    assert_eq!(snapshot.rows("cas")[0].generation, expected.generation);
     assert_eq!(
         snapshot.rows("cas")[0].credential.expose_api_key(),
         Some("CAS-REPLACED")
     );
     assert_eq!(
         store
-            .disable_if_matches("cas", id, 2, "operator disabled")
+            .disable_if_matches(
+                "cas",
+                CredentialStamp { rev: 2, ..expected },
+                "operator disabled",
+            )
             .await
             .unwrap(),
         CasOutcome::Applied
@@ -1518,14 +1545,22 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
     let disabled = disk_state(&path);
     assert_eq!(
         store
-            .replace_if_matches("cas", id, 3, api("CANNOT-RESURRECT"))
+            .replace_if_matches(
+                "cas",
+                CredentialStamp { rev: 3, ..expected },
+                api("CANNOT-RESURRECT"),
+            )
             .await
             .unwrap(),
         CasOutcome::Stale
     );
     assert_eq!(
         store
-            .disable_if_matches("cas", id, 3, "cannot overwrite")
+            .disable_if_matches(
+                "cas",
+                CredentialStamp { rev: 3, ..expected },
+                "cannot overwrite",
+            )
             .await
             .unwrap(),
         CasOutcome::Stale
@@ -1533,6 +1568,7 @@ async fn cas_stale_is_nonwriting_and_applied_increments_rev_once() {
     assert_eq!(disk_state(&path), disabled);
     let snapshot = store.snapshot().await.unwrap();
     assert_eq!(snapshot.rows("cas")[0].rev, 3);
+    assert_eq!(snapshot.rows("cas")[0].generation, expected.generation);
     assert_eq!(
         snapshot.rows("cas")[0].disabled_cause.as_deref(),
         Some("operator disabled")
@@ -1564,8 +1600,11 @@ async fn remove_absent_skips_write_and_remove_provider_deletes_all_its_rows() {
         )
         .await
         .unwrap();
+    let expected = store.snapshot().await.unwrap().rows("remove")[0].stamp();
+    assert_eq!(expected.id, id);
+    assert_eq!(expected.rev, 1);
     store
-        .disable_if_matches("remove", id, 1, "disabled")
+        .disable_if_matches("remove", expected, "disabled")
         .await
         .unwrap();
     store
@@ -1740,6 +1779,9 @@ async fn refresh_loop_waiter_refreshes_peer_still_stale_revision_once() {
         )
         .await
         .unwrap();
+    let expected = store.snapshot().await.unwrap().rows("stale-peer")[0].stamp();
+    assert_eq!(expected.id, id);
+    assert_eq!(expected.rev, 1);
     let port = Arc::new(StalePeerRefresh {
         gate: Semaphore::new(0),
         calls: AtomicUsize::new(0),
@@ -1774,7 +1816,7 @@ async fn refresh_loop_waiter_refreshes_peer_still_stale_revision_once() {
     });
     assert_eq!(
         FileAuthStore::at(&path)
-            .replace_if_matches("stale-peer", id, 1, peer_credential)
+            .replace_if_matches("stale-peer", expected, peer_credential)
             .await
             .unwrap(),
         CasOutcome::Applied
@@ -1860,8 +1902,11 @@ async fn refresh_success_losing_cas_adopts_fresh_peer_instead_of_overwriting() {
         .unwrap();
     let port = Arc::new(PeerRotation {
         peer: FileAuthStore::at(&path),
-        id,
-        rev: 1,
+        expected: CredentialStamp {
+            id,
+            rev: 1,
+            ..store.snapshot().await.unwrap().rows("peer")[0].stamp()
+        },
         calls: AtomicUsize::new(0),
         outcome: Ok(refreshed()),
         peer_expiry: FRESH,
@@ -1896,8 +1941,11 @@ async fn refresh_success_losing_cas_to_stale_peer_is_retryable_not_overwritten()
         .unwrap();
     let port = Arc::new(PeerRotation {
         peer: FileAuthStore::at(&path),
-        id,
-        rev: 1,
+        expected: CredentialStamp {
+            id,
+            rev: 1,
+            ..store.snapshot().await.unwrap().rows("peer")[0].stamp()
+        },
         calls: AtomicUsize::new(0),
         outcome: Ok(refreshed()),
         peer_expiry: NOW,
@@ -2061,6 +2109,9 @@ async fn refresh_loop_row_disabled_while_waiting_for_lock_is_skipped() {
         )
         .await
         .unwrap();
+    let expected = store.snapshot().await.unwrap().rows("disabled-waiter")[0].stamp();
+    assert_eq!(expected.id, id);
+    assert_eq!(expected.rev, 1);
     let port = Arc::new(GatedRefresh::new(Err(RefreshFailure::Transient(
         "offline".into(),
     ))));
@@ -2088,7 +2139,7 @@ async fn refresh_loop_row_disabled_while_waiting_for_lock_is_skipped() {
     tokio::task::yield_now().await;
     assert_eq!(
         FileAuthStore::at(path)
-            .disable_if_matches("disabled-waiter", id, 1, "peer disabled")
+            .disable_if_matches("disabled-waiter", expected, "peer disabled")
             .await
             .unwrap(),
         CasOutcome::Applied
@@ -2126,8 +2177,11 @@ async fn definitive_failure_does_not_disable_peer_still_stale_revision() {
         .unwrap();
     let port = Arc::new(PeerRotation {
         peer: FileAuthStore::at(&path),
-        id,
-        rev: 1,
+        expected: CredentialStamp {
+            id,
+            rev: 1,
+            ..store.snapshot().await.unwrap().rows("peer")[0].stamp()
+        },
         calls: AtomicUsize::new(0),
         outcome: Err(RefreshFailure::Definitive("invalid_grant".into())),
         peer_expiry: NOW,
@@ -2168,6 +2222,9 @@ async fn refresh_lease_held_by_peer_store_defers_refresh_and_adopts_its_rotation
         )
         .await
         .unwrap();
+    let expected = store.snapshot().await.unwrap().rows("lease")[0].stamp();
+    assert_eq!(expected.id, id);
+    assert_eq!(expected.rev, 1);
     let peer = FileAuthStore::at(&path);
     let lease = peer.refresh_lease().await.unwrap();
     let port = Arc::new(Probe::new(Ok(refreshed())));
@@ -2183,8 +2240,7 @@ async fn refresh_lease_held_by_peer_store_defers_refresh_and_adopts_its_rotation
     assert_eq!(
         peer.replace_if_matches(
             "lease",
-            id,
-            1,
+            expected,
             oauth("LEASE-PEER-LITERAL", FRESH, Some("lease"))
         )
         .await

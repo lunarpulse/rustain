@@ -31,6 +31,7 @@ async fn test_noop_provider_returns_error() {
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: None,
         model: "test".to_string(),
         max_tokens: 100,
         system_prompt: String::new(),

@@ -265,6 +265,7 @@ async fn ac2_keystone_run_turn_emits_the_real_overwrite_diff() {
             reasoning_content: None,
         }],
         CompletionOptions {
+            session_id: None,
             model: "test".into(),
             max_tokens: 100,
             system_prompt: String::new(),

@@ -38,7 +38,17 @@ static PROVIDERS: &[ProviderMeta] = &[
             AuthMethod::ApiKey,
         ],
         oauth_api: Some(&policies::ANTHROPIC_API),
-        org_scoped_identity: policies::org_scoped_identity("anthropic"),
+        org_scoped_identity: true,
+    },
+    ProviderMeta {
+        id: "openai-codex",
+        display_name: "ChatGPT Plus/Pro (Codex Subscription)",
+        signup_url: "https://chatgpt.com/",
+        requires_key: true,
+        api_key_env: "OPENAI_CODEX_OAUTH_TOKEN",
+        auth_methods: &[AuthMethod::OAuthCode(&policies::CODEX_OAUTH)],
+        oauth_api: Some(&policies::CODEX_API),
+        org_scoped_identity: true,
     },
     ProviderMeta {
         id: "openai",
@@ -48,7 +58,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "OPENAI_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("openai"),
+        org_scoped_identity: false,
     },
     ProviderMeta {
         id: "openrouter",
@@ -58,7 +68,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "OPENROUTER_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("openrouter"),
+        org_scoped_identity: false,
     },
     ProviderMeta {
         id: "google",
@@ -68,7 +78,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "GOOGLE_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("google"),
+        org_scoped_identity: false,
     },
     ProviderMeta {
         id: "deepseek",
@@ -78,7 +88,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "DEEPSEEK_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("deepseek"),
+        org_scoped_identity: false,
     },
     ProviderMeta {
         id: "moonshot",
@@ -88,7 +98,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "MOONSHOT_API_KEY",
         auth_methods: &[AuthMethod::ApiKey],
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("moonshot"),
+        org_scoped_identity: false,
     },
     ProviderMeta {
         id: "ollama",
@@ -98,7 +108,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         api_key_env: "",
         auth_methods: &[AuthMethod::ApiKey], // placeholder — ollama has no auth but ApiKey is the shape
         oauth_api: None,
-        org_scoped_identity: policies::org_scoped_identity("ollama"),
+        org_scoped_identity: false,
     },
 ];
 
@@ -141,9 +151,9 @@ mod tests {
     }
 
     #[test]
-    fn all_provider_ids_includes_all_seven() {
+    fn all_provider_ids_include_browser_subscription() {
         let ids: Vec<_> = all_provider_ids().collect();
-        assert_eq!(ids.len(), 7);
+        assert!(ids.contains(&"openai-codex"));
         assert!(ids.contains(&"anthropic"));
         assert!(ids.contains(&"ollama"));
     }

@@ -84,14 +84,55 @@ impl Default for BudgetStateStore {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[serial_test::serial(rustain_data_dir)]
-    async fn budget_state_save_load_roundtrip() {
+    #[test]
+    fn budget_state_save_load_roundtrip() {
+        // Keep the root alive until the isolated runtime-frontdoor scenario exits.
+        // Command::env never changes the library test process's data directory.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let original = std::env::var("RUSTAIN_DATA_DIR").ok(); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        unsafe {
-            std::env::set_var("RUSTAIN_DATA_DIR", tmp.path().as_os_str()); // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        }
+        let helper = format!(
+            "{}::budget_state_subprocess_scenario",
+            module_path!().split_once("::").unwrap().1
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &helper, "--nocapture"])
+            .env("RUSTAIN_BUDGET_STATE_TEST_DIR", tmp.path())
+            .env("RUSTAIN_DATA_DIR", tmp.path())
+            .output()
+            .expect("run budget state subprocess");
+        assert!(
+            output.status.success(),
+            "budget state subprocess failed: {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            tmp.path().join("scenario.completed").is_file(),
+            "budget state subprocess did not complete its assertions"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_state_subprocess_scenario() {
+        let Some(root) =
+            crate::infrastructure::utils::env_var_trimmed("RUSTAIN_BUDGET_STATE_TEST_DIR")
+        else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        // Validate isolation before invoking any path-resolving store operation.
+        assert!(root.is_absolute() && root.is_dir());
+        assert_eq!(
+            crate::infrastructure::utils::env_var_trimmed("RUSTAIN_DATA_DIR")
+                .expect("child data directory"),
+            root.to_str().expect("UTF-8 test directory")
+        );
+        let path = root.join("budget_state.json");
+        assert_eq!(
+            crate::infrastructure::paths::budget_state_path().expect("path"),
+            path
+        );
+        assert!(!path.exists());
 
         let store = BudgetStateStore::new();
 
@@ -109,14 +150,12 @@ mod tests {
         assert_eq!(got, want);
 
         // Corrupt file → graceful default
-        let path = crate::infrastructure::paths::budget_state_path().expect("path");
+        // Use the parent-owned path, never a newly resolved user-data path.
         std::fs::write(&path, "this is not json").expect("write garbage");
         let recovered = store.load().await;
         assert_eq!(recovered, BudgetState::default());
-
-        match original {
-            Some(v) => unsafe { std::env::set_var("RUSTAIN_DATA_DIR", v) }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-            None => unsafe { std::env::remove_var("RUSTAIN_DATA_DIR") }, // CONFORMANCE_EXCEPTION: test-only env var save/restore for tempdir isolation
-        }
+        // A successful exit alone could mean that --exact matched no tests.
+        std::fs::write(root.join("scenario.completed"), b"complete")
+            .expect("record completed budget scenario");
     }
 }

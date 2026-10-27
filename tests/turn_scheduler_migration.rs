@@ -337,6 +337,7 @@ async fn turn_scheduler_migration() {
             reasoning_content: None,
         }],
         CompletionOptions {
+            session_id: None,
             model: "test".into(),
             max_tokens: 100,
             system_prompt: String::new(),
@@ -433,6 +434,7 @@ async fn successful_a2a_result_taints_next_main_turn_dispatch() {
             reasoning_content: None,
         }],
         CompletionOptions {
+            session_id: None,
             model: "test".into(),
             max_tokens: 100,
             system_prompt: String::new(),

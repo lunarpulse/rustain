@@ -57,13 +57,16 @@ fn resolve_auth_with_runtime(
 }
 
 /// Complete endpoint identity, using the same URL resolution as construction.
-fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
+pub fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     if kind == "anthropic" {
         return crate::infrastructure::utils::normalize_base_url(&anthropic_base_url(
             Some(cfg),
             &crate::infrastructure::utils::env_var_trimmed,
         ));
+    }
+    if kind == "openai-codex" {
+        return codex_base_url(cfg);
     }
     let base = cfg
         .base_url
@@ -116,8 +119,7 @@ pub fn discovery_fingerprint(
         return scope;
     }
     let kind = cfg.kind.as_deref().unwrap_or(rows_key);
-    let oauth_allowed =
-        kind != "anthropic" || anthropic_oauth_allowed(&discovery_base_url(rows_key, cfg));
+    let oauth_allowed = oauth_allowed(kind, &discovery_base_url(rows_key, cfg));
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
     let selection = crate::adapters::cli::auth::source_for(
         rows_key,
@@ -164,8 +166,9 @@ pub fn build_provider_for_config(
     #[cfg(any(test, feature = "test-instrumentation"))]
     PROVIDER_CTOR_COUNT.fetch_add(1, Ordering::Relaxed);
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    match kind {
+    let adapter: Result<Arc<dyn StreamingProvider>, ProviderError> = match kind {
         "anthropic" => build_anthropic_from_config(cfg, None),
+        "openai-codex" => build_codex_from_config(cfg),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
@@ -212,7 +215,8 @@ pub fn build_provider_for_config(
             "unknown provider kind '{}' for '{}'",
             kind, provider_id
         ))),
-    }
+    };
+    Ok(configured_provider(provider_id, cfg, adapter?))
 }
 
 /// Build a provider adapter with an **explicit** candidate key (Story 13.4a DN-1).
@@ -229,10 +233,16 @@ pub fn build_provider_for_config_with_key(
     key: &str,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    let runtime = crate::domain::models::SecretString::new(key.to_owned());
-    let auth = Some(crate::domain::models::ResolvedAuth::ApiKey(runtime));
-    match kind {
+    let auth = (kind != "openai-codex").then(|| {
+        crate::domain::models::ResolvedAuth::ApiKey(crate::domain::models::SecretString::new(
+            key.to_owned(),
+        ))
+    });
+    let adapter: Result<Arc<dyn StreamingProvider>, ProviderError> = match kind {
         "anthropic" => build_anthropic_from_config(cfg, auth),
+        "openai-codex" => Err(ProviderError::Other(
+            "openai-codex has no API-key login".into(),
+        )),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
@@ -283,7 +293,8 @@ pub fn build_provider_for_config_with_key(
             "unknown provider kind '{}' for '{}'",
             kind, provider_id
         ))),
-    }
+    };
+    Ok(configured_provider(provider_id, cfg, adapter?))
 }
 
 fn build_anthropic_from_config(
@@ -347,9 +358,9 @@ pub(crate) fn anthropic_base_url(
 }
 
 /// Stored subscription credentials may only leave for their policy origin.
-pub fn anthropic_oauth_allowed(base_url: &str) -> bool {
-    let Some(policy) = crate::adapters::auth::policies::oauth_api("anthropic") else {
-        return false;
+pub fn oauth_allowed(kind: &str, base_url: &str) -> bool {
+    let Some(policy) = crate::adapters::auth::policies::oauth_api(kind) else {
+        return true;
     };
     let official = crate::adapters::auth::policies::endpoint(policy.api_origin);
     match (url::Url::parse(base_url), url::Url::parse(&official)) {
@@ -365,7 +376,7 @@ pub(crate) fn anthropic_handle(
     base_url: &str,
     auth_header: Option<crate::domain::models::AuthHeaderScheme>,
 ) -> Result<crate::infrastructure::key_resolver::CredentialHandle, ProviderError> {
-    let oauth_allowed = anthropic_oauth_allowed(base_url);
+    let oauth_allowed = oauth_allowed("anthropic", base_url);
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
     let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
     if crate::adapters::cli::auth::source_for(
@@ -386,6 +397,175 @@ pub(crate) fn anthropic_handle(
         oauth_allowed,
         auth_header,
     ))
+}
+
+fn codex_base_url(cfg: &ProviderConfig) -> String {
+    let base = cfg
+        .base_url
+        .as_ref()
+        .map(|url| url.expose_url().to_owned())
+        .unwrap_or_else(|| {
+            crate::adapters::auth::policies::endpoint("https://chatgpt.com/backend-api")
+        });
+    #[cfg(feature = "openai")]
+    {
+        // All accepted endpoint spellings identify the same Responses endpoint.
+        crate::adapters::openai_codex::responses_url(&base)
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        crate::infrastructure::utils::normalize_base_url(&base)
+    }
+}
+
+fn build_codex_from_config(
+    cfg: &ProviderConfig,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        let base = codex_base_url(cfg);
+        let allowed = oauth_allowed("openai-codex", &base);
+        let env_vars = if cfg.api_key_env.is_empty() {
+            vec![]
+        } else {
+            vec![cfg.api_key_env.clone()]
+        };
+        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+        let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
+        if crate::adapters::cli::auth::source_for(
+            &cfg.provider_id,
+            &names,
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+            allowed,
+        )
+        .is_none()
+        {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            cfg.provider_id.clone(),
+            env_vars,
+            allowed,
+            None,
+        );
+        Ok(Arc::new(crate::adapters::openai_codex::CodexAdapter::new(
+            handle,
+            cfg.model_id.clone(),
+            base,
+        )?))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = cfg;
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
+/// Keep endpoint identity and endpoint restrictions outside transport-specific policy.
+struct ConfiguredProvider {
+    id: String,
+    tools_disabled: bool,
+    inner: Arc<dyn StreamingProvider>,
+}
+
+fn configured_provider(
+    id: &str,
+    cfg: &ProviderConfig,
+    inner: Arc<dyn StreamingProvider>,
+) -> Arc<dyn StreamingProvider> {
+    if inner.provider_id() == id && cfg.supports_tools != Some(false) {
+        return inner;
+    }
+    Arc::new(ConfiguredProvider {
+        id: id.into(),
+        tools_disabled: cfg.supports_tools == Some(false),
+        inner,
+    })
+}
+
+impl ConfiguredProvider {
+    fn metadata(
+        &self,
+        mut models: Vec<crate::domain::models::provider::ModelDescriptor>,
+    ) -> Vec<crate::domain::models::provider::ModelDescriptor> {
+        for model in &mut models {
+            model.provider_id.clone_from(&self.id);
+        }
+        restrict_tools(&mut models, self.tools_disabled);
+        models
+    }
+}
+
+pub(crate) fn restrict_tools(
+    models: &mut [crate::domain::models::provider::ModelDescriptor],
+    disabled: bool,
+) {
+    if disabled {
+        for model in models {
+            model
+                .capabilities
+                .remove(&crate::domain::models::provider::ModelCapability::ToolUse);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for ConfiguredProvider {
+    async fn stream_completion(
+        &self,
+        messages: Vec<crate::domain::models::Message>,
+        options: crate::domain::models::CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, crate::domain::models::StreamChunk>,
+        ProviderError,
+    > {
+        self.inner.stream_completion(messages, options).await
+    }
+    async fn abort(&self) -> Result<(), ProviderError> {
+        self.inner.abort().await
+    }
+    fn provider_id(&self) -> String {
+        self.id.clone()
+    }
+    fn list_models(&self) -> Vec<crate::domain::models::provider::ModelDescriptor> {
+        self.metadata(self.inner.list_models())
+    }
+    async fn discover_models(
+        &self,
+        filter: &[String],
+        context: &str,
+    ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        self.inner.discover_models(filter, context).await
+    }
+    fn set_discovered_models(&self, models: Vec<crate::domain::models::provider::ModelDescriptor>) {
+        self.inner.set_discovered_models(self.metadata(models));
+    }
+    fn discovery_credential_fingerprint(&self, context: &str) -> Option<String> {
+        self.inner.discovery_credential_fingerprint(context)
+    }
+    async fn discovery_scope(&self, context: &str) -> Option<String> {
+        self.inner.discovery_scope(context).await
+    }
+    fn default_context_window(&self, model: &str) -> Option<u32> {
+        self.inner.default_context_window(model)
+    }
+    async fn health_check(&self) -> Result<(), ProviderError> {
+        self.inner.health_check().await
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<crate::domain::ports::ProbeOutcome, ProviderError> {
+        self.inner.connectivity_probe().await
+    }
+    fn provider_descriptor(&self) -> crate::domain::models::provider::ProviderDescriptor {
+        let mut descriptor = self.inner.provider_descriptor();
+        descriptor.provider_id.clone_from(&self.id);
+        descriptor
+    }
 }
 
 #[cfg(feature = "openai")]

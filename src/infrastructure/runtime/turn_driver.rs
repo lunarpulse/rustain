@@ -702,6 +702,7 @@ impl LocalTurnDriver {
         // first subsequent TurnComplete (the reducer leaves Turn.model empty).
         state.pending_resolved_model = Some(resolved.model.clone());
         let options = CompletionOptions {
+            session_id: Some(conversation.id.clone()),
             model: resolved.model.clone(),
             max_tokens: 8192,
             system_prompt: system_prompt.clone(),

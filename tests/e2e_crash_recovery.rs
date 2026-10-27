@@ -342,6 +342,7 @@ fn test_e2e_context_rebuild_api_messages() {
 
     // Validate via AnthropicRequest builder
     let options = CompletionOptions {
+        session_id: None,
         model: "test-model".into(),
         max_tokens: 8192,
         system_prompt: String::new(),

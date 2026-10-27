@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 pub struct CatalogLayers {
     pub provider_id: String,
+    pub kind: String,
     pub bundled: Vec<ModelDescriptor>,
     pub models_dev: Vec<ModelRecord>,
     pub cache: Option<CachedDiscoveryEntry>,
@@ -81,11 +82,11 @@ fn bottom_context(layers: &CatalogLayers, id: &str) -> u32 {
     #[cfg(feature = "openai")]
     {
         use crate::adapters::openai::{OpenAiCompatibleVariant, allowlists};
-        if let Some(variant) = OpenAiCompatibleVariant::builtin(&layers.provider_id) {
+        if let Some(variant) = OpenAiCompatibleVariant::builtin(&layers.kind) {
             return allowlists::variant_default_context(&variant);
         }
     }
-    if layers.provider_id == "anthropic" {
+    if layers.kind == "anthropic" {
         200_000
     } else {
         layers
@@ -207,6 +208,7 @@ pub fn public_catalog(id: &str, kind: &str, filter: &[String]) -> Vec<ModelDescr
     merge_catalog(
         CatalogLayers {
             provider_id: id.into(),
+            kind: kind.into(),
             bundled,
             models_dev: models_dev_layer(kind),
             cache: None,
@@ -221,8 +223,9 @@ pub fn public_catalog(id: &str, kind: &str, filter: &[String]) -> Vec<ModelDescr
 fn layers(target: &DiscoveryTarget, cache: Option<CachedDiscoveryEntry>) -> CatalogLayers {
     CatalogLayers {
         provider_id: target.provider_id.clone(),
+        kind: target.kind.clone(),
         bundled: target.bundled.clone(),
-        models_dev: models_dev_layer(&target.provider_id),
+        models_dev: models_dev_layer(&target.kind),
         cache,
         model_filter: target.model_filter.clone(),
         adapter: Some(target.provider.clone()),
@@ -256,6 +259,12 @@ pub fn seed_target(target: &DiscoveryTarget, cache: &ModelCatalogCache) {
 }
 
 pub fn rejected_notice(target: &DiscoveryTarget) -> String {
+    if target.kind == "openai-codex" {
+        return format!(
+            "{} rejected its credential (HTTP 401/403). {}",
+            target.display_name, target.sign_in_hint
+        );
+    }
     format!(
         "{} rejected its credential (HTTP 401/403) — models could not be discovered. {}",
         target.display_name, target.sign_in_hint
@@ -460,6 +469,10 @@ pub async fn remerge_all(
         for mut locked in registry.list_locked() {
             if let Some(entry) = entries.iter().find(|entry| entry.id == locked.provider_id) {
                 locked.models = public_catalog(&entry.id, entry.kind(), &entry.cfg.model_filter);
+                super::provider_factory::restrict_tools(
+                    &mut locked.models,
+                    entry.cfg.supports_tools == Some(false),
+                );
             }
             let provider_id = locked.provider_id.clone();
             registry.register_locked(locked);
@@ -491,39 +504,68 @@ pub async fn rediscover_after_login(
     before: &AuthSnapshot,
 ) -> Option<RefreshReport> {
     let after = crate::adapters::auth_store::FileAuthStore::try_snapshot_sync().ok()?;
-    let versions = |snapshot: &AuthSnapshot| {
+    let grants = |snapshot: &AuthSnapshot| {
         snapshot
             .rows(provider_id)
             .iter()
-            .map(|row| (row.id, row.rev))
+            .map(crate::domain::models::StoredCredential::stamp)
             .collect::<std::collections::BTreeSet<_>>()
     };
-    if versions(&after) == versions(before) {
+    if grants(&after) == grants(before) {
         return None;
     }
-    let entry = super::provider_availability::effective_providers(app_config)
+    let entries: Vec<_> = super::provider_availability::effective_providers(app_config)
         .into_iter()
-        .find(|entry| entry.id == provider_id && entry.cfg.enabled && entry.cfg.discover_models)?;
-    if !matches!(
-        super::provider_availability::availability(&entry, &after, &super::utils::env_var_trimmed),
-        super::provider_availability::Availability::Signed(_)
-    ) {
+        .filter(|entry| {
+            entry.rows_key() == provider_id && entry.cfg.enabled && entry.cfg.discover_models
+        })
+        .filter(|entry| {
+            matches!(
+                super::provider_availability::availability(
+                    entry,
+                    &after,
+                    &super::utils::env_var_trimmed
+                ),
+                super::provider_availability::Availability::Signed(_)
+            )
+        })
+        .collect();
+    if entries.is_empty() {
         return None;
     }
     let layer = super::startup::init_provider_layer(app_config);
-    let target = layer
-        .discovery_targets
-        .iter()
-        .find(|target| target.provider_id == provider_id || target.provider_id == entry.kind())?;
-    Some(
-        refresh_target(
-            target,
-            &ModelCatalogCache::new(),
-            Some(&layer.registry),
-            true,
-        )
-        .await,
-    )
+    let cache = ModelCatalogCache::new();
+    let mut combined: Option<RefreshReport> = None;
+    for entry in entries {
+        let Some(target) = layer
+            .discovery_targets
+            .iter()
+            .find(|target| target.provider_id == entry.id)
+        else {
+            continue;
+        };
+        let report = refresh_target(target, &cache, Some(&layer.registry), true).await;
+        if let Some(combined) = &mut combined {
+            combined.model_count += report.model_count;
+            // Preserve a failure in the summary rather than hiding it behind a
+            // later successful alias. Every matching entry is still refreshed.
+            if combined.status == DiscoveryStatus::Ok {
+                combined.status = report.status;
+            }
+            if let Some(notice) = report.notice {
+                match &mut combined.notice {
+                    Some(existing) => {
+                        existing.push('\n');
+                        existing.push_str(&notice);
+                    }
+                    None => combined.notice = Some(notice),
+                }
+            }
+        } else {
+            combined = Some(report);
+        }
+    }
+    combined
 }
 
 #[cfg(test)]
@@ -547,6 +589,7 @@ mod tests {
     fn catalog() -> CatalogLayers {
         CatalogLayers {
             provider_id: "openai".into(),
+            kind: "openai".into(),
             bundled: vec![ModelDescriptor {
                 model_id: "model".into(),
                 display_name: "Bundled".into(),

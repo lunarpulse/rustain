@@ -396,6 +396,7 @@ fn test_router_delegates_to_active_provider() {
             .stream_completion(
                 vec![],
                 CompletionOptions {
+                    session_id: None,
                     model: "test".to_string(),
                     max_tokens: 1024,
                     system_prompt: "".to_string(),
@@ -419,6 +420,7 @@ fn test_router_delegates_to_active_provider() {
             .stream_completion(
                 vec![],
                 CompletionOptions {
+                    session_id: None,
                     model: "test".to_string(),
                     max_tokens: 1024,
                     system_prompt: "".to_string(),
@@ -480,6 +482,7 @@ fn test_router_swap_does_not_block_in_flight_stream() {
             .stream_completion(
                 vec![],
                 CompletionOptions {
+                    session_id: None,
                     model: "test".to_string(),
                     max_tokens: 1024,
                     system_prompt: "".to_string(),

@@ -305,6 +305,7 @@ async fn test_generate_title_via_mock_provider() {
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: None,
         model: "test-model".to_string(),
         max_tokens: 30,
         system_prompt: "Generate a concise title".to_string(),
@@ -344,6 +345,7 @@ async fn test_title_generation_failure_silent() {
                 reasoning_content: None,
             }],
             CompletionOptions {
+                session_id: None,
                 model: "test".to_string(),
                 max_tokens: 30,
                 system_prompt: "Generate title".to_string(),

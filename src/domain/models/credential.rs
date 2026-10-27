@@ -71,15 +71,42 @@ pub enum CredentialOrigin {
 #[serde(transparent)]
 pub struct CredentialId(pub u64);
 
+/// One login epoch; zero is reserved for legacy rows awaiting store derivation.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(transparent)]
+pub struct CredentialGeneration(pub [u8; 16]);
+
+/// Atomic identity of the precise stored grant used by a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CredentialStamp {
+    pub id: CredentialId,
+    pub rev: u64,
+    pub generation: CredentialGeneration,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredCredential {
     pub id: CredentialId,
     pub rev: u64,
+    #[serde(default)]
+    pub generation: CredentialGeneration,
     pub origin: CredentialOrigin,
     #[serde(flatten)]
     pub credential: Credential,
     pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
     pub disabled_cause: Option<String>,
+}
+
+impl StoredCredential {
+    pub fn stamp(&self) -> CredentialStamp {
+        CredentialStamp {
+            id: self.id,
+            rev: self.rev,
+            generation: self.generation,
+        }
+    }
 }
 
 impl std::fmt::Display for StoredCredential {
@@ -343,6 +370,7 @@ mod tests {
         let row = StoredCredential {
             id: CredentialId(1),
             rev: 1,
+            generation: CredentialGeneration([1; 16]),
             origin: CredentialOrigin::Stored,
             credential,
             last_validated: None,

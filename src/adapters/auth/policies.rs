@@ -1,4 +1,4 @@
-//! Static provider protocol rules, adapted from oh-my-pi's Anthropic policy.
+//! Static provider protocol rules, adapted from oh-my-pi's authentication policies.
 //!
 //! MIT License
 //!
@@ -30,12 +30,14 @@ const CLIENT: ClientId = ClientId::Base64("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0N
 const EXCHANGE: TokenRequestPolicy = TokenRequestPolicy {
     url: "https://api.anthropic.com/v1/oauth/token",
     encoding: BodyEncoding::Json,
+    timeout_ms: 30_000,
     headers: &[],
     extra_params: &[("state", Tpl::State)],
 };
 const REFRESH_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
     url: "https://api.anthropic.com/v1/oauth/token",
     encoding: BodyEncoding::Json,
+    timeout_ms: 30_000,
     headers: &[
         ("anthropic-beta", Tpl::Lit("oauth-2025-04-20")),
         (
@@ -69,6 +71,7 @@ const REFRESH_PROJECTION: TokenProjection = TokenProjection {
 };
 pub static ANTHROPIC_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
     label: "Claude Pro/Max subscription (browser)",
+    login_name: "Anthropic (Claude Pro/Max)",
     instructions: "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
     paste_prompt: "Paste the authorization code (or full redirect URL):",
     client_id: CLIENT,
@@ -94,8 +97,74 @@ pub static ANTHROPIC_API: OAuthApiPolicy = OAuthApiPolicy {
     refresh: &ANTHROPIC_REFRESH,
 };
 
-pub const fn org_scoped_identity(provider: &str) -> bool {
-    matches!(provider.as_bytes(), b"anthropic")
+pub const CODEX_ORIGINATOR: &str = "omp";
+const CODEX_CLIENT: ClientId = ClientId::Literal("app_EMoamEEZ73f0CkXaXp7hrann");
+const CODEX_TOKEN_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
+    url: "https://auth.openai.com/oauth/token",
+    encoding: BodyEncoding::Form,
+    timeout_ms: 15_000,
+    headers: &[],
+    extra_params: &[],
+};
+const CODEX_PROJECTION: TokenProjection = TokenProjection {
+    access: "/access_token",
+    refresh: "/refresh_token",
+    expires_in: "/expires_in",
+    skew_ms: 0,
+    account_id: None,
+    email: None,
+    project_id: None,
+    org_id: None,
+    org_name: None,
+};
+pub static CODEX_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
+    label: "ChatGPT Plus/Pro subscription (browser)",
+    login_name: "ChatGPT Plus/Pro (Codex Subscription)",
+    instructions: "A browser window should open. Complete login to finish.",
+    paste_prompt: "Paste the authorization code (or full redirect URL):",
+    client_id: CODEX_CLIENT,
+    authorize_url: "https://auth.openai.com/oauth/authorize",
+    scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
+    authorize_extra: &[
+        ("id_token_add_organizations", Tpl::Lit("true")),
+        ("codex_cli_simplified_flow", Tpl::Lit("true")),
+        ("originator", Tpl::Lit(CODEX_ORIGINATOR)),
+    ],
+    port: 1455,
+    port_fallback: false,
+    callback_path: "/auth/callback",
+    paste: true,
+    exchange: &CODEX_TOKEN_REQUEST,
+    projection: &CODEX_PROJECTION,
+    identity_hook: Some(IdentityHook::CodexJwt),
+};
+pub static CODEX_REFRESH: RefreshPolicy = RefreshPolicy {
+    client_id: CODEX_CLIENT,
+    request: &CODEX_TOKEN_REQUEST,
+    projection: &CODEX_PROJECTION,
+    identity_hook: Some(IdentityHook::CodexJwt),
+};
+pub static CODEX_API: OAuthApiPolicy = OAuthApiPolicy {
+    api_origin: "https://chatgpt.com",
+    refresh: &CODEX_REFRESH,
+};
+
+pub fn org_scoped_identity(provider: &str) -> bool {
+    crate::adapters::cli::auth::providers::lookup(provider)
+        .is_some_and(|meta| meta.org_scoped_identity)
+}
+
+/// Instrumented callers may replace pinned ports, never change fallback policy.
+pub fn callback_port(policy: &OAuthCodePolicy) -> u16 {
+    #[cfg(feature = "test-instrumentation")]
+    if !policy.port_fallback
+        && let Some(port) =
+            crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_AUTH_CALLBACK_PORT")
+                .and_then(|port| port.parse::<u16>().ok())
+    {
+        return port;
+    }
+    policy.port
 }
 
 pub fn claude_code_version() -> String {
@@ -132,7 +201,7 @@ pub fn endpoint(value: &str) -> String {
 }
 
 pub fn oauth_api(provider: &str) -> Option<&'static OAuthApiPolicy> {
-    (provider == "anthropic").then_some(&ANTHROPIC_API)
+    crate::adapters::cli::auth::providers::lookup(provider).and_then(|meta| meta.oauth_api)
 }
 
 #[cfg(test)]
@@ -164,6 +233,31 @@ mod tests {
             endpoint("https://api.anthropic.com/v1/oauth/token"),
             "https://api.anthropic.com/v1/oauth/token"
         );
+    }
+
+    #[cfg(not(feature = "test-instrumentation"))]
+    #[test]
+    #[serial_test::serial]
+    fn shipped_build_ignores_test_callback_override() {
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: the serial guard outlives this restoration.
+                unsafe {
+                    match &self.0 {
+                        Some(value) => std::env::set_var("RUSTAIN_TEST_AUTH_CALLBACK_PORT", value),
+                        None => std::env::remove_var("RUSTAIN_TEST_AUTH_CALLBACK_PORT"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RUSTAIN_TEST_AUTH_CALLBACK_PORT"));
+        // SAFETY: environment mutation is serialized with all other callers.
+        unsafe {
+            std::env::set_var("RUSTAIN_TEST_AUTH_CALLBACK_PORT", "1");
+        }
+        assert_eq!(callback_port(&CODEX_OAUTH), 1455);
+        assert_eq!(callback_port(&ANTHROPIC_OAUTH), 54545);
     }
 
     #[test]

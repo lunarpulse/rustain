@@ -5684,7 +5684,7 @@ pub async fn run(
                                         tokio::spawn(async move {
                                             match tokio::time::timeout(
                                                 BACKGROUND_TASK_TIMEOUT,
-                                                generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                                generate_title(&*provider_ref, &model, &title_conv_id, &user_msg, &assistant_msg),
                                             ).await {
                                                 Ok(Ok(title)) => {
                                                     let _ = event_tx_ref.send(AppEvent::TitleGenerated {
@@ -5781,7 +5781,7 @@ pub async fn run(
                                     tokio::spawn(async move {
                                         match tokio::time::timeout(
                                             BACKGROUND_TASK_TIMEOUT,
-                                            generate_title(&*provider_ref, &model, &user_msg, &assistant_msg),
+                                            generate_title(&*provider_ref, &model, &title_conv_id, &user_msg, &assistant_msg),
                                         ).await {
                                             Ok(Ok(title)) => {
                                                 let _ = event_tx_ref.send(AppEvent::TitleGenerated {
@@ -9837,6 +9837,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 async fn generate_title(
     provider: &dyn StreamingProvider,
     model: &str,
+    conversation_id: &str,
     user_msg: &str,
     assistant_msg: &str,
 ) -> Result<String> {
@@ -9853,6 +9854,7 @@ async fn generate_title(
         reasoning_content: None,
     }];
     let options = CompletionOptions {
+        session_id: Some(format!("{conversation_id}:title")),
         model: model.to_string(),
         max_tokens: 30,
         system_prompt: "Generate a concise title (under 60 characters) for this conversation. Output only the title, no quotes or explanation.".to_string(),
@@ -10378,6 +10380,30 @@ fn resolve_command_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn title_requests_use_conversation_scoped_side_sessions() {
+        let provider = crate::adapters::noop::RecordingProvider::default();
+        assert_eq!(
+            generate_title(&provider, "model", "conversation-a", "hello", "hi")
+                .await
+                .unwrap(),
+            "Recorded response"
+        );
+        generate_title(&provider, "model", "conversation-b", "hello", "hi")
+            .await
+            .unwrap();
+        let requests = provider.requests.lock().await;
+        assert_eq!(
+            requests[0].session_id.as_deref(),
+            Some("conversation-a:title")
+        );
+        assert_eq!(
+            requests[1].session_id.as_deref(),
+            Some("conversation-b:title")
+        );
+        assert!(requests.iter().all(|request| request.tools.is_empty()));
+    }
 
     // `warning_notice_does_not_transfer_focus` moved to `handlers/notice.rs`
     // per DGI-E (Winston Task 1 sign-off). Story 8.0a Phase 4 Task 10.

@@ -74,7 +74,7 @@ impl EffectiveProvider {
         self.cfg.kind.as_deref().unwrap_or(&self.id)
     }
     pub fn rows_key(&self) -> &str {
-        if self.kind() == "anthropic" {
+        if crate::adapters::auth::policies::oauth_api(self.kind()).is_some() {
             &self.cfg.provider_id
         } else {
             &self.id
@@ -93,17 +93,19 @@ impl EffectiveProvider {
         }
     }
     pub fn oauth_allowed(&self, env_lookup: &dyn Fn(&str) -> Option<String>) -> bool {
-        self.kind() != "anthropic"
-            || super::provider_factory::anthropic_oauth_allowed(
-                &super::provider_factory::anthropic_base_url(
-                    if self.origin == ProviderOrigin::Config {
-                        Some(&self.cfg)
-                    } else {
-                        None
-                    },
-                    env_lookup,
-                ),
+        let base = if self.kind() == "anthropic" {
+            super::provider_factory::anthropic_base_url(
+                if self.origin == ProviderOrigin::Config {
+                    Some(&self.cfg)
+                } else {
+                    None
+                },
+                env_lookup,
             )
+        } else {
+            super::provider_factory::discovery_base_url(&self.id, &self.cfg)
+        };
+        super::provider_factory::oauth_allowed(self.kind(), &base)
     }
     pub fn display_name(&self) -> String {
         providers::lookup(self.kind())

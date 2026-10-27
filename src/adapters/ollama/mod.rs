@@ -894,6 +894,7 @@ mod tests {
             },
         ];
         let options = CompletionOptions {
+            session_id: None,
             model: "model".into(),
             max_tokens: 64,
             system_prompt: String::new(),

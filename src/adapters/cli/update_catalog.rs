@@ -117,6 +117,7 @@ pub async fn run_update_catalog(
                 let models = merge_catalog(
                     CatalogLayers {
                         provider_id: provider.id.to_string(),
+                        kind: provider.id.to_string(),
                         bundled,
                         models_dev: vec![],
                         cache: None,
