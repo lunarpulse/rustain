@@ -84,6 +84,7 @@ fn resolved_oauth(
         auth: ResolvedAuth::OAuth {
             access,
             account_id: identity.account_id.clone(),
+            project_id: identity.project_id.clone(),
         },
         row: Some(row),
         identity: identity.key(crate::adapters::auth::policies::org_scoped_identity(

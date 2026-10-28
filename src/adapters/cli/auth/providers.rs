@@ -116,6 +116,18 @@ static PROVIDERS: &[ProviderMeta] = &[
         org_scoped_identity: false,
         default_model: None,
     },
+    // A structured subscription credential (token + project) has no env form.
+    ProviderMeta {
+        id: "google-gemini-cli",
+        display_name: "Google Cloud Code Assist (Gemini CLI)",
+        signup_url: "https://goo.gle/gemini-cli-auth-docs",
+        requires_key: true,
+        api_key_env: "",
+        auth_methods: &[AuthMethod::OAuthCode(&policies::GEMINI_CLI_OAUTH)],
+        oauth_api: Some(&policies::GEMINI_CLI_API),
+        org_scoped_identity: false,
+        default_model: Some("gemini-3.1-pro-preview"),
+    },
     ProviderMeta {
         id: "deepseek",
         display_name: "DeepSeek",
@@ -237,6 +249,31 @@ mod tests {
                 "ChatGPT Plus/Pro subscription (device code)"
             ]
         );
+    }
+
+    #[test]
+    fn gemini_cli_is_a_login_only_subscription_with_its_own_default() {
+        let meta = lookup("google-gemini-cli").unwrap();
+        assert_eq!(meta.display_name, "Google Cloud Code Assist (Gemini CLI)");
+        assert_eq!(meta.signup_url, "https://goo.gle/gemini-cli-auth-docs");
+        assert!(meta.requires_key);
+        assert_eq!(meta.api_key_env, "");
+        assert!(matches!(meta.auth_methods, [AuthMethod::OAuthCode(_)]));
+        assert_eq!(
+            meta.auth_methods[0].login_name(),
+            Some("Google Cloud Code Assist (Gemini CLI)")
+        );
+        assert_eq!(
+            meta.oauth_api.unwrap().api_origin,
+            "https://cloudcode-pa.googleapis.com"
+        );
+        assert!(!meta.org_scoped_identity);
+        assert_eq!(meta.default_model, Some("gemini-3.1-pro-preview"));
+        // The API-key Google provider is a different row.
+        assert!(matches!(
+            lookup("google").unwrap().auth_methods,
+            [AuthMethod::ApiKey]
+        ));
     }
 
     #[test]

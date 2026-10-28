@@ -45,6 +45,43 @@ pub enum ClientId {
     Base64(&'static str),
 }
 
+/// An installed-app registration value shipped in the binary; Base64 is obfuscation,
+/// not secrecy. Decoded only into the token request body; `Debug` never shows it.
+#[derive(Clone, Copy)]
+pub enum ClientSecret {
+    Base64(&'static str),
+}
+impl std::fmt::Debug for ClientSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClientSecret([redacted])")
+    }
+}
+
+/// PKCE and a client secret are mutually exclusive by construction.
+#[derive(Debug, Clone, Copy)]
+pub enum OAuthClient {
+    /// Public client: S256 challenge on the authorization URL, verifier on exchange.
+    PublicPkce,
+    /// Confidential installed-app client: no PKCE, the secret on exchange and refresh.
+    Confidential { secret: ClientSecret },
+}
+
+/// Where the browser callback listener binds and what the redirect names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallbackHost {
+    /// `localhost` on IPv4 and, when available, IPv6.
+    Localhost,
+    /// `127.0.0.1` only; the redirect names `127.0.0.1`.
+    Ipv4Loopback,
+}
+
+/// Provider work that must succeed after the code exchange before a login counts.
+#[derive(Debug, Clone, Copy)]
+pub enum PostExchangeHook {
+    /// Cloud Code Assist project discovery or onboarding.
+    GeminiCliProject,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum BodyEncoding {
     Json,
@@ -88,9 +125,10 @@ pub enum IdentityHook {
     CodexJwt,
     /// Access-JWT `sub`, then a best-effort xAI OIDC userinfo lookup.
     XaiUserinfo,
+    /// Best-effort Google userinfo `email`; login only.
+    GoogleUserinfo,
 }
 
-/// PKCE is intrinsic: a confidential client secret cannot be represented.
 #[derive(Debug)]
 pub struct OAuthCodePolicy {
     pub label: &'static str,
@@ -98,16 +136,19 @@ pub struct OAuthCodePolicy {
     pub instructions: &'static str,
     pub paste_prompt: &'static str,
     pub client_id: ClientId,
+    pub client: OAuthClient,
     pub authorize_url: &'static str,
     pub scope: &'static str,
     pub authorize_extra: &'static [(&'static str, Tpl)],
     pub port: u16,
     pub port_fallback: bool,
+    pub callback_host: CallbackHost,
     pub callback_path: &'static str,
     pub paste: bool,
     pub exchange: &'static TokenRequestPolicy,
     pub projection: &'static TokenProjection,
     pub identity_hook: Option<IdentityHook>,
+    pub post_exchange: Option<PostExchangeHook>,
 }
 
 /// One login method, two device protocols sharing display, time, cancellation and storage.
@@ -146,9 +187,13 @@ pub struct Rfc8628Policy {
 #[derive(Debug)]
 pub struct RefreshPolicy {
     pub client_id: ClientId,
+    /// Sent only by confidential clients.
+    pub client_secret: Option<ClientSecret>,
     pub request: &'static TokenRequestPolicy,
     pub projection: &'static TokenProjection,
     pub identity_hook: Option<IdentityHook>,
+    /// A row without `project_id` fails before any HTTP.
+    pub require_project_id: bool,
 }
 
 #[derive(Debug)]

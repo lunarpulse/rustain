@@ -4,7 +4,7 @@
 #[path = "conformance_20_1d_codex_subscription/auth.rs"]
 pub(crate) mod auth;
 #[path = "conformance_20_1d_codex_subscription/boundaries.rs"]
-mod boundaries;
+pub(crate) mod boundaries;
 #[path = "conformance_20_1d_codex_subscription/cli.rs"]
 pub(crate) mod cli;
 #[path = "conformance_20_1d_codex_subscription/credential_binding.rs"]

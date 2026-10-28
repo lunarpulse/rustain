@@ -124,11 +124,17 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         "adapters/anthropic/claude_code.rs",
         // Candidate keys go directly to the fixed validation adapter, never env.
         "adapters/auth/flows/api_key.rs",
+        // The Cloud Code Assist project hook builds its provisioning bearer header
+        // once (`headers`), marked sensitive; redaction reads it back from the map.
+        "adapters/auth/gemini_cli_project.rs",
         // The identity hook exposes the access token once: the Anthropic bootstrap
         // header or local Codex JWT claim decoding, never logs or stored identity.
         "adapters/auth/flows/identity.rs",
-        // Refresh bearer is exposed only into the token grant body.
+        // Refresh tokens and confidential client secrets are exposed only into the
+        // token grant body (`grant_secret`).
         "adapters/auth/flows/token.rs",
+        // One boundary builds the sensitive Cloud Code Assist bearer header (`bearer`).
+        "adapters/gemini_cli/mod.rs",
         "adapters/openai/mod.rs",
         // One boundary builds the sensitive bearer header and decodes its request JWT.
         "adapters/openai_codex/profile.rs",
@@ -156,9 +162,10 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 21,
-        "expose_secret() pinned count changed: got {count}, expected 21. \
-         Codex and xAI each add one consolidated bearer-header boundary; \
+        count, 23,
+        "expose_secret() pinned count changed: got {count}, expected 23. \
+         Codex, xAI and Gemini CLI each add one consolidated bearer-header boundary, \
+         the Gemini CLI project hook one provisioning-header boundary; \
          stored credentials otherwise retain their secret wrappers."
     );
 }
@@ -224,8 +231,9 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
         // a failed connect and greps every surfaced string for the password.
         "adapters/mcp/client.rs",
-        // Codex's and xAI's distinct configured bases are each exposed once, only
-        // for their actual HTTP endpoint (`xai_configured_base`).
+        // Codex's, xAI's and Gemini CLI's distinct configured bases are each exposed
+        // once, only for their actual HTTP endpoint (`xai_configured_base`,
+        // `gemini_cli_base_url`).
         "infrastructure/provider_factory.rs",
     ]
     .iter()
@@ -242,9 +250,9 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         "expose_url() count is 0 — the matcher is broken"
     );
     assert_eq!(
-        count, 8,
-        "expose_url() pinned count changed: got {count}, expected 8. \
-         Codex and xAI each add one construction-consistent configured-base boundary."
+        count, 9,
+        "expose_url() pinned count changed: got {count}, expected 9. \
+         Codex, xAI and Gemini CLI each add one construction-consistent configured-base boundary."
     );
 }
 

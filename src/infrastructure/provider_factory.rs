@@ -68,6 +68,9 @@ pub fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
     if kind == "openai-codex" {
         return codex_base_url(cfg);
     }
+    if kind == "google-gemini-cli" {
+        return gemini_cli_base_url(cfg);
+    }
     #[cfg(feature = "openai")]
     if let Some(xai) = crate::adapters::xai::XaiKind::from_id(kind) {
         return xai_base_url(xai, cfg);
@@ -174,6 +177,7 @@ pub fn build_provider_for_config(
         "anthropic" => build_anthropic_from_config(cfg, None),
         "openai-codex" => build_codex_from_config(cfg),
         "xai" | "xai-oauth" => build_xai_from_config(provider_id, cfg, kind),
+        "google-gemini-cli" => build_gemini_cli_from_config(cfg),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
@@ -238,7 +242,11 @@ pub fn build_provider_for_config_with_key(
     key: &str,
 ) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
-    let auth = (!matches!(kind, "openai-codex" | "xai" | "xai-oauth")).then(|| {
+    let auth = (!matches!(
+        kind,
+        "openai-codex" | "xai" | "xai-oauth" | "google-gemini-cli"
+    ))
+    .then(|| {
         crate::domain::models::ResolvedAuth::ApiKey(crate::domain::models::SecretString::new(
             key.to_owned(),
         ))
@@ -251,6 +259,9 @@ pub fn build_provider_for_config_with_key(
         "xai" => build_xai_with_key(provider_id, cfg, key),
         "xai-oauth" => Err(ProviderError::Other(
             "xai-oauth has no API-key login".into(),
+        )),
+        "google-gemini-cli" => Err(ProviderError::Other(
+            "google-gemini-cli has no API-key login".into(),
         )),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
@@ -577,6 +588,64 @@ fn build_xai_with_key(
     }
 }
 
+/// One base for construction, availability, origin guard and cache identity: the
+/// configured `base_url` (its one exposure here), else the Cloud Code Assist origin.
+fn gemini_cli_base_url(cfg: &ProviderConfig) -> String {
+    let configured = cfg.base_url.as_ref().map(|url| url.expose_url());
+    #[cfg(feature = "openai")]
+    {
+        crate::infrastructure::utils::normalize_base_url(&crate::adapters::gemini_cli::base_url(
+            configured,
+        ))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        crate::infrastructure::utils::normalize_base_url(configured.unwrap_or_default())
+    }
+}
+
+/// The stored login only: a structured token + project has no env or API-key form.
+fn build_gemini_cli_from_config(
+    cfg: &ProviderConfig,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        let base = gemini_cli_base_url(cfg);
+        // A configured base on another origin locks the stored row.
+        let allowed =
+            oauth_allowed("google-gemini-cli", &base) && oauth_allowed(&cfg.provider_id, &base);
+        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+        if crate::adapters::cli::auth::source_for(
+            &cfg.provider_id,
+            &[],
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+            allowed,
+        )
+        .is_none()
+        {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            cfg.provider_id.clone(),
+            Vec::new(),
+            allowed,
+            None,
+        );
+        Ok(Arc::new(
+            crate::adapters::gemini_cli::GeminiCliAdapter::new(handle, base)?,
+        ))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = cfg;
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
 /// Keep endpoint identity and endpoint restrictions outside transport-specific policy.
 struct ConfiguredProvider {
     id: String,
@@ -811,6 +880,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn gemini_cli_has_no_key_login_and_guards_its_origin() {
+        let _env = EnvGuard::new(None);
+        let cfg = |base: Option<&str>| ProviderConfig {
+            model_id: "gemini-3.1-pro-preview".into(),
+            ..xai_config("google-gemini-cli", base)
+        };
+        match build_provider_for_config_with_key("google-gemini-cli", &cfg(None), "key") {
+            Err(ProviderError::Other(message)) => {
+                assert_eq!(message, "google-gemini-cli has no API-key login");
+            }
+            Err(other) => panic!("unexpected error {other:?}"),
+            Ok(_) => panic!("google-gemini-cli must refuse a static key"),
+        }
+        let base = discovery_base_url("google-gemini-cli", &cfg(None));
+        assert_eq!(base, "https://cloudcode-pa.googleapis.com");
+        assert!(oauth_allowed("google-gemini-cli", &base));
+        let foreign = discovery_base_url("google-gemini-cli", &cfg(Some("https://proxy.example/")));
+        assert_eq!(foreign, "https://proxy.example");
+        assert!(!oauth_allowed("google-gemini-cli", &foreign));
     }
 
     #[test]

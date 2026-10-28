@@ -63,8 +63,10 @@ neither stored nor environment credentials can serve.
 
 Anthropic supports Claude Pro/Max browser subscription login and API keys.
 ChatGPT Codex supports browser and device-code subscription login. xAI Grok OAuth
-(`xai-oauth`) supports device-code subscription login only. Other keyed providers,
-including `xai`, use masked API-key entry with pre-storage validation.
+(`xai-oauth`) supports device-code subscription login only. Google Cloud Code
+Assist (`google-gemini-cli`) supports browser subscription login only. Other keyed
+providers, including `xai` and `google`, use masked API-key entry with pre-storage
+validation.
 
 ### Usage
 
@@ -76,6 +78,7 @@ rustain auth login openai-codex --method oauth  # ChatGPT Plus/Pro browser login
 rustain auth login openai-codex --method device # ChatGPT Plus/Pro device code (headless)
 rustain auth login xai-oauth                    # SuperGrok / X Premium+ device code
 rustain auth login xai                          # store an xAI API key
+rustain auth login google-gemini-cli            # Gemini CLI (Cloud Code Assist) browser login
 rustain auth login ollama       # reports "no API key required"
 ```
 
@@ -88,8 +91,10 @@ port 54545 (falling back to a free port when necessary), and uses PKCE and a
 separate CSRF state. In a terminal it also accepts the final redirect URL, a
 `code=…&state=…` query (any parameter order, optional leading `?` or `#`),
 `code#state`, or a bare code. A supplied wrong state is rejected and re-prompts;
-a state-less or empty-state paste is accepted. The browser/paste flow times out
-after 300 seconds; masked API-key entry has no deadline. Ctrl-C cancels the flow
+a state-less or empty-state paste is accepted. The browser/paste wait times out
+after 300 seconds; the token exchange and any post-login provisioning that follow
+it run under their own per-request timeouts, and masked API-key entry has no
+deadline. Ctrl-C cancels the flow
 and releases its listeners. Browser launch is best-effort; non-TTY login has no
 paste prompt.
 
@@ -113,6 +118,15 @@ omp-compatible request profile (`User-Agent: omp/18.12.6`); its availability doe
 not imply xAI approval. Provider policies or backend changes may restrict access
 or put your account at risk. rustain does not refuse subscription tokens. Use the
 separate `xai` API-key provider if you do not accept subscription-client risk.
+
+**Gemini CLI subscription policy risk:** This third-party client signs in with
+Google's Gemini CLI installed-app OAuth client and sends requests with the Gemini
+CLI wire identity (`User-Agent: GeminiCLI/0.46.0/<model> (<platform>; <arch>;
+terminal)` and Gemini CLI `Client-Metadata`), as oh-my-pi does; its availability
+does not imply Google approval. Provider policies or backend changes may restrict
+access or put your account at risk. rustain does not refuse subscription tokens.
+Use the separate `google` API-key provider if you do not accept subscription-client
+risk.
 
 ### ChatGPT Plus/Pro (Codex Subscription)
 
@@ -261,6 +275,70 @@ A stored row's 401 refreshes once; a remaining 401/403 marks the provider
 `⚠ sign in again`. Health checks and login probes classify 404/405 as an
 unsupported endpoint. A login that changes stored rows triggers the post-login
 discovery described above.
+
+### Google Cloud Code Assist (Gemini CLI)
+
+Run `rustain auth login google-gemini-cli` (one method, no picker). It is Google's
+installed-app authorization-code flow without PKCE: stderr shows
+`Complete the sign-in in your browser.`, the authorization URL and
+`Local browser launch: http://127.0.0.1:<port>/launch`. The callback listens on
+`127.0.0.1` only, port 8085, falling back to a free port
+(`Preferred port 8085 unavailable, using port <n>`); the redirect is
+`http://127.0.0.1:<port>/oauth2callback`. State checking, paste (redirect URL,
+query, `code#state` or bare code), denial and Ctrl-C follow the shared browser rules,
+and the 300-second deadline covers only the browser/paste wait. The success line
+is `Logged in to Google Cloud Code Assist (Gemini CLI)` plus the account email.
+
+The exchange posts the authorization code with the client id and client secret
+to `https://oauth2.googleapis.com/token`; the stored expiry is `expires_in` minus
+300 seconds. The account email comes from Google userinfo (best-effort, 15 s; a
+failure logs in without an email). A token response without a refresh token fails
+with `No refresh token received. Please try again.`
+
+The login succeeds only after a Cloud Code Assist project is found or provisioned
+(`Checking for existing Cloud Code Assist project...`, `loadCodeAssist`). An
+account with a current tier uses its project, else `GOOGLE_CLOUD_PROJECT` (or
+`GOOGLE_CLOUD_PROJECT_ID` when the first is unset or blank). Otherwise the default
+allowed tier is onboarded (`Provisioning Cloud Code Assist project (this may take a
+moment)...`); a non-free tier needs one of those variables first. A pending
+provisioning operation is polled at most 24 times, 5 seconds apart (`Waiting for
+project provisioning (attempt n/24)...`), then fails with `Project provisioning did
+not complete after 24 attempts`. Each request is bounded to 30 seconds. An account
+Google must verify fails with `Account verification required[ for <email>]. Visit
+<url> to continue, then sign in again.`; only an `https:` verification URL is shown.
+Any failure stores nothing. The project variables are read at login only: the
+project is stored with the credential and every request sends the project of the
+same row as its bearer.
+
+Stored rows refresh lazily with the client secret and keep their project, email and
+refresh token; refresh never re-runs userinfo or provisioning. A row without a
+project never refreshes: it fails before any token request with
+`google-gemini-cli credentials are missing projectId; sign in again` (the row stays
+enabled). A request with it fails before it is sent with ``Missing token or
+projectId in Google Cloud credentials. Run `rustain auth login google-gemini-cli`
+to re-authenticate.`` Run the login again in either case. There is no
+environment-variable credential: without a login the selector shows
+``Run `rustain auth login google-gemini-cli` ``. `rustain auth logout
+google-gemini-cli` removes the rows. Stored rows are sent only to
+`https://cloudcode-pa.googleapis.com`; a configured `base_url` on another origin
+makes them ineligible.
+
+**Client secret provenance.** The installed-app client id and secret are the
+Base64 literals oh-my-pi ships for this login (decoded only into the token request
+body, never printed, logged or stored). Base64 is obfuscation, not secrecy: the
+secret is an installed-app registration value that grants nothing without your
+consent. The inspected source shows where rustain obtained the values; it does not
+establish who at Google registered or published them.
+
+Requests use Cloud Code Assist's native
+`POST <base>/v1internal:streamGenerateContent?alt=sse` (never Chat Completions),
+with the Gemini CLI headers above and omp's envelope, roles, images, tool schemas,
+retries (4 attempts; server retry hints up to 5 minutes) and error texts. Gemini
+thought signatures are kept privately per response and replayed only to the same
+provider and model within a tool round and across text turns; they never appear in
+transcripts, observers, ACP, `ask` output or logs. The provider serves its 7
+bundled models (default `gemini-3.1-pro-preview`); live model discovery is not
+performed yet, so login prints no `Discovered` line.
 
 ### How it works
 
@@ -413,6 +491,7 @@ same post-login path, as described above.
 | moonshot   | `MOONSHOT_API_KEY`   | ✓            |
 | xai        | `XAI_API_KEY`        | ✓            |
 | xai-oauth  | `XAI_OAUTH_TOKEN`    | ✓            |
+| google-gemini-cli | —             | ✓ (login)    |
 | ollama     | —                    | ✗            |
 
 ### Security

@@ -105,5 +105,8 @@ pub mod responses;
 #[cfg(feature = "openai")]
 pub mod xai;
 
+#[cfg(feature = "openai")]
+pub mod gemini_cli;
+
 #[cfg(feature = "ollama")]
 pub mod ollama;

@@ -244,6 +244,8 @@ pub enum ResolvedAuth {
     OAuth {
         access: SecretString,
         account_id: Option<String>,
+        /// The project of the same row as `access` (Cloud Code Assist); not a secret.
+        project_id: Option<String>,
     },
 }
 
@@ -379,6 +381,7 @@ mod tests {
         let resolved = ResolvedAuth::OAuth {
             access: "ACCESS-CANARY".into(),
             account_id: None,
+            project_id: None,
         };
         for output in [
             format!("{row:?} {row}"),

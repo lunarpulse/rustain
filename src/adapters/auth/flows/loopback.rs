@@ -23,6 +23,7 @@
 //! SOFTWARE.
 
 use super::{FlowError, LoginUi};
+use crate::domain::models::auth_policy::CallbackHost;
 use std::io;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -44,6 +45,7 @@ impl Loopback {
     pub async fn bind(
         port: u16,
         fallback: bool,
+        host: CallbackHost,
         path: &str,
         ui: &dyn LoginUi,
     ) -> Result<Self, FlowError> {
@@ -74,23 +76,29 @@ impl Loopback {
                 .local_addr()
                 .map_err(|_| FlowError::configuration("Cannot read OAuth callback address"))?
                 .port();
-            let v6 = match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, actual)).await {
-                Ok(listener) => Some(listener),
-                Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
-                    drop(v4);
-                    if !fallback || attempt == 4 {
-                        return Err(FlowError::configuration(
-                            "IPv6 OAuth callback port is already in use",
-                        ));
+            let v6 = match host {
+                // A non-`localhost` callback host binds that single address only.
+                CallbackHost::Ipv4Loopback => None,
+                CallbackHost::Localhost => {
+                    match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, actual)).await {
+                        Ok(listener) => Some(listener),
+                        Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
+                            drop(v4);
+                            if !fallback || attempt == 4 {
+                                return Err(FlowError::configuration(
+                                    "IPv6 OAuth callback port is already in use",
+                                ));
+                            }
+                            requested = 0;
+                            continue;
+                        }
+                        Err(e) if ipv6_unavailable(&e) => None,
+                        Err(_) => {
+                            return Err(FlowError::configuration(
+                                "Cannot bind IPv6 OAuth callback listener",
+                            ));
+                        }
                     }
-                    requested = 0;
-                    continue;
-                }
-                Err(e) if ipv6_unavailable(&e) => None,
-                Err(_) => {
-                    return Err(FlowError::configuration(
-                        "Cannot bind IPv6 OAuth callback listener",
-                    ));
                 }
             };
             if actual != port {
@@ -98,11 +106,15 @@ impl Loopback {
                     "Preferred port {port} unavailable, using port {actual}"
                 ));
             }
+            let name = match host {
+                CallbackHost::Localhost => "localhost",
+                CallbackHost::Ipv4Loopback => "127.0.0.1",
+            };
             return Ok(Self {
                 v4,
                 v6,
-                redirect: format!("http://localhost:{actual}{path}"),
-                launch: format!("http://localhost:{actual}/launch"),
+                redirect: format!("http://{name}:{actual}{path}"),
+                launch: format!("http://{name}:{actual}/launch"),
                 authorize: String::new(),
             });
         }
@@ -123,8 +135,13 @@ impl Loopback {
                 result = async { match &self.v6 { Some(v6) => v6.accept().await, None => std::future::pending().await } } => result,
                 Some(_) = connections.join_next(), if !connections.is_empty() => continue,
             };
+            // A failed accept (aborted handshake, descriptor pressure) never ends the
+            // listener; it lives until the login future that owns it finishes (the
+            // 300 s wait, then the exchange's own bounds). A short pause keeps a
+            // persistent accept error from spinning a core.
             let Ok((stream, _)) = accepted else {
-                return;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                continue;
             };
             let (path, state, authorize, tx) = (
                 path.to_owned(),

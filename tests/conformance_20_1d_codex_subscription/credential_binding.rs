@@ -472,7 +472,10 @@ fn assert_actual_grant(resolved: &Resolved, row: &StoredCredential) {
     let Credential::OAuth(oauth) = &row.credential else {
         panic!("expected persisted OAuth grant")
     };
-    let ResolvedAuth::OAuth { access, account_id } = &resolved.auth else {
+    let ResolvedAuth::OAuth {
+        access, account_id, ..
+    } = &resolved.auth
+    else {
         panic!("expected resolved OAuth grant")
     };
     assert_eq!(access.expose_secret(), oauth.access.expose_secret());

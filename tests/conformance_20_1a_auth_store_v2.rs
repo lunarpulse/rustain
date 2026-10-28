@@ -373,6 +373,7 @@ async fn k05_m04_oauth_models_mask_both_tokens_but_disk_retains_them() {
     let resolved = ResolvedAuth::OAuth {
         access: "MASKING-ACCESS-CANARY".into(),
         account_id: None,
+        project_id: None,
     };
     for output in [
         format!("{credential:?}"),

@@ -693,6 +693,74 @@
           "stale": false
         }
       ]
+    },
+    "google-gemini-cli": {
+      "fetchedAtUnix": 0,
+      "models": [
+        {
+          "modelId": "gemini-2.0-flash",
+          "displayName": "Gemini 2.0 Flash",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-2.5-flash",
+          "displayName": "Gemini 2.5 Flash",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-2.5-pro",
+          "displayName": "Gemini 2.5 Pro",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3-flash-preview",
+          "displayName": "Gemini 3 Flash Preview",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3-pro-preview",
+          "displayName": "Gemini 3 Pro Preview",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.1-flash-lite-preview",
+          "displayName": "Gemini 3.1 Flash Lite Preview",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.1-pro-preview",
+          "displayName": "Gemini 3.1 Pro Preview",
+          "providerId": "google-gemini-cli",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        }
+      ]
     }
   }
 }

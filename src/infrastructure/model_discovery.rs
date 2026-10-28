@@ -259,6 +259,13 @@ pub fn seed_target(target: &DiscoveryTarget, cache: &ModelCatalogCache) {
 }
 
 pub fn rejected_notice(target: &DiscoveryTarget) -> String {
+    // Catalogue-only kinds never discover, so no discovery failure is claimed.
+    if target.kind == "google-gemini-cli" {
+        return format!(
+            "{} rejected its credential (HTTP 401/403). {}",
+            target.display_name, target.sign_in_hint
+        );
+    }
     format!(
         "{} rejected its credential (HTTP 401/403) — models could not be discovered. {}",
         target.display_name, target.sign_in_hint

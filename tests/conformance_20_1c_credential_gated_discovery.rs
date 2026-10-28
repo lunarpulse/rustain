@@ -117,6 +117,7 @@ async fn k01_home_key_provisions_without_config_and_env_unlocks() {
             "anthropic",
             "deepseek",
             "google",
+            "google-gemini-cli",
             "moonshot",
             "openai",
             "openai-codex",

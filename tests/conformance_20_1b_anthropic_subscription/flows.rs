@@ -736,9 +736,13 @@ async fn pinned_port_busy_is_configuration_error() {
             port_fallback: false,
             ..ANTHROPIC_OAUTH
         };
-    let _listener = tokio::net::TcpListener::bind(("127.0.0.1", 54546))
+    // Hold a kernel-assigned port and pin the login to it: a fixed port in the
+    // ephemeral range can already be taken by another process on a shared host.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
+    let held = listener.local_addr().unwrap().port().to_string();
+    let _env = Env::set(&[("RUSTAIN_TEST_AUTH_CALLBACK_PORT", &held)]);
     let temp = tempfile::tempdir().unwrap();
     let port = store(&temp);
     let (ui, _, _) = recording_ui(false);

@@ -30,9 +30,10 @@ pub(crate) fn jwt(value: serde_json::Value) -> String {
     )
 }
 
-struct Env(Vec<(&'static str, Option<OsString>)>);
+/// Restores every variable it set; reused by later subscription suites.
+pub(crate) struct Env(Vec<(&'static str, Option<OsString>)>);
 impl Env {
-    fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+    pub(crate) fn set(values: &[(&'static str, Option<&str>)]) -> Self {
         Self(
             values
                 .iter()
@@ -565,7 +566,7 @@ async fn refresh_form_preserves_stored_identity_and_org_through_resolver() {
 
 #[tokio::test]
 #[serial]
-async fn callback_override_is_pinned_only_and_retains_no_fallback() {
+async fn callback_override_applies_to_every_policy_and_never_changes_fallback() {
     let server = MockServer::start().await;
     let held = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = held.local_addr().unwrap().port().to_string();
@@ -573,12 +574,19 @@ async fn callback_override_is_pinned_only_and_retains_no_fallback() {
         ("RUSTAIN_TEST_AUTH_ORIGIN", Some(&server.uri())),
         ("RUSTAIN_TEST_AUTH_CALLBACK_PORT", Some(&port)),
     ]);
-    assert_eq!(
-        rustain::adapters::auth::policies::callback_port(
-            &rustain::adapters::auth::policies::ANTHROPIC_OAUTH
-        ),
-        54545
-    );
+    // Fallback policies take the override too, so tests never bind their fixed port;
+    // each policy keeps its own fallback rule.
+    for policy in [
+        &rustain::adapters::auth::policies::ANTHROPIC_OAUTH,
+        &rustain::adapters::auth::policies::GEMINI_CLI_OAUTH,
+    ] {
+        assert!(policy.port_fallback);
+        assert_eq!(
+            rustain::adapters::auth::policies::callback_port(policy).to_string(),
+            port
+        );
+    }
+    assert!(!CODEX_OAUTH.port_fallback);
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);
     let (ui, mut urls) = ui();

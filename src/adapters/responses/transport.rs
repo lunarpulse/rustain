@@ -85,7 +85,8 @@ pub trait Wire: WireProfile + Send + Sync + 'static {
 pub struct AbortSlot(Mutex<Option<CancellationToken>>);
 
 impl AbortSlot {
-    async fn arm(&self) -> CancellationToken {
+    /// Replaces the slot with a fresh token for a new logical request.
+    pub(crate) async fn arm(&self) -> CancellationToken {
         let cancel = CancellationToken::new();
         *self.0.lock().await = Some(cancel.clone());
         cancel

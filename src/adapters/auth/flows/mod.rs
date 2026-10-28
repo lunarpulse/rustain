@@ -139,17 +139,9 @@ pub async fn login(
             AuthMethod::OAuthCode(policy) => {
                 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
                 {
-                    // Bounds the browser/paste wait and exchange, never masked key entry.
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(300),
-                        oauth_code::run(policy, ctx),
-                    )
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(FlowError::configuration(
-                            "Login timed out after 300 seconds",
-                        ))
-                    })?
+                    // Its 300 s deadline bounds only the browser/paste wait; the
+                    // exchange and post-exchange requests carry their own bounds.
+                    oauth_code::run(policy, ctx).await?
                 }
                 #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
                 {
@@ -159,8 +151,7 @@ pub async fn login(
                     ));
                 }
             }
-            // Self-bounded (Codex: 120 polls; RFC 8628: `expires_in`), so never wrapped
-            // in the browser timeout.
+            // Self-bounded (Codex: 120 polls; RFC 8628: `expires_in`).
             AuthMethod::Device(policy) => {
                 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
                 {

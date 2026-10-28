@@ -194,20 +194,20 @@ async fn mount_stream(server: &MockServer, body: String) {
         .mount(server)
         .await;
 }
-async fn raw_listener() -> (TcpListener, String) {
+pub(crate) async fn raw_listener() -> (TcpListener, String) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
     (listener, origin)
 }
 
 /// Read a real request completely before the fixture writes or closes its response.
-struct RawRequest {
-    method: String,
-    target: String,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
+pub(crate) struct RawRequest {
+    pub(crate) method: String,
+    pub(crate) target: String,
+    pub(crate) headers: HashMap<String, String>,
+    pub(crate) body: Vec<u8>,
 }
-async fn read_request(socket: &mut TcpStream) -> RawRequest {
+pub(crate) async fn read_request(socket: &mut TcpStream) -> RawRequest {
     let mut bytes = Vec::new();
     let header_end = loop {
         if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
@@ -247,10 +247,10 @@ async fn read_request(socket: &mut TcpStream) -> RawRequest {
         body: bytes[header_end..header_end + length].to_vec(),
     }
 }
-async fn stream_headers(socket: &mut TcpStream) {
+pub(crate) async fn stream_headers(socket: &mut TcpStream) {
     socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.unwrap();
 }
-async fn write_chunk(socket: &mut TcpStream, bytes: &[u8]) {
+pub(crate) async fn write_chunk(socket: &mut TcpStream, bytes: &[u8]) {
     socket
         .write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
         .await
@@ -259,11 +259,11 @@ async fn write_chunk(socket: &mut TcpStream, bytes: &[u8]) {
     socket.write_all(b"\r\n").await.unwrap();
     socket.flush().await.unwrap();
 }
-async fn finish_stream(socket: &mut TcpStream, body: &str) {
+pub(crate) async fn finish_stream(socket: &mut TcpStream, body: &str) {
     write_chunk(socket, body.as_bytes()).await;
     socket.write_all(b"0\r\n\r\n").await.unwrap();
 }
-async fn assert_peer_eof(socket: &mut TcpStream) {
+pub(crate) async fn assert_peer_eof(socket: &mut TcpStream) {
     let mut byte = [0];
     let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut byte))
         .await
@@ -274,7 +274,7 @@ async fn assert_peer_eof(socket: &mut TcpStream) {
         "dropping the consumer must close the response connection"
     );
 }
-fn assert_no_connection(listener: &TcpListener) {
+pub(crate) fn assert_no_connection(listener: &TcpListener) {
     assert!(
         listener.accept().now_or_never().is_none(),
         "cancelled operation must not open another connection"

@@ -44,6 +44,9 @@ pub(super) async fn fill(
         IdentityHook::AnthropicBootstrap => bootstrap(http, access, identity, refresh).await,
         IdentityHook::CodexJwt => codex(access, raw, identity, refresh)?,
         IdentityHook::XaiUserinfo => xai(http, access, identity).await,
+        // Login only: refresh keeps the stored email through the resolver merge.
+        IdentityHook::GoogleUserinfo if !refresh => google(http, access, identity).await,
+        IdentityHook::GoogleUserinfo => {}
     }
     Ok(())
 }
@@ -184,6 +187,34 @@ async fn xai(http: &reqwest::Client, access: &str, identity: &mut CredentialIden
     }
     if let Some(sub) = scalar_string(body.get("sub")) {
         identity.account_id = Some(sub);
+    }
+}
+
+/// omp `fetchUserInfo`: a best-effort bearer GET; any failure leaves identity unset and
+/// no body is logged. The 15 s bound is rustain's (omp has only cancellation).
+async fn google(http: &reqwest::Client, access: &str, identity: &mut CredentialIdentity) {
+    const USERINFO: &str = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
+    let response = http
+        .get(crate::adapters::auth::policies::endpoint(USERINFO))
+        .timeout(std::time::Duration::from_secs(15))
+        .bearer_auth(access)
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return;
+    };
+    if !response.status().is_success() {
+        return;
+    }
+    let Ok(body) = response.json::<serde_json::Value>().await else {
+        return;
+    };
+    if let Some(email) = body
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .filter(|email| !email.is_empty())
+    {
+        identity.email = Some(email.to_owned());
     }
 }
 

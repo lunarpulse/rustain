@@ -26,14 +26,19 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
-pub(super) fn generate() -> (String, String, String) {
+/// S256 verifier and challenge of a public client.
+pub(super) fn pair() -> (String, String) {
     let mut bytes = [0_u8; 96];
     OsRng.fill_bytes(&mut bytes);
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
     let challenge = challenge(&verifier);
+    (verifier, challenge)
+}
+/// 16 random bytes, lower-case hex.
+pub(super) fn state() -> String {
     let mut state = [0_u8; 16];
     OsRng.fill_bytes(&mut state);
-    (verifier, challenge, hex::encode(state))
+    hex::encode(state)
 }
 fn challenge(verifier: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))

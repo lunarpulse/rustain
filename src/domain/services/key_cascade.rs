@@ -59,6 +59,7 @@ pub fn select<'a>(
                     SelectionMaterial::Ready(ResolvedAuth::OAuth {
                         access: oauth.access.clone(),
                         account_id: oauth.identity.account_id.clone(),
+                        project_id: oauth.identity.project_id.clone(),
                     })
                 } else {
                     SelectionMaterial::NeedsRefresh {

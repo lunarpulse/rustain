@@ -78,22 +78,27 @@ pub static ANTHROPIC_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
     instructions: "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted.",
     paste_prompt: "Paste the authorization code (or full redirect URL):",
     client_id: CLIENT,
+    client: OAuthClient::PublicPkce,
     authorize_url: "https://claude.ai/oauth/authorize",
     scope: "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
     authorize_extra: &[("code", Tpl::Lit("true"))],
     port: 54545,
     port_fallback: true,
+    callback_host: CallbackHost::Localhost,
     callback_path: "/callback",
     paste: true,
     exchange: &EXCHANGE,
     projection: &LOGIN_PROJECTION,
     identity_hook: Some(IdentityHook::AnthropicBootstrap),
+    post_exchange: None,
 };
 pub static ANTHROPIC_REFRESH: RefreshPolicy = RefreshPolicy {
     client_id: CLIENT,
+    client_secret: None,
     request: &REFRESH_REQUEST,
     projection: &REFRESH_PROJECTION,
     identity_hook: Some(IdentityHook::AnthropicBootstrap),
+    require_project_id: false,
 };
 pub static ANTHROPIC_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://api.anthropic.com",
@@ -126,6 +131,7 @@ pub static CODEX_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
     instructions: "A browser window should open. Complete login to finish.",
     paste_prompt: "Paste the authorization code (or full redirect URL):",
     client_id: CODEX_CLIENT,
+    client: OAuthClient::PublicPkce,
     authorize_url: "https://auth.openai.com/oauth/authorize",
     scope: "openid profile email offline_access api.connectors.read api.connectors.invoke",
     authorize_extra: &[
@@ -135,17 +141,21 @@ pub static CODEX_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
     ],
     port: 1455,
     port_fallback: false,
+    callback_host: CallbackHost::Localhost,
     callback_path: "/auth/callback",
     paste: true,
     exchange: &CODEX_TOKEN_REQUEST,
     projection: &CODEX_PROJECTION,
     identity_hook: Some(IdentityHook::CodexJwt),
+    post_exchange: None,
 };
 pub static CODEX_REFRESH: RefreshPolicy = RefreshPolicy {
     client_id: CODEX_CLIENT,
+    client_secret: None,
     request: &CODEX_TOKEN_REQUEST,
     projection: &CODEX_PROJECTION,
     identity_hook: Some(IdentityHook::CodexJwt),
+    require_project_id: false,
 };
 pub static CODEX_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://chatgpt.com",
@@ -208,13 +218,81 @@ pub static XAI_DEVICE: DevicePolicy = DevicePolicy {
 };
 pub static XAI_REFRESH: RefreshPolicy = RefreshPolicy {
     client_id: XAI_CLIENT,
+    client_secret: None,
     request: &XAI_REFRESH_REQUEST,
     projection: &XAI_PROJECTION,
     identity_hook: Some(IdentityHook::XaiUserinfo),
+    require_project_id: false,
 };
 pub static XAI_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://api.x.ai",
     refresh: &XAI_REFRESH,
+};
+
+// Google Cloud Code Assist (Gemini CLI): omp `catalog/src/compat/rules/auth/google-gemini-cli.kdl`.
+// The installed-app client id and secret are omp's Base64 literals; they grant
+// nothing without a user's consent and are sent only to the token endpoint.
+const GEMINI_CLI_CLIENT: ClientId = ClientId::Base64(
+    "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t",
+);
+const GEMINI_CLI_SECRET: ClientSecret =
+    ClientSecret::Base64("R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=");
+const GEMINI_CLI_TOKEN_REQUEST: TokenRequestPolicy = TokenRequestPolicy {
+    url: TokenUrl::Static("https://oauth2.googleapis.com/token"),
+    encoding: BodyEncoding::Form,
+    timeout_ms: 30_000,
+    headers: &[],
+    extra_params: &[],
+};
+const GEMINI_CLI_PROJECTION: TokenProjection = TokenProjection {
+    access: "/access_token",
+    refresh: "/refresh_token",
+    expires_in: "/expires_in",
+    skew_ms: 300_000,
+    // Userinfo fills `email`; the project hook fills `project_id`.
+    account_id: None,
+    email: None,
+    project_id: None,
+    org_id: None,
+    org_name: None,
+};
+pub static GEMINI_CLI_OAUTH: OAuthCodePolicy = OAuthCodePolicy {
+    label: "Google account (Gemini CLI)",
+    login_name: "Google Cloud Code Assist (Gemini CLI)",
+    instructions: "Complete the sign-in in your browser.",
+    paste_prompt: "Paste the authorization code (or full redirect URL):",
+    client_id: GEMINI_CLI_CLIENT,
+    client: OAuthClient::Confidential {
+        secret: GEMINI_CLI_SECRET,
+    },
+    authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+    scope: "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile",
+    authorize_extra: &[
+        ("access_type", Tpl::Lit("offline")),
+        ("prompt", Tpl::Lit("consent")),
+    ],
+    port: 8085,
+    port_fallback: true,
+    callback_host: CallbackHost::Ipv4Loopback,
+    callback_path: "/oauth2callback",
+    paste: true,
+    exchange: &GEMINI_CLI_TOKEN_REQUEST,
+    projection: &GEMINI_CLI_PROJECTION,
+    identity_hook: Some(IdentityHook::GoogleUserinfo),
+    post_exchange: Some(PostExchangeHook::GeminiCliProject),
+};
+/// Refresh keeps the stored project: no userinfo and no re-onboarding.
+pub static GEMINI_CLI_REFRESH: RefreshPolicy = RefreshPolicy {
+    client_id: GEMINI_CLI_CLIENT,
+    client_secret: Some(GEMINI_CLI_SECRET),
+    request: &GEMINI_CLI_TOKEN_REQUEST,
+    projection: &GEMINI_CLI_PROJECTION,
+    identity_hook: None,
+    require_project_id: true,
+};
+pub static GEMINI_CLI_API: OAuthApiPolicy = OAuthApiPolicy {
+    api_origin: "https://cloudcode-pa.googleapis.com",
+    refresh: &GEMINI_CLI_REFRESH,
 };
 
 pub fn org_scoped_identity(provider: &str) -> bool {
@@ -222,13 +300,13 @@ pub fn org_scoped_identity(provider: &str) -> bool {
         .is_some_and(|meta| meta.org_scoped_identity)
 }
 
-/// Instrumented callers may replace pinned ports, never change fallback policy.
+/// Instrumented callers may replace any requested port, never the fallback policy,
+/// so tests never bind a provider's fixed port and can hold the requested one.
 pub fn callback_port(policy: &OAuthCodePolicy) -> u16 {
     #[cfg(feature = "test-instrumentation")]
-    if !policy.port_fallback
-        && let Some(port) =
-            crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_AUTH_CALLBACK_PORT")
-                .and_then(|port| port.parse::<u16>().ok())
+    if let Some(port) =
+        crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_AUTH_CALLBACK_PORT")
+            .and_then(|port| port.parse::<u16>().ok())
     {
         return port;
     }
@@ -326,6 +404,8 @@ mod tests {
         }
         assert_eq!(callback_port(&CODEX_OAUTH), 1455);
         assert_eq!(callback_port(&ANTHROPIC_OAUTH), 54545);
+        // The override reaches fallback policies only in instrumented builds.
+        assert_eq!(callback_port(&GEMINI_CLI_OAUTH), 8085);
     }
 
     #[test]
@@ -365,6 +445,19 @@ mod tests {
                 assert_eq!(url::Url::parse(api.api_origin).unwrap().scheme(), "https");
                 https(api.refresh.request.url);
             }
+        }
+    }
+
+    #[test]
+    fn debug_output_never_shows_the_client_secret_literal() {
+        let ClientSecret::Base64(literal) = GEMINI_CLI_SECRET;
+        for debug in [
+            format!("{GEMINI_CLI_OAUTH:?}"),
+            format!("{GEMINI_CLI_REFRESH:?}"),
+            format!("{GEMINI_CLI_API:?}"),
+        ] {
+            assert!(!debug.contains(literal));
+            assert!(debug.contains("ClientSecret([redacted])"));
         }
     }
 }

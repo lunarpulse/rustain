@@ -92,7 +92,8 @@ impl EffectiveProvider {
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect()
-        } else if self.cfg.api_key_env.is_empty() {
+        // A Gemini CLI credential is a stored login only (token + project).
+        } else if self.cfg.api_key_env.is_empty() || self.kind() == "google-gemini-cli" {
             vec![]
         } else {
             vec![&self.cfg.api_key_env]

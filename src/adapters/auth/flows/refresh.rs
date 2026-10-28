@@ -58,11 +58,24 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
                 RefreshFailure::Transient("oauth refresh unavailable for provider".into())
             })?
             .refresh;
+        // Checked before any HTTP. Transient, as omp does not classify it definitive,
+        // so the row is never disabled for it.
+        if policy.require_project_id && credential.identity.project_id.is_none() {
+            return Err(RefreshFailure::Transient(format!(
+                "{provider} credentials are missing projectId; sign in again"
+            )));
+        }
         let client = token::client_id(policy.client_id)
+            .map_err(|_| RefreshFailure::Transient("oauth refresh configuration invalid".into()))?;
+        let secret = policy
+            .client_secret
+            .map(token::client_secret)
+            .transpose()
             .map_err(|_| RefreshFailure::Transient("oauth refresh configuration invalid".into()))?;
         let values = Values {
             client_id: &client,
-            refresh: token::refresh_secret(&credential.refresh),
+            client_secret: secret.as_ref().map(token::grant_secret),
+            refresh: token::grant_secret(&credential.refresh),
             ..Default::default()
         };
         // Resolved per refresh: a discovered endpoint is rediscovered and revalidated,
@@ -92,7 +105,7 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
         .map_err(|_| RefreshFailure::Transient("oauth refresh identity invalid".into()))?;
         Ok(RefreshedTokens {
             access: projected.access,
-            refresh: (!token::refresh_secret(&projected.refresh).is_empty())
+            refresh: (!token::grant_secret(&projected.refresh).is_empty())
                 .then_some(projected.refresh),
             expires_at_ms: projected.expires_at_ms,
             identity: projected.identity,

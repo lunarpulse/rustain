@@ -39,6 +39,8 @@ pub(super) fn client() -> reqwest::Client {
 #[derive(Default)]
 pub(super) struct Values<'a> {
     pub client_id: &'a str,
+    /// Confidential clients only; selects the no-PKCE grant field sets.
+    pub client_secret: Option<&'a str>,
     pub redirect: &'a str,
     pub scope: &'a str,
     pub state: &'a str,
@@ -66,12 +68,21 @@ impl Values<'_> {
 pub(super) fn client_id(id: ClientId) -> Result<String, FlowError> {
     match id {
         ClientId::Literal(id) => Ok(id.to_owned()),
-        ClientId::Base64(id) => base64::engine::general_purpose::STANDARD
-            .decode(id)
-            .ok()
-            .and_then(|id| String::from_utf8(id).ok())
-            .ok_or_else(|| FlowError::configuration("Invalid OAuth client configuration")),
+        ClientId::Base64(id) => decode(id),
     }
+}
+/// Held as a secret from decoding to the form body; a corrupt literal is never echoed.
+pub(super) fn client_secret(secret: ClientSecret) -> Result<SecretString, FlowError> {
+    match secret {
+        ClientSecret::Base64(secret) => decode(secret).map(SecretString::new),
+    }
+}
+fn decode(literal: &str) -> Result<String, FlowError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(literal)
+        .ok()
+        .and_then(|value| String::from_utf8(value).ok())
+        .ok_or_else(|| FlowError::configuration("Invalid OAuth client configuration"))
 }
 pub(super) struct TokenFailure {
     pub status: Option<u16>,
@@ -110,40 +121,55 @@ impl TokenFailure {
     }
 }
 /// Grant fields in each grant's exact wire order; policy `extra_params` follow them.
+/// A confidential client (`Values::client_secret`) sends its secret and no verifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Grant {
-    /// `grant_type, client_id, code, redirect_uri, code_verifier` (browser exchange).
+    /// Public: `grant_type, client_id, code, redirect_uri, code_verifier`;
+    /// confidential: `grant_type, client_id, client_secret, code, redirect_uri`.
     AuthorizationCode,
     /// `grant_type=authorization_code, client_id, code, code_verifier, redirect_uri`.
     CodexDeviceExchange,
-    /// `grant_type, client_id, refresh_token`.
+    /// `grant_type, client_id[, client_secret], refresh_token`.
     Refresh,
     /// `grant_type=urn:ietf:params:oauth:grant-type:device_code, client_id, device_code`.
     DeviceCode,
 }
 impl Grant {
     fn fields<'a>(self, values: &Values<'a>) -> Vec<(&'static str, &'a str)> {
-        match self {
-            Self::AuthorizationCode => vec![
+        match (self, values.client_secret) {
+            (Self::AuthorizationCode, None) => vec![
                 ("grant_type", "authorization_code"),
                 ("client_id", values.client_id),
                 ("code", values.code),
                 ("redirect_uri", values.redirect),
                 ("code_verifier", values.verifier),
             ],
-            Self::CodexDeviceExchange => vec![
+            (Self::AuthorizationCode, Some(secret)) => vec![
+                ("grant_type", "authorization_code"),
+                ("client_id", values.client_id),
+                ("client_secret", secret),
+                ("code", values.code),
+                ("redirect_uri", values.redirect),
+            ],
+            (Self::CodexDeviceExchange, _) => vec![
                 ("grant_type", "authorization_code"),
                 ("client_id", values.client_id),
                 ("code", values.code),
                 ("code_verifier", values.verifier),
                 ("redirect_uri", values.redirect),
             ],
-            Self::Refresh => vec![
+            (Self::Refresh, None) => vec![
                 ("grant_type", "refresh_token"),
                 ("client_id", values.client_id),
                 ("refresh_token", values.refresh),
             ],
-            Self::DeviceCode => vec![
+            (Self::Refresh, Some(secret)) => vec![
+                ("grant_type", "refresh_token"),
+                ("client_id", values.client_id),
+                ("client_secret", secret),
+                ("refresh_token", values.refresh),
+            ],
+            (Self::DeviceCode, _) => vec![
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("client_id", values.client_id),
                 ("device_code", values.device_code),
@@ -288,7 +314,60 @@ fn string(value: &serde_json::Value, path: Option<&str>) -> Option<String> {
         .filter(|v| !v.trim().is_empty())
         .map(str::to_owned)
 }
-/// The refresh token is exposed only to construct its outbound token request.
-pub(super) fn refresh_secret(secret: &SecretString) -> &str {
+/// Refresh tokens and confidential client secrets are exposed only to construct
+/// their outbound token request.
+pub(super) fn grant_secret(secret: &SecretString) -> &str {
     secret.expose_secret()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn form(grant: Grant, values: &Values<'_>) -> String {
+        url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(grant.fields(values))
+            .finish()
+    }
+
+    #[test]
+    fn confidential_clients_send_the_secret_and_never_a_verifier() {
+        let public = Values {
+            client_id: "id",
+            code: "c",
+            redirect: "http://127.0.0.1:1/cb",
+            verifier: "v",
+            refresh: "r",
+            ..Default::default()
+        };
+        assert_eq!(
+            form(Grant::AuthorizationCode, &public),
+            "grant_type=authorization_code&client_id=id&code=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb&code_verifier=v"
+        );
+        assert_eq!(
+            form(Grant::Refresh, &public),
+            "grant_type=refresh_token&client_id=id&refresh_token=r"
+        );
+        let confidential = Values {
+            client_secret: Some("s"),
+            ..public
+        };
+        assert_eq!(
+            form(Grant::AuthorizationCode, &confidential),
+            "grant_type=authorization_code&client_id=id&client_secret=s&code=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Fcb"
+        );
+        assert_eq!(
+            form(Grant::Refresh, &confidential),
+            "grant_type=refresh_token&client_id=id&client_secret=s&refresh_token=r"
+        );
+    }
+
+    #[test]
+    fn client_literals_decode_and_a_corrupt_one_is_never_echoed() {
+        assert_eq!(client_id(ClientId::Base64("aWQ=")).unwrap(), "id");
+        let secret = client_secret(ClientSecret::Base64("c2VjcmV0")).unwrap();
+        assert_eq!(grant_secret(&secret), "secret");
+        let error = client_secret(ClientSecret::Base64("!!CORRUPT!!")).unwrap_err();
+        assert_eq!(error.to_string(), "Invalid OAuth client configuration");
+    }
 }

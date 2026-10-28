@@ -201,6 +201,32 @@ is still sent). `xai` keys have no origin rule. For `xai-oauth`, `provider_id`
 selects the login credential rows, so an alias map key with
 `provider_id = "xai-oauth"` uses the same login.
 
+### Google Cloud Code Assist (Gemini CLI subscription)
+
+`google-gemini-cli` is a built-in provider that needs no configuration; its
+bundled default is `gemini-3.1-pro-preview`. An explicit entry looks like:
+
+```toml
+model = "gemini-3.1-pro-preview"
+
+[provider.google-gemini-cli]
+provider_id = "google-gemini-cli"
+kind = "google-gemini-cli"
+model_id = "gemini-3.1-pro-preview"
+api_key_env = "" # Required field; this provider has no environment credential.
+enabled = true
+```
+
+Authenticate with `rustain auth login google-gemini-cli`; there is no API-key or
+environment credential, so keep `api_key_env = ""`. Requests go to
+`<base>/v1internal:streamGenerateContent?alt=sse`. The base is `base_url` with
+trailing slashes stripped, else `https://cloudcode-pa.googleapis.com`. Stored
+credentials are eligible only when that base has the official
+`https://cloudcode-pa.googleapis.com` origin: a `base_url` on any other origin
+leaves the provider locked and never receives the token. `provider_id` selects the
+login rows, so an alias map key with `provider_id = "google-gemini-cli"` uses the
+same login. This provider is unrelated to the `google` API-key provider.
+
 ### Field-level merge
 
 Setting `[pricing."my-model"]` in user TOML *adds* to the built-in pricing catalog — it does not replace it. The same holds for `[provider.X]` and `[router.step_tiers]`.
