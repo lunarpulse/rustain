@@ -45,7 +45,8 @@
 //   enter/exit/once/WeakMap cycle guards are dropped; `$ref` cycles are still
 //   broken in `dereference_json_schema` exactly as omp does.
 // - Rustain robustness addition: `$ref` inlining is bounded by
-//   `MAX_DEREF_DEPTH` and `MAX_DEREF_NODES`; omp inlines without bound.
+//   `MAX_DEREF_DEPTH` (with or without definitions) and the emitted-bytes
+//   budget `MAX_DEREF_BYTES`, warning once per walk; omp inlines without bound.
 // - JavaScript prototype-chain lookups (`key in Record`) are treated as own-key
 //   lookups.
 
@@ -760,30 +761,100 @@ const DEREF_SCHEMA_VALUE_KEYS: &[&str] = &[
 /// bound: the deepest nesting of one dereference walk. Every nested subschema and
 /// every inlined `$ref` adds a level, so long `$ref` chains and deeply nested
 /// untrusted schemas cannot exhaust the stack. A subschema past this depth becomes
-/// the permissive `{}` a `$ref` cycle becomes.
+/// the permissive `{}` a `$ref` cycle becomes. It applies with or without
+/// `$defs`/`definitions`.
 const MAX_DEREF_DEPTH: usize = 64;
-/// Rustain robustness addition beyond omp `dereference.ts`: the subschema nodes one
-/// dereference walk visits before it stops inlining, so definitions shared by many
-/// `$ref`s cannot expand exponentially. Once spent, every further resolvable `$ref`
-/// becomes the permissive `{}` a `$ref` cycle becomes; literal subschemas are still
-/// copied, which is bounded by the input size.
-const MAX_DEREF_NODES: usize = 10_000;
+/// Rustain robustness addition beyond omp `dereference.ts`: the approximate JSON
+/// bytes one dereference walk emits — keys, scalars and every literal leaf
+/// (`enum`, `const`, `default`, `examples`, `description`, …) — before it stops
+/// inlining, so definitions shared by many `$ref`s cannot expand exponentially,
+/// however large their literals. Once spent, every further resolvable `$ref`
+/// becomes the permissive `{}` a `$ref` cycle becomes; the rest of the schema
+/// is still copied, which is bounded by the input size.
+const MAX_DEREF_BYTES: usize = 1 << 20;
 
-/// State of one dereference walk: the `$ref`s on the current resolution path and
-/// the subschema nodes visited so far.
+/// A rustain dereference bound that degraded part of a schema to `{}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DerefBudget {
+    Depth,
+    Bytes,
+}
+
+/// State of one dereference walk: the `$ref`s on the current resolution path, the
+/// bytes emitted so far and the first bound that degraded the output.
 #[derive(Default)]
 struct DerefWalk {
     visiting: HashSet<String>,
-    visited: usize,
+    bytes: usize,
+    exhausted: Option<DerefBudget>,
+}
+
+impl DerefWalk {
+    /// The degraded `{}`; the first exhaustion of a walk warns once.
+    fn exhaust(&mut self, budget: DerefBudget) -> Value {
+        if self.exhausted.is_none() {
+            self.exhausted = Some(budget);
+            tracing::warn!(
+                ?budget,
+                max_depth = MAX_DEREF_DEPTH,
+                max_bytes = MAX_DEREF_BYTES,
+                "Gemini CLI tool schema exceeded a $ref inlining bound; the excess is sent as {{}}"
+            );
+        }
+        Value::Object(JsonObject::new())
+    }
+}
+
+/// Approximate serialized bytes of `value`, without recursion.
+fn json_bytes(value: &Value) -> usize {
+    let mut stack = vec![value];
+    let mut bytes = 0_usize;
+    while let Some(value) = stack.pop() {
+        bytes = bytes.saturating_add(match value {
+            Value::Null | Value::Bool(_) => 5,
+            Value::Number(_) => 8,
+            Value::String(text) => text.len() + 2,
+            Value::Array(items) => {
+                stack.extend(items);
+                2 + items.len()
+            }
+            Value::Object(map) => {
+                stack.extend(map.values());
+                2 + map.keys().map(|key| key.len() + 4).sum::<usize>()
+            }
+        });
+    }
+    bytes
+}
+
+/// Whether `value` nests containers deeper than `limit`, without recursion. JSON
+/// nesting bounds subschema nesting from above.
+fn deeper_than(value: &Value, limit: usize) -> bool {
+    let mut stack = vec![(value, 0_usize)];
+    while let Some((value, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        match value {
+            Value::Array(items) => stack.extend(items.iter().map(|item| (item, depth + 1))),
+            Value::Object(map) => stack.extend(map.values().map(|entry| (entry, depth + 1))),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// dereference.ts:123-131 `dereferenceJsonSchema`: inline local `$ref`s from the
-/// root `$defs`/`definitions`, which are dropped from the output.
+/// root `$defs`/`definitions`, which are dropped from the output. A schema without
+/// definitions is walked only when it nests past [`MAX_DEREF_DEPTH`].
 fn dereference_json_schema(schema: &Value) -> Cow<'_, Value> {
     let Value::Object(root) = schema else {
         return Cow::Borrowed(schema);
     };
-    if !root.contains_key("$defs") && !root.contains_key("definitions") {
+    if !root.contains_key("$defs")
+        && !root.contains_key("definitions")
+        && !deeper_than(schema, MAX_DEREF_DEPTH)
+    {
         return Cow::Borrowed(schema);
     }
     Cow::Owned(dereference_node(schema, root, &mut DerefWalk::default(), 0))
@@ -813,7 +884,10 @@ fn dereference_keyword(
             )
         }
         _ if DEREF_SCHEMA_VALUE_KEYS.contains(&key) => dereference_node(value, root, walk, depth),
-        _ => value.clone(),
+        _ => {
+            walk.bytes = walk.bytes.saturating_add(json_bytes(value));
+            value.clone()
+        }
     }
 }
 
@@ -839,25 +913,29 @@ fn is_definition_key(key: &str) -> bool {
 
 /// dereference.ts:71-111 `dereferenceNode`. A ref already on the resolution
 /// path becomes `{}`; unresolvable refs are returned untouched. Past
-/// [`MAX_DEREF_DEPTH`] a node, and once [`MAX_DEREF_NODES`] are spent a
+/// [`MAX_DEREF_DEPTH`] a node, and once [`MAX_DEREF_BYTES`] are spent a
 /// resolvable ref, becomes the same `{}` (rustain bound, not in omp).
 fn dereference_node(node: &Value, root: &JsonObject, walk: &mut DerefWalk, depth: usize) -> Value {
     let Value::Object(object) = node else {
+        walk.bytes = walk.bytes.saturating_add(json_bytes(node));
         return node.clone();
     };
     if depth > MAX_DEREF_DEPTH {
-        return Value::Object(JsonObject::new());
+        return walk.exhaust(DerefBudget::Depth);
     }
-    walk.visited += 1;
+    walk.bytes = walk
+        .bytes
+        .saturating_add(2 + object.keys().map(|key| key.len() + 4).sum::<usize>());
     if let Some(Value::String(reference)) = object.get("$ref") {
         if walk.visiting.contains(reference) {
             return Value::Object(JsonObject::new());
         }
         let Some(resolved) = resolve_local_ref(reference, root) else {
+            walk.bytes = walk.bytes.saturating_add(json_bytes(node));
             return node.clone();
         };
-        if walk.visited > MAX_DEREF_NODES {
-            return Value::Object(JsonObject::new());
+        if walk.bytes > MAX_DEREF_BYTES {
+            return walk.exhaust(DerefBudget::Bytes);
         }
         walk.visiting.insert(reference.clone());
         let inlined = dereference_node(resolved, root, walk, depth + 1);
@@ -2507,17 +2585,97 @@ mod tests {
         let dereferenced = dereference_json_schema(&schema).into_owned();
         let mut counts = (0, 0);
         count_objects(&dereferenced, &mut counts);
-        let (objects, empty) = counts;
-        // One schema object plus one `properties` map per visited node.
-        assert!(
-            objects <= 2 * (MAX_DEREF_NODES + MAX_DEREF_DEPTH),
-            "{objects} objects"
-        );
-        assert!(empty > 0, "refs past the node budget degrade to {{}}");
-        assert!(serde_json::to_vec(&dereferenced).unwrap().len() < 2 << 20);
+        let (_, empty) = counts;
+        // DF-20-1D4A-SCHEMA-DEREF-BYTE-BUDGET: the bound is bytes, not nodes.
+        let bytes = serde_json::to_vec(&dereferenced).unwrap().len();
+        assert!(bytes < 2 * MAX_DEREF_BYTES, "{bytes} bytes");
+        assert!(empty > 0, "refs past the byte budget degrade to {{}}");
         // Deterministic degradation: the same input yields the same output.
         assert_eq!(dereference_json_schema(&schema).into_owned(), dereferenced);
         assert!(normalize_for_google(&schema).is_object());
+    }
+
+    /// Doubling definitions whose every level carries a large literal leaf.
+    fn doubling_literal_schema(levels: usize, literal: &str) -> Value {
+        let mut schema = doubling_schema(levels);
+        for (_, definition) in schema["$defs"].as_object_mut().unwrap().iter_mut() {
+            definition["description"] = json!(literal);
+            definition["enum"] = json!([literal]);
+        }
+        schema
+    }
+
+    #[test]
+    fn dereference_byte_budget_counts_literal_leaves() {
+        // 4 KiB literals twice per level: a node-count budget would emit ~80 MB.
+        let literal = "L".repeat(4096);
+        let schema = doubling_literal_schema(30, &literal);
+        let mut walk = DerefWalk::default();
+        let Value::Object(root) = &schema else {
+            unreachable!()
+        };
+        let dereferenced = dereference_node(&schema, root, &mut walk, 0);
+        assert_eq!(walk.exhausted, Some(DerefBudget::Bytes));
+        let bytes = serde_json::to_vec(&dereferenced).unwrap().len();
+        assert!(bytes < 2 * MAX_DEREF_BYTES, "{bytes} bytes");
+        // Small literal-bearing schemas still inline exactly (positive control).
+        let small = doubling_literal_schema(3, "x");
+        let mut walk = DerefWalk::default();
+        let Value::Object(root) = &small else {
+            unreachable!()
+        };
+        let inlined = dereference_node(&small, root, &mut walk, 0);
+        assert_eq!(walk.exhausted, None);
+        assert_eq!(
+            inlined["properties"]["root"]["properties"]["a"]["description"],
+            "x"
+        );
+    }
+
+    #[test]
+    fn dereference_depth_bound_applies_without_definitions() {
+        let mut deep = json!({"type": "string"});
+        for _ in 0..(MAX_DEREF_DEPTH + 20) {
+            let mut wrapper = JsonObject::new();
+            wrapper.insert("not".into(), deep);
+            deep = Value::Object(wrapper);
+        }
+        let dereferenced = dereference_json_schema(&deep).into_owned();
+        let mut node = &dereferenced;
+        let mut levels = 0;
+        while let Some(child) = node.get("not") {
+            levels += 1;
+            node = child;
+        }
+        assert_eq!(levels, MAX_DEREF_DEPTH + 1);
+        assert_eq!(node, &json!({}));
+        // Shallow schemas without definitions are still borrowed untouched.
+        let shallow = json!({"type": "object", "properties": {"a": {"not": {"type": "string"}}}});
+        assert!(matches!(
+            dereference_json_schema(&shallow),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    /// A process-wide capture (scoped dispatchers race the callsite interest
+    /// cache when parallel tests hit the same warning).
+    #[test]
+    #[tracing_test::traced_test]
+    fn an_exhausted_walk_warns_once() {
+        // Thousands of refs past the budget, one warning.
+        dereference_json_schema(&doubling_literal_schema(30, &"L".repeat(4096)));
+        // A walk within both bounds never warns.
+        dereference_json_schema(&doubling_schema(3));
+        logs_assert(|lines| {
+            let warnings: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("exceeded a $ref inlining bound"))
+                .collect();
+            match warnings.as_slice() {
+                [one] if one.contains("WARN") && one.contains("Bytes") => Ok(()),
+                other => Err(format!("{other:?}")),
+            }
+        });
     }
 
     #[test]

@@ -2785,9 +2785,6 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
                 if cfg.discover_models {
                     if entry.kind() == "ollama" {
                         unsupported_discovery.push((id.clone(), entry.kind().to_owned()));
-                    } else if entry.kind() == "google-gemini-cli" {
-                        // Catalogue-only: the bundled seed, republished after models.dev
-                        // refreshes; no live discovery and no "unsupported" notice.
                     } else {
                         discovery_targets.push(target);
                     }

@@ -123,12 +123,12 @@ pub fn merge_catalog(layers: CatalogLayers, live: LiveOutcome) -> MergeResult {
             records.push(record);
         }
     }
-    for record in layers
+    let cached = layers
         .models_dev
         .iter()
         .chain(layers.cache.iter().flat_map(|cache| &cache.models))
-        .chain(live_records.iter().flatten())
-    {
+        .map(|record| (record, false));
+    for (record, live) in cached.chain(live_records.iter().flatten().map(|record| (record, true))) {
         let index = if let Some(&index) = indices.get(&record.model_id) {
             index
         } else {
@@ -141,6 +141,13 @@ pub fn merge_catalog(layers: CatalogLayers, live: LiveOutcome) -> MergeResult {
             index
         };
         fold_record(&mut records[index], record);
+        // A live roster owns the wire id outright, `None` included: an older
+        // layer's wire id never outlives the discovery that dropped it.
+        if live {
+            records[index]
+                .wire_model_id
+                .clone_from(&record.wire_model_id);
+        }
     }
     let authoritative = live_records.as_ref().or_else(|| {
         layers
@@ -263,13 +270,6 @@ pub fn seed_target(target: &DiscoveryTarget, cache: &ModelCatalogCache) {
 }
 
 pub fn rejected_notice(target: &DiscoveryTarget) -> String {
-    // Catalogue-only kinds never discover, so no discovery failure is claimed.
-    if target.kind == "google-gemini-cli" {
-        return format!(
-            "{} rejected its credential (HTTP 401/403). {}",
-            target.display_name, target.sign_in_hint
-        );
-    }
     format!(
         "{} rejected its credential (HTTP 401/403) — models could not be discovered. {}",
         target.display_name, target.sign_in_hint
@@ -666,6 +666,36 @@ mod tests {
         assert!(model.capabilities.contains(&ModelCapability::Vision));
         assert!(model.capabilities.contains(&ModelCapability::Thinking));
         assert_eq!(model.pricing_tier.as_deref(), Some("premium"));
+    }
+
+    #[test]
+    fn a_live_roster_owns_the_wire_id_and_a_cached_one_survives_only_without_it() {
+        let served = |live| {
+            let mut cached = record("model", None, None, None);
+            cached.wire_model_id = Some("cached-wire".into());
+            let mut layers = catalog();
+            layers.cache = Some(CachedDiscoveryEntry {
+                fetched_at_unix: 0,
+                credential_fingerprint: "scope".into(),
+                authoritative: true,
+                models: vec![cached],
+            });
+            merge_catalog(layers, live).served[0].wire_model_id.clone()
+        };
+        // Without a live roster the cached wire id stands.
+        assert_eq!(
+            served(LiveOutcome::NotAttempted).as_deref(),
+            Some("cached-wire")
+        );
+        // A live record without one clears it; a live wire id replaces it.
+        let live = record("model", None, None, None);
+        assert_eq!(served(LiveOutcome::Success(vec![live.clone()])), None);
+        let mut wired = live;
+        wired.wire_model_id = Some("live-wire".into());
+        assert_eq!(
+            served(LiveOutcome::Success(vec![wired])).as_deref(),
+            Some("live-wire")
+        );
     }
 
     #[test]

@@ -243,13 +243,18 @@ struct ResponseValue<'a> {
 // Default thinking: omp `streamSimple` without an effort (stream.ts:2113-2172).
 
 /// The generation config and, when the profile routes it, the wire model id.
-fn generation(
+fn generation<'p>(
     options: &CompletionOptions,
-    profile: &GeminiModelProfile,
-) -> (GenerationConfig, Option<&'static str>) {
+    profile: &'p GeminiModelProfile,
+) -> (GenerationConfig, Option<&'p str>) {
     let base = options.max_tokens;
-    let routes = profile.routes;
-    let route = |effort| routes.and_then(|routes| routes.route(effort));
+    let routes = profile.routes.as_ref();
+    // omp `resolveWireModelId`: the effort's route, else the row's `requestModelId`.
+    let route = |effort| {
+        routes
+            .and_then(|routes| routes.route(effort))
+            .or(profile.request_model_id.as_deref())
+    };
     let config = |max_output_tokens, thinking_config| GenerationConfig {
         temperature: options.temperature,
         max_output_tokens,
@@ -303,22 +308,31 @@ fn generation(
     (config(base.min(profile.max_output), suppress), route(None))
 }
 
-/// omp `normalizeMandatoryReasoningOptions` + `minimumSupportedEffort`. The
-/// routed-default branch of `defaultSupportedEffort` needs a `requestModelId`,
-/// which no Gemini CLI row has.
+/// omp `normalizeMandatoryReasoningOptions` + `defaultSupportedEffort`: the effort
+/// whose route is the row's `requestModelId`, else `minimumSupportedEffort`.
 fn mandatory_effort(profile: &GeminiModelProfile) -> Option<Effort> {
     if !profile.reasoning || !profile.thinking.requires_effort() || profile.suppress_when_off {
         return None;
     }
     let efforts = profile.thinking.efforts();
-    Effort::CANONICAL
-        .into_iter()
-        .find(|effort| efforts.contains(effort))
+    let supported = || {
+        Effort::CANONICAL
+            .into_iter()
+            .filter(|e| efforts.contains(e))
+    };
+    profile
+        .routes
+        .as_ref()
+        .zip(profile.request_model_id.as_deref())
+        .and_then(|(routes, default)| {
+            supported().find(|effort| routes.route(Some(*effort)) == Some(default))
+        })
+        .or_else(|| supported().next())
         .or_else(|| efforts.first().copied())
 }
 
 /// omp `mapEffortToGoogleThinkingLevel` (model-thinking.ts:97-117).
-fn thinking_level(effort: Effort, routes: Option<EffortRoutes>) -> &'static str {
+fn thinking_level(effort: Effort, routes: Option<&EffortRoutes>) -> &'static str {
     match effort {
         Effort::Minimal => match routes {
             Some(routes) if routes.minimal.is_some() && routes.minimal == routes.low => "LOW",
@@ -1230,7 +1244,8 @@ mod tests {
             let (_, route) = generation(&options, &profile);
             assert_eq!(route.unwrap_or(id), id, "{id} wire model");
         }
-        let (_, route) = generation(&options("gemini-2.5-flash"), &for_model("gemini-2.5-flash"));
+        let flash = for_model("gemini-2.5-flash");
+        let (_, route) = generation(&options("gemini-2.5-flash"), &flash);
         assert_eq!(route, Some("gemini-2.5-flash"));
     }
 
@@ -1259,7 +1274,7 @@ mod tests {
         assert_eq!(generation_json(&opts, &pro), budget(65_536, 1024));
 
         opts.max_tokens = 8192;
-        let mut capped = pro;
+        let mut capped = pro.clone();
         capped.max_output = 1025;
         assert_eq!(generation_json(&opts, &capped), budget(1025, 1024));
         // max ≤ budget → max(0, max − 1024) = 0 → thinking off with the base cap.
@@ -1278,9 +1293,9 @@ mod tests {
         let opts = options("gemini-3-flash-preview");
         let mut flash = for_model("gemini-3-flash-preview");
         flash.routes = Some(EffortRoutes {
-            off: Some("flash-off"),
-            minimal: Some("flash-low"),
-            low: Some("flash-low"),
+            off: Some("flash-off".into()),
+            minimal: Some("flash-low".into()),
+            low: Some("flash-low".into()),
             medium: None,
             high: None,
         });
@@ -1303,6 +1318,97 @@ mod tests {
             generation_json(&options("gemini-2.5-pro"), &pro),
             r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":false,"thinkingBudget":0}}"#
         );
+    }
+
+    /// Table C: the no-effort wire id and thinking of collapsed logical ids, with
+    /// omp's live-member routing (CL:905-974) and exact lookup of raw rows.
+    #[test]
+    fn logical_ids_route_without_an_effort() {
+        use super::super::profile::{Served, resolve};
+        const SUPPRESSED: &str = r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":false,"thinkingLevel":"MINIMAL"}}"#;
+        let collapsed = |wire| Served::Collapsed {
+            wire,
+            reasoning: true,
+        };
+        for (id, served, wire, expected) in [
+            (
+                "gemini-3.1-pro",
+                collapsed("gemini-3.1-pro-low"),
+                "gemini-3.1-pro-low",
+                SUPPRESSED,
+            ),
+            (
+                "gemini-3.5-flash",
+                collapsed("gemini-3.5-flash-extra-low"),
+                "gemini-3.5-flash-extra-low",
+                SUPPRESSED,
+            ),
+            (
+                "gemini-3-pro",
+                Served::Absent,
+                "gemini-3-pro-low",
+                SUPPRESSED,
+            ),
+            (
+                "gemini-3.7-flash",
+                collapsed("gemini-3.7-flash-low"),
+                "gemini-3.7-flash-low",
+                r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"LOW"}}"#,
+            ),
+            (
+                "gemini-9-pro",
+                collapsed("gemini-9-pro"),
+                "gemini-9-pro",
+                r#"{"maxOutputTokens":8192}"#,
+            ),
+            // `-low` absent: the off route drops to the default member.
+            (
+                "gemini-3.1-pro",
+                collapsed("gemini-pro-agent"),
+                "gemini-pro-agent",
+                SUPPRESSED,
+            ),
+            // Only the retired member live and not reasoning: no thinking.
+            (
+                "gemini-3.1-pro",
+                Served::Collapsed {
+                    wire: "gemini-3.1-pro-high",
+                    reasoning: false,
+                },
+                "gemini-3.1-pro-high",
+                r#"{"maxOutputTokens":8192}"#,
+            ),
+            // The clamp follows the default member's tier (omp `defaultSupportedEffort`).
+            (
+                "gemini-3.7-flash",
+                collapsed("gemini-3.7-flash-medium"),
+                "gemini-3.7-flash-medium",
+                r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"MEDIUM"}}"#,
+            ),
+            (
+                "gemini-3.7-flash",
+                collapsed("gemini-3.7-flash-tiered"),
+                "gemini-3.7-flash-tiered",
+                r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"MINIMAL"}}"#,
+            ),
+            // A raw row named like a template logical id is sent as itself.
+            (
+                "gemini-9-flash",
+                Served::Row,
+                "gemini-9-flash",
+                r#"{"maxOutputTokens":8192,"thinkingConfig":{"includeThoughts":true,"thinkingLevel":"MINIMAL"}}"#,
+            ),
+        ] {
+            let opts = options(id);
+            let profile = resolve(id, served);
+            assert_eq!(generation_json(&opts, &profile), expected, "{id}");
+            let body =
+                String::from_utf8(encode(&[user("hi")], &opts, &profile, "p").unwrap()).unwrap();
+            assert!(
+                body.starts_with(&format!(r#"{{"project":"p","model":"{wire}","request":"#)),
+                "{body}"
+            );
+        }
     }
 
     #[test]

@@ -27,6 +27,8 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
+mod collapse;
+mod discovery;
 mod errors;
 mod events;
 pub(crate) mod profile;
@@ -43,6 +45,7 @@ use crate::{
         errors::ProviderError,
         models::{
             CompletionOptions, Message, ModelDescriptor, ResolvedAuth, StopReason, StreamChunk,
+            provider::DiscoveredModels,
         },
         ports::{ProbeOutcome, StreamingProvider},
     },
@@ -71,6 +74,8 @@ const FIRST_EVENT_TIMEOUT: &str =
 const INVALID_JSON: &str = "Cloud Code Assist stream returned invalid JSON";
 const EMPTY: &str = "Cloud Code Assist API returned an empty response";
 const BODY_TRANSPORT: &str = "Cloud Code Assist transport error reading response body";
+/// omp `loadCodeAssist` body without a project (probe and project-less discovery).
+const LOAD_CODE_ASSIST_BODY: &str = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
 
 /// The API base without a trailing `/`: the configured one, else the default.
 pub fn base_url(configured: Option<&str>) -> String {
@@ -149,6 +154,29 @@ impl Inner {
             .unwrap_or_default()
     }
 
+    /// The wire profile of `model`, read against the served catalogue (R3/R4): a
+    /// served row naming a wire id is a collapsed one.
+    fn profile(&self, model: &str) -> profile::GeminiModelProfile {
+        use crate::domain::models::provider::ModelCapability;
+        let served = self.discovered_models.load();
+        let row = (**served)
+            .as_deref()
+            .and_then(|models| models.iter().find(|row| row.model_id == model));
+        profile::resolve(
+            model,
+            match row {
+                None => profile::Served::Absent,
+                Some(row) => match row.wire_model_id.as_deref() {
+                    Some(wire) => profile::Served::Collapsed {
+                        wire,
+                        reasoning: row.capabilities.contains(&ModelCapability::Thinking),
+                    },
+                    None => profile::Served::Row,
+                },
+            },
+        )
+    }
+
     /// `POST <base>/v1internal:loadCodeAssist`, status only; a stored row's 401
     /// recovers once.
     async fn probe_status(&self) -> Result<(u16, std::time::Duration), ProviderError> {
@@ -156,7 +184,7 @@ impl Inner {
         let mut resolved = self.handle.current().await?;
         let mut retried = false;
         let url = format!("{}/v1internal:loadCodeAssist", self.base);
-        let body = r#"{"metadata":{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}}"#;
+        let body = LOAD_CODE_ASSIST_BODY;
         loop {
             let headers = headers(
                 &resolved.auth,
@@ -507,7 +535,7 @@ impl StreamingProvider for GeminiCliAdapter {
         let resolved = cancel.run(self.inner.handle.current()).await?;
         // Checked before any POST.
         project(&resolved)?;
-        let profile = profile::for_model(&options.model);
+        let profile = self.inner.profile(&options.model);
         let tool_names = options.tools.iter().map(|tool| tool.name.clone()).collect();
         let mut call = Call {
             inner: self.inner.clone(),
@@ -566,6 +594,21 @@ impl StreamingProvider for GeminiCliAdapter {
     }
     fn set_discovered_models(&self, models: Vec<ModelDescriptor>) {
         self.inner.discovered_models.store(Arc::new(Some(models)));
+    }
+    async fn discover_models(
+        &self,
+        model_filter: &[String],
+        scope_context: &str,
+    ) -> Option<Result<DiscoveredModels, ProviderError>> {
+        Some(self.inner.discover(model_filter, scope_context).await)
+    }
+    /// Credentials resolve per request, so the scope is read through that same path.
+    async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
+        let resolved = self.inner.handle.current().await.ok()?;
+        Some(crate::adapters::model_catalog_cache::request_scope(
+            scope_context,
+            &resolved,
+        ))
     }
     async fn health_check(&self) -> Result<(), ProviderError> {
         let (status, _) = tokio::time::timeout(Duration::from_secs(5), self.inner.probe_status())

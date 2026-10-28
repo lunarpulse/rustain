@@ -1,6 +1,6 @@
-//! Catalogue-only registration through `init_provider_layer` and the models.dev
-//! republication path (K11), the credential gate and the untouched `google`
-//! API-key provider (AC11), and the real debug binary (K12).
+//! Registration through `init_provider_layer` and the models.dev republication
+//! path (K11; live discovery since 20-1d4b), the credential gate and the
+//! untouched `google` API-key provider (AC11), and the real debug binary (K12).
 //!
 //! K12 needs the real binary built with `test-instrumentation` first.
 //! `RUSTAIN_TEST_GEMINI_CLI_BINARY` selects it explicitly; the cargo-bin fallback
@@ -23,9 +23,7 @@ use rustain::domain::models::{
     AppConfig, AuthSource, Credential, ModelCapability, ModelDescriptor, StreamChunk,
 };
 use rustain::domain::ports::AuthStorePort;
-use rustain::infrastructure::model_discovery::{
-    rediscover_after_login, refresh_and_announce, rejected_notice, spawn_headless,
-};
+use rustain::infrastructure::model_discovery::{refresh_and_announce, rejected_notice};
 use rustain::infrastructure::provider_availability::{
     Availability, ProviderOrigin, availability, effective_providers,
 };
@@ -188,7 +186,25 @@ fn not_a_live_target(layer: &ProviderLayer) {
             .discovery_targets
             .iter()
             .all(|t| t.provider_id != PROVIDER && t.kind != PROVIDER),
-        "catalogue-only: never a live discovery target"
+        "a locked entry is never a live discovery target"
+    );
+    assert!(
+        layer
+            .unsupported_discovery
+            .iter()
+            .all(|(id, kind)| id != PROVIDER && kind != PROVIDER),
+        "no \"doesn't support model discovery\" toast"
+    );
+}
+
+/// 20-1d4b R5: a signed entry is a live discovery target and a catalogue target.
+fn a_live_target(layer: &ProviderLayer) {
+    assert!(
+        layer
+            .discovery_targets
+            .iter()
+            .any(|t| t.provider_id == PROVIDER),
+        "a signed entry is a live discovery target"
     );
     assert!(
         layer
@@ -243,45 +259,34 @@ fn header<'a>(request: &'a Request, name: &str) -> &'a str {
         .unwrap()
 }
 
-// ── K11: catalogue-only ─────────────────────────────────────────────────────
+// ── K11: seeded, then live (20-1d4b R5) ─────────────────────────────────────
 
 #[tokio::test]
 #[serial]
-async fn k11_catalogue_only_target_is_seeded_never_discovered_and_never_claims_discovery() {
+async fn k11_signed_target_is_seeded_offline_then_discovered_by_the_live_consumers() {
     let server = MockServer::start().await;
     let temp = tempfile::tempdir().unwrap();
     let _env = env(temp.path(), &server.uri());
     let _isolated = isolate(temp.path(), NO_MODELS_DEV);
     let cfg = app_config();
-    let before = store().snapshot().await.unwrap();
     login(&server, ACCESS, PROJECT, EMAIL).await;
     let baseline = server.received_requests().await.unwrap().len();
-
-    // The post-login refresh finds no live target for the kind: nothing to announce.
-    assert!(
-        rediscover_after_login(PROVIDER, &cfg, &before)
-            .await
-            .is_none(),
-        "a catalogue-only login claims no discovery"
-    );
 
     let layer = init_provider_layer(&cfg);
     let target = catalogue_target(&layer);
     assert_eq!(target.kind, PROVIDER);
     assert_eq!(target.display_name, NAME);
     assert_eq!(target.sign_in_hint, HINT);
-    not_a_live_target(&layer);
-    // Every other bundled entry is locked in this world, so the live consumers
-    // (startup `refresh_and_announce`, `spawn_periodic_catalog_refresh`,
-    // `spawn_headless`) have no input at all.
-    assert!(
-        layer.discovery_targets.is_empty(),
-        "{:?}",
+    a_live_target(&layer);
+    // Every other bundled entry is locked in this world: the Gemini CLI entry is
+    // the only input of the live consumers.
+    assert_eq!(
         layer
             .discovery_targets
             .iter()
-            .map(|t| &t.provider_id)
-            .collect::<Vec<_>>()
+            .map(|t| t.provider_id.as_str())
+            .collect::<Vec<_>>(),
+        [PROVIDER]
     );
     assert!(layer.router.get_provider(PROVIDER).is_some());
     assert_eq!(rows(&target.bundled), seed());
@@ -294,16 +299,31 @@ async fn k11_catalogue_only_target_is_seeded_never_discovered_and_never_claims_d
         Some(DiscoveryStatus::Idle)
     );
     assert_eq!(layer.registry.sign_in_hint(PROVIDER).as_deref(), Some(HINT));
-
-    // A rejected credential names the login and claims no discovery failure.
-    let notice = rejected_notice(target);
     assert_eq!(
-        notice,
-        "Google Cloud Code Assist (Gemini CLI) rejected its credential (HTTP 401/403). Run `rustain auth login google-gemini-cli`"
+        server.received_requests().await.unwrap().len(),
+        baseline,
+        "registration is offline"
     );
-    assert!(!notice.contains("models could not be discovered"));
 
-    // The live consumers over exactly the inputs production hands them.
+    // A rejected credential now claims the discovery failure too.
+    assert_eq!(
+        rejected_notice(target),
+        "Google Cloud Code Assist (Gemini CLI) rejected its credential (HTTP 401/403) — models could not be discovered. Run `rustain auth login google-gemini-cli`"
+    );
+
+    // The live consumers over exactly the inputs production hands them: the
+    // forced refresh reaches Cloud Code Assist discovery and announces nothing
+    // but the refreshed catalogue (an empty quota keeps the seed).
+    Mock::given(method("POST"))
+        .and(path("/v1internal:fetchAvailableModels"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1internal:retrieveUserQuota"))
+        .respond_with(ok(json!({"buckets": []})))
+        .mount(&server)
+        .await;
     let (bus, mut domain_rx) = EventBus::new(64);
     let bus = Arc::new(bus);
     let tracker = RefreshTracker::new();
@@ -311,23 +331,21 @@ async fn k11_catalogue_only_target_is_seeded_never_discovered_and_never_claims_d
     for live in &layer.discovery_targets {
         refresh_and_announce(live, &cache, &layer.registry, true, &bus, &tracker).await;
     }
-    spawn_headless(layer.discovery_targets.clone(), layer.registry.clone());
-    // Even handed to the refresh path directly, the adapter has no discovery
-    // request: it keeps serving the seed, raises no notice and sends nothing.
-    refresh_and_announce(target, &cache, &layer.registry, true, &bus, &tracker).await;
     assert_eq!(rows(&served(&layer)), seed());
-    let (_, raised) = notices(&mut domain_rx);
+    let (refreshed, raised) = notices(&mut domain_rx);
+    assert_eq!(refreshed, [PROVIDER]);
     assert!(raised.is_empty(), "{raised:?}");
-
-    let requests = server.received_requests().await.unwrap();
+    let paths: Vec<_> = server.received_requests().await.unwrap()[baseline..]
+        .iter()
+        .map(|r| r.url.path().to_owned())
+        .collect();
     assert_eq!(
-        requests.len(),
-        baseline,
-        "no live consumer sends a request for the kind: {:?}",
-        requests[baseline..]
-            .iter()
-            .map(|r| r.url.path().to_owned())
-            .collect::<Vec<_>>()
+        paths,
+        [
+            "/v1internal:fetchAvailableModels",
+            "/v1internal:fetchAvailableModels",
+            "/v1internal:retrieveUserQuota"
+        ]
     );
 }
 
@@ -352,7 +370,7 @@ async fn k11_models_dev_refresh_republishes_the_seed_through_the_catalogue_only_
     let cfg = app_config();
     let layer = init_provider_layer(&cfg);
     let target = catalogue_target(&layer);
-    not_a_live_target(&layer);
+    a_live_target(&layer);
     let baseline = server.received_requests().await.unwrap().len();
 
     rustain::adapters::models_dev::refresh().await.unwrap();
@@ -471,7 +489,7 @@ async fn plain_without_a_login_the_bundled_entry_is_locked_then_login_serves_the
     assert_eq!(rows(&models), seed());
     assert_seed_capabilities(&models);
     catalogue_target(&layer);
-    not_a_live_target(&layer);
+    a_live_target(&layer);
     assert_eq!(
         server.received_requests().await.unwrap().len(),
         baseline,
@@ -645,6 +663,10 @@ const THOUGHT: &str = "GEMINI-THOUGHT-MARK planning the read.";
 const VISIBLE: &str = "Reading the notes.";
 const ANSWER: &str = "Gemini tool round answered";
 const SIGNATURES: [&str; 3] = ["U0lHMA==", "U0lHMQ==", "U0lHMg=="];
+/// 20-1d4b: `auth login` discovers through Antigravity's 403 and an empty quota.
+const FETCH: &str = "/v1internal:fetchAvailableModels";
+const QUOTA: &str = "/v1internal:retrieveUserQuota";
+const DISCOVERED: &str = "Discovered 7 models for Google Cloud Code Assist (Gemini CLI).";
 
 pub(crate) struct Fixture {
     pub(crate) home: tempfile::TempDir,
@@ -728,8 +750,7 @@ impl Fixture {
         };
         std::fs::create_dir_all(fixture.home.path().join("config")).unwrap();
         let config = "model = \"gemini-3.1-pro-preview\"\n\n[provider.gemini]\nkind = \"google-gemini-cli\"\nprovider_id = \"google-gemini-cli\"\nmodel_id = \"gemini-3.1-pro-preview\"\napi_key_env = \"\"\nenabled = true\ndiscover_models = true\n";
-        std::fs::write(fixture.home.path().join("config/config.toml"), config).unwrap();
-        std::fs::write(fixture.evidence.join("config.toml"), config).unwrap();
+        fixture.config(config);
         fixture.json("binary.json", &json!({
             "path": fixture.binary,
             "selection": if explicit_binary.is_some() { "RUSTAIN_TEST_GEMINI_CLI_BINARY" } else { "assert_cmd::cargo::cargo_bin" },
@@ -751,6 +772,12 @@ impl Fixture {
             serde_json::to_vec_pretty(value).unwrap(),
         )
         .unwrap();
+    }
+
+    /// The live `config.toml` and its evidence copy, so evidence shows what ran.
+    pub(crate) fn config(&self, toml: &str) {
+        std::fs::write(self.home.path().join("config/config.toml"), toml).unwrap();
+        std::fs::write(self.evidence.join("config.toml"), toml).unwrap();
     }
 
     fn command(&self, label: &str, args: &[&str]) -> tokio::process::Command {
@@ -1003,6 +1030,10 @@ async fn k12_real_debug_binary_login_status_two_turn_ask_logout() {
         }).await;
         Mock::given(method("GET")).and(path("/api.json"))
             .respond_with(ok(json!({}))).mount(&server).await;
+        Mock::given(method("POST")).and(path(FETCH))
+            .respond_with(ResponseTemplate::new(403)).mount(&server).await;
+        Mock::given(method("POST")).and(path(QUOTA))
+            .respond_with(ok(json!({"buckets": []}))).mount(&server).await;
         // Turn 1: signed thinking, signed text, a signed real `Read` call. Turn 2: the answer.
         Mock::given(method("POST")).and(path(STREAM))
             .respond_with(sse(&[
@@ -1023,11 +1054,11 @@ async fn k12_real_debug_binary_login_status_two_turn_ask_logout() {
             .unwrap_or_else(|| panic!("{transcript}"));
         assert!(checking < provisioning);
         assert!(!transcript.contains("Waiting for project provisioning"), "one immediate done poll: {transcript}");
-        assert!(!transcript.contains("Discovered"), "catalogue-only login claims no discovery: {transcript}");
+        assert!(transcript.lines().any(|line| line == DISCOVERED), "the login discovers (20-1d4b): {transcript}");
 
         let requests = fixture.requests(&server, "login").await;
         let provider_paths: Vec<_> = requests.iter().map(|r| r.url.path()).filter(|p| *p != "/api.json").collect();
-        assert_eq!(provider_paths, [TOKEN, USERINFO, LOAD, ONBOARD, OPERATION]);
+        assert_eq!(provider_paths, [TOKEN, USERINFO, LOAD, ONBOARD, OPERATION, FETCH, FETCH, QUOTA]);
         let token = hits(&requests, TOKEN)[0];
         assert_eq!(header(token, "content-type"), "application/x-www-form-urlencoded");
         let exchange = url::form_urlencoded::Serializer::new(String::new())
@@ -1185,7 +1216,7 @@ async fn k12_real_debug_binary_login_status_two_turn_ask_logout() {
             "stream_posts": posts.len(), "envelope_project": first["project"],
             "replayed_signatures_on_post_2": SIGNATURES,
             "configured_after_logout": gemini["configured"],
-            "chat_completions_requests": 0, "discovered_line": false,
+            "chat_completions_requests": 0, "discovered_line": DISCOVERED,
             "fixture_secrets_only": true,
         }));
     }).await.expect("CLI fixture exceeded its structural 120-second deadline");

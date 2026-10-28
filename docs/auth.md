@@ -131,11 +131,14 @@ access or put your account at risk. rustain does not refuse subscription tokens.
 **Gemini CLI subscription policy risk:** This third-party client signs in with
 Google's Gemini CLI installed-app OAuth client and sends requests with the Gemini
 CLI wire identity (`User-Agent: GeminiCLI/0.46.0/<model> (<platform>; <arch>;
-terminal)` and Gemini CLI `Client-Metadata`), as oh-my-pi does; its availability
-does not imply Google approval. Provider policies or backend changes may restrict
-access or put your account at risk. rustain does not refuse subscription tokens.
-Use the separate `google` API-key provider if you do not accept subscription-client
-risk.
+terminal)` and Gemini CLI `Client-Metadata`), as oh-my-pi does; model discovery
+also sends the access token to Google's Antigravity hosts
+(`daily-cloudcode-pa.googleapis.com` and `daily-cloudcode-pa.sandbox.googleapis.com`)
+with the Antigravity identity (`antigravity/hub/2.19.1 (aidev_client;
+os_type=darwin; arch=arm64; cl=963137146)`). Its availability does not imply Google
+approval. Provider policies or backend changes may restrict access or put your
+account at risk. rustain does not refuse subscription tokens. Use the separate
+`google` API-key provider if you do not accept subscription-client risk.
 
 ### ChatGPT Plus/Pro (Codex Subscription)
 
@@ -397,7 +400,8 @@ to re-authenticate.`` Run the login again in either case. There is no
 environment-variable credential: without a login the selector shows
 ``Run `rustain auth login google-gemini-cli` ``. `rustain auth logout
 google-gemini-cli` removes the rows. Stored rows are sent only to
-`https://cloudcode-pa.googleapis.com`; a configured `base_url` on another origin
+`https://cloudcode-pa.googleapis.com` and, for model discovery, to the two
+`daily-cloudcode-pa` Antigravity hosts; a configured `base_url` on another origin
 makes them ineligible.
 
 **Client secret provenance.** The installed-app client id and secret are the
@@ -413,9 +417,36 @@ with the Gemini CLI headers above and omp's envelope, roles, images, tool schema
 retries (4 attempts; server retry hints up to 5 minutes) and error texts. Gemini
 thought signatures are kept privately per response and replayed only to the same
 provider and model within a tool round and across text turns; they never appear in
-transcripts, observers, ACP, `ask` output or logs. The provider serves its 7
-bundled models (default `gemini-3.1-pro-preview`); live model discovery is not
-performed yet, so login prints no `Discovered` line.
+transcripts, observers, ACP, `ask` output or logs.
+
+**Model discovery.** A signed Gemini CLI entry discovers its models live, as
+oh-my-pi does. It first asks Antigravity (`POST /v1internal:fetchAvailableModels`
+with body `{}` on `daily-cloudcode-pa.googleapis.com`, then the sandbox host;
+10 seconds each). Any failure there — including HTTP 401/403, which only means
+the account lacks Antigravity access — falls back to the account's own quota list
+(`POST <base>/v1internal:retrieveUserQuota` with the Gemini CLI headers and body
+`{"project":"<stored project>"}`). A quota 401 refreshes the login once and
+resends with the new token and the same row's project; a remaining 401/403 marks
+the provider signed out with ``Run `rustain auth login google-gemini-cli` ``. Other
+quota failures keep the last served catalogue. Effort-tier variants collapse into
+one logical model (for example `gemini-3.1-pro-low`, `gemini-pro-agent` and
+`gemini-3.1-pro-high` become `gemini-3.1-pro`; `gemini-3.7-flash-low`… become
+`gemini-3.7-flash`), and on the quota path a live `X`/`X-thinking` twin becomes `X`.
+The picker lists the 7 bundled models first (default `gemini-3.1-pro-preview`),
+then the newly discovered ones by name. A logical model is sent without an effort
+as oh-my-pi sends it: `gemini-3.1-pro` as `gemini-3.1-pro-low` with
+`thinkingConfig {"includeThoughts":false,"thinkingLevel":"MINIMAL"}`,
+`gemini-<rev>-flash` (3.6 and later) as `gemini-<rev>-flash-low` with
+`{"includeThoughts":true,"thinkingLevel":"LOW"}`, and a twin `X` as `X` without a
+thinking config; bundled ids are sent unchanged. When the account does not list
+the member a route names, the request goes to its first listed member instead (for
+example `gemini-3.1-pro` as `gemini-pro-agent` when `gemini-3.1-pro-low` is not
+listed), and an upstream id that only looks like a logical id is sent as itself.
+The roster is cached per account (it survives token refreshes, never another
+account), refreshed at startup, every
+4 hours and after login: `rustain auth login google-gemini-cli` ends with
+`Discovered N models for Google Cloud Code Assist (Gemini CLI).` The Antigravity
+client version is pinned (no update-manifest lookup).
 
 ### How it works
 

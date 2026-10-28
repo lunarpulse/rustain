@@ -1,5 +1,7 @@
 //! Per-model Gemini CLI wire profile, adapted from oh-my-pi (catalog/src/models.json,
-//! catalog/src/compat/rules/classes/gemini.kdl, catalog/src/compat/rules/providers/google-gemini-cli.kdl).
+//! catalog/src/compat/rules/classes/gemini.kdl, catalog/src/compat/rules/providers/google-gemini-cli.kdl,
+//! and, for collapsed logical ids, catalog/src/compat/collapse.ts with the
+//! `google-gemini-cli` families of catalog/src/compat/rules/taxonomy/_collapse.kdl).
 //!
 //! MIT License
 //!
@@ -24,6 +26,9 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
+use super::collapse::{Family as VariantFamily, Role};
+use std::borrow::Cow;
+
 /// omp thinking effort tiers a Gemini CLI row can expose, in canonical order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Effort {
@@ -39,8 +44,8 @@ impl Effort {
         [Effort::Minimal, Effort::Low, Effort::Medium, Effort::High];
 }
 
-const ALL_EFFORTS: &[Effort] = &Effort::CANONICAL;
-const LOW_HIGH: &[Effort] = &[Effort::Low, Effort::High];
+pub(super) const ALL_EFFORTS: &[Effort] = &Effort::CANONICAL;
+pub(super) const LOW_HIGH: &[Effort] = &[Effort::Low, Effort::High];
 /// Budget rows carry the pre-3 four-tier ladder (`gemini.kdl` `revision "<3"`).
 pub(crate) const BUDGET_EFFORTS: &[Effort] = ALL_EFFORTS;
 
@@ -81,30 +86,31 @@ impl Thinking {
 }
 
 /// omp `thinking.effortRouting`: wire model id per effort (`off` = thinking off).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Collapsed `{rev}` and derived families carry ids built at resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffortRoutes {
-    pub off: Option<&'static str>,
-    pub minimal: Option<&'static str>,
-    pub low: Option<&'static str>,
-    pub medium: Option<&'static str>,
-    pub high: Option<&'static str>,
+    pub off: Option<Cow<'static, str>>,
+    pub minimal: Option<Cow<'static, str>>,
+    pub low: Option<Cow<'static, str>>,
+    pub medium: Option<Cow<'static, str>>,
+    pub high: Option<Cow<'static, str>>,
 }
 
 impl EffortRoutes {
     /// Route for `effort` (`None` = off).
-    pub(crate) fn route(&self, effort: Option<Effort>) -> Option<&'static str> {
+    pub(crate) fn route(&self, effort: Option<Effort>) -> Option<&str> {
         match effort {
-            None => self.off,
-            Some(Effort::Minimal) => self.minimal,
-            Some(Effort::Low) => self.low,
-            Some(Effort::Medium) => self.medium,
-            Some(Effort::High) => self.high,
+            None => self.off.as_deref(),
+            Some(Effort::Minimal) => self.minimal.as_deref(),
+            Some(Effort::Low) => self.low.as_deref(),
+            Some(Effort::Medium) => self.medium.as_deref(),
+            Some(Effort::High) => self.high.as_deref(),
         }
     }
 }
 
 /// Wire-relevant facts of one Gemini CLI model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GeminiModelProfile {
     pub reasoning: bool,
     pub thinking: Thinking,
@@ -117,6 +123,9 @@ pub(crate) struct GeminiModelProfile {
     /// `streamFirstEventTimeoutMs ?? 300000`.
     pub first_event_ms: u64,
     pub routes: Option<EffortRoutes>,
+    /// omp `requestModelId`: the wire id when no route applies (`resolveWireModelId`,
+    /// model-thinking.ts:147-149); only a served collapsed row has one.
+    pub request_model_id: Option<Cow<'static, str>>,
     pub suppress_when_off: bool,
     /// `multimodalFunctionResponse`.
     pub multimodal_function_response: bool,
@@ -136,6 +145,7 @@ const UNKNOWN: GeminiModelProfile = GeminiModelProfile {
     first_event_ms: DEFAULT_FIRST_EVENT_MS,
     routes: None,
     suppress_when_off: false,
+    request_model_id: None,
     multimodal_function_response: false,
 };
 
@@ -153,6 +163,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: FLASH_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: false,
         },
     ),
@@ -169,13 +180,14 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             flash_leak: true,
             first_event_ms: FLASH_FIRST_EVENT_MS,
             routes: Some(EffortRoutes {
-                off: Some("gemini-2.5-flash"),
+                off: Some(Cow::Borrowed("gemini-2.5-flash")),
                 minimal: None,
                 low: None,
                 medium: None,
                 high: None,
             }),
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: false,
         },
     ),
@@ -193,6 +205,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: DEFAULT_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: false,
         },
     ),
@@ -211,6 +224,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: FLASH_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: true,
         },
     ),
@@ -229,6 +243,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: DEFAULT_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: true,
         },
     ),
@@ -247,6 +262,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: DEFAULT_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: true,
         },
     ),
@@ -265,6 +281,7 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
             first_event_ms: DEFAULT_FIRST_EVENT_MS,
             routes: None,
             suppress_when_off: false,
+            request_model_id: None,
             multimodal_function_response: true,
         },
     ),
@@ -273,9 +290,122 @@ const BUNDLED: [(&str, GeminiModelProfile); 7] = [
 /// Profile of `id`: a bundled row, else omp's class rules for the parsed id.
 pub(crate) fn for_model(id: &str) -> GeminiModelProfile {
     if let Some((_, profile)) = BUNDLED.iter().find(|(bundled, _)| *bundled == id) {
-        return *profile;
+        return profile.clone();
     }
     derive(id)
+}
+
+/// What the adapter serves under the requested id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Served<'a> {
+    /// No served row has this id.
+    Absent,
+    /// A served row with this exact id that no collapse produced.
+    Row,
+    /// A served collapsed row: the default wire id its record names (omp
+    /// `requestModelId`, or the bare id of a derived `X`/`X-thinking` pair) and
+    /// whether it reasons.
+    Collapsed { wire: &'a str, reasoning: bool },
+}
+
+/// Profile of a requested id (R3/R4). Bundled ids keep their bundled profile.
+/// A served collapsed reviewed row takes its family's table facts with the routes
+/// its live members allow; an unserved reviewed logical id, member or alias selects
+/// its family from the static table (omp `resolveVariantSelector`); a served
+/// derived pair `X` routes `off → X` with no mandatory effort; any other id —
+/// including a raw served row named like a logical id — is that row (omp's exact
+/// lookup wins) under the class rules.
+pub(crate) fn resolve(id: &str, served: Served<'_>) -> GeminiModelProfile {
+    if let Some((_, profile)) = BUNDLED.iter().find(|(bundled, _)| *bundled == id) {
+        return profile.clone();
+    }
+    match (super::collapse::reviewed(id), served) {
+        (Some((family, Role::Logical)), Served::Collapsed { wire, reasoning }) => {
+            family_profile(&family, Some((wire, reasoning)))
+        }
+        (Some((family, _)), Served::Absent) => family_profile(&family, None),
+        (_, Served::Collapsed { wire, .. }) if wire == id => derived_pair(id),
+        _ => derive(id),
+    }
+}
+
+/// A reviewed family: the class facts of its logical id with the table's thinking
+/// surface, routes and suppression. Unserved, it takes the whole static table and
+/// reasons. Served, its default wire id is the first live non-retired member
+/// (CL:954-974), so every non-retired member ranked before it is absent — all are
+/// when it is retired or unknown; routes to absent or retired members drop and the
+/// request falls back to that id (CL:905-916), and a family whose live members do
+/// not reason carries no thinking (CL:918-920,978-982).
+fn family_profile(family: &VariantFamily, served: Option<(&str, bool)>) -> GeminiModelProfile {
+    let mut routes = family.routes.clone();
+    let (reasoning, request_model_id) = match served {
+        None => (true, None),
+        Some((wire, reasoning)) => {
+            let retired = |id: &str| family.retired.contains(&id);
+            let live_from = family
+                .members
+                .iter()
+                .position(|member| &**member == wire)
+                .filter(|_| !retired(wire))
+                .unwrap_or(family.members.len());
+            let absent = &family.members[..live_from];
+            for route in [
+                &mut routes.off,
+                &mut routes.minimal,
+                &mut routes.low,
+                &mut routes.medium,
+                &mut routes.high,
+            ] {
+                let gone = route.as_deref().is_some_and(|target| {
+                    retired(target) || absent.iter().any(|member| &**member == target)
+                });
+                if gone {
+                    *route = None;
+                }
+            }
+            (reasoning, Some(Cow::Owned(wire.to_owned())))
+        }
+    };
+    GeminiModelProfile {
+        reasoning,
+        thinking: if reasoning {
+            family.thinking
+        } else {
+            Thinking::None
+        },
+        routes: reasoning.then_some(routes),
+        suppress_when_off: family.suppress_when_off,
+        request_model_id,
+        ..derive(&family.id)
+    }
+}
+
+/// A derived `X`/`X-thinking` family (CL:557-599): the class thinking surface with
+/// `requiresEffort` stripped (budget when the class has none), `off → X`.
+fn derived_pair(id: &str) -> GeminiModelProfile {
+    let class = derive(id);
+    let thinking = match class.thinking {
+        Thinking::Level { efforts, .. } => Thinking::Level {
+            efforts,
+            requires_effort: false,
+        },
+        Thinking::Budget { .. } | Thinking::None => Thinking::Budget {
+            requires_effort: false,
+        },
+    };
+    GeminiModelProfile {
+        reasoning: true,
+        thinking,
+        routes: Some(EffortRoutes {
+            off: Some(Cow::Owned(id.to_owned())),
+            minimal: None,
+            low: None,
+            medium: None,
+            high: None,
+        }),
+        suppress_when_off: false,
+        ..class
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -354,6 +484,7 @@ fn derive(id: &str) -> GeminiModelProfile {
         },
         routes: None,
         suppress_when_off: false,
+        request_model_id: None,
         multimodal_function_response: gemini3,
     }
 }
@@ -460,7 +591,7 @@ mod tests {
             assert_eq!(profile.multimodal_function_response, mfr, "{id}");
             assert!(!profile.suppress_when_off, "{id}");
             let expected_routes = (id == "gemini-2.5-flash").then_some(EffortRoutes {
-                off: Some("gemini-2.5-flash"),
+                off: Some(Cow::Borrowed("gemini-2.5-flash")),
                 minimal: None,
                 low: None,
                 medium: None,
@@ -485,6 +616,7 @@ mod tests {
                 first_event_ms: 60_000,
                 routes: None,
                 suppress_when_off: false,
+                request_model_id: None,
                 multimodal_function_response: true,
             }
         );
@@ -548,5 +680,181 @@ mod tests {
         assert_eq!(routes.route(Some(Effort::Minimal)), None);
         assert_eq!(Thinking::None.efforts(), &[] as &[Effort]);
         assert!(!Thinking::None.requires_effort());
+    }
+
+    fn routes(profile: &GeminiModelProfile) -> [Option<&str>; 5] {
+        let routes = profile.routes.as_ref().expect("routed profile");
+        [
+            routes.off.as_deref(),
+            routes.minimal.as_deref(),
+            routes.low.as_deref(),
+            routes.medium.as_deref(),
+            routes.high.as_deref(),
+        ]
+    }
+
+    #[test]
+    fn bundled_ids_resolve_to_their_bundled_profile() {
+        for (id, _) in &BUNDLED {
+            for served in [
+                Served::Absent,
+                Served::Row,
+                Served::Collapsed {
+                    wire: id,
+                    reasoning: true,
+                },
+            ] {
+                assert_eq!(resolve(id, served), for_model(id), "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn reviewed_logical_ids_take_the_static_table() {
+        let pro = resolve("gemini-3.1-pro", Served::Absent);
+        assert_eq!(
+            routes(&pro),
+            [
+                Some("gemini-3.1-pro-low"),
+                None,
+                Some("gemini-3.1-pro-low"),
+                None,
+                Some("gemini-pro-agent")
+            ]
+        );
+        assert!(pro.reasoning && pro.suppress_when_off);
+        assert_eq!(
+            pro.thinking,
+            Thinking::Level {
+                efforts: LOW_HIGH,
+                requires_effort: false
+            }
+        );
+        // The class facts of the logical id stay.
+        assert!(pro.first_call_sentinel && pro.multimodal_function_response && !pro.flash_leak);
+        // A raw served row named like the logical id is that row (omp exact lookup).
+        assert_eq!(
+            resolve("gemini-3.1-pro", Served::Row),
+            derive("gemini-3.1-pro")
+        );
+        assert_eq!(resolve("gemini-9-flash", Served::Row).routes, None);
+
+        let flash = resolve("gemini-3.7-flash", Served::Absent);
+        assert_eq!(
+            routes(&flash),
+            [
+                None,
+                Some("gemini-3.7-flash-low"),
+                Some("gemini-3.7-flash-low"),
+                Some("gemini-3.7-flash-medium"),
+                Some("gemini-3.7-flash-high")
+            ]
+        );
+        assert!(flash.thinking.requires_effort() && !flash.suppress_when_off && flash.flash_leak);
+
+        let three = resolve("gemini-3-pro", Served::Absent);
+        assert_eq!(routes(&three)[0], Some("gemini-3-pro-low"));
+        assert!(three.suppress_when_off);
+        let five = resolve("gemini-3.5-flash", Served::Absent);
+        assert_eq!(routes(&five)[0], Some("gemini-3.5-flash-extra-low"));
+        assert_eq!(routes(&five)[1], Some("gemini-3-flash-agent"));
+    }
+
+    #[test]
+    fn unserved_members_and_aliases_select_their_family_but_a_served_row_wins() {
+        assert_eq!(
+            resolve("gemini-3-flash", Served::Absent),
+            resolve("gemini-3.5-flash", Served::Absent)
+        );
+        assert_eq!(
+            resolve("gemini-3.1-pro-high", Served::Absent),
+            resolve("gemini-3.1-pro", Served::Absent)
+        );
+        assert_eq!(
+            resolve("gemini-3-flash", Served::Row),
+            derive("gemini-3-flash")
+        );
+        assert_eq!(resolve("gemini-3.1-pro-low", Served::Row).routes, None);
+    }
+
+    #[test]
+    fn derived_pairs_route_off_to_themselves_without_a_mandatory_effort() {
+        let pair = resolve(
+            "gemini-9-pro",
+            Served::Collapsed {
+                wire: "gemini-9-pro",
+                reasoning: true,
+            },
+        );
+        assert_eq!(
+            routes(&pair),
+            [Some("gemini-9-pro"), None, None, None, None]
+        );
+        assert_eq!(
+            pair.thinking,
+            Thinking::Level {
+                efforts: LOW_HIGH,
+                requires_effort: false
+            }
+        );
+        assert!(pair.reasoning && !pair.suppress_when_off);
+        // Without the served pair the class rules require an effort (control).
+        let class = resolve("gemini-9-pro", Served::Absent);
+        assert!(class.thinking.requires_effort() && class.routes.is_none());
+        let budget = resolve(
+            "gemini-2.0-flash-x",
+            Served::Collapsed {
+                wire: "gemini-2.0-flash-x",
+                reasoning: true,
+            },
+        );
+        assert_eq!(
+            budget.thinking,
+            Thinking::Budget {
+                requires_effort: false
+            }
+        );
+        assert!(budget.reasoning);
+    }
+
+    #[test]
+    fn served_collapsed_rows_drop_routes_to_absent_members() {
+        let served = |id, wire, reasoning| resolve(id, Served::Collapsed { wire, reasoning });
+        // Every member live: the whole table, defaulting to the first member.
+        let pro = served("gemini-3.1-pro", "gemini-3.1-pro-low", true);
+        assert_eq!(
+            routes(&pro),
+            routes(&resolve("gemini-3.1-pro", Served::Absent))
+        );
+        assert_eq!(pro.request_model_id.as_deref(), Some("gemini-3.1-pro-low"));
+        // `-low` absent: only the route to the live default member stays.
+        let agent = served("gemini-3.1-pro", "gemini-pro-agent", true);
+        assert_eq!(
+            routes(&agent),
+            [None, None, None, None, Some("gemini-pro-agent")]
+        );
+        assert!(agent.suppress_when_off);
+        // Only the retired member live: no route, no thinking.
+        let retired = served("gemini-3.1-pro", "gemini-3.1-pro-high", false);
+        assert_eq!(
+            (retired.routes, retired.reasoning, retired.thinking),
+            (None, false, Thinking::None)
+        );
+        assert_eq!(
+            retired.request_model_id.as_deref(),
+            Some("gemini-3.1-pro-high")
+        );
+        // Template: members ranked before the default are absent.
+        let high = served("gemini-3.7-flash", "gemini-3.7-flash-high", true);
+        assert_eq!(
+            routes(&high),
+            [None, None, None, None, Some("gemini-3.7-flash-high")]
+        );
+        let tiered = served("gemini-3.7-flash", "gemini-3.7-flash-tiered", true);
+        assert_eq!(routes(&tiered), [None; 5]);
+        assert_eq!(
+            tiered.request_model_id.as_deref(),
+            Some("gemini-3.7-flash-tiered")
+        );
     }
 }
