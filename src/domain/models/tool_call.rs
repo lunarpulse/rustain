@@ -24,6 +24,11 @@ pub struct ToolCallResult {
     pub output: String,
     pub is_error: bool,
     pub duration_ms: u64,
+    /// Result images carried from the tool to the turn loop (Story 20.1d4a
+    /// T1). Runtime-only: transitions reach observers, so it is never
+    /// serialized.
+    #[serde(skip)]
+    pub images: Vec<crate::domain::models::ImageAttachment>,
 }
 
 /// Newtype for an approval request identifier.
@@ -383,6 +388,7 @@ mod tests {
                 output: "hello".into(),
                 is_error: false,
                 duration_ms: 42,
+                images: Vec::new(),
             },
         };
         let json = serde_json::to_string(&call).unwrap();
@@ -455,7 +461,8 @@ mod tests {
                 result: ToolCallResult {
                     output: "o".into(),
                     is_error: false,
-                    duration_ms: 0
+                    duration_ms: 0,
+                    images: Vec::new(),
                 }
             }
             .is_terminal()
@@ -521,6 +528,7 @@ mod tests {
                         output: "o".into(),
                         is_error: false,
                         duration_ms: 0,
+                        images: Vec::new(),
                     },
                 },
                 "✓ Success",

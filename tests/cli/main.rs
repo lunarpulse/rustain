@@ -54,6 +54,9 @@ mod conformance_20_1d3_copilot;
 #[path = "../conformance_20_1d4_gemini_cli.rs"]
 mod conformance_20_1d4_gemini_cli;
 
+#[path = "../conformance_20_1d4a_tool_turn_fidelity.rs"]
+mod conformance_20_1d4a_tool_turn_fidelity;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

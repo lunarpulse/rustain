@@ -644,6 +644,7 @@ async fn ac3_pins_provider_facing_literals_and_toolresult_shape() {
         tool_use_id: "id".to_string(),
         content: "c".to_string(),
         is_error: false,
+        images: Vec::new(),
     };
     assert_eq!(pinned.tool_use_id, "id");
 }

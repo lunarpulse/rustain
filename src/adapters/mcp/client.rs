@@ -786,10 +786,11 @@ impl McpClientAdapter {
                 tool_use_id: format!("mcp-task-unwired-{seq}"),
                 content: format!(
                     "MCP server '{}' created task {task_id} but this client has no \
-                     task runtime; the task runs untracked on the server.",
+                 task runtime; the task runs untracked on the server.",
                     self.spec.id
                 ),
                 is_error: false,
+                images: Vec::new(),
             });
         };
         let transport = Arc::new(PeerTaskTransport::new(peer));

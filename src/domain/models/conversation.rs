@@ -289,6 +289,23 @@ impl Conversation {
             .filter(|m| !m.content_blocks.is_empty())
             .map(|m| (m.id.clone(), m.content_blocks.clone()))
             .collect();
+        // Story 20.1d4a: a turn without response marks (a migrated row) keeps
+        // its row's provider call ids, positionally, as it keeps its blocks.
+        let mut old_provider_ids: std::collections::HashMap<String, Vec<Option<String>>> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| m.tool_calls.iter().any(|call| call.provider_id.is_some()))
+            .map(|m| {
+                (
+                    m.id.clone(),
+                    m.tool_calls
+                        .iter()
+                        .map(|call| call.provider_id.clone())
+                        .collect(),
+                )
+            })
+            .collect();
         let old_sources: std::collections::HashSet<String> = self
             .messages
             .iter()
@@ -321,14 +338,25 @@ impl Conversation {
             let mut tool_calls = Vec::new();
             let mut tool_results: std::collections::HashMap<super::turn::PartId, &TurnPart> =
                 std::collections::HashMap::new();
-            // Turn-backed replay state (Story 20.1d1b) replaces any earlier copy,
-            // so repeated rebuilds never duplicate it.
+            let marked = !turn.responses.is_empty();
+            // Turn-backed replay state (Story 20.1d1b) and response spans
+            // (Story 20.1d4a) replace any earlier copy, so repeated rebuilds
+            // never duplicate them. A turn without marks keeps its row's spans.
             let mut content_blocks: Vec<ContentBlockType> = old_blocks
                 .remove(&turn.id.0)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|block| !matches!(block, ContentBlockType::ProviderReplay(_)))
+                .filter(|block| match block {
+                    ContentBlockType::ProviderReplay(_) => false,
+                    ContentBlockType::ResponseSpan(_) => !marked,
+                    _ => true,
+                })
                 .collect();
+            let (spans, provider_ids) = response_spans(turn);
+            let mut old_ids = old_provider_ids
+                .remove(&turn.id.0)
+                .unwrap_or_default()
+                .into_iter();
 
             // First pass: collect results, prose, and reasoning
             for part in &turn.parts {
@@ -379,6 +407,7 @@ impl Conversation {
                             Some(ToolResultInfo {
                                 content: output.content.clone(),
                                 is_error: output.is_error,
+                                images: output.images.clone(),
                                 diff: output.diff.clone(),
                             })
                         } else {
@@ -387,6 +416,11 @@ impl Conversation {
                     });
 
                     let tc_id = tool_call_id_for(&turn.id, *pid);
+                    let provider_id = if marked {
+                        provider_ids.get(pid).cloned()
+                    } else {
+                        old_ids.next().flatten()
+                    };
 
                     tool_calls.push(ToolCallInfo {
                         id: tc_id,
@@ -396,9 +430,11 @@ impl Conversation {
                         started_at_ms: Some((*started_at).max(0) as u64),
                         completed_at_ms: ended_at.map(|v| v.max(0) as u64),
                         status: status_str.map(|s| s.to_string()),
+                        provider_id,
                     });
                 }
             }
+            content_blocks.extend(spans.into_iter().map(ContentBlockType::ResponseSpan));
 
             let created_at = turn.started_at / 1000;
             let provenance = msg_indices.get(&turn.id.0).map(|&idx| {
@@ -448,6 +484,47 @@ impl Conversation {
             processed_turn_ids.contains(&m.id)
         });
     }
+}
+
+/// One [`super::content::ResponseSpan`] per response mark of `turn`, and the
+/// provider id of every marked invocation (Story 20.1d4a T2). Parts after the
+/// last mark, which the reducer never leaves, join the last response.
+fn response_spans(
+    turn: &Turn,
+) -> (
+    Vec<super::content::ResponseSpan>,
+    std::collections::HashMap<super::turn::PartId, String>,
+) {
+    let mut spans = Vec::with_capacity(turn.responses.len());
+    let mut provider_ids = std::collections::HashMap::new();
+    let mut start = 0;
+    let last = turn.responses.len().saturating_sub(1);
+    for (index, mark) in turn.responses.iter().enumerate() {
+        let end = if index == last {
+            turn.parts.len()
+        } else {
+            mark.end.clamp(start, turn.parts.len())
+        };
+        let mut span = super::content::ResponseSpanBuilder::default();
+        let mut call_ids = mark.call_ids.iter();
+        for part in &turn.parts[start..end] {
+            match part {
+                TurnPart::Prose { text, .. } => span.text(text),
+                TurnPart::Reasoning { text, .. } => span.reasoning(text),
+                TurnPart::ToolInvocation { id, .. } => {
+                    span.call();
+                    if let Some(call_id) = call_ids.next() {
+                        provider_ids.insert(*id, call_id.clone());
+                    }
+                }
+                TurnPart::ProviderReplay { .. } => span.replay(),
+                TurnPart::ToolResult { .. } => {}
+            }
+        }
+        spans.push(span.finish());
+        start = end;
+    }
+    (spans, provider_ids)
 }
 
 /// Summary for conversation list display (lighter than full Conversation).
@@ -584,6 +661,15 @@ impl PersistedConversation {
             peer_row_revision: self.peer_row_revision,
         };
 
+        // Story 20.1d4a T2: an assistant row appended by a messages-only
+        // persister (`ask`, the daemon, ACP, a peer row) after a migrated load
+        // has no turn; the mirror would delete it at the next rebuild. Back it
+        // with a turn of its own id, in message order, keeping its provider
+        // call ids.
+        if !conv.turns.is_empty() {
+            migrate_unbacked_rows(&mut conv);
+        }
+
         // Legacy-deserialization fallback: if `turns` is empty but `messages` is populated
         // (pre-16.2 session JSON), populate `turns` by migrating each Assistant `ChatMessage`.
         // Non-Assistant messages are kept in `messages` only (rebuild_messages_mirror preserves
@@ -592,27 +678,67 @@ impl PersistedConversation {
         if conv.turns.is_empty() && !conv.messages.is_empty() {
             for msg in &mut conv.messages {
                 if msg.role == MessageRole::Assistant {
-                    let turn = migrate_chat_message_to_turn(msg);
-                    // Story 19.20a: id-less legacy rows acquire the same unique join identity.
-                    if msg.id.is_empty() {
-                        msg.id = turn.id.0.clone();
-                    }
-                    // The turn renderer and rebuilt mirror use these invocation identities.
-                    // Normalize immediately so selection/copy work before the first rebuild.
-                    for (call, part_id) in msg.tool_calls.iter_mut().zip(
-                        turn.parts.iter().filter_map(|part| match part {
-                            TurnPart::ToolInvocation { id, .. } => Some(*id),
-                            _ => None,
-                        }),
-                    ) {
-                        call.id = tool_call_id_for(&turn.id, part_id);
-                    }
+                    let turn = migrate_row(msg);
                     conv.turns.push(turn);
                 }
             }
         }
 
         conv
+    }
+}
+
+/// Migrate one assistant row into its turn and give the row that turn's join
+/// identities.
+fn migrate_row(msg: &mut ChatMessage) -> Turn {
+    let turn = migrate_chat_message_to_turn(msg);
+    // Story 19.20a: id-less legacy rows acquire the same unique join identity.
+    if msg.id.is_empty() {
+        msg.id = turn.id.0.clone();
+    }
+    // The turn renderer and rebuilt mirror use these invocation identities.
+    // Normalize immediately so selection/copy work before the first rebuild.
+    for (call, part_id) in msg
+        .tool_calls
+        .iter_mut()
+        .zip(turn.parts.iter().filter_map(|part| match part {
+            TurnPart::ToolInvocation { id, .. } => Some(*id),
+            _ => None,
+        }))
+    {
+        call.id = tool_call_id_for(&turn.id, part_id);
+    }
+    turn
+}
+
+/// Story 20.1d4a T2: back every assistant row without a turn of its id. Each
+/// new turn goes after the turn of the nearest earlier backed row, so assistant
+/// turns follow their rows' order; existing turns keep their relative order.
+/// The row's original call ids become its provider ids before the `tc_…`
+/// rename, so its provider bytes stay what they were.
+fn migrate_unbacked_rows(conv: &mut Conversation) {
+    let mut backed: std::collections::HashSet<String> =
+        conv.turns.iter().map(|turn| turn.id.0.clone()).collect();
+    let mut insert_at = 0;
+    for msg in &mut conv.messages {
+        if msg.role != MessageRole::Assistant {
+            continue;
+        }
+        if backed.contains(&msg.id) {
+            if let Some(position) = conv.turns.iter().position(|turn| turn.id.0 == msg.id) {
+                insert_at = position + 1;
+            }
+            continue;
+        }
+        for call in &mut msg.tool_calls {
+            if call.provider_id.is_none() {
+                call.provider_id = Some(call.id.clone());
+            }
+        }
+        let turn = migrate_row(msg);
+        backed.insert(turn.id.0.clone());
+        conv.turns.insert(insert_at, turn);
+        insert_at += 1;
     }
 }
 
@@ -989,5 +1115,328 @@ mod tests {
         let restored: ChatMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.authorship, Authorship::AgentComposed);
         assert_eq!(restored.retracted_at_ms, Some(1_700_000_123_000));
+    }
+
+    // ── Story 20.1d4a T2: spans, provider ids, result images, unbacked rows ──
+
+    fn image() -> crate::domain::models::ImageAttachment {
+        crate::domain::models::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "UE5H".into(),
+        }
+    }
+
+    fn replay(marker: &str) -> crate::domain::models::ProviderReplayItem {
+        crate::domain::models::ProviderReplayItem {
+            provider: "p".into(),
+            model: "m".into(),
+            payload: std::sync::Arc::new(serde_json::json!({ "m": marker })),
+        }
+    }
+
+    /// A two-response tool turn as the TUI event loop folds it.
+    fn reduced_turn() -> Conversation {
+        use crate::domain::models::{StopReason, StreamChunk, WriteDiffState};
+        let mut conversation = Conversation::default();
+        conversation.messages.push(ChatMessage {
+            id: "u".into(),
+            role: MessageRole::User,
+            content: "go".into(),
+            ..Default::default()
+        });
+        let (mut state, clock) = crate::domain::services::reducer::test_reducer_state(0);
+        let mut streaming = crate::domain::models::StreamingState::default();
+        let result = |id: &str, images| StreamChunk::ToolResult {
+            id: id.into(),
+            content: format!("r{id}"),
+            is_error: false,
+            operator_private: false,
+            diff: WriteDiffState::NotAWrite,
+            images,
+        };
+        for chunk in [
+            StreamChunk::Thinking {
+                content: "T".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::Text {
+                content: "V".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::ToolUse {
+                id: "A".into(),
+                name: "img".into(),
+                input: serde_json::json!({}),
+            },
+            StreamChunk::ToolUse {
+                id: "B".into(),
+                name: "echo".into(),
+                input: serde_json::json!({}),
+            },
+            StreamChunk::ProviderReplay { item: replay("r1") },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+            },
+            result("B", vec![]),
+            result("A", vec![image()]),
+            StreamChunk::ToolUse {
+                id: "C".into(),
+                name: "echo".into(),
+                input: serde_json::json!({}),
+            },
+            StreamChunk::ProviderReplay { item: replay("r2") },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::ToolUse,
+            },
+            result("C", vec![]),
+            StreamChunk::Text {
+                content: "done".into(),
+                parent_tool_use_id: None,
+            },
+            StreamChunk::ProviderReplay { item: replay("r3") },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ] {
+            crate::domain::services::reducer::apply_chunk_for_tests(
+                &mut conversation,
+                &mut streaming,
+                &mut state,
+                chunk,
+                &clock,
+            );
+        }
+        conversation
+    }
+
+    fn spans(message: &ChatMessage) -> Vec<&crate::domain::models::ResponseSpan> {
+        message
+            .content_blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlockType::ResponseSpan(span) => Some(span),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn api_shape(conversation: &Conversation) -> Vec<(String, Vec<String>, Vec<String>, usize)> {
+        crate::domain::services::message_builder::build_api_messages(conversation)
+            .into_iter()
+            .map(|m| {
+                (
+                    m.content,
+                    m.tool_uses.into_iter().map(|u| u.id).collect(),
+                    m.tool_results.into_iter().map(|r| r.tool_use_id).collect(),
+                    m.provider_replay.len(),
+                )
+            })
+            .collect()
+    }
+
+    fn expected_shape() -> Vec<(String, Vec<String>, Vec<String>, usize)> {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        vec![
+            ("go".into(), vec![], vec![], 0),
+            ("V".into(), s(&["A", "B"]), vec![], 1),
+            (String::new(), vec![], s(&["A", "B"]), 0),
+            (String::new(), s(&["C"]), vec![], 1),
+            (String::new(), vec![], s(&["C"]), 0),
+            ("done".into(), vec![], vec![], 1),
+        ]
+    }
+
+    #[test]
+    fn marked_turn_mirror_writes_spans_provider_ids_and_result_images_once() {
+        let mut conversation = reduced_turn();
+        conversation.rebuild_messages_mirror();
+        conversation.rebuild_messages_mirror();
+        let row = &conversation.messages[1];
+        assert_eq!(row.content, "VTdone", "the display fold is unchanged");
+        assert!(row.tool_calls.iter().all(|call| call.id.starts_with("tc_")));
+        let ids: Vec<_> = row
+            .tool_calls
+            .iter()
+            .map(|c| c.wire_id().to_owned())
+            .collect();
+        assert_eq!(ids, vec!["A", "B", "C"]);
+        assert_eq!(
+            row.tool_calls[0].result.as_ref().unwrap().images,
+            vec![image()]
+        );
+        let spans = spans(row);
+        assert_eq!(spans.len(), 3, "kept once across rebuilds");
+        assert_eq!(
+            (
+                spans[0].text.as_str(),
+                spans[0].reasoning.as_deref(),
+                spans[0].tool_calls,
+                spans[0].replay
+            ),
+            ("V", Some("T"), 2, 1)
+        );
+        assert_eq!((spans[1].tool_calls, spans[1].replay), (1, 1));
+        assert_eq!(spans[2].text, "done");
+        assert_eq!(api_shape(&conversation), expected_shape());
+
+        // Session store round trip.
+        let mut loaded = PersistedConversation::from_conversation(&conversation).to_conversation();
+        loaded.rebuild_messages_mirror();
+        assert_eq!(api_shape(&loaded), expected_shape());
+    }
+
+    #[test]
+    fn an_unmarked_migrated_row_keeps_its_spans_provider_ids_and_images() {
+        // A row written by `ask` (spans, provider ids, result images), loaded by
+        // the TUI on a first load and rebuilt twice.
+        let mut reduced = reduced_turn();
+        reduced.rebuild_messages_mirror();
+        let mut row = reduced.messages[1].clone();
+        row.id = "ask-row".into();
+        row.content = "Vdone".into();
+        for (call, id) in row.tool_calls.iter_mut().zip(["A", "B", "C"]) {
+            call.id = id.into();
+        }
+        let mut file = Conversation::default();
+        file.messages = vec![reduced.messages[0].clone(), row];
+        let mut loaded = PersistedConversation::from_conversation(&file).to_conversation();
+        loaded.rebuild_messages_mirror();
+        loaded.rebuild_messages_mirror();
+        let rebuilt = &loaded.messages[1];
+        assert!(
+            rebuilt
+                .tool_calls
+                .iter()
+                .all(|call| call.id.starts_with("tc_ask-row_"))
+        );
+        assert_eq!(
+            rebuilt.tool_calls[0].result.as_ref().unwrap().images,
+            vec![image()]
+        );
+        assert_eq!(spans(rebuilt).len(), 3);
+        assert_eq!(api_shape(&loaded), {
+            let mut expected = expected_shape();
+            expected[1].0 = "V".into();
+            expected
+        });
+    }
+
+    #[test]
+    fn rows_appended_after_a_migrated_load_are_backed_in_message_order() {
+        let call = |id: &str| ToolCallInfo {
+            id: id.into(),
+            name: "echo".into(),
+            input: serde_json::json!({}),
+            result: Some(ToolResultInfo {
+                content: "ok".into(),
+                is_error: false,
+                images: vec![],
+                diff: Default::default(),
+            }),
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None,
+            provider_id: None,
+        };
+        let row = |id: &str, calls| ChatMessage {
+            id: id.into(),
+            role: MessageRole::Assistant,
+            content: id.into(),
+            tool_calls: calls,
+            ..Default::default()
+        };
+        let user = |id: &str| ChatMessage {
+            id: id.into(),
+            role: MessageRole::User,
+            content: id.into(),
+            ..Default::default()
+        };
+        // First load migrates `first`; the file is saved with turns.
+        let mut file = Conversation::default();
+        file.messages = vec![user("u1"), row("first", vec![call("orig-1")])];
+        let mut loaded = PersistedConversation::from_conversation(&file).to_conversation();
+        loaded.rebuild_messages_mirror();
+        // `ask`, then a controlled peer row, append messages-only rows.
+        loaded.messages.push(user("u2"));
+        loaded.messages.push(row("second", vec![call("orig-2")]));
+        let mut peer = row("peer-response-node", vec![]);
+        peer.history_source = HistorySource::PeerDisplay;
+        loaded.messages.push(peer);
+        loaded.peer_row_controls.insert(
+            "peer-response-node".into(),
+            PeerRowControl {
+                node_id: "node".into(),
+                item_address: None,
+                stories: None,
+                status: None,
+                retro: None,
+                selected_for: None,
+                message_type: Default::default(),
+                sender_label: "peer".into(),
+                stage: PeerRowStage::Ready,
+                node_resolvable: true,
+            },
+        );
+        let first_tc = loaded.messages[1].tool_calls[0].id.clone();
+        let mut reloaded = PersistedConversation::from_conversation(&loaded).to_conversation();
+        let turn_ids: Vec<_> = reloaded
+            .turns
+            .iter()
+            .map(|turn| turn.id.0.as_str())
+            .collect();
+        assert_eq!(turn_ids, vec!["first", "second", "peer-response-node"]);
+        let second = &reloaded.messages[3];
+        assert_eq!(second.tool_calls[0].provider_id.as_deref(), Some("orig-2"));
+        assert!(second.tool_calls[0].id.starts_with("tc_second_"));
+        assert_eq!(
+            reloaded.messages[1].tool_calls[0].id, first_tc,
+            "backed rows are untouched"
+        );
+        reloaded.rebuild_messages_mirror();
+        let ids: Vec<_> = reloaded.messages.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["u1", "first", "u2", "second", "peer-response-node"]
+        );
+        assert!(
+            reloaded
+                .peer_row_controls
+                .contains_key("peer-response-node")
+        );
+        assert!(reloaded.messages[4].is_peer_display());
+        let api = crate::domain::services::message_builder::build_api_messages(&reloaded);
+        let second_use = api
+            .iter()
+            .find(|m| m.content == "second")
+            .expect("the appended row reaches the provider");
+        assert_eq!(
+            second_use.tool_uses[0].id, "orig-2",
+            "its original id on the wire"
+        );
+    }
+
+    #[test]
+    fn the_first_load_path_is_unchanged() {
+        let mut file = Conversation::default();
+        file.messages = vec![ChatMessage {
+            id: "legacy".into(),
+            role: MessageRole::Assistant,
+            content: "x".into(),
+            tool_calls: vec![ToolCallInfo {
+                id: "orig".into(),
+                name: "echo".into(),
+                input: serde_json::json!({}),
+                result: None,
+                started_at_ms: None,
+                completed_at_ms: None,
+                status: None,
+                provider_id: None,
+            }],
+            ..Default::default()
+        }];
+        let loaded = PersistedConversation::from_conversation(&file).to_conversation();
+        let call = &loaded.messages[0].tool_calls[0];
+        assert!(call.id.starts_with("tc_legacy_"));
+        assert_eq!(call.provider_id, None);
     }
 }

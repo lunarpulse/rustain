@@ -476,6 +476,7 @@ impl ToolScheduler {
                         output: out.content,
                         is_error: out.is_error,
                         duration_ms,
+                        images: out.images,
                     },
                 },
             ),
@@ -572,6 +573,7 @@ mod tests {
                 tool_use_id: String::new(),
                 content: "ok".to_string(),
                 is_error: false,
+                images: vec![],
             })
         }
     }
@@ -619,6 +621,7 @@ mod tests {
                     tool_use_id: String::new(),
                     content: "ok".into(),
                     is_error: false,
+                    images: vec![],
                 })
             }
             async fn execute_invocation(

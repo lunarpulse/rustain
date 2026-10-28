@@ -844,6 +844,7 @@ async fn generic_orphan_note_truncation_interrupted_placeholder_and_hoist() {
         tool_use_id: id.into(),
         content,
         is_error: false,
+        images: Vec::new(),
     };
     results.tool_results = vec![
         result("c1", "found".into()),

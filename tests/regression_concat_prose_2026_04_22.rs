@@ -43,6 +43,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         // Prose run 2: 5 text deltas
         Text {
@@ -88,6 +89,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         ToolResult {
             id: "toolu_03".into(),
@@ -95,6 +97,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         ToolResult {
             id: "toolu_04".into(),
@@ -102,6 +105,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         // Prose run 3: 5 text deltas
         Text {
@@ -142,6 +146,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         ToolResult {
             id: "toolu_06".into(),
@@ -149,6 +154,7 @@ fn regression_chunks() -> Vec<StreamChunk> {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         // Prose run 4: 6 text deltas
         Text {

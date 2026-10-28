@@ -61,6 +61,7 @@ impl ToolSetPort for TaskToolSet {
             tool_use_id: String::new(),
             content: "subagent completed".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

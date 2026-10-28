@@ -619,13 +619,28 @@ async fn k10_managed_draft_tool_result_stays_peer_display_and_local_tool_result_
     }
     let requests = provider.requests.lock();
     let next_local_messages = &requests[4].0;
+    // Story 20.1d4a T2 (daemon commit) and AC2 (no prose `[tool use: …]`
+    // text): the daemon commits each response with its tool calls and their
+    // results, so the completed Write reaches the next request as a
+    // structured call/result pair instead of folded message content.
+    let local_path = host.journal.path.join("local.txt");
+    let local_path = local_path.to_str().unwrap();
     assert!(
         next_local_messages
             .iter()
-            .any(|message| message.content.contains(&local_result)
-                && message
-                    .content
-                    .contains(host.journal.path.join("local.txt").to_str().unwrap())),
+            .flat_map(|message| &message.tool_uses)
+            .any(|call| call.id == "local-write"
+                && call.name == "Write"
+                && call.input["file_path"] == local_path),
+        "actual completed Write call and destination remain in decoded operator history"
+    );
+    assert!(
+        next_local_messages
+            .iter()
+            .flat_map(|message| &message.tool_results)
+            .any(|result| result.tool_use_id == "local-write"
+                && result.content == local_result
+                && result.content.contains(local_path)),
         "actual completed Write result and destination remain in decoded operator history"
     );
     let next_local_request = serde_json::to_string(&requests[4]).unwrap();

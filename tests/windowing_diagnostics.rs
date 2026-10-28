@@ -38,6 +38,7 @@ fn assistant_turn(started_at: i64, prose: &str, tool: &str, path: &str) -> Turn 
             content: "ok".into(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
     });
     t
@@ -77,10 +78,12 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
                     content: "ok".into(),
                     is_error: false,
                     diff: rustain::domain::models::WriteDiffState::NotAWrite,
+                    images: Vec::new(),
                 }),
                 started_at_ms: Some(0),
                 completed_at_ms: Some(1),
                 status: Some("✓ Success".into()),
+                provider_id: None,
             }),
             _ => {}
         }

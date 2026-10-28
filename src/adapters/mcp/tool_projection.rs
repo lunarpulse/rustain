@@ -62,9 +62,12 @@ pub fn parse_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 ///
 /// - Text content blocks are concatenated with `"\n"`.
 /// - Non-text blocks (image, resource, audio) become bracket placeholders.
+/// - Image blocks also keep their bytes in `images` (Story 20.1d4a T1), so a
+///   provider that maps result images sends them; `content` is unchanged.
 /// - `is_error` comes from `result.is_error.unwrap_or(false)`.
 pub fn project_rmcp_result(result: CallToolResult, tool_use_id: String) -> ToolResult {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut images = Vec::new();
 
     for content in &result.content {
         match &content.raw {
@@ -73,6 +76,10 @@ pub fn project_rmcp_result(result: CallToolResult, tool_use_id: String) -> ToolR
             }
             RawContent::Image(ci) => {
                 text_parts.push(format!("[image: {}]", ci.mime_type));
+                images.push(crate::domain::models::ImageAttachment {
+                    media_type: ci.mime_type.clone(),
+                    data: ci.data.clone(),
+                });
             }
             RawContent::Resource(cr) => {
                 let label = match &cr.resource {
@@ -103,6 +110,7 @@ pub fn project_rmcp_result(result: CallToolResult, tool_use_id: String) -> ToolR
         tool_use_id,
         content,
         is_error,
+        images,
     }
 }
 

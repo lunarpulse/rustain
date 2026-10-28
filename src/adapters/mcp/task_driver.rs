@@ -258,6 +258,7 @@ impl McpTaskRuntime {
                          was materialized."
                     ),
                     is_error: false,
+                    images: Vec::new(),
                 });
             }
         }
@@ -315,6 +316,7 @@ impl McpTaskRuntime {
                  or inspect the room for progress."
             ),
             is_error: false,
+            images: Vec::new(),
         })
     }
 

@@ -928,10 +928,12 @@ fn copy_conversation() -> Conversation {
             content: "tool output".to_string(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
         status: None,
+        provider_id: None,
     }];
     let assistant = base(MessageRole::Assistant, "assistant reply".to_string());
     Conversation {

@@ -201,11 +201,13 @@ pub fn initiator(messages: &[Message]) -> &'static str {
     }
 }
 
-/// omp `hasCopilotVisionInput`.
+/// omp `hasCopilotVisionInput`: an image on a user message or a tool result.
 pub fn vision(messages: &[Message]) -> bool {
-    messages
-        .iter()
-        .any(|message| message.role == MessageRole::User && !message.images.is_empty())
+    messages.iter().any(|message| {
+        message.role == MessageRole::User
+            && (!message.images.is_empty()
+                || message.tool_results.iter().any(|r| !r.images.is_empty()))
+    })
 }
 
 /// The per-request dynamic headers except the integration id (request state).
@@ -561,6 +563,7 @@ mod tests {
                     tool_use_id: "c".into(),
                     content: "r".into(),
                     is_error: false,
+                    images: vec![],
                 }]
             } else {
                 vec![]
@@ -588,6 +591,13 @@ mod tests {
             message(MessageRole::User, false, true),
             message(MessageRole::Assistant, false, false)
         ]));
+        assert!(!vision(&[message(MessageRole::User, true, false)]));
+        let mut tool_image = message(MessageRole::User, true, false);
+        tool_image.tool_results[0].images = vec![crate::domain::models::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "AA==".into(),
+        }];
+        assert!(vision(&[tool_image]), "a tool-result image is vision input");
     }
 
     #[test]

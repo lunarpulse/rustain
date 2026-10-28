@@ -441,7 +441,9 @@ impl CopilotAdapter {
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-        let resolved = self.inner.handle.current().await?;
+        // Armed first: an abort while the credential resolves cancels this request.
+        let cancel = self.inner.abort.arm();
+        let resolved = cancel.run(self.inner.handle.current()).await?;
         let has = |capability: ModelCapability| {
             descriptor
                 .as_ref()
@@ -470,8 +472,16 @@ impl CopilotAdapter {
             state: self.inner.responses.state(&resolved, &root),
         };
         let url = format!("{root}/responses");
-        let stream =
-            transport::stream(self.inner.clone(), &url, resolved, wire, messages, options).await?;
+        let stream = transport::stream(
+            self.inner.clone(),
+            &url,
+            cancel,
+            resolved,
+            wire,
+            messages,
+            options,
+        )
+        .await?;
         let Some(session) = session else {
             return Ok(stream);
         };
@@ -565,5 +575,52 @@ impl StreamingProvider for CopilotAdapter {
                     }
                 })?;
         listing_status(status).map(|()| ProbeOutcome { latency })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keystone (DF-20-1D-RESPONSES-ABORT-WINDOW): on the Responses route, an
+    /// abort while the stored grant refreshes cancels the request before
+    /// anything is sent.
+    #[tokio::test]
+    async fn abort_while_the_credential_resolves_cancels_the_responses_stream() {
+        use crate::adapters::responses::transport::test_support::{
+            loopback, options, stored_oauth, user, within,
+        };
+        use futures::FutureExt;
+
+        let (handle, refresh, _dir) = stored_oauth(
+            PROVIDER_ID,
+            true,
+            crate::domain::models::CredentialIdentity::default(),
+        )
+        .await;
+        let (listener, origin) = loopback().await;
+        assert_eq!(catalog::route("gpt-5"), Route::Responses);
+        let adapter = Arc::new(CopilotAdapter::new(handle, "gpt-5".into(), Some(origin)).unwrap());
+        let task = tokio::spawn({
+            let adapter = adapter.clone();
+            async move {
+                adapter
+                    .stream_completion(vec![user("hi")], options("gpt-5"))
+                    .await
+                    .map(drop)
+            }
+        });
+        within(refresh.entered.notified()).await;
+        adapter.abort().await.unwrap();
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "nothing is sent after the abort"
+        );
+        assert_eq!(adapter.inner.abort.live(), 0);
     }
 }

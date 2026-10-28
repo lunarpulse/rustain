@@ -54,14 +54,29 @@ pub struct ToolResultMessage {
     pub tool_use_id: String,
     pub content: String,
     pub is_error: bool,
+    /// Images the tool returned (Story 20.1d4a T1); only adapters that map
+    /// result images read them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageAttachment>,
 }
 
-/// An image attached to a user message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// An image attached to a user message or a tool result.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAttachment {
     pub media_type: String,
     pub data: String,
+}
+
+/// Never prints `data`, so `tracing` and panic messages of every carrier that
+/// derives `Debug` cannot leak image bytes (Story 20.1d4a T3).
+impl std::fmt::Debug for ImageAttachment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageAttachment")
+            .field("media_type", &self.media_type)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
 }
 
 /// A user message queued for sending (used by TurnQueue).

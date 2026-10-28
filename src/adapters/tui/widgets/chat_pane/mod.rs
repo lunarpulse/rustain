@@ -813,12 +813,14 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                                 content: output.content.clone(),
                                 is_error: output.is_error,
                                 diff: output.diff.clone(),
+                                images: Vec::new(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: false,
                                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                images: Vec::new(),
                             }
                         }
                     }),
@@ -830,12 +832,14 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
                                 content: output.content.clone(),
                                 is_error: output.is_error,
                                 diff: output.diff.clone(),
+                                images: Vec::new(),
                             }
                         } else {
                             ToolResultInfo {
                                 content: String::new(),
                                 is_error: true,
                                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                images: Vec::new(),
                             }
                         }
                     });
@@ -876,6 +880,7 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
         },
         completed_at_ms: ended_at_ms,
         status: status_chip,
+        provider_id: None,
     }
 }
 

@@ -234,6 +234,7 @@ impl SubagentProvider {
                 tool_use_id: String::new(),
                 content: format!("Subagent launch rejected by authority: {err}"),
                 is_error: true,
+                images: Vec::new(),
             });
         }
         // D1 fix: extract per-turn context from input JSON (injected by CompositeToolsetAdapter)
@@ -267,6 +268,7 @@ impl SubagentProvider {
                                 "Subagent launch refused: the parent's tool restriction could not be read, so the child cannot be proven no wider than its parent ({error})"
                             ),
                             is_error: true,
+                            images: Vec::new(),
                         });
                     }
                 },
@@ -335,6 +337,7 @@ impl SubagentProvider {
                         parent_ctx_tokens, parent_remaining
                     ),
                     is_error: true,
+                    images: Vec::new(),
                 });
             }
         }
@@ -359,6 +362,7 @@ impl SubagentProvider {
                                 task_id
                             ),
                             is_error: true,
+                            images: Vec::new(),
                         });
                     }
                 };
@@ -409,6 +413,7 @@ impl SubagentProvider {
                     tool_use_id: String::new(),
                     content: final_content,
                     is_error,
+                    images: Vec::new(),
                 });
             }
         }
@@ -429,6 +434,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: format!("Cannot inherit predecessor transcript: {error}"),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -507,6 +513,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: "Subagent channel closed unexpectedly".into(),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -607,6 +614,7 @@ impl SubagentProvider {
             tool_use_id: String::new(),
             content: final_content,
             is_error,
+            images: Vec::new(),
         })
     }
 
@@ -629,6 +637,7 @@ impl SubagentProvider {
                 tool_use_id: String::new(),
                 content: format!("Task output read rejected by authority: {err}"),
                 is_error: true,
+                images: Vec::new(),
             });
         }
 
@@ -642,6 +651,7 @@ impl SubagentProvider {
                     tool_use_id: String::new(),
                     content: "Read cancelled".into(),
                     is_error: true,
+                    images: Vec::new(),
                 });
             }
             match self.spool.pread(task_id, offset, len).await {
@@ -651,6 +661,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: format!("Task '{}' not found (no spool file)", task_id),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
                 Err(e) => {
@@ -658,6 +669,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: format!("Failed to read task output: {}", e),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -667,6 +679,7 @@ impl SubagentProvider {
                     tool_use_id: String::new(),
                     content: "Read cancelled".into(),
                     is_error: true,
+                    images: Vec::new(),
                 });
             }
             match self.spool.read_full(task_id).await {
@@ -676,6 +689,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: format!("Task '{}' not found (no spool file)", task_id),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
                 Err(e) => {
@@ -683,6 +697,7 @@ impl SubagentProvider {
                         tool_use_id: String::new(),
                         content: format!("Failed to read task output: {}", e),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
             }
@@ -692,6 +707,7 @@ impl SubagentProvider {
             tool_use_id: String::new(),
             content,
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -817,6 +833,7 @@ fn map_subagent_error(e: crate::domain::models::SubagentError) -> ToolResult {
         tool_use_id: String::new(),
         content,
         is_error: true,
+        images: Vec::new(),
     }
 }
 

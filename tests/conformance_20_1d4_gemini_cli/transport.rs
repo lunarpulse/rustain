@@ -538,6 +538,7 @@ fn results(results: &[(&str, &str, bool)]) -> Message {
             tool_use_id: (*id).into(),
             content: (*content).into(),
             is_error: *is_error,
+            images: Vec::new(),
         })
         .collect();
     message

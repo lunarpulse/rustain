@@ -374,6 +374,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: vec![],
                 },
             });
         }
@@ -493,6 +494,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: vec![],
                 },
             });
             t

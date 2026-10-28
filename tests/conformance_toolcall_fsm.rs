@@ -57,6 +57,7 @@ fn ac1_enum_shape_and_serde_round_trip() {
                 output: "ok".into(),
                 is_error: false,
                 duration_ms: 42,
+                images: vec![],
             },
         },
         ToolCall::Error {
@@ -743,6 +744,7 @@ impl ToolSetPort for SleepToolSet {
             tool_use_id: String::new(),
             content: "done".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }
@@ -775,6 +777,7 @@ impl ToolSetPort for NotifyingSleepToolSet {
             tool_use_id: String::new(),
             content: "done".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

@@ -645,6 +645,7 @@ mod tests {
             started_at_ms: Some(1000000),
             completed_at_ms: completed,
             status: None,
+            provider_id: None,
         }
     }
 
@@ -662,11 +663,13 @@ mod tests {
                     content: "output".into(),
                     is_error: false,
                     diff: WriteDiffState::NotAWrite,
+                    images: Vec::new(),
                 }),
                 Some(ToolResultInfo {
                     content: "failed".into(),
                     is_error: true,
                     diff: WriteDiffState::NotAWrite,
+                    images: Vec::new(),
                 }),
             ] {
                 let mut tc = make_tool_call("Bash", result);
@@ -719,6 +722,7 @@ mod tests {
                 content: "edited".into(),
                 is_error: false,
                 diff: WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         tc.input = serde_json::json!({
@@ -771,6 +775,7 @@ mod tests {
                     lines: display_diff("before", "after"),
                     more: 0,
                 },
+                images: Vec::new(),
             }),
         );
         tc.input = serde_json::json!({"content": "secret-input"});
@@ -813,6 +818,7 @@ mod tests {
                 content: "hello\nworld".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let state = ToolBlockState::default();
@@ -827,6 +833,7 @@ mod tests {
                 content: "line1\nline2\nline3".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let state = ToolBlockState {
@@ -845,6 +852,7 @@ mod tests {
                 content: String::new(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let state = ToolBlockState {
@@ -863,6 +871,7 @@ mod tests {
                 content: "error msg".to_string(),
                 is_error: true,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let state = ToolBlockState::default();
@@ -890,6 +899,7 @@ mod tests {
                 content: "output".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -909,6 +919,7 @@ mod tests {
                 content: "output line".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -931,6 +942,7 @@ mod tests {
                 content: "command not found".to_string(),
                 is_error: true,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
         );
         let theme = crate::adapters::tui::theme::Theme::dark();
@@ -969,10 +981,12 @@ mod tests {
                 content: "Successfully wrote 4 bytes to f.rs".to_string(),
                 is_error: false,
                 diff,
+                images: Vec::new(),
             }),
             started_at_ms: Some(1000000),
             completed_at_ms: Some(1002300),
             status: None,
+            provider_id: None,
         }
     }
 
@@ -1209,6 +1223,7 @@ mod tests {
                     content: "one\ntwo".to_string(),
                     is_error: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: Vec::new(),
                 }),
             ),
         ];

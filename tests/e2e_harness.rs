@@ -934,6 +934,7 @@ fn test_e2e_tool_use_conversation_state() {
         is_error: false,
         operator_private: false,
         diff: rustain::domain::models::WriteDiffState::NotAWrite,
+        images: Vec::new(),
     });
 
     h.render();

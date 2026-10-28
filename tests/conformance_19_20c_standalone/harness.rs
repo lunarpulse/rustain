@@ -150,6 +150,7 @@ impl ToolSetPort for CapturedTools {
             tool_use_id: String::new(),
             content: "captured".into(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

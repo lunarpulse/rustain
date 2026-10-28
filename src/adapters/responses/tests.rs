@@ -83,6 +83,7 @@ fn request_images_tools_instructions_and_wire_order() {
         tool_use_id: "call_1|other_item".into(),
         content: "denied".into(),
         is_error: true,
+        images: Vec::new(),
     });
     let mut options = options();
     options.tools.push(ToolDefinition {
@@ -779,6 +780,7 @@ fn generic_request_reasoning_literal_and_wire_order() {
         tool_use_id: "call_1".into(),
         content: "ok".into(),
         is_error: false,
+        images: Vec::new(),
     });
     let mut options = options();
     options.model = "grok-4.6".into();

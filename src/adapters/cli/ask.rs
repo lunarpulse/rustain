@@ -920,6 +920,10 @@ pub async fn run_ask_core(
     let mut turn_usage: Option<UsageInfo> = None;
     // Story 20.1d1b: replay items persist on the assistant row, never on stdout.
     let mut provider_replay = Vec::new();
+    // Story 20.1d4a T2: one span per provider response, closed at each
+    // `TurnComplete`, so a resume rebuilds the in-turn history.
+    let mut span = crate::domain::models::ResponseSpanBuilder::default();
+    let mut spans = Vec::new();
     // Story 13.1c: accumulate the last proposed plan (last-wins, AC6).
     let mut proposed_plan: Option<Plan> = None;
     let mut renderer = AskRenderer::new(output_format, out);
@@ -940,10 +944,16 @@ pub async fn run_ask_core(
                 StreamChunk::Text { content, .. } => {
                     if !turn_complete {
                         assistant_text.push_str(content);
+                        span.text(content);
                         if let Err(e) = renderer.on_chunk(chunk) {
                             let _ = writeln!(err, "Error: failed to write stream output: {}", e);
                             return ExitCode::FAILURE;
                         }
+                    }
+                }
+                StreamChunk::Thinking { content, .. } => {
+                    if !turn_complete {
+                        span.reasoning(content);
                     }
                 }
                 StreamChunk::ToolUse { id, name, input } => {
@@ -957,7 +967,9 @@ pub async fn run_ask_core(
                             started_at_ms: None,
                             completed_at_ms: None,
                             status: None,
+                            provider_id: Some(id.clone()),
                         });
+                        span.call();
                     }
                     if !turn_complete {
                         if let Err(e) = renderer.on_chunk(chunk) {
@@ -970,14 +982,22 @@ pub async fn run_ask_core(
                     id,
                     content,
                     is_error,
+                    images,
                     ..
                 } => {
                     if !turn_complete {
                         last_block_start = assistant_text.len();
-                        if let Some(tc) = tool_calls.iter_mut().find(|tc| tc.id == *id) {
+                        // The latest unanswered call of that provider id: a
+                        // provider may recycle ids across responses.
+                        if let Some(tc) = tool_calls
+                            .iter_mut()
+                            .rev()
+                            .find(|tc| tc.wire_id() == id.as_str() && tc.result.is_none())
+                        {
                             tc.result = Some(ToolResultInfo {
                                 content: content.clone(),
                                 is_error: *is_error,
+                                images: images.clone(),
                                 diff: crate::domain::models::WriteDiffState::NotAWrite,
                             });
                         } else {
@@ -995,6 +1015,9 @@ pub async fn run_ask_core(
                     }
                 }
                 StreamChunk::TurnComplete { stop_reason } => {
+                    if !turn_complete {
+                        spans.push(ContentBlockType::ResponseSpan(span.finish()));
+                    }
                     turn_stop_reason = stop_reason.clone();
                     if matches!(
                         stop_reason,
@@ -1013,6 +1036,7 @@ pub async fn run_ask_core(
                 StreamChunk::ProviderReplay { item } => {
                     if !turn_complete {
                         provider_replay.push(ContentBlockType::ProviderReplay(item.clone()));
+                        span.replay();
                     }
                 }
                 StreamChunk::Error { content } => {
@@ -1110,6 +1134,7 @@ pub async fn run_ask_core(
     // Story 13.1c (AC7): dry-run is fully read-only — skip all session writes
     // and the resume hint. A dry-run leaves zero trace on disk.
     if !opts.dry_run {
+        provider_replay.extend(spans);
         conversation.messages.push(ChatMessage {
             id: generate_message_id(),
             role: MessageRole::Assistant,

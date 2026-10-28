@@ -454,6 +454,7 @@ mod tests {
                     tool_use_id: "call-1".into(),
                     content: "result".into(),
                     is_error: false,
+                    images: vec![],
                 }],
                 tool_uses: vec![],
                 context_prefix: Some("[selected-recipient-item]".into()),

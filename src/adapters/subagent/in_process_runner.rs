@@ -1627,6 +1627,7 @@ async fn run_child(
                         started_at_ms: None,
                         completed_at_ms: None,
                         status: None,
+                        provider_id: None,
                     });
                 }
                 StreamChunk::Text { content, .. } => {
@@ -1776,6 +1777,7 @@ async fn run_child(
                             tool_use_id: r.id.clone(),
                             content: format!("Blocked by authority: {err}"),
                             is_error: true,
+                            images: vec![],
                         })
                         .collect();
                     for tr in &blocked {
@@ -1841,22 +1843,26 @@ async fn run_child(
 
                 let mut tool_result_messages: Vec<ToolResultMessage> = Vec::new();
                 for call in terminal {
-                    let (id, content, is_error) = match call {
+                    let (id, content, is_error, images) = match call {
                         crate::domain::models::ToolCall::Success { id, result, .. } => {
-                            (id, result.output, result.is_error)
+                            (id, result.output, result.is_error, result.images)
                         }
                         crate::domain::models::ToolCall::Error { id, error, .. } => {
-                            (id, error, true)
+                            (id, error, true, Vec::new())
                         }
-                        crate::domain::models::ToolCall::Cancelled { id, reason, .. } => {
-                            (id, format!("Tool execution cancelled: {}", reason), true)
-                        }
+                        crate::domain::models::ToolCall::Cancelled { id, reason, .. } => (
+                            id,
+                            format!("Tool execution cancelled: {}", reason),
+                            true,
+                            Vec::new(),
+                        ),
                         _ => continue,
                     };
                     tool_result_messages.push(ToolResultMessage {
                         tool_use_id: id,
                         content: content.clone(),
                         is_error,
+                        images,
                     });
                     if let Err(e) = spool
                         .append(
@@ -8730,6 +8736,7 @@ mod tests {
                 tool_use_id: String::new(),
                 content: "ok".into(),
                 is_error: false,
+                images: Vec::new(),
             })
         }
     }

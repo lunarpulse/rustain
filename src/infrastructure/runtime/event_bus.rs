@@ -160,7 +160,8 @@ impl EventBus {
 }
 
 /// Keep the retained transcript intact while projecting only public tools and
-/// never the operator-private provider replay state (Story 20.1d1b).
+/// never the operator-private provider replay state (Story 20.1d1b), response
+/// spans, provider call ids or result images (Story 20.1d4a T3).
 pub(crate) fn public_transcript_message(
     message: &crate::domain::models::ChatMessage,
 ) -> crate::domain::models::ChatMessage {
@@ -175,6 +176,7 @@ pub(crate) fn public_transcript_message(
                 !matches!(
                     block,
                     crate::domain::models::ContentBlockType::ProviderReplay(_)
+                        | crate::domain::models::ContentBlockType::ResponseSpan(_)
                 )
             })
             .cloned()
@@ -185,7 +187,14 @@ pub(crate) fn public_transcript_message(
             .filter(|tool| {
                 tool.name != crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME
             })
-            .cloned()
+            .map(|tool| {
+                let mut tool = tool.clone();
+                tool.provider_id = None;
+                if let Some(result) = &mut tool.result {
+                    result.images = Vec::new();
+                }
+                tool
+            })
             .collect(),
         created_at: message.created_at,
         token_count: message.token_count,
@@ -197,6 +206,58 @@ pub(crate) fn public_transcript_message(
         authorship: message.authorship,
         send_authorization: message.send_authorization,
         retracted_at_ms: message.retracted_at_ms,
+    }
+}
+
+/// Result images stay in the operator's own history: every observer event
+/// carries the chunk without them (Story 20.1d4a T3).
+fn public_chunk(chunk: &StreamChunk) -> StreamChunk {
+    match chunk {
+        StreamChunk::ToolResult {
+            id,
+            content,
+            is_error,
+            operator_private,
+            diff,
+            images: _,
+        } => StreamChunk::ToolResult {
+            id: id.clone(),
+            content: content.clone(),
+            is_error: *is_error,
+            operator_private: *operator_private,
+            diff: diff.clone(),
+            images: Vec::new(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// The runtime-only result images of a tool transition never reach an
+/// observer either (Story 20.1d4a T3).
+fn public_transition(
+    transition: &crate::domain::models::ToolCallTransition,
+) -> crate::domain::models::ToolCallTransition {
+    use crate::domain::models::{ToolCall, ToolCallResult};
+    let call = match &transition.call {
+        ToolCall::Success {
+            id,
+            request,
+            result,
+        } => ToolCall::Success {
+            id: id.clone(),
+            request: request.clone(),
+            result: ToolCallResult {
+                output: result.output.clone(),
+                is_error: result.is_error,
+                duration_ms: result.duration_ms,
+                images: Vec::new(),
+            },
+        },
+        other => other.clone(),
+    };
+    crate::domain::models::ToolCallTransition {
+        conversation_id: transition.conversation_id.clone(),
+        call,
     }
 }
 
@@ -224,7 +285,7 @@ impl RawEvent {
             } => RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
-                kind: RawEventKind::Provider(chunk.clone()),
+                kind: RawEventKind::Provider(public_chunk(chunk)),
             },
             AppEvent::PeerProviderChunk {
                 conversation_id,
@@ -233,7 +294,7 @@ impl RawEvent {
             } => RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
-                kind: RawEventKind::PeerProvider(chunk.clone()),
+                kind: RawEventKind::PeerProvider(public_chunk(chunk)),
             },
             AppEvent::PeerTurnClosed {
                 conversation_id, ..
@@ -280,7 +341,7 @@ impl RawEvent {
             } => RawEvent {
                 conversation_id: Some(conversation_id.clone()),
                 timestamp_ms: now,
-                kind: RawEventKind::Tool(transition.clone()),
+                kind: RawEventKind::Tool(public_transition(transition)),
             },
             AppEvent::ApprovalRuntimeEventBridged { .. } => return None,
             AppEvent::ConfigReloaded { success, error } => RawEvent {
@@ -614,6 +675,7 @@ mod tests {
                 tool_use_id: String::new(),
                 content: String::new(),
                 is_error: false,
+                images: vec![],
             },
         });
         assert!(RawEvent::from_app_event(&ev).is_none());
@@ -846,6 +908,7 @@ mod tests {
                 is_error: false,
                 operator_private: true,
                 diff: WriteDiffState::NotAWrite,
+                images: vec![],
             },
         ] {
             for event in [
@@ -883,6 +946,7 @@ mod tests {
             is_error: false,
             operator_private: false,
             diff: WriteDiffState::NotAWrite,
+            images: vec![],
         };
         let encoded = serde_json::to_string(&public).unwrap();
         assert!(!encoded.contains("operator_private"));
@@ -939,6 +1003,7 @@ mod tests {
                     output: "private-alias".into(),
                     is_error: false,
                     duration_ms: 0,
+                    images: vec![],
                 },
             },
             ToolCall::Error {
@@ -977,10 +1042,12 @@ mod tests {
                 content: "Proposal shown for private-alias".into(),
                 is_error: false,
                 diff: WriteDiffState::NotAWrite,
+                images: vec![],
             }),
             started_at_ms: None,
             completed_at_ms: None,
             status: None,
+            provider_id: None,
         };
         let mut public = private.clone();
         public.name = "Read".into();
@@ -1005,6 +1072,132 @@ mod tests {
             "A6 stored transcript is unchanged"
         );
         assert_eq!(projected.tool_calls.len(), 1);
+    }
+
+    /// Story 20.1d4a T3: result images, provider call ids and response spans
+    /// stay in the operator's store; every observer projection drops them.
+    #[test]
+    fn projections_drop_result_images_provider_ids_and_spans() {
+        use crate::domain::models::{
+            ChatMessage, ContentBlockType, ImageAttachment, ResponseSpan, ToolCall, ToolCallInfo,
+            ToolCallRequest, ToolCallResult, ToolResultInfo, WriteDiffState,
+        };
+        let image = ImageAttachment {
+            media_type: "image/png".into(),
+            data: "IMAGE-BYTES-MARKER".into(),
+        };
+        let retained = ChatMessage {
+            content: "visible".into(),
+            content_blocks: vec![
+                ContentBlockType::Thinking("thought".into()),
+                ContentBlockType::ResponseSpan(ResponseSpan {
+                    text: "SPAN-MARKER".into(),
+                    ..Default::default()
+                }),
+            ],
+            tool_calls: vec![ToolCallInfo {
+                id: "tc_1".into(),
+                name: "img".into(),
+                input: serde_json::json!({}),
+                result: Some(ToolResultInfo {
+                    content: "[image: image/png]".into(),
+                    is_error: false,
+                    images: vec![image.clone()],
+                    diff: WriteDiffState::NotAWrite,
+                }),
+                started_at_ms: None,
+                completed_at_ms: None,
+                status: None,
+                provider_id: Some("PROVIDER-ID-MARKER".into()),
+            }],
+            ..Default::default()
+        };
+        let projected = serde_json::to_string(&public_transcript_message(&retained)).unwrap();
+        for marker in ["IMAGE-BYTES-MARKER", "PROVIDER-ID-MARKER", "SPAN-MARKER"] {
+            assert!(!projected.contains(marker), "{projected}");
+        }
+        assert!(projected.contains("thought") && projected.contains("[image: image/png]"));
+        let stored = serde_json::to_string(&retained).unwrap();
+        assert!(stored.contains("IMAGE-BYTES-MARKER") && stored.contains("PROVIDER-ID-MARKER"));
+
+        let chunk = StreamChunk::ToolResult {
+            id: "A".into(),
+            content: "[image: image/png]".into(),
+            is_error: false,
+            operator_private: false,
+            diff: WriteDiffState::NotAWrite,
+            images: vec![image.clone()],
+        };
+        let node = std::sync::Arc::new(crate::domain::models::AgentId::new());
+        for event in [
+            AppEvent::ProviderChunk {
+                conversation_id: "c".into(),
+                chunk: chunk.clone(),
+            },
+            AppEvent::PeerProviderChunk {
+                node: node.clone(),
+                conversation_id: "c".into(),
+                chunk: chunk.clone(),
+            },
+            AppEvent::ToolCallTransitionBridged {
+                conversation_id: "c".into(),
+                transition: ToolCallTransition {
+                    conversation_id: "c".into(),
+                    call: ToolCall::Success {
+                        id: "A".into(),
+                        request: ToolCallRequest {
+                            id: "A".into(),
+                            tool_name: "img".into(),
+                            input: serde_json::json!({}),
+                        },
+                        result: ToolCallResult {
+                            output: "[image: image/png]".into(),
+                            is_error: false,
+                            duration_ms: 0,
+                            images: vec![image.clone()],
+                        },
+                    },
+                },
+            },
+        ] {
+            let raw = RawEvent::from_app_event(&event).expect("projected");
+            assert!(!format!("{raw:?}").contains("IMAGE-BYTES-MARKER"));
+            match raw.kind {
+                RawEventKind::Provider(StreamChunk::ToolResult { images, .. })
+                | RawEventKind::PeerProvider(StreamChunk::ToolResult { images, .. }) => {
+                    assert!(images.is_empty())
+                }
+                RawEventKind::Tool(transition) => match transition.call {
+                    ToolCall::Success { result, .. } => assert!(result.images.is_empty()),
+                    other => panic!("{other:?}"),
+                },
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// Story 20.1d4a T3: `Debug` of every carrier prints the media type and
+    /// byte count of an image, never its data.
+    #[test]
+    fn image_debug_prints_only_media_type_and_length() {
+        let image = crate::domain::models::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "IMAGE-BYTES-MARKER".into(),
+        };
+        let rendered = format!("{image:?}");
+        assert_eq!(
+            rendered,
+            "ImageAttachment { media_type: \"image/png\", bytes: 18 }"
+        );
+        let chunk = StreamChunk::ToolResult {
+            id: "A".into(),
+            content: String::new(),
+            is_error: false,
+            operator_private: false,
+            diff: Default::default(),
+            images: vec![image],
+        };
+        assert!(!format!("{chunk:?}").contains("IMAGE-BYTES-MARKER"));
     }
 }
 

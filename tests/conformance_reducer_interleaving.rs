@@ -58,6 +58,7 @@ fn conformance_interleaved_streaming_produces_correct_parts() {
                 content: "output".into(),
                 is_error: false,
                 diff: rustain::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
         },
     ];

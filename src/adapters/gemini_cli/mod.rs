@@ -37,7 +37,7 @@ mod schema;
 use crate::{
     adapters::{
         anthropic::sse::SseLineBuffer,
-        responses::transport::{AbortSlot, recover_once},
+        responses::transport::{AbortSlot, Armed, recover_once},
     },
     domain::{
         errors::ProviderError,
@@ -57,7 +57,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 
 /// Provider kind and replay stamp of captured Gemini parts.
 pub(crate) const PROVIDER_KIND: &str = "google-gemini-cli";
@@ -230,7 +229,7 @@ struct Call {
     /// The header-less POST carrying the body encoded for the current project.
     request: Option<reqwest::Request>,
     headers: HeaderMap,
-    cancel: CancellationToken,
+    cancel: Armed,
 }
 
 impl Call {
@@ -293,13 +292,16 @@ impl Call {
             if response.status().is_success() {
                 return Ok(response);
             }
+            // A recovery may refresh over the network: an abort ends it promptly.
             if status == 401
-                && recover_once(
-                    &self.inner.handle,
-                    &mut self.resolved,
-                    &mut self.auth_retried,
-                )
-                .await?
+                && self
+                    .cancel
+                    .run(recover_once(
+                        &self.inner.handle,
+                        &mut self.resolved,
+                        &mut self.auth_retried,
+                    ))
+                    .await?
             {
                 // The recovered grant supplies both the bearer and the project.
                 self.encode()?;
@@ -500,12 +502,13 @@ impl StreamingProvider for GeminiCliAdapter {
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-        let resolved = self.inner.handle.current().await?;
+        // Armed first: an abort while the credential resolves cancels this request.
+        let cancel = self.inner.abort.arm();
+        let resolved = cancel.run(self.inner.handle.current()).await?;
         // Checked before any POST.
         project(&resolved)?;
         let profile = profile::for_model(&options.model);
         let tool_names = options.tools.iter().map(|tool| tool.name.clone()).collect();
-        let cancel = self.inner.abort.arm().await;
         let mut call = Call {
             inner: self.inner.clone(),
             url: format!(
@@ -608,6 +611,78 @@ impl StreamingProvider for GeminiCliAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        adapters::responses::transport::test_support::{
+            accept, loopback, options, reject, stored_oauth, user, within,
+        },
+        domain::models::CredentialIdentity,
+    };
+    use futures::FutureExt;
+
+    fn identity() -> CredentialIdentity {
+        CredentialIdentity {
+            email: Some("user@example.com".into()),
+            project_id: Some("project".into()),
+            ..CredentialIdentity::default()
+        }
+    }
+
+    fn spawn_stream(
+        adapter: &Arc<GeminiCliAdapter>,
+    ) -> tokio::task::JoinHandle<Result<(), ProviderError>> {
+        let adapter = adapter.clone();
+        tokio::spawn(async move {
+            adapter
+                .stream_completion(vec![user("hi")], options("gemini-2.5-pro"))
+                .await
+                .map(drop)
+        })
+    }
+
+    /// Keystone (a): an abort while the stored grant refreshes cancels the request.
+    #[tokio::test]
+    async fn abort_while_the_credential_resolves_cancels_the_stream() {
+        let (handle, refresh, _dir) = stored_oauth(PROVIDER_KIND, true, identity()).await;
+        let (listener, origin) = loopback().await;
+        let adapter = Arc::new(GeminiCliAdapter::new(handle, origin).unwrap());
+        let task = spawn_stream(&adapter);
+        within(refresh.entered.notified()).await;
+        adapter.abort().await.unwrap();
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "nothing is sent after the abort"
+        );
+        assert_eq!(adapter.inner.abort.live(), 0);
+    }
+
+    /// Keystone (b): an abort during a 401 refresh ends the open without a resend.
+    #[tokio::test]
+    async fn abort_during_401_recovery_cancels_before_the_resend() {
+        let (handle, refresh, _dir) = stored_oauth(PROVIDER_KIND, false, identity()).await;
+        let (listener, origin) = loopback().await;
+        let adapter = Arc::new(GeminiCliAdapter::new(handle, origin).unwrap());
+        let task = spawn_stream(&adapter);
+        let mut socket = within(accept(&listener)).await;
+        reject(&mut socket).await;
+        within(refresh.entered.notified()).await;
+        adapter.abort().await.unwrap();
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert_eq!(refresh.calls(), 1);
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "the rejected request is never resent"
+        );
+        assert_eq!(adapter.inner.abort.live(), 0);
+    }
 
     #[test]
     fn configured_base_wins_and_trailing_slashes_are_trimmed() {

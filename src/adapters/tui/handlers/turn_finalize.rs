@@ -40,6 +40,7 @@ pub fn finalize_streaming_turn(
                 content: "[aborted]".to_string(),
                 is_error: true,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             });
             tc.completed_at_ms =
                 Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
@@ -104,6 +105,7 @@ mod tests {
             started_at_ms: Some(1),
             completed_at_ms: None,
             status: None,
+            provider_id: None,
         }
     }
 

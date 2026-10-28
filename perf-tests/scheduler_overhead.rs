@@ -58,6 +58,7 @@ impl ToolSetPort for NoOpToolSet {
             tool_use_id: String::new(),
             content: "ok".to_string(),
             is_error: false,
+            images: vec![],
         })
     }
 }

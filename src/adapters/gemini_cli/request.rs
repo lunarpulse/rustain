@@ -44,6 +44,10 @@ const MAX_TOOL_CALL_NAME_LENGTH: usize = 64;
 /// omp `MIN_OUTPUT_TOKENS` (stream.ts:1526).
 const MIN_OUTPUT_TOKENS: u32 = 1024;
 static NO_ARGS: Value = Value::Null;
+/// omp's image user-turn lead text for a non-multimodal model (G:384).
+const TOOL_RESULT_IMAGE: &str = "Tool result image:";
+/// omp's value of a result that has images but no text (G:354).
+const SEE_ATTACHED_IMAGE: &str = "(see attached image)";
 
 /// The POST body, encoded once per logical request.
 pub(crate) fn encode(
@@ -223,14 +227,17 @@ fn args_or_empty<S: Serializer>(args: &&Value, serializer: S) -> Result<S::Ok, S
 struct FunctionResponse<'a> {
     name: &'a str,
     response: ResponseValue<'a>,
+    /// Result images nested for a multimodal-function-response model (G:368).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parts: Option<Vec<Part<'a>>>,
 }
 
 #[derive(Serialize)]
 struct ResponseValue<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<&'a str>,
+    output: Option<Cow<'a, str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'a str>,
+    error: Option<Cow<'a, str>>,
 }
 
 // Default thinking: omp `streamSimple` without an effort (stream.ts:2113-2172).
@@ -363,6 +370,7 @@ enum Entry<'a> {
         name: &'a str,
         content: &'a str,
         is_error: bool,
+        images: &'a [ImageAttachment],
     },
 }
 
@@ -374,7 +382,13 @@ fn contents<'a>(
     let entries = pair(sanitize_malformed(flatten(messages)));
     let mut order = CallOrder::default();
     let mut contents: Vec<Content<'a>> = Vec::with_capacity(entries.len());
+    // G:215-225: image turns of a non-multimodal model wait until the merged
+    // functionResponse turn is complete, each result's images in call order.
+    let mut pending_images: Vec<(Option<usize>, Vec<Part<'a>>)> = Vec::new();
     for entry in entries {
+        if !matches!(entry, Entry::Result { .. }) {
+            flush_tool_images(&mut pending_images, &mut contents);
+        }
         match entry {
             Entry::User { text, images } => {
                 let parts = user_parts(text, images, profile.vision);
@@ -399,21 +413,29 @@ fn contents<'a>(
                 name,
                 content,
                 is_error,
+                images,
             } => {
+                let ordinal = order.ordinals.get(&key).copied();
+                let (value, attached) = result_value(content, images, profile.vision);
+                let nested = profile.multimodal_function_response && !attached.is_empty();
                 let response = if is_error {
                     ResponseValue {
                         output: None,
-                        error: Some(content),
+                        error: Some(value),
                     }
                 } else {
                     ResponseValue {
-                        output: Some(content),
+                        output: Some(value),
                         error: None,
                     }
                 };
                 let part = Part {
-                    function_response: Some(FunctionResponse { name, response }),
-                    order: order.ordinals.get(&key).copied(),
+                    function_response: Some(FunctionResponse {
+                        name,
+                        response,
+                        parts: nested.then(|| image_parts(attached).collect()),
+                    }),
+                    order: ordinal,
                     ..Part::default()
                 };
                 // Cloud Code Assist wants every function response in one user turn.
@@ -429,13 +451,73 @@ fn contents<'a>(
                         parts: vec![part],
                     }),
                 }
+                if !nested && !attached.is_empty() {
+                    let mut parts = Vec::with_capacity(1 + attached.len());
+                    parts.push(Part::text(Cow::Borrowed(TOOL_RESULT_IMAGE)));
+                    parts.extend(image_parts(attached));
+                    pending_images.push((ordinal, parts));
+                }
             }
         }
     }
+    flush_tool_images(&mut pending_images, &mut contents);
     for content in &mut contents {
         sort_known_in_place(&mut content.parts);
     }
     contents
+}
+
+/// G:338-360: the result value and the images the target receives. rustain's
+/// `content` keeps the projector's `[image: <mime>]` markers (a recorded
+/// deviation), so `(see attached image)` applies only to an empty result.
+fn result_value<'a>(
+    content: &'a str,
+    images: &'a [ImageAttachment],
+    vision: bool,
+) -> (Cow<'a, str>, &'a [ImageAttachment]) {
+    if images.is_empty() {
+        return (Cow::Borrowed(content), images);
+    }
+    if !vision {
+        let value = if content.is_empty() {
+            Cow::Borrowed(NON_VISION_IMAGE_PLACEHOLDER)
+        } else {
+            Cow::Owned(format!("{content}\n{NON_VISION_IMAGE_PLACEHOLDER}"))
+        };
+        return (value, &[]);
+    }
+    let value = if content.is_empty() {
+        Cow::Borrowed(SEE_ATTACHED_IMAGE)
+    } else {
+        Cow::Borrowed(content)
+    };
+    (value, images)
+}
+
+/// omp `convertGoogleImagePart` for inline bytes.
+fn image_parts<'a>(images: &'a [ImageAttachment]) -> impl Iterator<Item = Part<'a>> {
+    images.iter().map(|image| Part {
+        inline_data: Some(InlineData {
+            mime_type: &image.media_type,
+            data: &image.data,
+        }),
+        ..Part::default()
+    })
+}
+
+/// omp `flushPendingToolImages` (G:220-225): one user turn, groups in call order.
+fn flush_tool_images<'a>(
+    pending: &mut Vec<(Option<usize>, Vec<Part<'a>>)>,
+    contents: &mut Vec<Content<'a>>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    sort_known(pending, |group| group.0);
+    contents.push(Content {
+        role: "user",
+        parts: pending.drain(..).flat_map(|(_, parts)| parts).collect(),
+    });
 }
 
 /// rustain shape → omp sequence: a message's results, then its own body.
@@ -447,6 +529,7 @@ fn flatten(messages: &[Message]) -> Vec<Entry<'_>> {
             name: "",
             content: result.content.as_str(),
             is_error: result.is_error,
+            images: &result.images,
         }));
         match message.role {
             MessageRole::User | MessageRole::System => {
@@ -539,6 +622,7 @@ fn sanitize_malformed(entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                 name,
                 content,
                 is_error,
+                images,
             } => {
                 let (malformed, drained) = match queues.get_mut(key.0) {
                     Some(queue) => (queue.pop_front(), queue.is_empty()),
@@ -555,6 +639,7 @@ fn sanitize_malformed(entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                     name,
                     content,
                     is_error,
+                    images,
                 }
             }
             Entry::User { text, images } => {
@@ -571,6 +656,7 @@ struct IndexedResult<'a> {
     index: usize,
     content: &'a str,
     is_error: bool,
+    images: &'a [ImageAttachment],
     consumed: bool,
 }
 
@@ -588,6 +674,7 @@ fn pair(mut entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                 key,
                 content,
                 is_error,
+                images,
                 ..
             } => {
                 let id = key.0;
@@ -603,6 +690,7 @@ fn pair(mut entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                     index,
                     content,
                     is_error: *is_error,
+                    images,
                     consumed: false,
                 });
             }
@@ -647,6 +735,7 @@ fn pair(mut entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                 key,
                 content,
                 is_error,
+                images,
                 ..
             } => {
                 if status.contains(&key) {
@@ -659,6 +748,7 @@ fn pair(mut entries: Vec<Entry<'_>>) -> Vec<Entry<'_>> {
                         name,
                         content,
                         is_error,
+                        images,
                     });
                     continue;
                 }
@@ -721,15 +811,16 @@ fn flush<'a>(
                 .find(|entry| !entry.consumed && entry.index > start)
                 .map(|entry| {
                     entry.consumed = true;
-                    (entry.content, entry.is_error)
+                    (entry.content, entry.is_error, entry.images)
                 })
         });
-        let (content, is_error) = real.unwrap_or((NO_RESULT, true));
+        let (content, is_error, images) = real.unwrap_or((NO_RESULT, true, &[]));
         out.push(Entry::Result {
             key,
             name,
             content,
             is_error,
+            images,
         });
     }
 }
@@ -750,21 +841,27 @@ impl<'a> CallOrder<'a> {
 
 /// omp `sortKnownInPlace`: ordered parts take the slots ordered parts occupy.
 fn sort_known_in_place(parts: &mut [Part<'_>]) {
-    let slots: Vec<usize> = parts
+    sort_known(parts, |part| part.order);
+}
+
+/// omp `sortKnownInPlace` over any items: those with an order take, sorted,
+/// the slots such items occupy; the rest stay put.
+fn sort_known<T: Default>(items: &mut [T], order: impl Fn(&T) -> Option<usize>) {
+    let slots: Vec<usize> = items
         .iter()
         .enumerate()
-        .filter_map(|(slot, part)| part.order.map(|_| slot))
+        .filter_map(|(slot, item)| order(item).map(|_| slot))
         .collect();
     if slots.len() < 2 {
         return;
     }
-    let mut known: Vec<Part<'_>> = slots
+    let mut known: Vec<T> = slots
         .iter()
-        .map(|&slot| std::mem::take(&mut parts[slot]))
+        .map(|&slot| std::mem::take(&mut items[slot]))
         .collect();
-    known.sort_by_key(|part| part.order);
-    for (slot, part) in slots.into_iter().zip(known) {
-        parts[slot] = part;
+    known.sort_by_key(|item| order(item));
+    for (slot, item) in slots.into_iter().zip(known) {
+        items[slot] = item;
     }
 }
 
@@ -1082,6 +1179,7 @@ mod tests {
                 tool_use_id: (*id).into(),
                 content: (*content).into(),
                 is_error: *is_error,
+                images: Vec::new(),
             })
             .collect();
         message
@@ -1353,6 +1451,66 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&parts).expect("encode"),
             r#"[{"role":"user","parts":[{"text":"see"},{"text":"[image omitted: model does not support vision]"}]}]"#
+        );
+    }
+
+    /// Story 20.1d4a T1: calls A then B; B's image-only result arrives first.
+    fn image_results(model: &str, vision: bool) -> String {
+        let image = |data: &str| ImageAttachment {
+            media_type: "image/png".into(),
+            data: data.into(),
+        };
+        let mut out = results(&[("b", "", false), ("a", "A text", false)]);
+        out.tool_results[0].images = vec![image("BBBB")];
+        out.tool_results[1].images = vec![image("AAAA")];
+        let messages = [
+            assistant("", &[("a", "read", json!({})), ("b", "grep", json!({}))]),
+            out,
+            user("next"),
+        ];
+        let mut profile = for_model(model);
+        profile.vision = vision;
+        serde_json::to_string(&contents(&messages, &options(model), &profile)).expect("encode")
+    }
+
+    #[test]
+    fn multimodal_model_nests_result_images_in_the_call_ordered_result_turn() {
+        let wire = image_results(PRO31, true);
+        assert!(
+            wire.contains(concat!(
+                r#"{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"A text"},"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]}},"#,
+                r#"{"functionResponse":{"name":"grep","response":{"output":"(see attached image)"},"parts":[{"inlineData":{"mimeType":"image/png","data":"BBBB"}}]}}]},"#,
+                r#"{"role":"user","parts":[{"text":"next"}]}]"#
+            )),
+            "{wire}"
+        );
+    }
+
+    #[test]
+    fn older_model_gets_one_buffered_image_turn_after_the_result_turn_in_call_order() {
+        assert_eq!(
+            image_results("gemini-2.5-pro", true),
+            concat!(
+                r#"[{"role":"model","parts":[{"functionCall":{"name":"read","args":{}}},{"functionCall":{"name":"grep","args":{}}}]},"#,
+                r#"{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"output":"A text"}}},"#,
+                r#"{"functionResponse":{"name":"grep","response":{"output":"(see attached image)"}}}]},"#,
+                r#"{"role":"user","parts":[{"text":"Tool result image:"},{"inlineData":{"mimeType":"image/png","data":"AAAA"}},"#,
+                r#"{"text":"Tool result image:"},{"inlineData":{"mimeType":"image/png","data":"BBBB"}}]},"#,
+                r#"{"role":"user","parts":[{"text":"next"}]}]"#
+            )
+        );
+    }
+
+    #[test]
+    fn non_vision_profile_sends_the_placeholder_value_and_no_result_image() {
+        let wire = image_results(PRO31, false);
+        assert!(!wire.contains("inlineData"), "{wire}");
+        assert!(
+            wire.contains(concat!(
+                r#"{"functionResponse":{"name":"read","response":{"output":"A text\n[image omitted: model does not support vision]"}}},"#,
+                r#"{"functionResponse":{"name":"grep","response":{"output":"[image omitted: model does not support vision]"}}}]}"#
+            )),
+            "{wire}"
         );
     }
 

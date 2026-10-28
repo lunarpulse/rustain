@@ -1228,19 +1228,15 @@ async fn story19_20c_socket_oversized_prose_and_result_attach_stays_usable() {
             ..Default::default()
         };
         if result {
-            oversized.tool_calls.push(ToolCallInfo {
-                id: "result-call".into(),
-                name: "Bash".into(),
-                input: serde_json::json!({"command": "printf result"}),
-                result: Some(ToolResultInfo {
-                    content: large,
-                    is_error: false,
-                    diff: WriteDiffState::NotAWrite,
-                }),
-                started_at_ms: None,
-                completed_at_ms: None,
-                status: None,
-            });
+            oversized.tool_calls.push(ToolCallInfo { id: "result-call".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "printf result"}),
+            result: Some(ToolResultInfo { content: large,
+            is_error: false,
+            diff: WriteDiffState::NotAWrite, images: Vec::new() }),
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None, provider_id: None });
         } else {
             oversized.content = large;
         }

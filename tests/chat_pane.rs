@@ -544,10 +544,12 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
             content: "output1\noutput2\noutput3".to_string(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
         status: None,
+        provider_id: None,
     };
     let msg_id = rustain::domain::models::generate_conversation_id();
     let conversation = make_conversation(vec![ChatMessage {
@@ -699,6 +701,7 @@ fn read_then_write_turn() -> (Conversation, String, String) {
             content: "1\tfn main() {}\n".to_string(),
             is_error: false,
             diff: WriteDiffState::NotAWrite,
+            images: Vec::new(),
         },
     });
     let write_pid = turn.push_part(|id| TurnPart::ToolInvocation {
@@ -716,6 +719,7 @@ fn read_then_write_turn() -> (Conversation, String, String) {
             content: "Successfully wrote 13 bytes to src/main.rs".to_string(),
             is_error: false,
             diff: WriteDiffState::NotAWrite,
+            images: Vec::new(),
         },
     });
     turn.push_part(|id| TurnPart::Prose {
@@ -944,10 +948,12 @@ fn focus_reaches_a_non_first_block_on_the_legacy_no_turn_path() {
             content: "out1\nout2\nout3".to_string(),
             is_error: false,
             diff: WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
         status: None,
+        provider_id: None,
     };
     let mut msg = bare_message("legacy-1", MessageRole::User, "two tools, no turn");
     msg.tool_calls = vec![
@@ -1018,6 +1024,7 @@ fn focus_follows_the_focused_turn_even_when_an_earlier_block_is_nearer_the_top()
                 content: "ok".to_string(),
                 is_error: false,
                 diff: WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
         });
         turn.push_part(|id| TurnPart::Prose {

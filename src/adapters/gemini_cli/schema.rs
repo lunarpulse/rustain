@@ -44,6 +44,8 @@
 // - A serde tree cannot contain cycles or shared subtrees, so omp's
 //   enter/exit/once/WeakMap cycle guards are dropped; `$ref` cycles are still
 //   broken in `dereference_json_schema` exactly as omp does.
+// - Rustain robustness addition: `$ref` inlining is bounded by
+//   `MAX_DEREF_DEPTH` and `MAX_DEREF_NODES`; omp inlines without bound.
 // - JavaScript prototype-chain lookups (`key in Record`) are treated as own-key
 //   lookups.
 
@@ -754,6 +756,27 @@ const DEREF_SCHEMA_VALUE_KEYS: &[&str] = &[
     "unevaluatedProperties",
 ];
 
+/// Rustain robustness addition beyond omp `dereference.ts`, which inlines without
+/// bound: the deepest nesting of one dereference walk. Every nested subschema and
+/// every inlined `$ref` adds a level, so long `$ref` chains and deeply nested
+/// untrusted schemas cannot exhaust the stack. A subschema past this depth becomes
+/// the permissive `{}` a `$ref` cycle becomes.
+const MAX_DEREF_DEPTH: usize = 64;
+/// Rustain robustness addition beyond omp `dereference.ts`: the subschema nodes one
+/// dereference walk visits before it stops inlining, so definitions shared by many
+/// `$ref`s cannot expand exponentially. Once spent, every further resolvable `$ref`
+/// becomes the permissive `{}` a `$ref` cycle becomes; literal subschemas are still
+/// copied, which is bounded by the input size.
+const MAX_DEREF_NODES: usize = 10_000;
+
+/// State of one dereference walk: the `$ref`s on the current resolution path and
+/// the subschema nodes visited so far.
+#[derive(Default)]
+struct DerefWalk {
+    visiting: HashSet<String>,
+    visited: usize,
+}
+
 /// dereference.ts:123-131 `dereferenceJsonSchema`: inline local `$ref`s from the
 /// root `$defs`/`definitions`, which are dropped from the output.
 fn dereference_json_schema(schema: &Value) -> Cow<'_, Value> {
@@ -763,31 +786,33 @@ fn dereference_json_schema(schema: &Value) -> Cow<'_, Value> {
     if !root.contains_key("$defs") && !root.contains_key("definitions") {
         return Cow::Borrowed(schema);
     }
-    Cow::Owned(dereference_node(schema, root, &mut HashSet::new()))
+    Cow::Owned(dereference_node(schema, root, &mut DerefWalk::default(), 0))
 }
 
-/// dereference.ts:39-50 `dereferenceKeyword`.
+/// dereference.ts:39-50 `dereferenceKeyword`; `depth` is the owning node's depth.
 fn dereference_keyword(
     key: &str,
     value: &Value,
     root: &JsonObject,
-    visiting: &mut HashSet<String>,
+    walk: &mut DerefWalk,
+    depth: usize,
 ) -> Value {
+    let depth = depth + 1;
     match value {
         Value::Object(map) if DEREF_SCHEMA_MAP_KEYS.contains(&key) => Value::Object(
             map.iter()
-                .map(|(name, entry)| (name.clone(), dereference_node(entry, root, visiting)))
+                .map(|(name, entry)| (name.clone(), dereference_node(entry, root, walk, depth)))
                 .collect(),
         ),
         Value::Array(items) if DEREF_SCHEMA_ARRAY_KEYS.contains(&key) || key == "items" => {
             Value::Array(
                 items
                     .iter()
-                    .map(|item| dereference_node(item, root, visiting))
+                    .map(|item| dereference_node(item, root, walk, depth))
                     .collect(),
             )
         }
-        _ if DEREF_SCHEMA_VALUE_KEYS.contains(&key) => dereference_node(value, root, visiting),
+        _ if DEREF_SCHEMA_VALUE_KEYS.contains(&key) => dereference_node(value, root, walk, depth),
         _ => value.clone(),
     }
 }
@@ -813,21 +838,30 @@ fn is_definition_key(key: &str) -> bool {
 }
 
 /// dereference.ts:71-111 `dereferenceNode`. A ref already on the resolution
-/// path becomes `{}`; unresolvable refs are returned untouched.
-fn dereference_node(node: &Value, root: &JsonObject, visiting: &mut HashSet<String>) -> Value {
+/// path becomes `{}`; unresolvable refs are returned untouched. Past
+/// [`MAX_DEREF_DEPTH`] a node, and once [`MAX_DEREF_NODES`] are spent a
+/// resolvable ref, becomes the same `{}` (rustain bound, not in omp).
+fn dereference_node(node: &Value, root: &JsonObject, walk: &mut DerefWalk, depth: usize) -> Value {
     let Value::Object(object) = node else {
         return node.clone();
     };
+    if depth > MAX_DEREF_DEPTH {
+        return Value::Object(JsonObject::new());
+    }
+    walk.visited += 1;
     if let Some(Value::String(reference)) = object.get("$ref") {
-        if visiting.contains(reference) {
+        if walk.visiting.contains(reference) {
             return Value::Object(JsonObject::new());
         }
         let Some(resolved) = resolve_local_ref(reference, root) else {
             return node.clone();
         };
-        visiting.insert(reference.clone());
-        let inlined = dereference_node(resolved, root, visiting);
-        visiting.remove(reference);
+        if walk.visited > MAX_DEREF_NODES {
+            return Value::Object(JsonObject::new());
+        }
+        walk.visiting.insert(reference.clone());
+        let inlined = dereference_node(resolved, root, walk, depth + 1);
+        walk.visiting.remove(reference);
 
         let has_siblings = object.keys().any(|key| !is_definition_key(key));
         if !has_siblings {
@@ -840,7 +874,10 @@ fn dereference_node(node: &Value, root: &JsonObject, visiting: &mut HashSet<Stri
             if is_definition_key(key) {
                 continue;
             }
-            merged.insert(key.clone(), dereference_keyword(key, entry, root, visiting));
+            merged.insert(
+                key.clone(),
+                dereference_keyword(key, entry, root, walk, depth),
+            );
         }
         return Value::Object(merged);
     }
@@ -850,7 +887,10 @@ fn dereference_node(node: &Value, root: &JsonObject, visiting: &mut HashSet<Stri
         if key == "$defs" || key == "definitions" {
             continue;
         }
-        result.insert(key.clone(), dereference_keyword(key, entry, root, visiting));
+        result.insert(
+            key.clone(),
+            dereference_keyword(key, entry, root, walk, depth),
+        );
     }
     Value::Object(result)
 }
@@ -2408,5 +2448,165 @@ mod tests {
         );
         assert_eq!(convert_ref("#/definitions/Foo"), "#/$defs/Foo");
         assert_eq!(convert_ref("#/other/Foo"), "#/other/Foo");
+    }
+
+    /// `levels` definitions `d0..`, each referencing the next twice (2^levels naive nodes).
+    fn doubling_schema(levels: usize) -> Value {
+        let mut defs = JsonObject::new();
+        for level in 0..levels {
+            let next = json!({"$ref": format!("#/$defs/d{}", level + 1)});
+            defs.insert(
+                format!("d{level}"),
+                json!({"type": "object", "properties": {"a": next.clone(), "b": next}}),
+            );
+        }
+        defs.insert(format!("d{levels}"), json!({"type": "string"}));
+        let mut root = JsonObject::new();
+        root.insert("type".into(), json!("object"));
+        root.insert("properties".into(), json!({"root": {"$ref": "#/$defs/d0"}}));
+        root.insert("$defs".into(), Value::Object(defs));
+        Value::Object(root)
+    }
+
+    /// Adds the objects and empty objects of a tree whose depth the walk bounded.
+    fn count_objects(value: &Value, counts: &mut (usize, usize)) {
+        match value {
+            Value::Object(map) => {
+                counts.0 += 1;
+                counts.1 += usize::from(map.is_empty());
+                map.values().for_each(|entry| count_objects(entry, counts));
+            }
+            Value::Array(items) => items.iter().for_each(|entry| count_objects(entry, counts)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn dereference_within_budget_inlines_shared_definitions_exactly() {
+        fn expanded(level: usize, levels: usize) -> Value {
+            if level == levels {
+                return json!({"type": "string"});
+            }
+            json!({"type": "object", "properties": {
+                "a": expanded(level + 1, levels),
+                "b": expanded(level + 1, levels),
+            }})
+        }
+        // 2^9 inlined nodes: inside both budgets, so the output is omp's unbounded inlining.
+        let schema = doubling_schema(8);
+        assert_eq!(
+            dereference_json_schema(&schema).into_owned(),
+            json!({"type": "object", "properties": {"root": expanded(0, 8)}})
+        );
+    }
+
+    #[test]
+    fn dereference_budget_bounds_exponential_shared_definitions() {
+        // 30 levels referencing the next twice: 2^31 nodes when inlined naively.
+        let schema = doubling_schema(30);
+        let dereferenced = dereference_json_schema(&schema).into_owned();
+        let mut counts = (0, 0);
+        count_objects(&dereferenced, &mut counts);
+        let (objects, empty) = counts;
+        // One schema object plus one `properties` map per visited node.
+        assert!(
+            objects <= 2 * (MAX_DEREF_NODES + MAX_DEREF_DEPTH),
+            "{objects} objects"
+        );
+        assert!(empty > 0, "refs past the node budget degrade to {{}}");
+        assert!(serde_json::to_vec(&dereferenced).unwrap().len() < 2 << 20);
+        // Deterministic degradation: the same input yields the same output.
+        assert_eq!(dereference_json_schema(&schema).into_owned(), dereferenced);
+        assert!(normalize_for_google(&schema).is_object());
+    }
+
+    #[test]
+    fn dereference_depth_bounds_long_ref_chains_and_deep_input() {
+        const CHAIN: usize = 10_000;
+        // A structural chain: every definition nests the next one under `properties`.
+        let mut defs = JsonObject::new();
+        for index in 0..CHAIN {
+            defs.insert(
+                format!("d{index}"),
+                json!({"type": "object", "properties": {
+                    "next": {"$ref": format!("#/$defs/d{}", index + 1)}
+                }}),
+            );
+        }
+        defs.insert(format!("d{CHAIN}"), json!({"type": "string"}));
+        let mut root = JsonObject::new();
+        root.insert("type".into(), json!("object"));
+        root.insert("properties".into(), json!({"next": {"$ref": "#/$defs/d0"}}));
+        root.insert("$defs".into(), Value::Object(defs));
+        let schema = Value::Object(root);
+        let dereferenced = dereference_json_schema(&schema).into_owned();
+        let mut node = &dereferenced;
+        let mut inlined = 0;
+        loop {
+            let next = node["properties"]["next"]
+                .as_object()
+                .expect("every level keeps its next property");
+            if next.is_empty() {
+                break;
+            }
+            inlined += 1;
+            assert!(
+                inlined <= MAX_DEREF_DEPTH,
+                "chain inlined past the depth bound"
+            );
+            node = &node["properties"]["next"];
+        }
+        // Each inlined level costs two depths: the `$ref` node and its definition.
+        assert_eq!(inlined, MAX_DEREF_DEPTH / 2);
+        assert!(normalize_for_google(&schema).is_object());
+
+        // A pure alias chain recurses without nesting its output.
+        let mut defs = JsonObject::new();
+        for index in 0..CHAIN {
+            defs.insert(
+                format!("a{index}"),
+                json!({"$ref": format!("#/$defs/a{}", index + 1)}),
+            );
+        }
+        defs.insert(format!("a{CHAIN}"), json!({"type": "string"}));
+        let mut root = JsonObject::new();
+        root.insert("type".into(), json!("object"));
+        root.insert("properties".into(), json!({"x": {"$ref": "#/$defs/a0"}}));
+        root.insert("$defs".into(), Value::Object(defs));
+        let schema = Value::Object(root);
+        assert_eq!(
+            dereference_json_schema(&schema).into_owned(),
+            json!({"type": "object", "properties": {"x": {}}})
+        );
+        assert!(normalize_for_google(&schema).is_object());
+
+        // Deeply nested literal input, built and torn down without recursion.
+        let mut deep = json!({"type": "string"});
+        for _ in 0..CHAIN {
+            let mut wrapper = JsonObject::new();
+            wrapper.insert("not".into(), deep);
+            deep = Value::Object(wrapper);
+        }
+        let mut root = JsonObject::new();
+        root.insert("$defs".into(), Value::Object(JsonObject::new()));
+        root.insert("not".into(), deep);
+        let schema = Value::Object(root);
+        let dereferenced = dereference_json_schema(&schema).into_owned();
+        let mut node = &dereferenced;
+        let mut levels = 0;
+        while let Some(child) = node.get("not") {
+            levels += 1;
+            assert!(levels <= MAX_DEREF_DEPTH + 1, "copied past the depth bound");
+            node = child;
+        }
+        assert_eq!(levels, MAX_DEREF_DEPTH + 1);
+        assert_eq!(node, &json!({}));
+        let mut rest = schema;
+        while let Value::Object(mut map) = rest {
+            match map.remove("not") {
+                Some(child) => rest = child,
+                None => break,
+            }
+        }
     }
 }

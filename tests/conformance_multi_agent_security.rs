@@ -782,6 +782,7 @@ impl ToolSetPort for CountedToolSet {
             tool_use_id: String::new(),
             content: "counted".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }
@@ -833,6 +834,7 @@ impl ToolSetPort for DualCountedToolSet {
             tool_use_id: String::new(),
             content: "counted".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

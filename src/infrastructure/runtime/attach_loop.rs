@@ -260,6 +260,7 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
                     content: (*c).to_string(),
                     is_error: *is_err,
                     diff: (*diff).clone(),
+                    images: Vec::new(),
                 });
                 tool_calls.push(ToolCallInfo {
                     id: tool_call_id_for(&turn.id, *id),
@@ -269,6 +270,7 @@ fn turn_to_chat_message(turn: &Turn) -> ChatMessage {
                     started_at_ms: Some((*started_at).max(0) as u64),
                     completed_at_ms: ended_at.map(|v| v.max(0) as u64),
                     status: status_str.map(|s| s.to_string()),
+                    provider_id: None,
                 });
             }
             TurnPart::ToolResult { .. } => {}
@@ -1482,16 +1484,19 @@ fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
             content: result.output.clone(),
             is_error: result.is_error,
             diff: crate::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         ToolCall::Error { error, .. } => Some(ToolResultInfo {
             content: error.clone(),
             is_error: true,
             diff: crate::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         ToolCall::Cancelled { reason, .. } => Some(ToolResultInfo {
             content: reason.clone(),
             is_error: true,
             diff: crate::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         _ => None,
     };
@@ -1510,6 +1515,7 @@ fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
         started_at_ms,
         completed_at_ms: None,
         status: Some(crate::domain::models::tool_call::status_chip(call).to_string()),
+        provider_id: None,
     }
 }
 
@@ -8197,6 +8203,7 @@ mod tests {
                             is_error: false,
                             operator_private: false,
                             diff: crate::domain::models::WriteDiffState::NotAWrite,
+                            images: Vec::new(),
                         }),
                         None,
                         &mut conversation,
@@ -8295,6 +8302,7 @@ mod tests {
                     is_error: false,
                     operator_private: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: Vec::new(),
                 }),
                 None,
                 &mut conversation,

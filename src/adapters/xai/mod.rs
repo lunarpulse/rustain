@@ -235,13 +235,16 @@ impl StreamingProvider for XaiAdapter {
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-        let resolved = self.inner.handle.current().await?;
+        // Armed first: an abort while the credential resolves cancels this request.
+        let cancel = self.inner.abort.arm();
+        let resolved = cancel.run(self.inner.handle.current()).await?;
         let (reasoning, vision) = self.inner.traits(&options.model);
         let profile = profile::Profile::new(self.inner.kind, &options, reasoning, vision);
         let url = format!("{}/responses", self.inner.base());
         transport::stream(
             self.inner.clone(),
             &url,
+            cancel,
             resolved,
             profile,
             messages,
@@ -344,5 +347,45 @@ mod tests {
                 "https://proxy.example/v1"
             );
         }
+    }
+
+    /// Keystone (DF-20-1D-RESPONSES-ABORT-WINDOW, review RF-05): an abort while
+    /// the stored grant refreshes cancels the request before anything is sent.
+    #[tokio::test]
+    async fn abort_while_the_credential_resolves_cancels_the_stream() {
+        use crate::adapters::responses::transport::test_support::{
+            loopback, options, stored_oauth, user, within,
+        };
+        use futures::FutureExt;
+
+        let (handle, refresh, _dir) = stored_oauth(
+            XaiKind::XaiOauth.id(),
+            true,
+            crate::domain::models::CredentialIdentity::default(),
+        )
+        .await;
+        let (listener, origin) = loopback().await;
+        let adapter = Arc::new(XaiAdapter::new(handle, XaiKind::XaiOauth, Some(origin)).unwrap());
+        let task = tokio::spawn({
+            let adapter = adapter.clone();
+            async move {
+                adapter
+                    .stream_completion(vec![user("hi")], options("grok-test"))
+                    .await
+                    .map(drop)
+            }
+        });
+        within(refresh.entered.notified()).await;
+        adapter.abort().await.unwrap();
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "nothing is sent after the abort"
+        );
+        assert_eq!(adapter.inner.abort.live(), 0);
     }
 }

@@ -47,8 +47,12 @@ use reqwest::{
     header::{HeaderMap, HeaderValue},
 };
 use serde_json::Value;
-use std::{collections::VecDeque, sync::Arc, time::Duration};
-use tokio::{sync::Mutex, time::Instant};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    time::Duration,
+};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Adapter-lifetime state the transport borrows for every logical request.
@@ -56,6 +60,7 @@ pub trait Host: Send + Sync + 'static {
     /// A client built without redirects.
     fn client(&self) -> &reqwest::Client;
     fn credentials(&self) -> &CredentialHandle;
+    /// The registry each request's token is armed from before its credential resolves.
     fn abort_slot(&self) -> &AbortSlot;
 }
 
@@ -102,21 +107,78 @@ enum Resent {
     Unanswered(Option<reqwest::Error>),
 }
 
-/// The cancellation token of the adapter's in-flight request.
+/// The cancellation tokens of the adapter's in-flight requests. Every logical
+/// request arms its own token, so concurrent streams never displace each other.
 #[derive(Default)]
-pub struct AbortSlot(Mutex<Option<CancellationToken>>);
+pub struct AbortSlot(Arc<Mutex<LiveTokens>>);
+
+#[derive(Default)]
+struct LiveTokens {
+    next: u64,
+    tokens: Vec<(u64, CancellationToken)>,
+}
+
+fn live(tokens: &Mutex<LiveTokens>) -> MutexGuard<'_, LiveTokens> {
+    tokens.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 impl AbortSlot {
-    /// Replaces the slot with a fresh token for a new logical request.
-    pub(crate) async fn arm(&self) -> CancellationToken {
+    /// Registers a fresh token for a new logical request. Arm before the
+    /// credential resolves; dropping the returned guard deregisters the token.
+    pub fn arm(&self) -> Armed {
         let cancel = CancellationToken::new();
-        *self.0.lock().await = Some(cancel.clone());
-        cancel
+        let mut live_tokens = live(&self.0);
+        let id = live_tokens.next;
+        live_tokens.next += 1;
+        live_tokens.tokens.push((id, cancel.clone()));
+        drop(live_tokens);
+        Armed {
+            cancel,
+            id,
+            slot: Arc::clone(&self.0),
+        }
     }
+    /// Cancels every request armed before this call; later ones are unaffected.
     pub async fn abort(&self) {
-        if let Some(cancel) = self.0.lock().await.take() {
+        let tokens = std::mem::take(&mut live(&self.0).tokens);
+        for (_, cancel) in tokens {
             cancel.cancel();
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn live(&self) -> usize {
+        live(&self.0).tokens.len()
+    }
+}
+
+/// One logical request's registered cancellation token; derefs to the token and
+/// deregisters it from its [`AbortSlot`] when dropped.
+pub struct Armed {
+    cancel: CancellationToken,
+    id: u64,
+    slot: Arc<Mutex<LiveTokens>>,
+}
+
+impl Armed {
+    /// Races `work` (credential resolution or recovery) against this request's abort.
+    pub async fn run<T>(
+        &self,
+        work: impl Future<Output = Result<T, ProviderError>>,
+    ) -> Result<T, ProviderError> {
+        tokio::select! {biased;()=self.cancel.cancelled()=>Err(ProviderError::Cancelled),result=work=>result}
+    }
+}
+
+impl std::ops::Deref for Armed {
+    type Target = CancellationToken;
+    fn deref(&self) -> &CancellationToken {
+        &self.cancel
+    }
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        live(&self.slot).tokens.retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -251,7 +313,7 @@ struct Exchange<H, W> {
     model: String,
     /// Header-less POST carrying the body encoded once per logical request.
     request: reqwest::Request,
-    cancel: CancellationToken,
+    cancel: Armed,
     headers: HeaderMap,
 }
 
@@ -317,13 +379,16 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                 };
                 return Ok(Opened { response, deadline });
             }
+            // A recovery may refresh over the network: an abort ends it promptly.
             if status == 401
-                && recover_once(
-                    self.host.credentials(),
-                    &mut self.resolved,
-                    &mut self.auth_retried,
-                )
-                .await?
+                && self
+                    .cancel
+                    .run(recover_once(
+                        self.host.credentials(),
+                        &mut self.resolved,
+                        &mut self.auth_retried,
+                    ))
+                    .await?
             {
                 if let Some(url) = self.wire.recovered(&self.resolved)? {
                     *self.request.url_mut() = url
@@ -694,10 +759,13 @@ impl<H: Host, W: Wire> StreamState<H, W> {
 
 /// Encode the body once, open with the profile's retry policy and stream the
 /// mapped chunks. Dropping the stream drops the response (closing the
-/// connection); `host.abort_slot()` cancels it in flight.
+/// connection). `cancel` was armed from `host.abort_slot()` before `resolved`
+/// was resolved, so `abort()` cancels the request from its first await; the
+/// stream deregisters it when finished or dropped.
 pub async fn stream<H: Host, W: Wire>(
     host: Arc<H>,
     url: &str,
+    cancel: Armed,
     resolved: Resolved,
     wire: W,
     messages: Vec<Message>,
@@ -715,7 +783,6 @@ pub async fn stream<H: Host, W: Wire>(
         .body(body)
         .build()
         .map_err(|e| crate::adapters::provider::classify_reqwest_error(&e))?;
-    let cancel = host.abort_slot().arm().await;
     let mut ctx = Exchange {
         host,
         policy,
@@ -750,4 +817,374 @@ pub async fn stream<H: Host, W: Wire>(
             Some((chunk, state))
         },
     )))
+}
+
+/// Credential and loopback fixtures of the Responses and Gemini CLI cancellation tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::{
+        adapters::auth_store::FileAuthStore,
+        domain::{
+            models::{
+                CompletionOptions, Credential, CredentialIdentity, CredentialOrigin, Message,
+                OAuthCredential,
+            },
+            ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure, RefreshedTokens},
+        },
+        infrastructure::key_resolver::{CredentialHandle, KeyResolver},
+    };
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+        sync::Notify,
+    };
+
+    /// The resolver clock of every fixture.
+    pub(crate) const NOW: i64 = 1_000_000_000;
+
+    /// Refresh exchanges that never finish; `entered` is signalled on entry.
+    #[derive(Default)]
+    pub(crate) struct HeldRefresh {
+        pub(crate) entered: Notify,
+        calls: AtomicUsize,
+    }
+
+    impl HeldRefresh {
+        pub(crate) fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OAuthRefreshPort for HeldRefresh {
+        async fn refresh(
+            &self,
+            _: &str,
+            _: &OAuthCredential,
+        ) -> Result<RefreshedTokens, RefreshFailure> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    /// A handle over one stored OAuth row of `provider` in a fresh file store. A
+    /// `stale` row refreshes before it resolves; a fresh one only on recovery.
+    pub(crate) async fn stored_oauth(
+        provider: &str,
+        stale: bool,
+        identity: CredentialIdentity,
+    ) -> (CredentialHandle, Arc<HeldRefresh>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileAuthStore::at(dir.path().join("auth.json")));
+        let credential = Credential::OAuth(OAuthCredential {
+            access: "STORED-ACCESS".into(),
+            refresh: "STORED-REFRESH".into(),
+            expires_at_ms: if stale { 0 } else { NOW + 3_600_000 },
+            authorized_at_ms: None,
+            identity,
+            routing: Default::default(),
+        });
+        store
+            .upsert(provider, credential, CredentialOrigin::Login, false)
+            .await
+            .unwrap();
+        let refresh = Arc::new(HeldRefresh::default());
+        let resolver = Arc::new(KeyResolver::new(store, refresh.clone(), Arc::new(|| NOW)));
+        let handle = CredentialHandle::new(resolver, provider.to_owned(), Vec::new(), true, None);
+        (handle, refresh, dir)
+    }
+
+    pub(crate) fn user(text: &str) -> Message {
+        serde_json::from_value(serde_json::json!({
+            "role": "user", "content": text, "images": [], "toolResults": [], "toolUses": [],
+            "contextPrefix": null
+        }))
+        .unwrap()
+    }
+
+    pub(crate) fn options(model: &str) -> CompletionOptions {
+        serde_json::from_value(serde_json::json!({
+            "model": model, "maxTokens": 256, "systemPrompt": "policy", "temperature": 0.7,
+            "tools": []
+        }))
+        .unwrap()
+    }
+
+    /// A loopback listener and its `http://` origin.
+    pub(crate) async fn loopback() -> (TcpListener, String) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        (listener, origin)
+    }
+
+    /// Bounds a structural wait so a regression fails instead of hanging.
+    pub(crate) async fn within<F: Future>(future: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .expect("structural gate reached")
+    }
+
+    /// Accepts one connection and reads one complete request from it.
+    pub(crate) async fn accept(listener: &TcpListener) -> TcpStream {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 4096];
+        let head = loop {
+            if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "request closed before its head");
+            bytes.extend_from_slice(&buffer[..count]);
+        };
+        let length = String::from_utf8_lossy(&bytes[..head])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .unwrap_or(0);
+        while bytes.len() < head + length {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "request closed before its body");
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        socket
+    }
+
+    /// Answers 401 and ends the connection, so a resend needs a new one.
+    pub(crate) async fn reject(socket: &mut TcpStream) {
+        socket
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    }
+
+    /// Opens an event stream whose body never arrives.
+    pub(crate) async fn hold_open(socket: &mut TcpStream) {
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_support::*, *};
+    use crate::{
+        adapters::noop::NoOpAuthStore,
+        domain::models::{CredentialIdentity, SecretString},
+        infrastructure::key_resolver::compose,
+    };
+    use futures::{FutureExt, StreamExt};
+
+    struct TestHost {
+        client: reqwest::Client,
+        handle: CredentialHandle,
+        abort: AbortSlot,
+    }
+
+    impl TestHost {
+        fn new(handle: CredentialHandle) -> Arc<Self> {
+            Arc::new(Self {
+                client: reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .unwrap(),
+                handle,
+                abort: AbortSlot::default(),
+            })
+        }
+    }
+
+    impl Host for TestHost {
+        fn client(&self) -> &reqwest::Client {
+            &self.client
+        }
+        fn credentials(&self) -> &CredentialHandle {
+            &self.handle
+        }
+        fn abort_slot(&self) -> &AbortSlot {
+            &self.abort
+        }
+    }
+
+    struct TestWire;
+
+    impl WireProfile for TestWire {
+        fn dialect(&self) -> Dialect {
+            Dialect::Codex
+        }
+        fn prompt_cache_key(&self) -> Option<&str> {
+            None
+        }
+        fn client_metadata(&self) -> Option<&Value> {
+            None
+        }
+    }
+
+    #[async_trait]
+    impl Wire for TestWire {
+        fn headers(&self, _: &str, auth: &ResolvedAuth) -> Result<HeaderMap, ProviderError> {
+            let bearer = format!("Bearer {}", auth.bearer_secret().expose_secret());
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "authorization",
+                HeaderValue::try_from(bearer).map_err(|_| ProviderError::AuthenticationFailed)?,
+            );
+            Ok(headers)
+        }
+        fn http_error(&self, status: u16, _: &HeaderMap, _: &str, _: &HeaderMap) -> ProviderError {
+            ProviderError::Other(format!("HTTP {status}"))
+        }
+        fn redact(&self, message: &str, _: &HeaderMap) -> String {
+            message.to_owned()
+        }
+    }
+
+    fn runtime_handle() -> CredentialHandle {
+        let resolver = compose(
+            Arc::new(NoOpAuthStore),
+            Arc::new(HeldRefresh::default()),
+            Arc::new(|| NOW),
+        );
+        CredentialHandle::runtime(resolver, "test".into(), SecretString::new("KEY".into()))
+    }
+
+    #[tokio::test]
+    async fn abort_slot_arms_one_token_per_request() {
+        let slot = AbortSlot::default();
+        let first = slot.arm();
+        let second = slot.arm();
+        drop(slot.arm());
+        assert_eq!(slot.live(), 2, "a dropped request leaves no stale token");
+        slot.abort().await;
+        assert!(first.is_cancelled() && second.is_cancelled());
+        let later = slot.arm();
+        assert!(
+            !later.is_cancelled(),
+            "an abort never reaches a later request"
+        );
+        drop((first, second));
+        assert_eq!(slot.live(), 1);
+        drop(later);
+        assert_eq!(slot.live(), 0);
+    }
+
+    /// Keystone (c): every stream in flight on one adapter is cancelled.
+    #[tokio::test]
+    async fn abort_cancels_every_concurrent_stream() {
+        let (listener, origin) = loopback().await;
+        let url = format!("{origin}/responses");
+        let host = TestHost::new(runtime_handle());
+        let mut streams = Vec::new();
+        let mut sockets = Vec::new();
+        for _ in 0..2 {
+            let cancel = host.abort_slot().arm();
+            let resolved = cancel.run(host.handle.current()).await.unwrap();
+            let request = vec![user("hi")];
+            let (opened, socket) = tokio::join!(
+                stream(
+                    host.clone(),
+                    &url,
+                    cancel,
+                    resolved,
+                    TestWire,
+                    request,
+                    options("m")
+                ),
+                async {
+                    let mut socket = within(accept(&listener)).await;
+                    hold_open(&mut socket).await;
+                    socket
+                }
+            );
+            streams.push(opened.unwrap());
+            sockets.push(socket);
+        }
+        assert_eq!(host.abort.live(), 2, "each stream owns its token");
+        host.abort_slot().abort().await;
+        for opened in &mut streams {
+            let chunk = within(opened.next()).await;
+            assert!(
+                matches!(
+                    chunk,
+                    Some(StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                        ..
+                    })
+                ),
+                "every in-flight stream ends cancelled"
+            );
+            assert!(within(opened.next()).await.is_none());
+        }
+        let later = host.abort_slot().arm();
+        assert!(
+            !later.is_cancelled(),
+            "an abort never reaches a later request"
+        );
+        drop(later);
+        drop(streams);
+        assert_eq!(
+            host.abort.live(),
+            0,
+            "finished streams leave no stale token"
+        );
+    }
+
+    /// Keystone (b): an abort during a 401 refresh ends the open without a resend.
+    #[tokio::test]
+    async fn abort_during_401_recovery_cancels_before_the_resend() {
+        let (handle, refresh, _dir) =
+            stored_oauth("responses-test", false, CredentialIdentity::default()).await;
+        let (listener, origin) = loopback().await;
+        let host = TestHost::new(handle);
+        let task = tokio::spawn({
+            let host = host.clone();
+            async move {
+                let url = format!("{origin}/responses");
+                let cancel = host.abort_slot().arm();
+                let resolved = cancel.run(host.handle.current()).await.unwrap();
+                let request = vec![user("hi")];
+                stream(
+                    host,
+                    &url,
+                    cancel,
+                    resolved,
+                    TestWire,
+                    request,
+                    options("m"),
+                )
+                .await
+                .map(drop)
+            }
+        });
+        let mut socket = within(accept(&listener)).await;
+        reject(&mut socket).await;
+        within(refresh.entered.notified()).await;
+        host.abort_slot().abort().await;
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert_eq!(refresh.calls(), 1);
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "the rejected request is never resent"
+        );
+        assert_eq!(host.abort.live(), 0);
+    }
 }

@@ -90,10 +90,12 @@ fn tool_call(id: &str, name: &str) -> ToolCallInfo {
             content: "ok".to_string(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1),
         status: Some("✓ Success".to_string()),
+        provider_id: None,
     }
 }
 

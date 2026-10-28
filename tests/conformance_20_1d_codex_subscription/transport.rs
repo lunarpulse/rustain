@@ -212,11 +212,13 @@ async fn k03_request_core_and_k04_headers_come_from_selected_bearer() {
             tool_use_id: "paired".into(),
             content: "found".into(),
             is_error: true,
+            images: vec![],
         },
         rustain::domain::models::ToolResultMessage {
             tool_use_id: "orphan".into(),
             content: "old result".into(),
             is_error: false,
+            images: vec![],
         },
     ];
     let output = chunks(&provider, vec![system, assistant, result, message], options).await;
@@ -514,6 +516,7 @@ async fn k06_turn_state_sessions_new_turn_and_side_request_are_isolated() {
             tool_use_id: "call".into(),
             content: "result".into(),
             is_error: false,
+            images: Vec::new(),
         });
     let (a, b) = tokio::join!(
         chunks(&provider, vec![continuation], options("session-A")),

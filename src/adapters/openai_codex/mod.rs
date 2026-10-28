@@ -160,12 +160,15 @@ impl StreamingProvider for CodexAdapter {
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-        let resolved = self.inner.handle.current().await?;
+        // Armed first: an abort while the credential resolves cancels this request.
+        let cancel = self.inner.abort.arm();
+        let resolved = cancel.run(self.inner.handle.current()).await?;
         let session = self.inner.sessions.begin(&messages, &options).await;
         let profile = profile::Profile::new(session, self.inner.sessions.clone())?;
         transport::stream(
             self.inner.clone(),
             &self.inner.url,
+            cancel,
             resolved,
             profile,
             messages,
@@ -243,5 +246,50 @@ impl StreamingProvider for CodexAdapter {
             401 | 403 => Err(ProviderError::AuthenticationFailed),
             _ => Err(ProviderError::Other(format!("Codex models HTTP {status}"))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        adapters::responses::transport::test_support::{
+            loopback, options, stored_oauth, user, within,
+        },
+        domain::models::CredentialIdentity,
+    };
+    use futures::FutureExt;
+
+    /// Keystone (a): an abort while the stored grant refreshes cancels the request.
+    #[tokio::test]
+    async fn abort_while_the_credential_resolves_cancels_the_stream() {
+        let identity = CredentialIdentity {
+            account_id: Some("account".into()),
+            ..CredentialIdentity::default()
+        };
+        let (handle, refresh, _dir) = stored_oauth(PROVIDER_KIND, true, identity).await;
+        let (listener, origin) = loopback().await;
+        let adapter = Arc::new(CodexAdapter::new(handle, String::new(), origin).unwrap());
+        let task = tokio::spawn({
+            let adapter = adapter.clone();
+            async move {
+                adapter
+                    .stream_completion(vec![user("hi")], options("gpt-test"))
+                    .await
+                    .map(drop)
+            }
+        });
+        within(refresh.entered.notified()).await;
+        adapter.abort().await.unwrap();
+        let result = within(task).await.unwrap();
+        assert!(
+            matches!(result, Err(ProviderError::Cancelled)),
+            "{result:?}"
+        );
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "nothing is sent after the abort"
+        );
+        assert_eq!(adapter.inner.abort.live(), 0);
     }
 }

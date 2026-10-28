@@ -42,6 +42,17 @@ pub struct ToolCallInfo {
     /// unset so old session JSONL loads cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// The call id the provider emitted (Story 20.1d4a T2), kept when the UI
+    /// renames `id`; the provider history uses it in place of `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+}
+
+impl ToolCallInfo {
+    /// The id the provider knows this call by.
+    pub fn wire_id(&self) -> &str {
+        self.provider_id.as_deref().unwrap_or(&self.id)
+    }
 }
 
 /// Result of a tool execution.
@@ -51,6 +62,9 @@ pub struct ToolResult {
     pub tool_use_id: String,
     pub content: String,
     pub is_error: bool,
+    /// Images the tool returned beside `content` (Story 20.1d4a T1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<super::message::ImageAttachment>,
 }
 
 /// Info about a tool result stored in ToolCallInfo.
@@ -59,6 +73,10 @@ pub struct ToolResult {
 pub struct ToolResultInfo {
     pub content: String,
     pub is_error: bool,
+    /// Result images, persisted for the provider history (Story 20.1d4a T1);
+    /// every outward transcript projection empties them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<super::message::ImageAttachment>,
     /// UI-only display-diff state for completed Write calls (Story 19.1,
     /// FR30). See [`WriteDiffState`] for why this is an enum rather than an
     /// `Option<Vec<DiffLine>>` — the Option encoding made the widget state

@@ -1238,6 +1238,7 @@ async fn p0_13_1b_g3_stream_ndjson_and_midstream_error() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::Usage {
             usage,
@@ -1524,6 +1525,7 @@ async fn p0_13_1b_g4_schema_fingerprint() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::Usage {
             usage,
@@ -1615,6 +1617,7 @@ async fn p0_13_1b_g5_snake_case_lint() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::Usage {
             usage,
@@ -1661,6 +1664,7 @@ async fn p0_13_1b_final_message_json() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::Text {
             content: "final block".into(),
@@ -1705,6 +1709,7 @@ async fn p1_13_1b_g7_empty_response() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::TurnComplete {
             stop_reason: StopReason::EndTurn,
@@ -1854,6 +1859,7 @@ impl rustain::domain::ports::ToolSetPort for PlanToolSet {
                 tool_use_id: String::new(),
                 content: "Plan proposed for user approval.".to_string(),
                 is_error: false,
+                images: Vec::new(),
             })
         } else {
             Err(rustain::domain::errors::ToolError::NotFound(
@@ -2734,6 +2740,7 @@ async fn p0_13_1c_final_message_only_dry_run() {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: vec![],
         },
         StreamChunk::Text {
             content: "Final plan paragraph.".into(),

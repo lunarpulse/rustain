@@ -3301,6 +3301,7 @@ pub async fn run(
                                                     content: "[aborted]".to_string(),
                                                     is_error: true,
                                                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                                    images: Vec::new(),
                                                 });
                                                 tc.completed_at_ms = Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
                                             }
@@ -8521,9 +8522,11 @@ pub(crate) fn persist_image_attachments(
 /// is dropped from the request (AC4 graceful degradation extended to the API
 /// request path).
 ///
-/// The index-advance logic must stay in sync with `build_api_messages`: it
-/// emits one `Message` per `ChatMessage`, plus a second synthetic user
-/// `Message` when an assistant turn carries tool-call results.
+/// Rows are paired with API messages by role and content, never by position:
+/// an assistant row expands to one `Message` per response span plus its
+/// result messages (Story 20.1d4a), results merge into the next user message,
+/// and the assembler may window or reshape the history. Each user or system
+/// row takes the next API message of its role and content.
 ///
 /// NOTE on `block_in_place`: mirrors `persist_image_attachments` — both call
 /// sites share the same sync-over-async pattern and will be lifted together
@@ -8535,11 +8538,19 @@ pub fn rehydrate_historical_images(
 ) {
     use base64::{Engine, engine::general_purpose::STANDARD};
 
-    let mut msg_idx = 0;
+    let mut next = 0;
     for cm in &conversation.messages {
-        if msg_idx >= messages.len() {
-            break;
+        if cm.role == MessageRole::Assistant {
+            continue;
         }
+        let Some(offset) = messages[next..]
+            .iter()
+            .position(|message| message.role == cm.role && message.content == cm.content)
+        else {
+            continue;
+        };
+        let msg_idx = next + offset;
+        next = msg_idx + 1;
 
         if cm.role == MessageRole::User
             && !cm.images.is_empty()
@@ -8568,18 +8579,6 @@ pub fn rehydrate_historical_images(
                     }
                 }
             }
-        }
-
-        msg_idx += 1;
-
-        // Mirror `build_api_messages`: assistant messages with at least one
-        // tool-call result produce a second synthetic user message for the
-        // tool results.
-        if cm.role == MessageRole::Assistant
-            && !cm.tool_calls.is_empty()
-            && cm.tool_calls.iter().any(|tc| tc.result.is_some())
-        {
-            msg_idx += 1;
         }
     }
 }
@@ -10850,10 +10849,12 @@ mod tests {
                 content: "file contents".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
             started_at_ms: None,
             completed_at_ms: None,
             status: None,
+            provider_id: None,
         });
         let conv = mk_conversation(
             conv_id,
@@ -10890,6 +10891,95 @@ mod tests {
         assert!(
             messages[2].images.is_empty(),
             "turn-2 user message has no image ref"
+        );
+    }
+
+    /// Story 20.1d4a (review RF-01): an assistant row with response spans
+    /// expands to one API message per span plus result messages, so a later
+    /// user image lands on its own user message, never on an assistant one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rehydrate_after_a_spanned_tool_row_lands_on_the_user_message() {
+        use crate::adapters::filesystem::{FileSystemStorage, content_hash, normalize_extension};
+        use crate::domain::models::{
+            ContentBlockType, ImageReference, ResponseSpan, ToolCallInfo, ToolResultInfo,
+        };
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let conv_id = "conv-rehydrate-spans";
+        let bytes: Vec<u8> = b"\x89PNG\r\n\x1a\n-spans".to_vec();
+        let image_ref = ImageReference {
+            file_name: format!(
+                "{}.{}",
+                content_hash(&bytes),
+                normalize_extension("image/png")
+            ),
+            media_type: "image/png".to_string(),
+            original_size: bytes.len(),
+        };
+        storage
+            .save_image(conv_id, &image_ref, &bytes)
+            .await
+            .unwrap();
+
+        // Two responses in one row: a tool call, then the final text.
+        let mut spanned = mk_chat_msg_assistant("done");
+        spanned.tool_calls.push(ToolCallInfo {
+            id: "tc_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"path": "x"}),
+            result: Some(ToolResultInfo {
+                content: "file contents".to_string(),
+                is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
+            }),
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None,
+            provider_id: Some("call_a".to_string()),
+        });
+        spanned.content_blocks = vec![
+            ContentBlockType::ResponseSpan(ResponseSpan {
+                tool_calls: 1,
+                ..Default::default()
+            }),
+            ContentBlockType::ResponseSpan(ResponseSpan {
+                text: "done".to_string(),
+                ..Default::default()
+            }),
+        ];
+        let conv = mk_conversation(
+            conv_id,
+            vec![
+                mk_chat_msg_user_with_images("read x", vec![]),
+                spanned,
+                mk_chat_msg_user_with_images("what is this?", vec![image_ref]),
+                mk_chat_msg_assistant("a cat"),
+                mk_chat_msg_user_with_images("thanks", vec![]),
+            ],
+        );
+
+        let mut messages = message_builder::build_api_messages(&conv);
+        // [User, Assistant(call), User(result), Assistant(done), User(image), Assistant, User]
+        assert_eq!(messages.len(), 7, "the spanned row expands per response");
+
+        rehydrate_historical_images(&conv, &mut messages, &storage);
+
+        assert_eq!(messages[4].role, MessageRole::User);
+        assert_eq!(messages[4].content, "what is this?");
+        assert_eq!(
+            messages[4].images.len(),
+            1,
+            "the image lands on its own user message"
+        );
+        assert!(
+            messages
+                .iter()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .all(|m| m.images.is_empty()),
+            "no image on an assistant message"
         );
     }
 

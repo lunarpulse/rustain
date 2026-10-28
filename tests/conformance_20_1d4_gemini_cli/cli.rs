@@ -646,8 +646,8 @@ const VISIBLE: &str = "Reading the notes.";
 const ANSWER: &str = "Gemini tool round answered";
 const SIGNATURES: [&str; 3] = ["U0lHMA==", "U0lHMQ==", "U0lHMg=="];
 
-struct Fixture {
-    home: tempfile::TempDir,
+pub(crate) struct Fixture {
+    pub(crate) home: tempfile::TempDir,
     evidence: PathBuf,
     binary: PathBuf,
     env: BTreeMap<&'static str, OsString>,
@@ -656,7 +656,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(server: &MockServer) -> Self {
+    pub(crate) fn new(server: &MockServer) -> Self {
         let home = tempfile::tempdir().unwrap();
         let evidence = std::env::var_os("RUSTAIN_TEST_GEMINI_CLI_EVIDENCE_DIR")
             .map(PathBuf::from)
@@ -745,7 +745,7 @@ impl Fixture {
         self.held.local_addr().unwrap().port()
     }
 
-    fn json(&self, file: &str, value: &Value) {
+    pub(crate) fn json(&self, file: &str, value: &Value) {
         std::fs::write(
             self.evidence.join(file),
             serde_json::to_vec_pretty(value).unwrap(),
@@ -786,7 +786,7 @@ impl Fixture {
         );
     }
 
-    async fn run(&self, label: &str, args: &[&str]) -> Output {
+    pub(crate) async fn run(&self, label: &str, args: &[&str]) -> Output {
         let output = tokio::time::timeout(COMMAND_TIMEOUT, self.command(label, args).output())
             .await
             .unwrap_or_else(|_| panic!("{label} exceeded {COMMAND_TIMEOUT:?}"))
@@ -800,7 +800,7 @@ impl Fixture {
         output
     }
 
-    async fn requests(&self, server: &MockServer, label: &str) -> Vec<Request> {
+    pub(crate) async fn requests(&self, server: &MockServer, label: &str) -> Vec<Request> {
         let requests = server.received_requests().await.unwrap();
         let values: Vec<_> = requests.iter().map(|request| json!({
             "method": request.method.as_str(), "url": request.url.as_str(),
@@ -824,7 +824,7 @@ fn provider_row<'a>(value: &'a Value, id: &str) -> &'a Value {
 
 /// `auth login google-gemini-cli` driven like a browser. Returns the output, the
 /// whole stderr transcript and the actual redirect URI.
-async fn cli_login(fixture: &Fixture, server: &MockServer) -> (Output, String, String) {
+pub(crate) async fn cli_login(fixture: &Fixture, server: &MockServer) -> (Output, String, String) {
     let mut child = fixture
         .command("login", &["auth", "login", PROVIDER])
         .spawn()
@@ -978,7 +978,7 @@ fn sse(frames: &[Value]) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(body, "text/event-stream")
 }
 
-fn stream_posts(requests: &[Request]) -> Vec<&Request> {
+pub(crate) fn stream_posts(requests: &[Request]) -> Vec<&Request> {
     requests
         .iter()
         .filter(|r| r.method == "POST" && r.url.path() == STREAM)

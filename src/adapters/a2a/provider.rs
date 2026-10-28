@@ -86,6 +86,7 @@ impl A2aProvider {
                     content: serde_json::to_string_pretty(&result)
                         .unwrap_or_else(|_| result.to_string()),
                     is_error: false,
+                    images: Vec::new(),
                 })
                 .map_err(|error| {
                     CapabilityError::InvocationFailed(capability_id.to_string(), error.to_string())
@@ -150,6 +151,7 @@ impl A2aProvider {
                 content: serde_json::to_string_pretty(&result)
                     .unwrap_or_else(|_| result.to_string()),
                 is_error: false,
+                images: Vec::new(),
             }),
             Err(error) => Err(CapabilityError::InvocationFailed(
                 capability_id.to_string(),

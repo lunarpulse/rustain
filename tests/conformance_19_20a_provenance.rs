@@ -1038,10 +1038,12 @@ async fn migrated_sessions_preserve_decorations_search_and_selected_tool_copy() 
             content: "SELECTED_TOOL_OUTPUT".into(),
             is_error: false,
             diff: Default::default(),
+            images: Vec::new(),
         }),
         started_at_ms: Some(1_000),
         completed_at_ms: Some(2_000),
         status: None,
+        provider_id: None,
     });
     let mut conversation = common::make_conversation(vec![message], vec![]);
     conversation.id = "legacy-decorations".into();

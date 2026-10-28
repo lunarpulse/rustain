@@ -894,6 +894,7 @@ impl ToolSetPort for CountingTools {
             tool_use_id: String::new(),
             content: "done".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

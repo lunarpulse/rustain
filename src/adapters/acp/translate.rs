@@ -1016,6 +1016,7 @@ mod tests {
                 started_at_ms: None,
                 completed_at_ms: None,
                 status: None,
+                provider_id: None,
             }],
             retracted_at_ms: None,
             ..Default::default()

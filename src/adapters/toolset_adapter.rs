@@ -471,6 +471,7 @@ impl ToolSetAdapter {
             tool_use_id: tid,
             content: result,
             is_error,
+            images: Vec::new(),
         })
     }
 
@@ -522,6 +523,7 @@ impl ToolSetAdapter {
                     file_path, total, offset
                 ),
                 is_error: false,
+                images: Vec::new(),
             });
         }
 
@@ -529,6 +531,7 @@ impl ToolSetAdapter {
             tool_use_id: String::new(),
             content: selected.join("\n"),
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -623,12 +626,13 @@ impl ToolSetAdapter {
                             tool_use_id: tool_use_id.to_string(),
                             content: format!(
                                 "TOCTOU conflict: '{}' was modified between snapshot and write.\n\
-                                 expected_hash: {}\n\
-                                 actual_hash: {}\n\
-                                 Rewind protection is intact — please retry or resolve the conflict.",
+                             expected_hash: {}\n\
+                             actual_hash: {}\n\
+                             Rewind protection is intact — please retry or resolve the conflict.",
                                 file_path, expected_hash, actual_hash
                             ),
                             is_error: true,
+                            images: Vec::new(),
                         });
                     }
                 }
@@ -638,11 +642,12 @@ impl ToolSetAdapter {
                         tool_use_id: tool_use_id.to_string(),
                         content: format!(
                             "TOCTOU conflict: '{}' was truncated or emptied between snapshot and write.\n\
-                             expected_hash: {}\n\
-                             Rewind protection is intact — please retry or resolve the conflict.",
+                         expected_hash: {}\n\
+                         Rewind protection is intact — please retry or resolve the conflict.",
                             file_path, expected_hash
                         ),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -651,11 +656,12 @@ impl ToolSetAdapter {
                         tool_use_id: tool_use_id.to_string(),
                         content: format!(
                             "TOCTOU conflict: '{}' was deleted between snapshot and write.\n\
-                             expected_hash: {}\n\
-                             Rewind protection is intact — please retry or resolve the conflict.",
+                         expected_hash: {}\n\
+                         Rewind protection is intact — please retry or resolve the conflict.",
                             file_path, expected_hash
                         ),
                         is_error: true,
+                        images: Vec::new(),
                     });
                 }
                 Err(e) => {
@@ -710,6 +716,7 @@ impl ToolSetAdapter {
             tool_use_id: tool_use_id.to_string(),
             content: format!("Successfully wrote {} bytes to {}", byte_count, file_path),
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -968,6 +975,7 @@ impl ToolSetAdapter {
             tool_use_id: tool_use_id.to_string(),
             content: format!("Applied patch to {}", touched.join(", ")),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }
@@ -1384,6 +1392,7 @@ impl ToolSetAdapter {
             tool_use_id: String::new(),
             content: "Plan sent for user approval.".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -1416,6 +1425,7 @@ impl ToolSetAdapter {
             tool_use_id: String::new(),
             content: "Plan proposed for user approval.".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -1450,9 +1460,10 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: format!(
                     "Blocked: input looks like a secret ({pattern}); nothing stored. \
-                     Redact the secret and retry."
+                 Redact the secret and retry."
                 ),
                 is_error: true,
+                images: Vec::new(),
             });
         }
 
@@ -1461,6 +1472,7 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: "Memory adapter not configured; nothing stored.".to_string(),
                 is_error: false,
+                images: Vec::new(),
             });
         };
 
@@ -1485,11 +1497,13 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: format!("Remembered: {summary}"),
                 is_error: false,
+                images: Vec::new(),
             }),
             Err(e) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Failed to remember: {e}"),
                 is_error: true,
+                images: Vec::new(),
             }),
         }
     }
@@ -1555,9 +1569,10 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: format!(
                     "Blocked: input looks like a secret ({pattern}); nothing stored. \
-                     Redact the secret and retry."
+                 Redact the secret and retry."
                 ),
                 is_error: true,
+                images: Vec::new(),
             });
         }
 
@@ -1568,6 +1583,7 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: "Memory adapter not configured; nothing stored.".to_string(),
                 is_error: false,
+                images: Vec::new(),
             });
         };
 
@@ -1592,11 +1608,13 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: format!("Recorded durable fact: {fact_text}"),
                 is_error: false,
+                images: Vec::new(),
             }),
             Err(e) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: format!("Failed to record fact: {e}"),
                 is_error: true,
+                images: Vec::new(),
             }),
         }
     }
@@ -1642,6 +1660,7 @@ impl ToolSetAdapter {
                 tool_use_id: String::new(),
                 content: format!("Skill '{}' activated.", name),
                 is_error: false,
+                images: Vec::new(),
             }),
             Ok(crate::domain::models::SkillActivationOutcome::TrustDeclined(n)) => {
                 // Decision 4: decline is a user choice, not an error. Surface it
@@ -1651,6 +1670,7 @@ impl ToolSetAdapter {
                     tool_use_id: String::new(),
                     content: format!("Skill '{}' not trusted — activation declined.", n),
                     is_error: false,
+                    images: Vec::new(),
                 })
             }
             Err(crate::domain::models::SkillActivationError::NotFound(n)) => {
@@ -1663,12 +1683,14 @@ impl ToolSetAdapter {
                         names.join(", ")
                     ),
                     is_error: true,
+                    images: Vec::new(),
                 })
             }
             Err(e) => Ok(ToolResult {
                 tool_use_id: String::new(),
                 content: e.to_string(),
                 is_error: true,
+                images: Vec::new(),
             }),
         }
     }
@@ -1707,6 +1729,7 @@ impl ToolSetAdapter {
                 name, trust_attr, body
             ),
             is_error: false,
+            images: Vec::new(),
         })
     }
 
@@ -1751,6 +1774,7 @@ impl ToolSetAdapter {
             content: json,
             is_error: false,
             tool_use_id: tool_use_id.to_string(),
+            images: Vec::new(),
         })
     }
 
@@ -1795,6 +1819,7 @@ impl ToolSetAdapter {
             content: json,
             is_error: false,
             tool_use_id: tool_use_id.to_string(),
+            images: Vec::new(),
         })
     }
 }

@@ -253,6 +253,7 @@ pub async fn run_turn(
                                 started_at_ms: Some(now_ms()),
                                 completed_at_ms: None,
                                 status: None,
+                                provider_id: None,
                             });
                         }
                         StreamChunk::Text { content, .. } => {
@@ -458,6 +459,7 @@ pub async fn run_turn(
                                             is_error: true,
                                             operator_private: false,
                                             diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                            images: vec![],
                                         },
                                     });
                                     let _ = event_tx.send(AppEvent::ProviderChunk {
@@ -473,6 +475,7 @@ pub async fn run_turn(
                                 tool_use_id: tc.id.clone(),
                                 content: answer.clone(),
                                 is_error: false,
+                                images: vec![],
                             };
                             let _ = event_tx.send(AppEvent::ProviderChunk {
                                 conversation_id: conversation_id.clone(),
@@ -483,6 +486,7 @@ pub async fn run_turn(
                                     operator_private: false,
                                     // AskUserQuestion answer — not a file write.
                                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                    images: vec![],
                                 },
                             });
                             indexed_results.push((
@@ -491,6 +495,7 @@ pub async fn run_turn(
                                     tool_use_id: result.tool_use_id,
                                     content: result.content,
                                     is_error: result.is_error,
+                                    images: result.images,
                                 },
                             ));
                         }
@@ -604,16 +609,19 @@ pub async fn run_turn(
                                 std::collections::HashSet::new();
                             let workspace_root = tools.workspace_root();
                             for (i, call) in terminal.into_iter().enumerate() {
-                                let (id, content, is_error, was_cancelled) = match call {
+                                let (id, content, is_error, was_cancelled, images) = match call {
                                     ToolCall::Success { id, result, .. } => {
-                                        (id, result.output, result.is_error, false)
+                                        (id, result.output, result.is_error, false, result.images)
                                     }
-                                    ToolCall::Error { id, error, .. } => (id, error, true, false),
+                                    ToolCall::Error { id, error, .. } => {
+                                        (id, error, true, false, Vec::new())
+                                    }
                                     ToolCall::Cancelled { id, reason, .. } => (
                                         id,
                                         format!("Tool execution cancelled: {}", reason),
                                         true,
                                         true,
+                                        Vec::new(),
                                     ),
                                     _ => (
                                         batch_with_idx[i].1.id.clone(),
@@ -621,6 +629,7 @@ pub async fn run_turn(
                                             .to_string(),
                                         true,
                                         false,
+                                        Vec::new(),
                                     ),
                                 };
                                 // Story 19.1 A3: display diff for completed,
@@ -664,6 +673,7 @@ pub async fn run_turn(
                                         operator_private: batch_with_idx[i].1.tool_name
                                             == crate::domain::models::team_proposal::TEAM_PROPOSAL_TOOL_NAME,
                                         diff,
+                                        images: images.clone(),
                                     },
                                 });
                                 indexed_results.push((
@@ -672,6 +682,7 @@ pub async fn run_turn(
                                         tool_use_id: id,
                                         content,
                                         is_error,
+                                        images,
                                     },
                                 ));
                                 if was_cancelled {

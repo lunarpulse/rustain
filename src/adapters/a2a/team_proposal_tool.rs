@@ -105,6 +105,7 @@ fn result(tool_use_id: &str, content: impl Into<String>) -> ToolResult {
         tool_use_id: tool_use_id.to_owned(),
         content: content.into(),
         is_error: false,
+        images: Vec::new(),
     }
 }
 

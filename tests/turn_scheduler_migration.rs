@@ -202,6 +202,7 @@ impl ToolSetPort for MockToolSet {
             tool_use_id: String::new(),
             content: "file contents".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }
@@ -236,6 +237,7 @@ impl ToolSetPort for RemoteThenBashTools {
             }
             .to_owned(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

@@ -34,6 +34,7 @@ fn chunk(v: &V) -> StreamChunk {
             is_error: false,
             operator_private: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         },
         V::H => StreamChunk::Thinking {
             content: "h".into(),

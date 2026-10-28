@@ -124,10 +124,12 @@ mod tests {
                 content: "ok".to_string(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             }),
             started_at_ms: Some(0),
             completed_at_ms: Some(1),
             status: Some("✓ Success".to_string()),
+            provider_id: None,
         }
     }
 

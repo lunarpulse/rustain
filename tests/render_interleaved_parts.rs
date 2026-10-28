@@ -99,6 +99,7 @@ fn make_result(content: &str, is_error: bool) -> TurnPart {
             content: content.to_string(),
             is_error,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         },
     }
 }

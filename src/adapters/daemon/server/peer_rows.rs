@@ -3,11 +3,13 @@ use crate::adapters::daemon::response_modes::{
     DRAFT_INTERRUPTED_NOTICE, DraftPhase, PendingDraftController, rap_one_way_notice,
 };
 use crate::domain::models::{
-    AgentId, Conversation, InteractionPolicySnapshot, ItemAddress, PeerId, PeerRowControl,
-    PeerRowStage, ReceivedSelection, ResponseMode, SelectionSummary, StorySummary,
+    AgentId, ChatMessage, Conversation, InteractionPolicySnapshot, ItemAddress, MessageRole,
+    PeerId, PeerRowControl, PeerRowStage, ReceivedSelection, ResponseMode, SelectionSummary,
+    StopReason, StorySummary, StreamChunk, generate_message_id,
 };
 #[cfg(feature = "a2a")]
 use crate::domain::models::{SemanticMessageType, carries_story_list, story_summary};
+use std::sync::Arc;
 
 /// Story 19.23 D6: the card's selection sentence names the final header label,
 /// sanitized once here at the render boundary.
@@ -184,6 +186,137 @@ impl AttachServer {
             mutations,
         )
         .await
+    }
+
+    pub(super) async fn collect_peer_chunk(&self, node: &Arc<AgentId>, chunk: &StreamChunk) {
+        use crate::domain::models::{ToolCallInfo, ToolResultInfo};
+        match chunk {
+            StreamChunk::TurnComplete { stop_reason } if *stop_reason != StopReason::ToolUse => {
+                self.finish_peer_buffer(node, stop_reason).await;
+                return;
+            }
+            StreamChunk::Error { content } => {
+                self.finish_peer_buffer(node, &StopReason::Cancelled).await;
+                if !content.is_empty() {
+                    let notice = ChatMessage {
+                        id: generate_message_id(),
+                        role: MessageRole::System,
+                        content: format!("Peer turn failed: {content}"),
+                        created_at: crate::domain::models::session_meta::now_unix(),
+                        synthetic: true,
+                        ..Default::default()
+                    };
+                    if let Err(error) = commit_peer_rows(
+                        &self.peer_row_serial,
+                        &self.conversation,
+                        &self.registry,
+                        self.core.storage.as_ref(),
+                        vec![PeerRowMutation::Upsert {
+                            message: notice,
+                            control: None,
+                        }],
+                    )
+                    .await
+                    {
+                        tracing::warn!(%error, "persisting peer stream error notice failed");
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
+        let mut buffers = self.peer_assistant_buffers.lock().await;
+        match chunk {
+            StreamChunk::Text { content, .. } => {
+                buffers
+                    .entry(node.clone())
+                    .or_default()
+                    .text
+                    .push_str(content);
+            }
+            StreamChunk::ToolUse { id, name, input } => {
+                buffers
+                    .entry(node.clone())
+                    .or_default()
+                    .tools
+                    .push(ToolCallInfo {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        result: None,
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        status: None,
+                        provider_id: None,
+                    });
+            }
+            StreamChunk::ToolResult {
+                id,
+                content,
+                is_error,
+                diff,
+                operator_private,
+                // Peer rows carry no result images (Story 20.1d4a T2).
+                ..
+            } => {
+                let buffer = buffers.entry(node.clone()).or_default();
+                if let Some(tool) = buffer.tools.iter_mut().find(|tool| tool.id == *id) {
+                    tool.result = Some(ToolResultInfo {
+                        content: content.clone(),
+                        is_error: *is_error,
+                        diff: diff.clone(),
+                        images: Vec::new(),
+                    });
+                } else if !*operator_private {
+                    // Retain unexpected result evidence without inventing a call.
+                    buffer.text.push_str(content);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(super) async fn finish_peer_buffer(&self, node: &Arc<AgentId>, stop_reason: &StopReason) {
+        let Some(mut buffer) = self.peer_assistant_buffers.lock().await.remove(node) else {
+            return;
+        };
+        if *stop_reason == StopReason::Cancelled {
+            // A cancelled peer turn is not an answer; tool evidence remains visible.
+            buffer.text.clear();
+        }
+        if buffer.text.is_empty() && buffer.tools.is_empty() {
+            return;
+        }
+        let message = ChatMessage {
+            id: generate_message_id(),
+            role: if *stop_reason == StopReason::Cancelled {
+                MessageRole::System
+            } else {
+                MessageRole::Assistant
+            },
+            content: buffer.text,
+            tool_calls: buffer.tools,
+            stop_reason: Some(stop_reason.clone()),
+            authorship: crate::domain::models::Authorship::AgentComposed,
+            send_authorization: crate::domain::models::SendAuthorization::Unknown,
+            history_source: crate::domain::models::HistorySource::PeerDisplay,
+            created_at: crate::domain::models::session_meta::now_unix(),
+            ..Default::default()
+        };
+        if let Err(error) = commit_peer_rows(
+            &self.peer_row_serial,
+            &self.conversation,
+            &self.registry,
+            self.core.storage.as_ref(),
+            vec![PeerRowMutation::Upsert {
+                message,
+                control: None,
+            }],
+        )
+        .await
+        {
+            tracing::warn!(%error, "persisting peer turn display failed");
+        }
     }
 }
 

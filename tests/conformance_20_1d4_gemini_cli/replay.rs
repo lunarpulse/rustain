@@ -1,8 +1,9 @@
 //! K09 (signature replay through the real turn loop: the two-turn literal, the
 //! invalid-signature sentinel, the edited turn, another model and another
 //! provider) and K10 (in-turn replay on the TUI, `ask`, daemon and ACP rails,
-//! text-only replay after a local reload and an `ask --resume`, the merged
-//! reload refusal, and privacy of every observer). Every Cloud Code Assist row is
+//! text-only replay after a local reload and an `ask --resume`, the tool-round
+//! replay after an `ask` resume and a daemon restart (span-correct since Story
+//! 20.1d4a), and privacy of every observer). Every Cloud Code Assist row is
 //! written by `flows::login` against the loopback stub.
 use super::auth::{
     ACCESS, EMAIL, Env, MODEL, PROJECT, PROVIDER, STREAM, build, config, env, hits, login, options,
@@ -36,8 +37,8 @@ use rustain::domain::errors::ToolError;
 use rustain::domain::events::AppEvent;
 use rustain::domain::models::{
     AppConfig, ChannelKind, ChannelTurnRequest, ChatMessage, ContentBlockType, Conversation,
-    MessageRole, PermissionMode, ProviderConfig, ReducerState, SessionManager, SessionState,
-    StopReason, StreamChunk, StreamingState, ToolDefinition, ToolResult, ViewState, reduce,
+    MessageRole, PermissionMode, ProviderConfig, SessionManager, SessionState, StopReason,
+    StreamChunk, StreamingState, ToolDefinition, ToolResult, ViewState,
 };
 use rustain::domain::ports::{
     ContextAssemblerPort, ContextPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
@@ -82,7 +83,7 @@ const SIGNED_TEXT_TURN: &str = r#"{"role":"model","parts":[{"thought":true,"text
 
 // ── loopback world ──────────────────────────────────────────────────────────
 
-struct World {
+pub(crate) struct World {
     server: MockServer,
     dir: tempfile::TempDir,
     _env: (Env, Env),
@@ -90,7 +91,7 @@ struct World {
 
 impl World {
     /// Isolated env plus one real browser login of the fixture account.
-    async fn start() -> Self {
+    pub(crate) async fn start() -> Self {
         let server = MockServer::start().await;
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().to_str().unwrap().to_owned();
@@ -108,14 +109,14 @@ impl World {
         }
     }
 
-    fn workspace(&self) -> PathBuf {
+    pub(crate) fn workspace(&self) -> PathBuf {
         let ws = self.dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
         ws
     }
 
     /// Stream attempts answered in order; the last one repeats.
-    async fn script(&self, attempts: Vec<ResponseTemplate>) {
+    pub(crate) async fn script(&self, attempts: Vec<ResponseTemplate>) {
         Mock::given(method("POST"))
             .and(path(STREAM))
             .respond_with(Script(attempts, AtomicUsize::new(0)))
@@ -136,7 +137,7 @@ impl World {
     }
 
     /// Raw bodies of every `streamGenerateContent` POST, in arrival order.
-    async fn posts(&self) -> Vec<String> {
+    pub(crate) async fn posts(&self) -> Vec<String> {
         let requests = self.server.received_requests().await.unwrap();
         hits(&requests, STREAM)
             .into_iter()
@@ -145,7 +146,7 @@ impl World {
     }
 }
 
-struct Script(Vec<ResponseTemplate>, AtomicUsize);
+pub(crate) struct Script(Vec<ResponseTemplate>, AtomicUsize);
 impl Respond for Script {
     fn respond(&self, _: &Request) -> ResponseTemplate {
         let index = self.1.fetch_add(1, Ordering::SeqCst);
@@ -180,7 +181,7 @@ impl Respond for Rounds {
 
 // ── Cloud Code Assist SSE ───────────────────────────────────────────────────
 
-fn frame(parts: Value, finish: Option<&str>) -> Value {
+pub(crate) fn frame(parts: Value, finish: Option<&str>) -> Value {
     let mut candidate = json!({"content": {"role": "model", "parts": parts}});
     if let Some(finish) = finish {
         candidate["finishReason"] = json!(finish);
@@ -191,7 +192,7 @@ fn frame(parts: Value, finish: Option<&str>) -> Value {
     }})
 }
 
-fn sse(frames: &[Value]) -> ResponseTemplate {
+pub(crate) fn sse(frames: &[Value]) -> ResponseTemplate {
     ResponseTemplate::new(200)
         .insert_header("content-type", "text/event-stream")
         .set_body_string(
@@ -260,11 +261,11 @@ fn user_content(text: &str) -> Value {
     json!({"role": "user", "parts": [{"text": text}]})
 }
 
-fn body(raw: &str) -> Value {
+pub(crate) fn body(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap()
 }
 
-fn contents(raw: &str) -> Vec<Value> {
+pub(crate) fn contents(raw: &str) -> Vec<Value> {
     body(raw)["request"]["contents"].as_array().unwrap().clone()
 }
 
@@ -277,7 +278,7 @@ fn assert_in_turn_replay(raw: &str) {
 }
 
 /// Every `thoughtSignature` value in request order.
-fn signatures(value: &Value) -> Vec<String> {
+pub(crate) fn signatures(value: &Value) -> Vec<String> {
     match value {
         Value::Object(map) => map
             .iter()
@@ -292,7 +293,7 @@ fn signatures(value: &Value) -> Vec<String> {
 }
 
 /// A signature, the replay payload or a replayed thought part.
-fn leaks(text: &str) -> bool {
+pub(crate) fn leaks(text: &str) -> bool {
     text.contains(MARK)
         || text.contains("gemini_parts")
         || text.contains("thoughtSignature")
@@ -348,6 +349,7 @@ impl ToolSetPort for ReadTools {
             tool_use_id: String::new(),
             content: format!("contents of {}", input["path"].as_str().unwrap_or_default()),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }
@@ -408,7 +410,7 @@ async fn ask_json(ws: &Path, query: &str, session: Option<String>) -> String {
     doc["session_id"].as_str().unwrap().to_owned()
 }
 
-fn chat_user(text: &str) -> ChatMessage {
+pub(crate) fn chat_user(text: &str) -> ChatMessage {
     ChatMessage {
         id: format!("user-{text}"),
         role: MessageRole::User,
@@ -417,20 +419,25 @@ fn chat_user(text: &str) -> ChatMessage {
     }
 }
 
-/// The TUI event loop's consumer: reduce, drain committed turns, rebuild the mirror.
-fn fold(conversation: &mut Conversation, chunks: impl IntoIterator<Item = StreamChunk>) {
-    let clock = SystemClock::default();
-    let mut state = ReducerState::new(0, std::time::Instant::now());
+/// The TUI event loop's consumer, composed from the production steps
+/// (`apply_chunk_for_tests`: reduce, drain the committed turn, rebuild the
+/// mirror; Story 20.1d4a closes DF-20-1D4-MIRROR-REASONING-IN-CONTENT's test
+/// copy).
+pub(crate) fn fold(conversation: &mut Conversation, chunks: impl IntoIterator<Item = StreamChunk>) {
+    let (mut state, clock) = rustain::domain::services::reducer::test_reducer_state(0);
+    let mut streaming = StreamingState::default();
     for chunk in chunks {
-        reduce(&mut state, chunk, &clock);
-        if let Some(turn) = state.committed_turn.take() {
-            conversation.turns.push(turn);
-            conversation.rebuild_messages_mirror();
-        }
+        rustain::domain::services::reducer::apply_chunk_for_tests(
+            conversation,
+            &mut streaming,
+            &mut state,
+            chunk,
+            &clock,
+        );
     }
 }
 
-fn render(conversation: &Conversation) -> String {
+pub(crate) fn render(conversation: &Conversation) -> String {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect};
     let mut terminal = Terminal::new(TestBackend::new(120, 60)).unwrap();
     let clock = SystemClock::default();
@@ -794,10 +801,12 @@ async fn k10_tui_tool_round_replays_in_turn_and_no_projection_carries_it() {
 }
 
 /// The `ask` rail: the in-turn literal, marker-free text/JSON output, the
-/// session store, and the merged reload refused by the consistency guard.
+/// session store, and the resumed history replayed exactly as in-turn (Story
+/// 20.1d4a T2: per-response spans and provider call ids make the reload pass
+/// the consistency guard; it was refused as a merged row before).
 #[tokio::test]
 #[serial]
-async fn k10_ask_tool_round_replays_in_turn_and_the_merged_reload_is_refused() {
+async fn k10_ask_tool_round_replays_in_turn_and_after_the_session_resume() {
     let world = World::start().await;
     world.rounds().await;
     let ws = world.workspace();
@@ -813,18 +822,17 @@ async fn k10_ask_tool_round_replays_in_turn_and_the_merged_reload_is_refused() {
     assert!(!leaks(&stdout) && !leaks(&stderr), "{stdout}\n{stderr}");
     let posts = world.posts().await;
     assert_eq!(posts.len(), 4);
-    // POST 3 carries the reloaded multi-response row: no fixture signature is
-    // sent misplaced; only the unsigned reconstruction's first-call sentinel.
-    let reloaded = body(&posts[2]);
-    assert!(!posts[2].contains(MARK), "{}", posts[2]);
+    // POST 3 carries the resumed tool round exactly as in-turn: every
+    // signature on its own part, no sentinel, both calls and both results.
+    let reloaded = contents(&posts[2]);
+    assert_eq!(reloaded[1], signed_model(SIG2), "{}", posts[2]);
+    assert_eq!(reloaded[2], responses(), "{}", posts[2]);
     assert_eq!(
-        signatures(&reloaded),
-        vec![SENTINEL.to_owned()],
+        signatures(&body(&posts[2])),
+        vec![SIG0.to_owned(), SIG1.to_owned(), SIG2.to_owned()],
         "{}",
         posts[2]
     );
-    let calls = posts[2].matches("\"functionCall\"").count();
-    assert_eq!(calls, 2, "the reloaded row keeps both calls: {}", posts[2]);
     // The new run's own tool round still replays in-turn.
     assert_eq!(
         contents(&posts[3])[contents(&posts[3]).len() - 2],
@@ -1000,7 +1008,7 @@ fn clean(frames: &[DaemonFrame]) {
 
 #[tokio::test]
 #[serial]
-async fn k10_daemon_tool_round_replays_in_turn_projects_nothing_and_restart_refuses_the_rows() {
+async fn k10_daemon_tool_round_replays_in_turn_projects_nothing_and_after_restart() {
     let world = World::start().await;
     world
         .script(vec![
@@ -1082,14 +1090,23 @@ async fn k10_daemon_tool_round_replays_in_turn_projects_nothing_and_restart_refu
     assert!(stored >= 1, "the daemon persists the turn's items");
     assert!(sessions_contain(&ws, SIG2));
 
-    // After a restart the messages-only rows fail the guard: nothing is sent misplaced.
+    // After a restart the per-response rows replay exactly as in-turn (Story
+    // 20.1d4a T2; before it they failed the guard and were sent unsigned).
     let daemon = Daemon::start(&ws, restored, "second.sock");
     let (mut client, ack) = attach(&daemon.socket).await;
     clean(&[ack]);
     clean(&daemon_turn(&mut client, "after restart").await);
     let posts = world.posts().await;
     assert_eq!(posts.len(), 4);
-    assert!(!posts[3].contains(MARK), "{}", posts[3]);
+    let reloaded = contents(&posts[3]);
+    assert_eq!(reloaded[1], signed_model(SIG2), "{}", posts[3]);
+    assert_eq!(reloaded[2], responses(), "{}", posts[3]);
+    assert_eq!(
+        signatures(&body(&posts[3])),
+        vec![SIG0.to_owned(), SIG1.to_owned(), SIG2.to_owned()],
+        "{}",
+        posts[3]
+    );
     drop(client);
     daemon.stop().await;
 }
@@ -1294,7 +1311,7 @@ async fn k10_an_edited_local_reload_drops_the_signatures() {
 // ── K10: privacy (20-1d1b K07 pattern) ──────────────────────────────────────
 
 #[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Capture(pub(crate) Arc<Mutex<Vec<u8>>>);
 impl std::io::Write for Capture {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(bytes);

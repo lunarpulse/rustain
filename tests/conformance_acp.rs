@@ -1328,6 +1328,7 @@ impl ToolSetPort for SentinelToolSet {
             tool_use_id: "tool-1".to_string(),
             content: "sentinel touched".to_string(),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

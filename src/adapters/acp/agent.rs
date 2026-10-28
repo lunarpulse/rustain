@@ -488,20 +488,31 @@ impl RustainAcpAgent {
         }
     }
 
+    /// One provider response as one assistant row (F0), with its reasoning,
+    /// replay items and response span (Stories 20.1d1b, 20.1d4a).
     fn assistant_message(
         content: String,
         tool_calls: Vec<ToolCallInfo>,
         stop_reason: DomainStopReason,
         provider_replay: Vec<crate::domain::models::ProviderReplayItem>,
+        span: crate::domain::models::ResponseSpan,
     ) -> ChatMessage {
+        use crate::domain::models::ContentBlockType;
+        let mut content_blocks = Vec::with_capacity(provider_replay.len() + 2);
+        if let Some(reasoning) = &span.reasoning {
+            content_blocks.push(ContentBlockType::Thinking(reasoning.clone()));
+        }
+        content_blocks.extend(
+            provider_replay
+                .into_iter()
+                .map(ContentBlockType::ProviderReplay),
+        );
+        content_blocks.push(ContentBlockType::ResponseSpan(span));
         ChatMessage {
             id: crate::domain::models::conversation::generate_message_id(),
             role: MessageRole::Assistant,
             content,
-            content_blocks: provider_replay
-                .into_iter()
-                .map(crate::domain::models::ContentBlockType::ProviderReplay)
-                .collect(),
+            content_blocks,
             tool_calls,
             created_at: now_unix(),
             token_count: None,
@@ -778,6 +789,9 @@ impl RustainAcpAgent {
         let mut assistant_messages: Vec<ChatMessage> = Vec::new();
         // Story 20.1d1b: persisted for replay on the next prompt, never sent as an update.
         let mut assistant_replay = Vec::new();
+        // Story 20.1d4a T2: the response's own text, reasoning, call and replay
+        // counts; `assistant_text` also carries client-visible notices.
+        let mut assistant_span = crate::domain::models::ResponseSpanBuilder::default();
         let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
             match mcp_event_rx.try_recv() {
@@ -840,13 +854,16 @@ impl RustainAcpAgent {
                                 assistant_stop_reason = reason.clone();
                                 if matches!(reason, DomainStopReason::ToolUse)
                                     && (!assistant_text.is_empty()
-                                        || !assistant_tool_calls.is_empty())
+                                        || !assistant_tool_calls.is_empty()
+                                        || !assistant_span.is_empty()
+                                        || !assistant_replay.is_empty())
                                 {
                                     assistant_messages.push(Self::assistant_message(
                                         std::mem::take(&mut assistant_text),
                                         std::mem::take(&mut assistant_tool_calls),
                                         DomainStopReason::ToolUse,
                                         std::mem::take(&mut assistant_replay),
+                                        assistant_span.finish(),
                                     ));
                                     assistant_messages.push(Self::tool_result_boundary_message());
                                 }
@@ -880,6 +897,10 @@ impl RustainAcpAgent {
                                 match &other {
                                     StreamChunk::Text { content, .. } => {
                                         assistant_text.push_str(content);
+                                        assistant_span.text(content);
+                                    }
+                                    StreamChunk::Thinking { content, .. } => {
+                                        assistant_span.reasoning(content);
                                     }
                                     StreamChunk::ToolUse { id, name, input } => {
                                         assistant_tool_calls.push(ToolCallInfo {
@@ -890,45 +911,50 @@ impl RustainAcpAgent {
                                             started_at_ms: None,
                                             completed_at_ms: None,
                                             status: None,
+                                            provider_id: Some(id.clone()),
                                         });
+                                        assistant_span.call();
                                     }
                                     StreamChunk::ToolResult {
                                         id,
                                         content,
                                         is_error,
+                                        images,
                                         ..
                                     } => {
                                         let result = ToolResultInfo {
                                             content: content.clone(),
                                             is_error: *is_error,
+                                            images: images.clone(),
                                             diff: crate::domain::models::WriteDiffState::NotAWrite,
                                         };
                                         let status =
                                             Some(if *is_error { "✗ Error" } else { "✓ Success" }.to_string());
-                                        if let Some(call) = assistant_tool_calls
+                                        // The latest unanswered call of that provider id.
+                                        let unanswered = |tc: &&mut ToolCallInfo| {
+                                            tc.wire_id() == id.as_str() && tc.result.is_none()
+                                        };
+                                        let call = match assistant_tool_calls
                                             .iter_mut()
                                             .rev()
-                                            .find(|tc| tc.id == *id)
+                                            .find(unanswered)
                                         {
+                                            Some(call) => Some(call),
+                                            None => assistant_messages
+                                                .iter_mut()
+                                                .rev()
+                                                .flat_map(|message| message.tool_calls.iter_mut().rev())
+                                                .find(unanswered),
+                                        };
+                                        if let Some(call) = call {
                                             call.result = Some(result);
                                             call.completed_at_ms = Some((now_unix().max(0) as u64) * 1000);
                                             call.status = status;
-                                        } else {
-                                            'outer: for message in assistant_messages.iter_mut().rev() {
-                                                for call in message.tool_calls.iter_mut().rev() {
-                                                    if call.id == *id {
-                                                        call.result = Some(result);
-                                                        call.completed_at_ms =
-                                                            Some((now_unix().max(0) as u64) * 1000);
-                                                        call.status = status;
-                                                        break 'outer;
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
                                     StreamChunk::ProviderReplay { item } => {
                                         assistant_replay.push(item.clone());
+                                        assistant_span.replay();
                                     }
                                     _ => {}
                                 }
@@ -1024,12 +1050,17 @@ impl RustainAcpAgent {
         if turn_cancel.is_cancelled() {
             assistant_stop_reason = DomainStopReason::Cancelled;
         }
-        if !assistant_text.is_empty() || !assistant_tool_calls.is_empty() {
+        if !assistant_text.is_empty()
+            || !assistant_tool_calls.is_empty()
+            || !assistant_span.is_empty()
+            || !assistant_replay.is_empty()
+        {
             assistant_messages.push(Self::assistant_message(
                 std::mem::take(&mut assistant_text),
                 std::mem::take(&mut assistant_tool_calls),
                 assistant_stop_reason.clone(),
                 std::mem::take(&mut assistant_replay),
+                assistant_span.finish(),
             ));
         }
         let should_save =

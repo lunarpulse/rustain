@@ -4,10 +4,10 @@
 #[path = "conformance_20_1d4_gemini_cli/auth.rs"]
 pub(crate) mod auth;
 #[path = "conformance_20_1d4_gemini_cli/cli.rs"]
-mod cli;
+pub(crate) mod cli;
 #[path = "conformance_20_1d4_gemini_cli/onboarding.rs"]
 mod onboarding;
 #[path = "conformance_20_1d4_gemini_cli/replay.rs"]
-mod replay;
+pub(crate) mod replay;
 #[path = "conformance_20_1d4_gemini_cli/transport.rs"]
 mod transport;

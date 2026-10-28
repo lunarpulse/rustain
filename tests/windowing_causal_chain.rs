@@ -69,6 +69,7 @@ fn build_conversation(specs: &[TurnSpec]) -> Conversation {
                         content: "ok".into(),
                         is_error: false,
                         diff: rustain::domain::models::WriteDiffState::NotAWrite,
+                        images: vec![],
                     },
                 });
             }
@@ -137,6 +138,7 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
                         content: "ok".into(),
                         is_error: false,
                         diff: rustain::domain::models::WriteDiffState::NotAWrite,
+                        images: Vec::new(),
                     })
                 } else {
                     None
@@ -144,6 +146,7 @@ fn assistant_chat(t: &Turn) -> ChatMessage {
                 started_at_ms: Some(0),
                 completed_at_ms: Some(1),
                 status: Some("✓".into()),
+                provider_id: None,
             }),
             _ => {}
         }

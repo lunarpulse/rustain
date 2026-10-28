@@ -260,11 +260,9 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                                     serde_json::Value::String(s) => s.clone(),
                                                     other => other.to_string(),
                                                 };
-                                                tc.result = Some(ToolResultInfo {
-                                                    content: content_str,
-                                                    is_error: is_error.unwrap_or(false),
-                                                    diff: crate::domain::models::WriteDiffState::NotAWrite,
-                                                });
+                                                tc.result = Some(ToolResultInfo { content: content_str,
+                                                is_error: is_error.unwrap_or(false),
+                                                diff: crate::domain::models::WriteDiffState::NotAWrite, images: Vec::new() });
                                             }
                                             None => {
                                                 tracing::warn!(
@@ -312,6 +310,7 @@ pub fn convert_lines_to_chat_messages(lines: &[ClaudeCodeLine]) -> Vec<ChatMessa
                                     started_at_ms: None,
                                     completed_at_ms: None,
                                     status: None,
+                                    provider_id: None,
                                 });
                             }
                             ClaudeCodeBlock::Image => {

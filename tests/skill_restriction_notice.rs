@@ -224,6 +224,7 @@ impl ToolSetPort for RecordingTools {
             tool_use_id: String::new(),
             content: format!("{tool_name} executed"),
             is_error: false,
+            images: Vec::new(),
         })
     }
 }

@@ -49,6 +49,10 @@ pub enum StreamChunk {
         /// resolving to `NotCaptured { HistoricalOrReattached }`.
         #[serde(default)]
         diff: WriteDiffState,
+        /// Result images for the operator's own history (Story 20.1d4a T1);
+        /// every observer projection empties them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<super::message::ImageAttachment>,
     },
     Error {
         content: String,

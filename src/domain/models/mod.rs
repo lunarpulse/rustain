@@ -160,7 +160,7 @@ pub use config::{
     ProviderConfig, SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
-pub use content::ContentBlockType;
+pub use content::{ContentBlockType, ResponseSpan, ResponseSpanBuilder};
 pub use conversation::{
     ChatMessage, Conversation, ConversationSummary, ForkSource, HistorySource, ImageReference,
     PeerRowControl, PeerRowOperation, PeerRowStage, generate_conversation_id, generate_message_id,
@@ -385,8 +385,8 @@ pub use tool_descriptor::{ToolAnnotations, ToolDescriptor, ToolId};
 pub use tools::{ToolCallInfo, ToolDefinition, ToolInvocation, ToolResult, ToolResultInfo};
 #[allow(unused_imports)]
 pub use turn::{
-    InvocationStatus, PartId, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart, TurnRoute,
-    generate_turn_id, migrate_chat_message_to_turn, tool_call_id_for,
+    InvocationStatus, PartId, ResponseMark, ToolOutput, Turn, TurnId, TurnOrigin, TurnPart,
+    TurnRoute, generate_turn_id, migrate_chat_message_to_turn, tool_call_id_for,
 };
 #[allow(unused_imports)]
 pub use turn_group::{

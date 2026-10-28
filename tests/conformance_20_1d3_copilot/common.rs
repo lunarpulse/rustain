@@ -198,6 +198,7 @@ pub(crate) fn tool_result(call: &str, output: &str) -> Message {
         tool_use_id: call.into(),
         content: output.into(),
         is_error: false,
+        images: vec![],
     });
     message
 }

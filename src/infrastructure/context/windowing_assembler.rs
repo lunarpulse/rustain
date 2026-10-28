@@ -32,7 +32,7 @@ use crate::domain::models::{
     GroupingConfig, Message, MessageRole, TurnGroup, estimate_tokens, jaccard_similarity,
 };
 use crate::domain::ports::ContextAssemblerPort;
-use crate::domain::services::message_builder::build_api_messages;
+use crate::domain::services::message_builder::{build_api_messages, build_api_messages_for};
 use crate::domain::services::turn_grouping::group_turns;
 
 /// JTBD-log gate: only emit the structured token-saving log for sessions large
@@ -102,15 +102,11 @@ impl ContextAssemblerPort for WindowingAssembler {
 
         // Materialise the active block by slicing the message mirror at the user
         // prompt that initiates the first active turn. Falls back to passthrough
-        // if the anchor message cannot be located (defensive — never panic).
+        // if the anchor message cannot be located (defensive — never panic). The
+        // slice keeps its backing turns, so a marked turn rebuilds per response
+        // span as it does in passthrough (Story 20.1d4a).
         let active_wire = match active_message_slice(conversation, turns, first_active_turn_idx) {
-            Some(active_msgs) => {
-                let sub = Conversation {
-                    messages: active_msgs,
-                    ..Default::default()
-                };
-                build_api_messages(&sub)
-            }
+            Some(active_msgs) => build_api_messages_for(active_msgs, turns),
             None => {
                 return AssembledContext {
                     messages: passthrough,
@@ -247,11 +243,11 @@ fn gist_message(content: String) -> Message {
 /// prompt that initiates `first_active_turn_idx` to the end (which includes the
 /// trailing live prompt). Returns `None` if the anchor assistant message cannot
 /// be located in the mirror.
-fn active_message_slice(
-    conversation: &Conversation,
+fn active_message_slice<'a>(
+    conversation: &'a Conversation,
     turns: &[crate::domain::models::Turn],
     first_active_turn_idx: usize,
-) -> Option<Vec<crate::domain::models::ChatMessage>> {
+) -> Option<&'a [crate::domain::models::ChatMessage]> {
     use crate::domain::models::ChatMessage;
     let anchor_id = &turns[first_active_turn_idx].id.0;
     let pos = conversation
@@ -264,7 +260,7 @@ fn active_message_slice(
     while start > 0 && conversation.messages[start - 1].role != MessageRole::Assistant {
         start -= 1;
     }
-    Some(conversation.messages[start..].to_vec())
+    Some(&conversation.messages[start..])
 }
 
 /// Estimated tokens of a single wire message (content + tool payloads +
@@ -367,6 +363,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: vec![],
                 },
             });
         }
@@ -410,10 +407,12 @@ mod tests {
                             content: "ok".into(),
                             is_error: false,
                             diff: crate::domain::models::WriteDiffState::NotAWrite,
+                            images: Vec::new(),
                         }),
                         started_at_ms: Some(0),
                         completed_at_ms: Some(1),
                         status: Some("✓ Success".into()),
+                        provider_id: None,
                     });
                 }
                 _ => {}
@@ -899,5 +898,48 @@ mod tests {
             "the returning A group's gist should carry the continuation marker; got: {}",
             second_a.gist
         );
+    }
+
+    // Story 20.1d4a (review RF-02): the active block rebuilds a marked turn per
+    // response span, as passthrough does, also when the turn has reasoning (the
+    // mirror folds reasoning into the row's content; the span check reads the
+    // backing turn).
+    #[test]
+    fn active_block_rebuilds_a_marked_turn_with_reasoning_per_span() {
+        use crate::domain::models::turn::ResponseMark;
+        let mut last = assistant_turn(60 * MIN + 1000, "", &[("Edit", "src/parser/d.rs")]);
+        last.push_part(|id| TurnPart::Reasoning {
+            id,
+            text: "think".into(),
+        });
+        last.push_part(|id| TurnPart::Prose {
+            id,
+            text: "parser d".into(),
+        });
+        let end = last.parts.len();
+        last.responses.push(ResponseMark {
+            end,
+            call_ids: Vec::new(),
+        });
+        let mut c = conv(vec![
+            assistant_turn(0, "auth a", &[("Read", "src/auth/a.rs")]),
+            assistant_turn(1000, "auth b", &[("Edit", "src/auth/b.rs")]),
+            assistant_turn(60 * MIN, "parser c", &[("Read", "src/parser/c.rs")]),
+            last,
+        ]);
+        c.rebuild_messages_mirror();
+        assert!(group_turns(&c.turns, &GroupingConfig::default()).len() >= 2);
+        let out = WindowingAssembler::default().assemble(&c, big());
+        let passthrough = build_api_messages(&c);
+        for wire in [&out.messages, &passthrough] {
+            let reply = wire
+                .iter()
+                .rev()
+                .find(|m| m.role == MessageRole::Assistant)
+                .expect("the marked turn is on the wire");
+            assert_eq!(reply.content, "parser d");
+            assert_eq!(reply.reasoning_content.as_deref(), Some("think"));
+            assert_eq!(reply.tool_uses.len(), 1);
+        }
     }
 }

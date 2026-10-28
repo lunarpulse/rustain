@@ -959,6 +959,7 @@ mod tests {
                 content: "output".into(),
                 is_error: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: vec![],
             },
         });
         turn.push_part(|id| TurnPart::Reasoning {

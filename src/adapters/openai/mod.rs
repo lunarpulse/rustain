@@ -865,6 +865,7 @@ mod tests {
                 tool_use_id: "call_1".to_string(),
                 content: "src/ tests/".to_string(),
                 is_error: false,
+                images: Vec::new(),
             };
 
             let messages = [
@@ -940,6 +941,7 @@ mod tests {
                 tool_use_id: "call_1".to_string(),
                 content: "src/ tests/".to_string(),
                 is_error: false,
+                images: Vec::new(),
             };
 
             let messages = [
@@ -1000,6 +1002,7 @@ mod tests {
                 tool_use_id: "call_err".to_string(),
                 content: "command not found".to_string(),
                 is_error: true,
+                images: Vec::new(),
             };
 
             let messages = [

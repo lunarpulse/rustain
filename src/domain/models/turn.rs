@@ -201,6 +201,9 @@ pub struct ToolOutput {
     /// as `NotCaptured { HistoricalOrReattached }`, never as `NewFile`.
     #[serde(default)]
     pub diff: super::diff::WriteDiffState,
+    /// Result images, persisted for the provider history (Story 20.1d4a T1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<super::message::ImageAttachment>,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,9 +269,26 @@ pub struct Turn {
     /// Stop reason from the model (set on TurnComplete).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<super::stream::StopReason>,
+    /// One mark per provider response, in order (Story 20.1d4a T2); empty for
+    /// turns recorded before it and for migrated rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub responses: Vec<ResponseMark>,
     /// Turn-local counter; not persisted.
     #[serde(skip)]
     next_part_id: u64,
+}
+
+/// The end of one provider response inside a [`Turn`] (Story 20.1d4a T2).
+/// The response owns the parts from the previous mark's `end` up to its own,
+/// except tool results, which belong to the invocation they reference.
+/// `call_ids` are the ids the provider gave this response's invocations, in
+/// part order.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseMark {
+    pub end: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub call_ids: Vec<String>,
 }
 
 fn is_local_history_source(source: &super::conversation::HistorySource) -> bool {
@@ -290,6 +310,7 @@ impl Turn {
             role: MessageRole::Assistant,
             history_source: super::conversation::HistorySource::Local,
             stop_reason: None,
+            responses: Vec::new(),
             next_part_id: 0,
         }
     }
@@ -331,6 +352,17 @@ impl Turn {
         self.next_part_id += 1;
         self.parts.push(build(id));
         id
+    }
+
+    /// The mirror's display text: prose and reasoning in part order.
+    pub fn display_text(&self) -> String {
+        let mut text = String::new();
+        for part in &self.parts {
+            if let TurnPart::Prose { text: t, .. } | TurnPart::Reasoning { text: t, .. } = part {
+                text.push_str(t);
+            }
+        }
+        text
     }
 }
 
@@ -376,6 +408,9 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
         role: MessageRole::Assistant,
         history_source: super::conversation::HistorySource::Local,
         stop_reason: msg.stop_reason.clone(),
+        // The row's own `ResponseSpan` blocks stay on the row; the mirror keeps
+        // them for a turn without marks (Story 20.1d4a T2).
+        responses: Vec::new(),
         next_part_id: 0,
     };
     turn.history_source = if msg.is_peer_display() {
@@ -427,6 +462,7 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
                     content: result.content.clone(),
                     is_error: result.is_error,
                     diff: result.diff.clone(),
+                    images: result.images.clone(),
                 },
             });
         }
@@ -614,10 +650,12 @@ mod tests {
                     content: "file contents".into(),
                     is_error: false,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: vec![],
                 }),
                 started_at_ms: Some(1_000),
                 completed_at_ms: Some(2_000),
                 status: Some("Done".into()),
+                provider_id: None,
             }],
             created_at: 1_700_000,
             token_count: None,
@@ -654,10 +692,12 @@ mod tests {
                     content: "exit 1".into(),
                     is_error: true,
                     diff: crate::domain::models::WriteDiffState::NotAWrite,
+                    images: vec![],
                 }),
                 started_at_ms: Some(1_000),
                 completed_at_ms: Some(2_000),
                 status: Some("Error".into()),
+                provider_id: None,
             }],
             created_at: 1_700_000,
             token_count: None,
@@ -695,6 +735,7 @@ mod tests {
                 started_at_ms: None,
                 completed_at_ms: None,
                 status: None,
+                provider_id: None,
             }],
             created_at: 1_700_000,
             token_count: None,

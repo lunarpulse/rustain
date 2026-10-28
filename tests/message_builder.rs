@@ -93,10 +93,12 @@ fn test_build_api_messages_merges_consecutive_user_for_tool_results() {
             content: "Plan proposed for user approval".to_string(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         started_at_ms: Some(0),
         completed_at_ms: Some(1000),
         status: Some("✓ Success".to_string()),
+        provider_id: None,
     };
 
     let conv = make_conversation(vec![
@@ -347,10 +349,12 @@ fn retained_proposal_call(id: &str, result: Option<&str>) -> ToolCallInfo {
             content: content.into(),
             is_error: false,
             diff: rustain::domain::models::WriteDiffState::NotAWrite,
+            images: Vec::new(),
         }),
         started_at_ms: None,
         completed_at_ms: None,
         status: None,
+        provider_id: None,
     }
 }
 

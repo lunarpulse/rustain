@@ -115,6 +115,9 @@ pub struct ReducerState {
     last_running_tool_use_id: Option<String>,
     pub pending_usage: Option<UsageInfo>,
     pub committed_turn: Option<Turn>,
+    /// Provider call ids of the open response's invocations, in part order
+    /// (Story 20.1d4a T2); moved into its `ResponseMark` at `TurnComplete`.
+    open_call_ids: Vec<String>,
     wall_anchor_ms: i64,
     instant_anchor: Instant,
 }
@@ -145,6 +148,7 @@ impl ReducerState {
             last_running_tool_use_id: None,
             pending_usage: None,
             committed_turn: None,
+            open_call_ids: Vec::new(),
             wall_anchor_ms,
             instant_anchor,
         }
@@ -234,6 +238,18 @@ impl ReducerState {
     fn flush_all(&mut self) {
         self.flush_open_prose();
         self.flush_open_reasoning();
+    }
+
+    /// Close the open response at a `TurnComplete` (Story 20.1d4a T2): every
+    /// part so far that no earlier mark owns belongs to it.
+    fn mark_response(&mut self) {
+        let call_ids = std::mem::take(&mut self.open_call_ids);
+        if let Some(turn) = self.open_turn.as_mut() {
+            turn.responses.push(crate::domain::models::ResponseMark {
+                end: turn.parts.len(),
+                call_ids,
+            });
+        }
     }
 }
 
@@ -332,6 +348,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             };
 
             state.pending_invocations.insert(id.clone(), part_id);
+            state.open_call_ids.push(id.clone());
             state.last_running_tool = Some(name);
             state.last_running_tool_use_id = Some(id);
 
@@ -344,6 +361,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             content,
             is_error,
             diff,
+            images,
             ..
         } => {
             state.ensure_open_turn(clock);
@@ -404,6 +422,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                         content,
                         is_error,
                         diff,
+                        images,
                     },
                 });
             }
@@ -453,6 +472,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             StopReason::ToolUse => {
                 state.ensure_open_turn(clock);
                 state.flush_all();
+                state.mark_response();
                 // Do NOT commit — turn continues for tool results
                 ChunkAction::TurnContinuing
             }
@@ -461,6 +481,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                     state.ensure_open_turn(clock);
                 }
                 state.flush_all();
+                state.mark_response();
                 if let Some(turn) = state.open_turn.as_mut() {
                     turn.stop_reason = Some(stop_reason.clone());
                 }
@@ -586,6 +607,7 @@ pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState
                                 // mirror never carries it (A5 — the model's
                                 // bytes are unchanged; Story 19.1).
                                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                images: Vec::new(),
                             })
                         } else {
                             None
@@ -607,6 +629,7 @@ pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState
                             started_at_ms: Some(*started_at as u64),
                             completed_at_ms: ended_at.map(|v| v as u64),
                             status: status_str.map(|s| s.to_string()),
+                            provider_id: None,
                         },
                     );
                 }
@@ -917,6 +940,7 @@ mod tests {
                         is_error: false,
                         operator_private: false,
                         diff: crate::domain::models::WriteDiffState::NotAWrite,
+                        images: vec![],
                     },
                 ],
                 expected: vec![ChunkAction::NeedsRedraw, ChunkAction::NeedsRedraw],
@@ -1100,6 +1124,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1462,6 +1487,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1529,6 +1555,7 @@ mod tests {
                 is_error: true,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1568,6 +1595,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1626,6 +1654,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1701,6 +1730,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1768,6 +1798,7 @@ mod tests {
                 is_error: false,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1801,6 +1832,7 @@ mod tests {
                 is_error: true,
                 operator_private: false,
                 diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: Vec::new(),
             },
             &clock,
         );
@@ -1826,5 +1858,104 @@ mod tests {
         assert!(state.open_reasoning.is_none());
         assert!(state.pending_invocations.is_empty());
         assert!(state.committed_turn.is_none());
+    }
+
+    // ── Story 20.1d4a: response marks, provider ids, result images ───────
+
+    fn feed(chunks: Vec<StreamChunk>) -> Turn {
+        let (mut state, clock) = make_state(0);
+        for chunk in chunks {
+            reduce(&mut state, chunk, &clock);
+        }
+        state.committed_turn.take().expect("committed turn")
+    }
+
+    fn text(content: &str) -> StreamChunk {
+        StreamChunk::Text {
+            content: content.into(),
+            parent_tool_use_id: None,
+        }
+    }
+
+    fn tool_use(id: &str) -> StreamChunk {
+        StreamChunk::ToolUse {
+            id: id.into(),
+            name: "tool".into(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    fn tool_result(id: &str, images: Vec<crate::domain::models::ImageAttachment>) -> StreamChunk {
+        StreamChunk::ToolResult {
+            id: id.into(),
+            content: format!("result {id}"),
+            is_error: false,
+            operator_private: false,
+            diff: crate::domain::models::WriteDiffState::NotAWrite,
+            images,
+        }
+    }
+
+    fn complete(stop_reason: StopReason) -> StreamChunk {
+        StreamChunk::TurnComplete { stop_reason }
+    }
+
+    #[test]
+    fn every_turn_complete_marks_a_response_with_its_provider_call_ids() {
+        let image = crate::domain::models::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "UE5H".into(),
+        };
+        let turn = feed(vec![
+            text("V"),
+            tool_use("A"),
+            tool_use("B"),
+            complete(StopReason::ToolUse),
+            tool_result("B", vec![]),
+            tool_result("A", vec![image.clone()]),
+            tool_use("A"),
+            complete(StopReason::ToolUse),
+            tool_result("A", vec![]),
+            text("done"),
+            complete(StopReason::EndTurn),
+        ]);
+        let marks: Vec<_> = turn
+            .responses
+            .iter()
+            .map(|mark| (mark.end, mark.call_ids.clone()))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                (3, vec!["A".to_owned(), "B".to_owned()]),
+                (6, vec!["A".to_owned()]),
+                (8, vec![]),
+            ],
+            "{:?}",
+            turn.parts
+        );
+        let images: Vec<_> = turn
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                TurnPart::ToolResult { output, .. } => Some(output.images.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images, vec![vec![], vec![image], vec![]]);
+    }
+
+    #[test]
+    fn a_cancelled_tail_is_its_own_response() {
+        let turn = feed(vec![
+            tool_use("A"),
+            complete(StopReason::ToolUse),
+            tool_result("A", vec![]),
+            text("partial"),
+            complete(StopReason::Cancelled),
+        ]);
+        assert_eq!(turn.responses.len(), 2);
+        assert_eq!(turn.responses[1].end, turn.parts.len());
+        assert!(turn.responses[1].call_ids.is_empty());
     }
 }
