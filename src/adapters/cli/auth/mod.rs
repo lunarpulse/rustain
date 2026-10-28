@@ -1,12 +1,14 @@
+pub mod accounts;
 pub mod list;
 pub mod login;
 pub mod logout;
 pub mod providers;
 pub mod status;
 pub mod terminal_ui;
+pub mod use_account;
 
 use crate::domain::models::{AuthSnapshot, AuthSource};
-use crate::domain::services::key_cascade::{CascadeInputs, SelectionMaterial, select};
+use crate::domain::services::key_cascade::{CascadeInputs, RowPolicy, SelectionMaterial, select};
 
 /// Ordered environment names used by provenance and ACP availability.
 pub(crate) fn env_vars_for<'a>(provider_id: &str, api_key_env: &'a str) -> [&'a str; 2] {
@@ -17,11 +19,38 @@ pub(crate) fn env_vars_for<'a>(provider_id: &str, api_key_env: &'a str) -> [&'a 
     }
 }
 
+/// After `auth login`, `auth use` or `auth logout --id`: refresh the provider's
+/// live roster when its credentials changed and still serve, and print the
+/// discovery line on stderr.
+pub async fn rediscover(
+    provider: &str,
+    app_config: &crate::domain::models::AppConfig,
+    before: &AuthSnapshot,
+) {
+    let Some(report) = crate::infrastructure::model_discovery::rediscover_after_auth_change(
+        provider, app_config, before,
+    )
+    .await
+    else {
+        return;
+    };
+    let display = providers::lookup(provider).map_or(provider, |meta| meta.display_name);
+    if let Some(notice) = report.notice {
+        eprintln!("{notice}");
+    } else if report.status == crate::domain::models::provider::DiscoveryStatus::Unavailable {
+        eprintln!("Provider {display} unavailable — showing bundled models.");
+    } else {
+        eprintln!("Discovered {} models for {display}.", report.model_count);
+    }
+}
+
 pub(crate) struct SourceSelection {
     pub source: AuthSource,
     pub material: SelectionMaterial,
     pub last_validated: Option<chrono::DateTime<chrono::Utc>>,
     pub identity: Option<String>,
+    /// The stored row a request would send, if any.
+    pub row: Option<crate::domain::models::CredentialId>,
 }
 
 impl SourceSelection {
@@ -44,6 +73,7 @@ impl SourceSelection {
             material: selection.material,
             last_validated: selection.last_validated,
             identity,
+            row: selection.row.map(|row| row.id),
         }
     }
 }
@@ -54,15 +84,16 @@ pub(crate) fn source_for(
     env_vars: &[&str],
     snapshot: &AuthSnapshot,
     env_lookup: &dyn Fn(&str) -> Option<String>,
-    oauth_allowed: bool,
+    policy: RowPolicy,
 ) -> Option<SourceSelection> {
     let selection = select(
         &CascadeInputs {
             runtime: None,
             rows: snapshot.rows(provider_id),
+            selected: snapshot.selected(provider_id),
             env_vars,
             env_lookup,
-            oauth_allowed,
+            policy,
             now_ms: chrono::Utc::now().timestamp_millis(),
         },
         &Default::default(),
@@ -103,8 +134,9 @@ pub(crate) fn source_for_configured(
         } else {
             id
         };
+        // A login-only kind reads no environment, as its factory and availability do.
         let env_name = cfg.api_key_env.as_str();
-        let env_vars = if env_name.is_empty() {
+        let env_vars = if env_name.is_empty() || providers::login_only(kind) {
             &[][..]
         } else {
             std::slice::from_ref(&env_name)
@@ -114,8 +146,8 @@ pub(crate) fn source_for_configured(
         } else {
             crate::infrastructure::provider_factory::discovery_base_url(id, cfg)
         };
-        let oauth_allowed = crate::infrastructure::provider_factory::oauth_allowed(kind, &base);
-        source_for(rows_key, env_vars, snapshot, env_lookup, oauth_allowed)
+        let policy = crate::infrastructure::provider_factory::row_policy(kind, rows_key, &base);
+        source_for(rows_key, env_vars, snapshot, env_lookup, policy)
     } else {
         let base = if provider_id == "anthropic" {
             crate::infrastructure::provider_factory::anthropic_base_url(None, env_lookup)
@@ -124,14 +156,14 @@ pub(crate) fn source_for_configured(
                 .map(|policy| crate::adapters::auth::policies::endpoint(policy.api_origin))
                 .unwrap_or_default()
         };
-        let oauth_allowed =
-            crate::infrastructure::provider_factory::oauth_allowed(provider_id, &base);
+        let policy =
+            crate::infrastructure::provider_factory::row_policy(provider_id, provider_id, &base);
         source_for(
             provider_id,
             &env_vars_for(provider_id, default_env),
             snapshot,
             env_lookup,
-            oauth_allowed,
+            policy,
         )
     }
 }

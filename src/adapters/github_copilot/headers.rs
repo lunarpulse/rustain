@@ -359,13 +359,14 @@ impl RequestProfile for CopilotProfile {
     fn headers(&self, _resolved: &Resolved, ctx: &RequestContext<'_>, out: &mut HeaderMap) {
         self.route_headers(ctx.messages, ctx.options.session_id.as_deref(), out);
     }
+    /// The identity state is keyed by the root this attempt set already uses.
     fn begin(
         &self,
         resolved: &Resolved,
+        base: &str,
         _ctx: &RequestContext<'_>,
     ) -> Option<Box<dyn RequestState>> {
-        let root = self.root(resolved);
-        Some(Box::new(self.state(resolved, &root)))
+        Some(Box::new(self.state(resolved, base)))
     }
     fn error(
         &self,
@@ -395,11 +396,12 @@ impl RequestProfile for CopilotProfile {
 
 impl ChatProfile for CopilotProfile {
     /// `store: false` only for a seed row that supports it and was not served by
-    /// this process's last live discovery; image parts for vision models.
-    fn compat(&self, ctx: &RequestContext<'_>) -> ChatCompat {
+    /// the request credential's own last live discovery; image parts for vision
+    /// models.
+    fn compat(&self, resolved: &Resolved, ctx: &RequestContext<'_>) -> ChatCompat {
         let model = ctx.options.model.as_str();
-        let store_false =
-            !self.shared.is_live(model) && catalog::seed_row(model).is_some_and(|row| row.store);
+        let store_false = !self.shared.is_live(resolved, model)
+            && catalog::seed_row(model).is_some_and(|row| row.store);
         let vision = self
             .shared
             .descriptor(model)

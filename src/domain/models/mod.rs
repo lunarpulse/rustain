@@ -169,7 +169,7 @@ pub use conversation::{
 pub use credential::{
     AuthSnapshot, AuthSource, AuthStatus, CasOutcome, Credential, CredentialGeneration,
     CredentialId, CredentialIdentity, CredentialOrigin, CredentialRouting, CredentialStamp,
-    OAuthCredential, ResolvedAuth, StoredCredential,
+    OAuthCredential, ResolvedAuth, RowRemoval, SelectOutcome, StoredCredential,
 };
 pub use cron_config::{CronConfig, CronJob};
 #[allow(unused_imports)]

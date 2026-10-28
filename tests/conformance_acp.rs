@@ -480,6 +480,20 @@ impl rustain::domain::ports::AuthStorePort for StaticAuthStore {
     ) -> Result<rustain::domain::models::CasOutcome, rustain::domain::errors::AuthError> {
         Ok(rustain::domain::models::CasOutcome::Stale)
     }
+    async fn select(
+        &self,
+        _provider: &str,
+        _id: rustain::domain::models::CredentialId,
+    ) -> Result<rustain::domain::models::SelectOutcome, rustain::domain::errors::AuthError> {
+        Ok(rustain::domain::models::SelectOutcome::NotFound)
+    }
+    async fn remove_row(
+        &self,
+        _provider: &str,
+        _id: rustain::domain::models::CredentialId,
+    ) -> Result<rustain::domain::models::RowRemoval, rustain::domain::errors::AuthError> {
+        Ok(rustain::domain::models::RowRemoval::NotFound)
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

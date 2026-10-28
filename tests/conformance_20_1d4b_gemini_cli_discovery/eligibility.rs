@@ -9,7 +9,7 @@ use rustain::domain::events::AppEvent;
 use rustain::domain::models::ProviderConfig;
 use rustain::domain::models::provider::DiscoveryStatus;
 use rustain::infrastructure::model_discovery::{
-    rediscover_after_login, refresh_and_announce, rejected_notice, spawn_headless,
+    rediscover_after_auth_change, refresh_and_announce, rejected_notice, spawn_headless,
 };
 use rustain::infrastructure::runtime::event_bus::EventBus;
 use rustain::infrastructure::startup::init_provider_layer;
@@ -47,7 +47,7 @@ async fn k5_the_signed_entry_is_live_and_every_consumer_discovers() {
 
     // `auth login`'s post-login refresh discovers through the new login.
     mount_quota_path(&world.server, &["gemini-9-pro"]).await;
-    let report = rediscover_after_login(PROVIDER, &cfg, &before)
+    let report = rediscover_after_auth_change(PROVIDER, &cfg, &before)
         .await
         .expect("a new Gemini CLI login is rediscovered");
     assert_eq!(report.status, DiscoveryStatus::Ok);
@@ -151,7 +151,7 @@ async fn k5_locked_entries_never_discover() {
     );
     spawn_headless(layer.discovery_targets.clone(), layer.registry.clone());
     assert!(
-        rediscover_after_login(PROVIDER, &cfg, &before)
+        rediscover_after_auth_change(PROVIDER, &cfg, &before)
             .await
             .is_none()
     );
@@ -199,7 +199,7 @@ async fn k5_locked_entries_never_discover() {
     login(&world.server, ACCESS, PROJECT, EMAIL).await;
     world.server.reset().await;
     assert!(
-        rediscover_after_login(PROVIDER, &cfg, &after)
+        rediscover_after_auth_change(PROVIDER, &cfg, &after)
             .await
             .is_none()
     );

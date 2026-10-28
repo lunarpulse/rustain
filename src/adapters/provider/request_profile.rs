@@ -53,11 +53,13 @@ pub trait RequestProfile: Send + Sync + fmt::Debug {
     }
     fn headers(&self, _resolved: &Resolved, _ctx: &RequestContext<'_>, _out: &mut HeaderMap) {}
     /// Called once per logical request after credential resolution, and again
-    /// after a 401 recovery replaces the `Resolved`. `None` (the default) means
-    /// no request-scoped headers and no alternate.
+    /// after a 401 recovery replaces the `Resolved`; `base` is this attempt
+    /// set's `base_url`, computed once. `None` (the default) means no
+    /// request-scoped headers and no alternate.
     fn begin(
         &self,
         _resolved: &Resolved,
+        _base: &str,
         _ctx: &RequestContext<'_>,
     ) -> Option<Box<dyn RequestState>> {
         None

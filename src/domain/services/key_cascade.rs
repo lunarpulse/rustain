@@ -8,12 +8,30 @@ use crate::domain::models::{
 
 pub const OAUTH_REFRESH_SKEW_MS: i64 = 60_000;
 
+/// What one provider entry may serve from its stored rows: OAuth rows only when
+/// its endpoint passes their origin policy, keys and environment unless its
+/// kind is a stored login only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowPolicy {
+    pub oauth: bool,
+    pub keys: bool,
+}
+
+impl RowPolicy {
+    pub const ANY: Self = Self {
+        oauth: true,
+        keys: true,
+    };
+}
+
 pub struct CascadeInputs<'a> {
     pub runtime: Option<&'a SecretString>,
     pub rows: &'a [StoredCredential],
+    /// The provider's active row (`AuthSnapshot::selected`).
+    pub selected: Option<CredentialId>,
     pub env_vars: &'a [&'a str],
     pub env_lookup: &'a dyn Fn(&str) -> Option<String>,
-    pub oauth_allowed: bool,
+    pub policy: RowPolicy,
     pub now_ms: i64,
 }
 
@@ -35,6 +53,9 @@ pub fn oauth_is_fresh(expires_at_ms: i64, now_ms: i64) -> bool {
     now_ms.saturating_add(OAUTH_REFRESH_SKEW_MS) < expires_at_ms
 }
 
+/// Runtime, then the active row when it ranks above the environment (an OAuth
+/// grant the endpoint may receive, or a login key), then R1: stored OAuth, login
+/// key, environment, stored key — over rows ordered active first, then file order.
 pub fn select<'a>(
     inputs: &CascadeInputs<'a>,
     skip: &BTreeSet<CredentialId>,
@@ -49,38 +70,40 @@ pub fn select<'a>(
     }
     let eligible =
         |row: &&StoredCredential| row.disabled_cause.is_none() && !skip.contains(&row.id);
-    for row in inputs.rows.iter().filter(eligible) {
-        if inputs.oauth_allowed
-            && let Credential::OAuth(oauth) = &row.credential
-        {
-            return Some(Selection {
-                source: AuthSource::StoredOAuth,
-                material: if oauth_is_fresh(oauth.expires_at_ms, inputs.now_ms) {
-                    SelectionMaterial::Ready(ResolvedAuth::OAuth {
-                        access: oauth.access.clone(),
-                        account_id: oauth.identity.account_id.clone(),
-                        project_id: oauth.identity.project_id.clone(),
-                        routing: oauth.routing.clone(),
-                    })
-                } else {
-                    SelectionMaterial::NeedsRefresh {
-                        id: row.id,
-                        rev: row.rev,
-                    }
-                },
-                row: Some(row),
-                last_validated: row.last_validated,
-            });
-        }
-    }
-    let key_row = |origin| {
-        inputs.rows.iter().filter(eligible).find_map(|row| {
-            if row.origin == origin {
-                if let Credential::ApiKey(key) = &row.credential {
-                    return Some((row, key));
+    let active = inputs
+        .selected
+        .and_then(|id| inputs.rows.iter().find(|row| row.id == id))
+        .filter(eligible);
+    let ordered = || {
+        active.into_iter().chain(
+            inputs
+                .rows
+                .iter()
+                .filter(|row| Some(row.id) != inputs.selected)
+                .filter(eligible),
+        )
+    };
+    let oauth_selection = |row: &'a StoredCredential| {
+        let Credential::OAuth(oauth) = &row.credential else {
+            return None;
+        };
+        Some(Selection {
+            source: AuthSource::StoredOAuth,
+            material: if oauth_is_fresh(oauth.expires_at_ms, inputs.now_ms) {
+                SelectionMaterial::Ready(ResolvedAuth::OAuth {
+                    access: oauth.access.clone(),
+                    account_id: oauth.identity.account_id.clone(),
+                    project_id: oauth.identity.project_id.clone(),
+                    routing: oauth.routing.clone(),
+                })
+            } else {
+                SelectionMaterial::NeedsRefresh {
+                    id: row.id,
+                    rev: row.rev,
                 }
-            }
-            None
+            },
+            row: Some(row),
+            last_validated: row.last_validated,
         })
     };
     let key_selection = |row: &'a StoredCredential, key: &SecretString, source| Selection {
@@ -88,6 +111,31 @@ pub fn select<'a>(
         material: SelectionMaterial::Ready(ResolvedAuth::ApiKey(key.clone())),
         row: Some(row),
         last_validated: row.last_validated,
+    };
+    if let Some(row) = active {
+        match &row.credential {
+            Credential::OAuth(_) if inputs.policy.oauth => return oauth_selection(row),
+            Credential::ApiKey(key)
+                if inputs.policy.keys && row.origin == CredentialOrigin::Login =>
+            {
+                return Some(key_selection(row, key, AuthSource::LoginKey));
+            }
+            _ => {}
+        }
+    }
+    if inputs.policy.oauth
+        && let Some(selection) = ordered().find_map(oauth_selection)
+    {
+        return Some(selection);
+    }
+    if !inputs.policy.keys {
+        return None;
+    }
+    let key_row = |origin| {
+        ordered().find_map(|row| match &row.credential {
+            Credential::ApiKey(key) if row.origin == origin => Some((row, key)),
+            _ => None,
+        })
     };
     if let Some((row, key)) = key_row(CredentialOrigin::Login) {
         return Some(key_selection(row, key, AuthSource::LoginKey));
@@ -155,9 +203,10 @@ mod tests {
         let inputs = CascadeInputs {
             runtime: None,
             rows: &rows,
+            selected: None,
             env_vars: &["KEY"],
             env_lookup: &|_| Some("env-key".into()),
-            oauth_allowed: true,
+            policy: RowPolicy::ANY,
             now_ms: 1_000,
         };
         assert!(matches!(
@@ -183,9 +232,10 @@ mod tests {
         let inputs = CascadeInputs {
             runtime: None,
             rows: &[row],
+            selected: None,
             env_vars: &["KEY"],
             env_lookup: &|_| Some("  \n".into()),
-            oauth_allowed: true,
+            policy: RowPolicy::ANY,
             now_ms: 0,
         };
         assert!(select(&inputs, &BTreeSet::new()).is_none());

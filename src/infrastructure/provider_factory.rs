@@ -23,7 +23,9 @@ fn resolve_auth_with_runtime(
     provider_id: &str,
     runtime: Option<&crate::domain::models::SecretString>,
 ) -> Option<crate::domain::models::ResolvedAuth> {
-    use crate::domain::services::key_cascade::{CascadeInputs, SelectionMaterial, select_ready};
+    use crate::domain::services::key_cascade::{
+        CascadeInputs, RowPolicy, SelectionMaterial, select_ready,
+    };
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
     let env_vars = if api_key_env.is_empty() {
         &[][..]
@@ -33,10 +35,11 @@ fn resolve_auth_with_runtime(
     let selection = select_ready(&CascadeInputs {
         runtime,
         rows: snapshot.rows(provider_id),
+        selected: snapshot.selected(provider_id),
         env_vars,
         env_lookup: &crate::infrastructure::utils::env_var_trimmed,
         now_ms: chrono::Utc::now().timestamp_millis(),
-        oauth_allowed: true,
+        policy: RowPolicy::ANY,
     })?;
     match selection.material {
         SelectionMaterial::Ready(auth) => Some(auth),
@@ -128,14 +131,14 @@ pub fn discovery_fingerprint(
         return scope;
     }
     let kind = cfg.kind.as_deref().unwrap_or(rows_key);
-    let oauth_allowed = oauth_allowed(kind, &discovery_base_url(rows_key, cfg));
+    let policy = row_policy(kind, rows_key, &discovery_base_url(rows_key, cfg));
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
     let selection = crate::adapters::cli::auth::source_for(
         rows_key,
         env_vars,
         &snapshot,
         &crate::infrastructure::utils::env_var_trimmed,
-        oauth_allowed,
+        policy,
     );
     let credential = match &selection {
         Some(selection) => match (
@@ -393,6 +396,22 @@ pub fn oauth_allowed(kind: &str, base_url: &str) -> bool {
     suffixed || url::Url::parse(&official).is_ok_and(|official| base.origin() == official.origin())
 }
 
+/// The one stored-row rule of every builder, availability, status and cache
+/// scope: a stored OAuth row leaves only for an endpoint both its entry kind's
+/// and its own rows key's origin policy accept (`[provider.openai-codex] kind =
+/// "openai"` never carries the Codex grant elsewhere), and a login-only kind
+/// serves its stored login alone.
+pub fn row_policy(
+    kind: &str,
+    rows_key: &str,
+    base_url: &str,
+) -> crate::domain::services::key_cascade::RowPolicy {
+    crate::domain::services::key_cascade::RowPolicy {
+        oauth: oauth_allowed(kind, base_url) && oauth_allowed(rows_key, base_url),
+        keys: !crate::adapters::cli::auth::providers::login_only(kind),
+    }
+}
+
 #[cfg(feature = "anthropic")]
 pub(crate) fn anthropic_handle(
     provider: &str,
@@ -400,7 +419,7 @@ pub(crate) fn anthropic_handle(
     base_url: &str,
     auth_header: Option<crate::domain::models::AuthHeaderScheme>,
 ) -> Result<crate::infrastructure::key_resolver::CredentialHandle, ProviderError> {
-    let oauth_allowed = oauth_allowed("anthropic", base_url);
+    let policy = row_policy("anthropic", provider, base_url);
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
     let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
     if crate::adapters::cli::auth::source_for(
@@ -408,7 +427,7 @@ pub(crate) fn anthropic_handle(
         &names,
         &snapshot,
         &crate::infrastructure::utils::env_var_trimmed,
-        oauth_allowed,
+        policy,
     )
     .is_none()
     {
@@ -418,7 +437,7 @@ pub(crate) fn anthropic_handle(
         crate::infrastructure::key_resolver::shared(),
         provider.to_owned(),
         env_vars,
-        oauth_allowed,
+        policy,
         auth_header,
     ))
 }
@@ -448,7 +467,7 @@ fn build_codex_from_config(
     #[cfg(feature = "openai")]
     {
         let base = codex_base_url(cfg);
-        let allowed = oauth_allowed("openai-codex", &base);
+        let policy = row_policy("openai-codex", &cfg.provider_id, &base);
         let env_vars = if cfg.api_key_env.is_empty() {
             vec![]
         } else {
@@ -461,7 +480,7 @@ fn build_codex_from_config(
             &names,
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            allowed,
+            policy,
         )
         .is_none()
         {
@@ -471,7 +490,7 @@ fn build_codex_from_config(
             crate::infrastructure::key_resolver::shared(),
             cfg.provider_id.clone(),
             env_vars,
-            allowed,
+            policy,
             None,
         );
         Ok(Arc::new(crate::adapters::openai_codex::CodexAdapter::new(
@@ -524,7 +543,7 @@ fn build_xai_from_config(
         // A subscription row keeps its own origin rule under any kind:
         // `[provider.xai-oauth] kind = "xai"` must not carry it to another origin.
         let base = xai_base_url(xai, cfg);
-        let allowed = oauth_allowed(kind, &base) && oauth_allowed(rows_key, &base);
+        let policy = row_policy(kind, rows_key, &base);
         let env_vars = if cfg.api_key_env.is_empty() {
             vec![]
         } else {
@@ -537,7 +556,7 @@ fn build_xai_from_config(
             &names,
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            allowed,
+            policy,
         )
         .is_none()
         {
@@ -547,7 +566,7 @@ fn build_xai_from_config(
             crate::infrastructure::key_resolver::shared(),
             rows_key.to_owned(),
             env_vars,
-            allowed,
+            policy,
             None,
         );
         Ok(Arc::new(XaiAdapter::new(
@@ -616,16 +635,16 @@ fn build_gemini_cli_from_config(
     #[cfg(feature = "openai")]
     {
         let base = gemini_cli_base_url(cfg);
-        // A configured base on another origin locks the stored row.
-        let allowed =
-            oauth_allowed("google-gemini-cli", &base) && oauth_allowed(&cfg.provider_id, &base);
+        // A configured base on another origin locks the stored row, and only the
+        // stored login itself is ever served.
+        let policy = row_policy("google-gemini-cli", &cfg.provider_id, &base);
         let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
         if crate::adapters::cli::auth::source_for(
             &cfg.provider_id,
             &[],
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            allowed,
+            policy,
         )
         .is_none()
         {
@@ -635,7 +654,7 @@ fn build_gemini_cli_from_config(
             crate::infrastructure::key_resolver::shared(),
             cfg.provider_id.clone(),
             Vec::new(),
-            allowed,
+            policy,
             None,
         );
         Ok(Arc::new(
@@ -661,7 +680,7 @@ fn build_copilot_from_config(
         let rows_key = cfg.provider_id.as_str();
         let base = discovery_base_url(rows_key, cfg);
         // A subscription row keeps its own origin rule under any entry name.
-        let allowed = oauth_allowed("github-copilot", &base) && oauth_allowed(rows_key, &base);
+        let policy = row_policy("github-copilot", rows_key, &base);
         let env_vars = if cfg.api_key_env.is_empty() {
             vec![]
         } else {
@@ -674,7 +693,7 @@ fn build_copilot_from_config(
             &names,
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            allowed,
+            policy,
         )
         .is_none()
         {
@@ -684,7 +703,7 @@ fn build_copilot_from_config(
             crate::infrastructure::key_resolver::shared(),
             rows_key.to_owned(),
             env_vars,
-            allowed,
+            policy,
             None,
         );
         Ok(Arc::new(
@@ -825,29 +844,28 @@ fn chat_credential(
     }
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
-    let handle = |env_vars: Vec<String>, allowed: bool| {
+    let handle = |env_vars: Vec<String>, policy| {
         crate::infrastructure::key_resolver::CredentialHandle::new(
             crate::infrastructure::key_resolver::shared(),
             provider_id.to_owned(),
             env_vars,
-            allowed,
+            policy,
             None,
         )
     };
     // A subscription row keeps its own origin rule under any kind:
     // `[provider.github-copilot] kind = "openai"` must not carry it to another origin.
-    let base = discovery_base_url(provider_id, cfg);
-    let allowed = oauth_allowed(kind, &base) && oauth_allowed(provider_id, &base);
+    let policy = row_policy(kind, provider_id, &discovery_base_url(provider_id, cfg));
     if cfg.api_key_env.is_empty() && kind == "openai-compatible" {
         let stored = crate::adapters::cli::auth::source_for(
             provider_id,
             &[],
             &snapshot,
             &crate::infrastructure::utils::env_var_trimmed,
-            allowed,
+            policy,
         );
         return Ok(match stored {
-            Some(_) => ChatCredential::Resolved(handle(vec![], allowed)),
+            Some(_) => ChatCredential::Resolved(handle(vec![], policy)),
             None => ChatCredential::Fixed(crate::domain::models::SecretString::new(String::new())),
         });
     }
@@ -862,13 +880,13 @@ fn chat_credential(
         &names,
         &snapshot,
         &crate::infrastructure::utils::env_var_trimmed,
-        allowed,
+        policy,
     )
     .is_none()
     {
         return Err(ProviderError::AuthenticationFailed);
     }
-    Ok(ChatCredential::Resolved(handle(env_vars, allowed)))
+    Ok(ChatCredential::Resolved(handle(env_vars, policy)))
 }
 
 #[cfg(feature = "openai")]

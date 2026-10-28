@@ -3,37 +3,13 @@ use crate::adapters::cli::auth::providers;
 use crate::domain::{
     errors::ProviderError,
     models::{Credential, ProviderConfig},
-    ports::AuthStorePort,
 };
-use std::sync::Arc;
 
-pub(super) async fn run(
-    provider: &str,
-    ctx: &FlowCtx,
-    store: &Arc<dyn AuthStorePort>,
-) -> Result<(Credential, bool), FlowError> {
+/// A distinct key is another account (a new active row); the same key again
+/// updates its row in place. Nothing is asked before the key itself.
+pub(super) async fn run(provider: &str, ctx: &FlowCtx) -> Result<(Credential, bool), FlowError> {
     let meta = providers::lookup(provider);
     let display = meta.map_or(provider, |m| m.display_name);
-    if store
-        .snapshot()
-        .await
-        .map_err(|_| FlowError::configuration("Cannot read credential store"))?
-        .rows(provider)
-        .iter()
-        .any(|row| row.disabled_cause.is_none() && matches!(row.credential, Credential::ApiKey(_)))
-    {
-        let reply = ctx
-            .ui
-            .prompt_secret(&format!("Overwrite existing {display} API key? [y/n] "))
-            .await;
-        // Expose candidate input only for the confirmation and provider probe.
-        if !reply
-            .as_ref()
-            .is_some_and(|reply| expose(reply).trim().starts_with(['y', 'Y']))
-        {
-            return Err(FlowError::Declined);
-        }
-    }
     let key = ctx
         .ui
         .prompt_secret(&format!("Enter {display} API key: "))

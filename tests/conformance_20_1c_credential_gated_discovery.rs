@@ -571,7 +571,7 @@ async fn k11_cache_scope_changes_refetch_and_removal_locks_without_old_roster() 
 #[tokio::test]
 #[serial]
 async fn k12_login_rediscovery_bypasses_a_matching_fresh_cache_only_after_rows_change() {
-    use rustain::infrastructure::model_discovery::rediscover_after_login;
+    use rustain::infrastructure::model_discovery::rediscover_after_auth_change;
     let world = World::new();
     let server = MockServer::start().await;
     let cfg = remote_config("openai", format!("{}/v1", server.uri()));
@@ -588,7 +588,7 @@ async fn k12_login_rediscovery_bypasses_a_matching_fresh_cache_only_after_rows_c
     )
     .await;
     models(&server, 200, json!([{"id":"new1"},{"id":"new2"}])).await;
-    let report = rediscover_after_login("openai", &cfg, &before)
+    let report = rediscover_after_auth_change("openai", &cfg, &before)
         .await
         .unwrap();
     assert_eq!(report.model_count, 2);
@@ -610,12 +610,12 @@ async fn k12_login_rediscovery_bypasses_a_matching_fresh_cache_only_after_rows_c
     let unchanged = FileAuthStore::new().snapshot().await.unwrap();
     server.reset().await;
     assert!(
-        rediscover_after_login("openai", &cfg, &unchanged)
+        rediscover_after_auth_change("openai", &cfg, &unchanged)
             .await
             .is_none()
     );
     assert!(
-        rediscover_after_login("ollama", &cfg, &before)
+        rediscover_after_auth_change("ollama", &cfg, &before)
             .await
             .is_none()
     );
@@ -634,7 +634,7 @@ async fn k12_login_rediscovery_bypasses_a_matching_fresh_cache_only_after_rows_c
     let before_local = FileAuthStore::new().snapshot().await.unwrap();
     world.key("local", "unused-local-key").await;
     assert!(
-        rediscover_after_login("local", &keyless, &before_local)
+        rediscover_after_auth_change("local", &keyless, &before_local)
             .await
             .is_none()
     );
@@ -647,7 +647,7 @@ async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision()
     use futures::future::BoxFuture;
     use rustain::adapters::auth::flows::{self, FlowCtx, LoginUi};
     use rustain::domain::models::{AuthMethod, SecretString};
-    use rustain::infrastructure::model_discovery::rediscover_after_login;
+    use rustain::infrastructure::model_discovery::rediscover_after_auth_change;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
@@ -716,7 +716,7 @@ async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision()
 
     // Exclude B's completed validation probe; observe only the post-login refresh.
     models(&server, 200, json!([{"id":"account-B-model"}])).await;
-    let report = rediscover_after_login("openai", &cfg, &before)
+    let report = rediscover_after_auth_change("openai", &cfg, &before)
         .await
         .expect("a recreated store's new grant must rediscover despite repeated id/rev");
     assert_eq!(report.status, DiscoveryStatus::Ok);
@@ -736,7 +736,7 @@ async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision()
 
     server.reset().await;
     assert!(
-        rediscover_after_login("openai", &cfg, &after)
+        rediscover_after_auth_change("openai", &cfg, &after)
             .await
             .is_none()
     );

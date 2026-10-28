@@ -30,12 +30,11 @@ const MODELS: &str = "/v1/models";
 const MODEL: &str = "gpt-4o";
 const SYSTEM: &str = "You are terse.";
 const ENTER: &str = "Enter OpenAI API key: ";
-const OVERWRITE: &str = "Overwrite existing OpenAI API key? [y/n] ";
 
 // ── fixtures ────────────────────────────────────────────────────────────────
 
 /// A `[provider.<id>]`-shaped entry of `kind` whose base is the stub's `/v1`.
-fn entry(server: &MockServer, id: &str, kind: &str, env: &str) -> ProviderConfig {
+pub(crate) fn entry(server: &MockServer, id: &str, kind: &str, env: &str) -> ProviderConfig {
     ProviderConfig {
         provider_id: id.into(),
         kind: Some(kind.into()),
@@ -52,15 +51,15 @@ fn entry(server: &MockServer, id: &str, kind: &str, env: &str) -> ProviderConfig
     }
 }
 /// The `[provider.openai]` entry.
-fn openai(server: &MockServer) -> ProviderConfig {
+pub(crate) fn openai(server: &MockServer) -> ProviderConfig {
     entry(server, "openai", "openai", "OPENAI_API_KEY")
 }
 
-/// An API-key login UI: confirms an overwrite with `y`, answers the key prompt
-/// with `key`, and records every secret prompt label.
-struct KeyUi {
-    key: String,
-    prompts: Mutex<Vec<String>>,
+/// An API-key login UI: answers the key prompt with `key` and records every
+/// secret prompt label.
+pub(crate) struct KeyUi {
+    pub(crate) key: String,
+    pub(crate) prompts: Mutex<Vec<String>>,
 }
 impl LoginUi for KeyUi {
     fn on_auth_url(&self, _: &str, _: &str, _: &str) {
@@ -72,11 +71,7 @@ impl LoginUi for KeyUi {
     fn on_progress(&self, _: &str) {}
     fn prompt_secret(&self, label: &str) -> BoxFuture<'_, Option<SecretString>> {
         self.prompts.lock().push(label.into());
-        let answer = if label.starts_with("Overwrite") {
-            "y".to_owned()
-        } else {
-            self.key.clone()
-        };
+        let answer = self.key.clone();
         Box::pin(async move { Some(SecretString::new(answer)) })
     }
     fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
@@ -92,7 +87,7 @@ impl LoginUi for KeyUi {
 
 /// The real `flows::login("openai", ApiKey)` with the production validation
 /// config (the CLI passes the entry); returns the secret prompt labels.
-async fn key_login(cfg: &ProviderConfig, key: &str) -> Vec<String> {
+pub(crate) async fn key_login(cfg: &ProviderConfig, key: &str) -> Vec<String> {
     let ui = Arc::new(KeyUi {
         key: key.into(),
         prompts: Mutex::new(Vec::new()),
@@ -117,7 +112,7 @@ async fn stored_key() -> String {
 }
 
 /// `GET /v1/models` answers one chat model (login probe and discovery).
-async fn mount_models(server: &MockServer) {
+pub(crate) async fn mount_models(server: &MockServer) {
     reply(
         server,
         "GET",
@@ -130,11 +125,11 @@ async fn mount_models(server: &MockServer) {
     .await;
 }
 
-fn bearer(key: &str) -> Option<String> {
+pub(crate) fn bearer(key: &str) -> Option<String> {
     Some(format!("Bearer {key}"))
 }
 
-fn turn() -> Vec<rustain::domain::models::Message> {
+pub(crate) fn turn() -> Vec<rustain::domain::models::Message> {
     vec![user("hi"), assistant("hello"), user("again")]
 }
 fn turn_json() -> Vec<Value> {
@@ -144,7 +139,7 @@ fn turn_json() -> Vec<Value> {
         json!({"role":"user","content":"again"}),
     ]
 }
-fn opts(system: &str, temperature: Option<f32>) -> CompletionOptions {
+pub(crate) fn opts(system: &str, temperature: Option<f32>) -> CompletionOptions {
     let mut options = options(MODEL, 1024, Some("conv-d4"));
     options.system_prompt = system.into();
     options.temperature = temperature;
@@ -169,7 +164,7 @@ fn literal(leading: Option<Value>, temperature: Option<f64>) -> Value {
     body
 }
 
-async fn ok_turn(provider: &Arc<dyn StreamingProvider>, options: CompletionOptions) {
+pub(crate) async fn ok_turn(provider: &Arc<dyn StreamingProvider>, options: CompletionOptions) {
     let chunks = complete(provider, turn(), options)
         .await
         .expect("the completion opens");
@@ -205,10 +200,21 @@ async fn k05_stored_key_change_reaches_the_same_adapter_instance() {
         literal(Some(json!({"role":"system","content":SYSTEM})), Some(0.5))
     );
 
-    // Re-login through the production flow: the overwrite is confirmed and
-    // the candidate is probed with its own bearer.
-    assert_eq!(key_login(&cfg, K2).await, [OVERWRITE, ENTER]);
-    assert_eq!(stored_key().await, K2);
+    // Re-login through the production flow with a distinct key: no overwrite
+    // prompt, the key is a second row that becomes active, and the candidate is
+    // probed with its own bearer (20-1d5 H1–H3).
+    assert_eq!(key_login(&cfg, K2).await, [ENTER]);
+    let snapshot = FileAuthStore::new().snapshot().await.unwrap();
+    let keys: Vec<_> = snapshot
+        .rows("openai")
+        .iter()
+        .map(|row| row.credential.expose_api_key().unwrap().to_owned())
+        .collect();
+    assert_eq!(keys, [K1, K2]);
+    assert_eq!(
+        snapshot.selected("openai"),
+        Some(snapshot.rows("openai")[1].id)
+    );
     let probes = requests(&server, "GET", MODELS).await;
     assert_eq!(header(probes.last().unwrap(), "authorization"), bearer(K2));
 

@@ -41,7 +41,7 @@ use crate::domain::models::{
     StoredCredential,
 };
 use crate::domain::ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure};
-use crate::domain::services::key_cascade::{self, CascadeInputs, SelectionMaterial};
+use crate::domain::services::key_cascade::{self, CascadeInputs, RowPolicy, SelectionMaterial};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
@@ -171,7 +171,7 @@ impl KeyResolver {
         env_vars: &[&str],
         env_lookup: &(dyn Fn(&str) -> Option<String> + Send + Sync),
     ) -> Result<Option<Resolved>, ResolveError> {
-        self.resolve_tracked_with_policy(provider, runtime, env_vars, env_lookup, true)
+        self.resolve_tracked_with_policy(provider, runtime, env_vars, env_lookup, RowPolicy::ANY)
             .await
     }
 
@@ -181,7 +181,7 @@ impl KeyResolver {
         runtime: Option<&SecretString>,
         env_vars: &[&str],
         env_lookup: &(dyn Fn(&str) -> Option<String> + Send + Sync),
-        oauth_allowed: bool,
+        policy: RowPolicy,
     ) -> Result<Option<Resolved>, ResolveError> {
         let mut skip = BTreeSet::new();
         let mut transient = None;
@@ -204,10 +204,12 @@ impl KeyResolver {
                 let inputs = CascadeInputs {
                     runtime,
                     rows: snapshot.rows(provider),
+                    // Re-read every resolve: `auth use` serves on the next request.
+                    selected: snapshot.selected(provider),
                     env_vars,
                     env_lookup,
                     now_ms: (self.clock)(),
-                    oauth_allowed,
+                    policy,
                 };
                 key_cascade::select(&inputs, &skip).map(|s| {
                     let identity = s.row.and_then(|row| oauth_identity(provider, row));
@@ -633,7 +635,7 @@ pub struct CredentialHandle {
     resolver: Arc<KeyResolver>,
     provider: String,
     env_vars: Vec<String>,
-    oauth_allowed: bool,
+    policy: RowPolicy,
     pub auth_header: Option<crate::domain::models::AuthHeaderScheme>,
     /// A candidate key under validation; it wins the cascade as `Runtime`.
     runtime: Option<SecretString>,
@@ -644,14 +646,14 @@ impl CredentialHandle {
         resolver: Arc<KeyResolver>,
         provider: String,
         env_vars: Vec<String>,
-        oauth_allowed: bool,
+        policy: RowPolicy,
         auth_header: Option<crate::domain::models::AuthHeaderScheme>,
     ) -> Self {
         Self {
             resolver,
             provider,
             env_vars,
-            oauth_allowed,
+            policy,
             auth_header,
             runtime: None,
         }
@@ -664,7 +666,10 @@ impl CredentialHandle {
             resolver,
             provider,
             env_vars: Vec::new(),
-            oauth_allowed: false,
+            policy: RowPolicy {
+                oauth: false,
+                keys: true,
+            },
             auth_header: None,
             runtime: Some(key),
         }
@@ -717,7 +722,7 @@ impl CredentialHandle {
                 self.runtime.as_ref(),
                 names,
                 &crate::infrastructure::utils::env_var_trimmed,
-                self.oauth_allowed,
+                self.policy,
             )
             .await
             .map_err(|error| ProviderError::ConnectionFailed(error.to_string()))?

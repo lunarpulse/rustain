@@ -285,7 +285,7 @@ impl StreamingProvider for AnthropicAdapter {
 
         #[cfg(feature = "openai")]
         if let Some(profile) = &self.request_profile {
-            return self.stream_profiled(profile, messages, options).await;
+            return self.stream_profiled(profile, None, messages, options).await;
         }
 
         let (mut resolved, plan) = self.current_auth().await?;

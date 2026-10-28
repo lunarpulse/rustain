@@ -2,7 +2,7 @@
 #![cfg(feature = "test-instrumentation")]
 
 #[path = "conformance_20_1b_anthropic_subscription/flows.rs"]
-mod flows;
+pub(crate) mod flows;
 #[path = "conformance_20_1b_anthropic_subscription/profile.rs"]
 mod profile;
 #[path = "conformance_20_1b_anthropic_subscription/resolver.rs"]

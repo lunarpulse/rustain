@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use crate::domain::errors::AuthError;
 use crate::domain::models::credential::{
     AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin, CredentialStamp,
+    RowRemoval, SelectOutcome,
 };
 
 /// Cross-process refresh election, held across one bounded refresh exchange so
@@ -33,6 +34,7 @@ impl RefreshLease {
 #[async_trait]
 pub trait AuthStorePort: Send + Sync {
     async fn snapshot(&self) -> Result<AuthSnapshot, AuthError>;
+    /// Writes the row and makes it the provider's active row in the same write.
     async fn upsert(
         &self,
         provider: &str,
@@ -40,6 +42,7 @@ pub trait AuthStorePort: Send + Sync {
         origin: CredentialOrigin,
         validated: bool,
     ) -> Result<CredentialId, AuthError>;
+    /// Refresh writes never change the provider's active row.
     async fn replace_if_matches(
         &self,
         provider: &str,
@@ -52,7 +55,13 @@ pub trait AuthStorePort: Send + Sync {
         expected: CredentialStamp,
         cause: &str,
     ) -> Result<CasOutcome, AuthError>;
+    /// Removes every row of the provider and its active-row choice.
     async fn remove(&self, provider: &str) -> Result<(), AuthError>;
+    /// Makes a known, enabled row of the provider active; anything else writes nothing.
+    async fn select(&self, provider: &str, id: CredentialId) -> Result<SelectOutcome, AuthError>;
+    /// Removes exactly one known row (enabled or disabled), clearing the active
+    /// choice when it named that row; unrecognised rows are never removed.
+    async fn remove_row(&self, provider: &str, id: CredentialId) -> Result<RowRemoval, AuthError>;
     /// Waits until this caller is the only refresher of the store's OAuth rows.
     /// The default suits stores no other process shares; durable stores override it.
     async fn refresh_lease(&self) -> Result<RefreshLease, AuthError> {

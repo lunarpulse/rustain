@@ -524,20 +524,26 @@ pub fn spawn_headless(targets: Vec<DiscoveryTarget>, registry: Arc<ProviderRegis
     }
 }
 
-pub async fn rediscover_after_login(
+/// Refreshes the provider's live roster after any credential change: a login, a
+/// new active row (`auth use`) or a removed row. A selection-only change counts;
+/// a no-op change (same row versions, same active row) does not.
+pub async fn rediscover_after_auth_change(
     provider_id: &str,
     app_config: &AppConfig,
     before: &AuthSnapshot,
 ) -> Option<RefreshReport> {
     let after = crate::adapters::auth_store::FileAuthStore::try_snapshot_sync().ok()?;
-    let grants = |snapshot: &AuthSnapshot| {
-        snapshot
-            .rows(provider_id)
-            .iter()
-            .map(crate::domain::models::StoredCredential::stamp)
-            .collect::<std::collections::BTreeSet<_>>()
+    let credentials = |snapshot: &AuthSnapshot| {
+        (
+            snapshot
+                .rows(provider_id)
+                .iter()
+                .map(crate::domain::models::StoredCredential::stamp)
+                .collect::<std::collections::BTreeSet<_>>(),
+            snapshot.selected(provider_id),
+        )
     };
-    if grants(&after) == grants(before) {
+    if credentials(&after) == credentials(before) {
         return None;
     }
     let entries: Vec<_> = super::provider_availability::effective_providers(app_config)

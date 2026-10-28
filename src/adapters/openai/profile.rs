@@ -30,7 +30,8 @@ pub struct ChatCompat {
 }
 
 pub trait ChatProfile: RequestProfile {
-    fn compat(&self, _ctx: &RequestContext<'_>) -> ChatCompat {
+    /// Body switches for the credential `resolved` this request sends.
+    fn compat(&self, _resolved: &Resolved, _ctx: &RequestContext<'_>) -> ChatCompat {
         ChatCompat::default()
     }
 }

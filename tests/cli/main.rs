@@ -60,6 +60,9 @@ mod conformance_20_1d4b_gemini_cli_discovery;
 #[path = "../conformance_20_1d4a_tool_turn_fidelity.rs"]
 mod conformance_20_1d4a_tool_turn_fidelity;
 
+#[path = "../conformance_20_1d5_openrouter_accounts.rs"]
+mod conformance_20_1d5_openrouter_accounts;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

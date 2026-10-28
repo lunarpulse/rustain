@@ -42,7 +42,9 @@ pub mod refresh;
 mod token;
 pub mod ui;
 use crate::domain::{
-    models::{AuthMethod, Credential, CredentialIdentity, CredentialOrigin, ProviderConfig},
+    models::{
+        AuthMethod, Credential, CredentialId, CredentialIdentity, CredentialOrigin, ProviderConfig,
+    },
     ports::AuthStorePort,
 };
 use futures::future::BoxFuture;
@@ -123,8 +125,6 @@ fn scaled(duration: Duration) -> Duration {
 pub enum FlowError {
     #[error("Login cancelled")]
     Cancelled,
-    #[error("Aborted — existing credential unchanged.")]
-    Declined,
     #[error("{0}")]
     Message(String),
 }
@@ -139,6 +139,8 @@ pub struct LoginResult {
     pub method: &'static str,
     pub validated: bool,
     pub identity: CredentialIdentity,
+    /// The row the login wrote, now the provider's active row.
+    pub credential_id: CredentialId,
 }
 
 pub async fn login(
@@ -150,7 +152,7 @@ pub async fn login(
     let cancel = ctx.ui.cancel_token();
     let run = async {
         let (credential, validated) = match method {
-            AuthMethod::ApiKey => api_key::run(provider_id, ctx, store).await?,
+            AuthMethod::ApiKey => api_key::run(provider_id, ctx).await?,
             AuthMethod::OAuthCode(policy) => {
                 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
                 {
@@ -199,7 +201,7 @@ pub async fn login(
             Credential::OAuth(o) => o.identity.clone(),
             Credential::ApiKey(_) => CredentialIdentity::default(),
         };
-        store
+        let credential_id = store
             .upsert(provider_id, credential, CredentialOrigin::Login, validated)
             .await
             .map_err(|_| FlowError::configuration("Failed to store credential"))?;
@@ -212,6 +214,7 @@ pub async fn login(
             },
             validated,
             identity,
+            credential_id,
         })
     };
     tokio::select! {

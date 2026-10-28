@@ -77,6 +77,25 @@ impl CredentialIdentity {
             .or_else(|| self.email.as_ref().map(|email| format!("email:{email}")))
             .or_else(|| self.project_id.as_ref().map(|id| format!("project:{id}")))
     }
+
+    /// Whether a login with this identity replaces the stored row: equal keys,
+    /// or a row keyed only by its project because that login's best-effort
+    /// account lookup failed, claimed by a later login of the same project that
+    /// recovered its email or account. The reverse never matches: a login keyed
+    /// only by its project never clobbers an identified row.
+    pub fn replaces(&self, stored: &Self, org_scoped: bool) -> bool {
+        let Some(key) = self.key(org_scoped) else {
+            return false;
+        };
+        if stored.key(org_scoped).as_ref() == Some(&key) {
+            return true;
+        }
+        !org_scoped
+            && stored.account_id.is_none()
+            && stored.email.is_none()
+            && stored.project_id.is_some()
+            && stored.project_id == self.project_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +157,8 @@ impl std::fmt::Display for StoredCredential {
 pub struct AuthSnapshot {
     pub providers: BTreeMap<String, Vec<StoredCredential>>,
     pub unknown_rows: usize,
+    /// The active row of each provider, chosen by its latest login or `auth use`.
+    pub selected: BTreeMap<String, CredentialId>,
 }
 
 impl AuthSnapshot {
@@ -147,12 +168,31 @@ impl AuthSnapshot {
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
+
+    pub fn selected(&self, provider: &str) -> Option<CredentialId> {
+        self.selected.get(provider).copied()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CasOutcome {
     Applied,
     Stale,
+}
+
+/// `AuthStorePort::select`: only a known, enabled row of the provider is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectOutcome {
+    Selected,
+    NotFound,
+    Disabled,
+}
+
+/// `AuthStorePort::remove_row`: exactly one known row, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowRemoval {
+    Removed,
+    NotFound,
 }
 
 impl Credential {

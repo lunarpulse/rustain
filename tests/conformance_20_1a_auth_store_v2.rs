@@ -1066,11 +1066,11 @@ async fn atomic_write_is_0600_replaces_inode_and_cleans_stale_tmp() {
     assert!(!stale.exists());
     assert!(path.with_extension("json.lock").exists());
     let snapshot = store.snapshot().await.unwrap();
-    assert_eq!(
-        snapshot.rows("atomic")[0].credential.expose_api_key(),
-        Some("ATOMIC-AFTER")
-    );
-    assert!(snapshot.rows("atomic")[0].last_validated.is_some());
+    // A distinct key is a second row (20-1d5 H1); the write itself is the subject.
+    let rows = snapshot.rows("atomic");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].credential.expose_api_key(), Some("ATOMIC-AFTER"));
+    assert!(rows[1].last_validated.is_some());
 }
 
 /// Separate instances have separate in-process mutexes. The sibling flock must
@@ -1305,8 +1305,10 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
     assert_ne!(a, b, "different accounts sharing email must not collapse");
 }
 
+/// 20-1d5 H1: an API-key upsert matches only equal key bytes (across origins);
+/// a distinct key appends; only the same key's tombstones are purged.
 #[tokio::test]
-async fn api_key_upsert_replaces_enabled_row_across_origins_and_purges_tombstones() {
+async fn api_key_upsert_matches_equal_bytes_across_origins_and_purges_their_tombstones() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("auth.json");
     fixture(
@@ -1319,69 +1321,66 @@ async fn api_key_upsert_replaces_enabled_row_across_origins_and_purges_tombstone
         ],
     );
     let store = FileAuthStore::at(&path);
+    let ids = |snapshot: &rustain::domain::models::AuthSnapshot| {
+        snapshot
+            .rows("key")
+            .iter()
+            .map(|row| row.id.0)
+            .collect::<Vec<_>>()
+    };
     let id = store
-        .upsert(
-            "key",
-            api("KEY-LOGIN-REPLACEMENT"),
-            CredentialOrigin::Login,
-            true,
-        )
+        .upsert("key", api("KEY-ENABLED"), CredentialOrigin::Login, true)
         .await
         .unwrap();
     assert_eq!(id, CredentialId(2));
     let snapshot = store.snapshot().await.unwrap();
-    let rows = snapshot.rows("key");
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].id, CredentialId(2));
-    assert_eq!(rows[0].rev, 2);
-    assert_eq!(rows[0].origin, CredentialOrigin::Login);
-    assert_eq!(
-        rows[0].credential.expose_api_key(),
-        Some("KEY-LOGIN-REPLACEMENT")
-    );
-    assert!(rows[0].last_validated.is_some());
-    assert_eq!(rows[1].id, CredentialId(3));
+    assert_eq!(ids(&snapshot), [1, 2, 3], "another key's tombstone stays");
+    let row = &snapshot.rows("key")[1];
+    assert_eq!(row.rev, 2);
+    assert_eq!(row.origin, CredentialOrigin::Login);
+    assert!(row.last_validated.is_some());
+    assert_eq!(snapshot.selected("key"), Some(id));
     assert_eq!(
         store
-            .upsert(
-                "key",
-                api("KEY-STORED-REPLACEMENT"),
-                CredentialOrigin::Stored,
-                false
-            )
+            .upsert("key", api("KEY-ENABLED"), CredentialOrigin::Stored, false)
             .await
             .unwrap(),
         id
     );
     let snapshot = store.snapshot().await.unwrap();
-    assert_eq!(snapshot.rows("key")[0].rev, 3);
-    assert_eq!(snapshot.rows("key")[0].origin, CredentialOrigin::Stored);
-    assert!(snapshot.rows("key")[0].last_validated.is_none());
+    assert_eq!(snapshot.rows("key")[1].rev, 3);
+    assert_eq!(snapshot.rows("key")[1].origin, CredentialOrigin::Stored);
+    assert!(snapshot.rows("key")[1].last_validated.is_none());
+    // A distinct key is another row and becomes active.
+    let other = store
+        .upsert("key", api("KEY-OTHER"), CredentialOrigin::Login, true)
+        .await
+        .unwrap();
+    assert_eq!(other, CredentialId(4));
+    let snapshot = store.snapshot().await.unwrap();
+    assert_eq!(ids(&snapshot), [1, 2, 3, 4]);
+    assert_eq!(snapshot.selected("key"), Some(other));
     store
-        .disable_if_matches("key", snapshot.rows("key")[0].stamp(), "disabled")
+        .disable_if_matches("key", snapshot.rows("key")[1].stamp(), "disabled")
         .await
         .unwrap();
     let new_id = store
-        .upsert(
-            "key",
-            api("KEY-AFTER-TOMBSTONE"),
-            CredentialOrigin::Stored,
-            false,
-        )
+        .upsert("key", api("KEY-ENABLED"), CredentialOrigin::Stored, false)
         .await
         .unwrap();
-    assert_ne!(new_id, id);
+    assert_eq!(new_id, CredentialId(5));
     let snapshot = store.snapshot().await.unwrap();
-    assert_eq!(snapshot.rows("key").len(), 2);
-    assert!(!snapshot.rows("key").iter().any(|row| row.id == id));
     assert_eq!(
-        snapshot
-            .rows("key")
-            .iter()
-            .filter(|row| matches!(row.credential, Credential::ApiKey(_)))
-            .count(),
-        1
+        ids(&snapshot),
+        [1, 3, 4, 5],
+        "only that key's tombstone is purged"
     );
+    let revived = store
+        .upsert("key", api("KEY-TOMBSTONE"), CredentialOrigin::Login, true)
+        .await
+        .unwrap();
+    assert_eq!(revived, CredentialId(6));
+    assert_eq!(ids(&store.snapshot().await.unwrap()), [3, 4, 5, 6]);
 }
 
 #[tokio::test]

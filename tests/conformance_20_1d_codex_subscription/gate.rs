@@ -6,7 +6,7 @@ use rustain::domain::models::provider::{DiscoveryStatus, ModelCapability};
 use rustain::domain::models::{AppConfig, Credential, CredentialOrigin, ProviderConfig};
 use rustain::domain::ports::{AuthStorePort, StreamingProvider};
 use rustain::infrastructure::{
-    model_discovery::{rediscover_after_login, refresh_target, remerge_all},
+    model_discovery::{rediscover_after_auth_change, refresh_target, remerge_all},
     provider_factory,
     startup::init_provider_layer,
 };
@@ -505,7 +505,7 @@ async fn codex_seed_is_locked_then_signed_with_live_discovery_and_no_api_key_con
         .mount(&server)
         .await;
     // The login changed the row versions, so the live target is refreshed.
-    let report = rediscover_after_login("openai-codex", &cfg, &before)
+    let report = rediscover_after_auth_change("openai-codex", &cfg, &before)
         .await
         .expect("signed Codex entry is rediscovered after login");
     assert_eq!(report.status, DiscoveryStatus::Ok);
@@ -612,7 +612,7 @@ async fn login_refresh_selects_all_entries_by_credential_rows_not_first_kind() {
         layer.router.connectivity_probe().await.unwrap();
     }
     assert_eq!(
-        rediscover_after_login("anthropic", &cfg, &before)
+        rediscover_after_auth_change("anthropic", &cfg, &before)
             .await
             .unwrap()
             .status,
@@ -629,7 +629,7 @@ async fn login_refresh_selects_all_entries_by_credential_rows_not_first_kind() {
             .all(|r| r.headers["x-api-key"] == "login-key")
     );
     assert!(
-        rediscover_after_login(
+        rediscover_after_auth_change(
             "anthropic",
             &cfg,
             &FileAuthStore::new().snapshot().await.unwrap()

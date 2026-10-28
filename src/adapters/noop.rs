@@ -12,6 +12,7 @@ use crate::domain::errors::{AuthError, PermissionError, ProviderError, StorageEr
 use crate::domain::models::ApprovalScope;
 use crate::domain::models::credential::{
     AuthSnapshot, CasOutcome, Credential, CredentialId, CredentialOrigin, CredentialStamp,
+    RowRemoval, SelectOutcome,
 };
 use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
 use crate::domain::models::usage::UsageLedgerEntry;
@@ -363,6 +364,16 @@ impl AuthStorePort for NoOpAuthStore {
     }
     async fn remove(&self, _provider: &str) -> Result<(), AuthError> {
         Ok(())
+    }
+    async fn select(&self, _provider: &str, _id: CredentialId) -> Result<SelectOutcome, AuthError> {
+        Ok(SelectOutcome::NotFound)
+    }
+    async fn remove_row(
+        &self,
+        _provider: &str,
+        _id: CredentialId,
+    ) -> Result<RowRemoval, AuthError> {
+        Ok(RowRemoval::NotFound)
     }
 }
 

@@ -898,7 +898,13 @@ pub(crate) mod test_support {
             .unwrap();
         let refresh = Arc::new(HeldRefresh::default());
         let resolver = Arc::new(KeyResolver::new(store, refresh.clone(), Arc::new(|| NOW)));
-        let handle = CredentialHandle::new(resolver, provider.to_owned(), Vec::new(), true, None);
+        let handle = CredentialHandle::new(
+            resolver,
+            provider.to_owned(),
+            Vec::new(),
+            crate::domain::services::key_cascade::RowPolicy::ANY,
+            None,
+        );
         (handle, refresh, dir)
     }
 

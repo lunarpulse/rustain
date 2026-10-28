@@ -339,9 +339,10 @@ impl OpenAiAdapter {
         options: &CompletionOptions,
     ) -> Result<ChatAttempt, ProviderError> {
         let ctx = RequestContext { messages, options };
-        let compat = self.profile.compat(&ctx);
+        let compat = self.profile.compat(resolved, &ctx);
         let request_body = OpenAiRequest::new(messages, options, &compat);
-        let url = format!("{}/chat/completions", self.profile.base_url(resolved)?);
+        let base = self.profile.base_url(resolved)?;
+        let url = format!("{base}/chat/completions");
         tracing::debug!(
             target_url = %url,
             model = %options.model,
@@ -360,7 +361,7 @@ impl OpenAiAdapter {
             headers.insert("authorization", value);
         }
         self.profile.headers(resolved, &ctx, &mut headers);
-        let state = self.profile.begin(resolved, &ctx);
+        let state = self.profile.begin(resolved, &base, &ctx);
         if let Some(state) = &state {
             state.headers(&mut headers);
         }
@@ -395,10 +396,13 @@ impl fmt::Debug for OpenAiAdapter {
     }
 }
 
-#[async_trait]
-impl StreamingProvider for OpenAiAdapter {
-    async fn stream_completion(
+impl OpenAiAdapter {
+    /// One logical Chat request. `resolved` is the credential a wrapping
+    /// adapter already read for this request, so its request shaping and the
+    /// request itself come from one store read; `None` resolves here.
+    pub(crate) async fn stream_with(
         &self,
+        resolved: Option<Resolved>,
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<futures::stream::BoxStream<'static, StreamChunk>, ProviderError> {
@@ -411,7 +415,10 @@ impl StreamingProvider for OpenAiAdapter {
         let resilience = self.profile.resilience();
         // The first-event watchdog is armed before the first attempt.
         let deadline = resilience.map(|_| stream_retry::deadline());
-        let mut resolved = self.resolve().await?;
+        let mut resolved = match resolved {
+            Some(resolved) => resolved,
+            None => self.resolve().await?,
+        };
         let mut recovered = false;
         loop {
             let mut attempt = self.attempt(&resolved, &messages, &options)?;
@@ -444,6 +451,17 @@ impl StreamingProvider for OpenAiAdapter {
                 } => return Err(attempt.error(status, &headers, &body)),
             }
         }
+    }
+}
+
+#[async_trait]
+impl StreamingProvider for OpenAiAdapter {
+    async fn stream_completion(
+        &self,
+        messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<futures::stream::BoxStream<'static, StreamChunk>, ProviderError> {
+        self.stream_with(None, messages, options).await
     }
 
     async fn abort(&self) -> Result<(), ProviderError> {

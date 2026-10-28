@@ -208,9 +208,9 @@ or runtime consumer for that metadata: it does not send an output-token limit.
 
 OAuth login stores an enabled subscription credential with the login instant,
 account and organization identity when available. Re-login replaces the same
-identity without prompting; another organization or account adds a separate row.
-The success line identifies your account, never a token. API-key overwrite
-confirmation applies only to enabled API-key rows.
+identity without prompting; another organization or account adds a separate row
+and becomes the active account (see [Multiple accounts](#multiple-accounts)).
+The success line identifies your account, never a token.
 
 ### xAI Grok OAuth (SuperGrok or X Premium+)
 
@@ -262,7 +262,7 @@ Run `rustain auth login xai` for masked key entry (TTY required) or set
 candidate key (never env or stored keys) to `GET <base>/models`, by default
 `https://api.x.ai/v1/models`. HTTP 401/403 rejects the key; a base without
 `/models` (HTTP 404/405) stores it unvalidated with
-`⚠  Could not confirm key via /models endpoint — xAI credentials stored unvalidated.`;
+`⚠  Could not confirm key — xAI credentials stored unvalidated.`;
 offline or other failures store nothing. The `xai` base is a non-default configured
 `base_url`, else `XAI_BASE_URL`, else `https://api.x.ai/v1`, for validation,
 requests and discovery alike.
@@ -317,7 +317,7 @@ for the account (`POST <endpoint>/models/<id>/policy`, five at a time). Both ste
 are best-effort: a failed probe or policy request never fails the login. The
 GitHub token is stored as is (there is no token exchange) with the Enterprise
 domain and the API endpoint; its "refresh" sends no HTTP and re-serves the same
-token. A second `rustain auth login github-copilot` replaces the served Copilot
+token. A second `rustain auth login github-copilot` replaces every stored Copilot
 login instead of adding a row, and the next request uses the new token.
 
 Alternatively, set `COPILOT_GITHUB_TOKEN` to a GitHub token, or to a JSON envelope
@@ -455,24 +455,84 @@ client version is pinned (no update-manifest lookup).
    before storage. An invalid key is never written to disk.
 3. **Storage** — credentials are persisted to `~/.rustain/auth.json` (mode `0600`,
    advisory-locked writes, atomic temp+rename) via the `AuthStorePort`.
-4. **Overwrite warning** — if an enabled API key already exists for the
-   provider, a confirmation prompt is shown before replacing it.
+4. **Accounts** — the same key again updates its row in place; a different key
+   is stored as another account and becomes the active one. Nothing is asked
+   before the key itself.
+
+### Multiple accounts
+
+Every provider can hold several stored accounts: distinct API keys, OAuth
+logins of different accounts or organizations, or both. Each login makes the
+account it wrote the provider's **active account**, and when the provider then
+holds more than one enabled account the login adds, on stderr:
+
+```text
+Active OpenAI account: API key #2.
+Switch with `rustain auth use openai --id <N>`; remove one with `rustain auth logout openai --id <N>`.
+```
+
+```bash
+rustain auth accounts              # every provider with stored accounts
+rustain auth accounts openai       # one provider (also --json)
+rustain auth use openai --id 1     # make account #1 active
+rustain auth logout openai --id 2  # remove account #2 only
+```
+
+`auth accounts` prints one header per provider — `OpenAI (openai): serving API key #1`,
+`serving OPENAI_API_KEY`, or `no usable credential` — and one line per stored
+account: `#<id>  <label>  <oauth|api_key>  <login|stored>  <state>`, where state is
+`active` (selected and served), `selected` (selected but not served, for example a
+migrated key below a set environment variable), `serving` (served by the default
+order), or `disabled: <cause>`. Labels are `API key #<id>`, or for OAuth the
+account's email, account or project, else `OAuth credential #<id>`, with the
+organization appended when it differs; key bytes are never shown. `--json` prints
+`{"schema_version":"1.0","providers":[{"provider","display_name","served","accounts":[…]}]}`,
+where `served` is `{"source":"oauth"|"login_key"|"stored_key","id":N}`,
+`{"source":"env","var":…}` or `null`.
+
+The choice is durable: it is stored in `auth.json`, survives restarts, and a
+running TUI or daemon serves it on its next request. Account ids are never reused
+within one `auth.json` (a deleted or recreated store starts again at `#1`), so a
+stale id is refused (`No stored credential #N for openai. Run \`rustain auth
+accounts openai\`.`) and never names another account. A disabled account cannot be
+selected (`Credential #N for openai is disabled (<cause>); log in again.`).
+`auth use` and `auth logout --id` refresh the provider's live model list when a
+credential still serves it, printing the same `Discovered N models` line as login.
+
+Google Cloud Code Assist logins whose best-effort email lookup failed are stored
+by their project; a later login of the same project that recovers the email
+updates that row instead of adding a second one. The reverse never merges: a
+login without an email never overwrites an identified account.
 
 ### Key resolution precedence
 
 The shared cascade resolves credentials in this order (highest wins):
 
 1. **Runtime** — explicit candidate passed by the login validation probe.
-2. **Stored OAuth** — first enabled OAuth row in file order.
-3. **Login key** — enabled API key with `origin: "login"`.
-4. **Environment variable** — trimmed, non-empty value.
-5. **Stored key** — enabled API key with `origin: "stored"`.
+2. **Active account** — the provider's selected row, when it is an enabled OAuth
+   grant the endpoint may receive, or an enabled login key.
+3. **Stored OAuth** — first enabled OAuth row, the active row first, then file order.
+4. **Login key** — enabled API key with `origin: "login"`.
+5. **Environment variable** — trimmed, non-empty value.
+6. **Stored key** — enabled API key with `origin: "stored"` (an active one first).
+
+A selected login key therefore beats an unselected OAuth row, but a selected
+migrated (`stored`) key never outranks the provider's environment variable. A
+disabled, removed, refresh-failed or unrecognised selection falls back to the
+default order; removing the active account clears the choice and never selects a
+neighbour.
 
 Both OAuth login and API-key login now write `origin: "login"`: a new login key
 beats environment variables. Migrated v1 keys and older paste logins retain
 `stored` origin below env. Config stores env-var names, never plaintext secrets.
 Bundled Anthropic status/list and startup check `ANTHROPIC_AUTH_TOKEN` before
 `ANTHROPIC_API_KEY`; config-driven availability and construction use the configured env name.
+
+A stored OAuth row leaves only for an endpoint that both the entry's `kind` and
+the row's own provider accept: `[provider.openai-codex] kind = "openai"` with
+another `base_url` is locked rather than sending the Codex grant there. A
+`google-gemini-cli` entry serves its stored login only — never an API key or
+environment variable, under any entry name.
 
 Every Anthropic, Codex and xAI request resolves its current credential through one shared
 resolver per process. A stale-only subscription builds successfully and refreshes
@@ -540,6 +600,10 @@ read-before-write guard prevents clobbering it. An empty v2 store (every
 provider removed) is readable by an older binary, which rewrites it as v1; the
 next v2 read migrates it again. Back up the store before downgrading; do not
 expect an older binary to use v2 credentials.
+
+The active-account choice is an optional top-level `selected` map in the same
+version 2 file. A v2 binary that predates it ignores the key and drops it on its
+next write; its provider then serves the default order. No row changes.
 
 Do not run pre-generation v2 writers alongside this version. They can drop the
 `generation` field, causing an in-flight fenced refresh to discard its stale
@@ -617,25 +681,34 @@ Use `--json` for machine-readable login output:
 
 ```bash
 rustain auth login anthropic --method oauth --json
-# → {"provider":"anthropic","status":"authenticated","method":"oauth","validated":true,"identity":{"email":"you@example.com"}}
+# → {"provider":"anthropic","status":"authenticated","method":"oauth","validated":true,"identity":{"email":"you@example.com"},"id":1}
 ```
 
 API-key results use `"method":"api_key"`; device-code logins store an OAuth row and
 report `"method":"oauth"`. Identity contains only fields actually
-learned. Guidance and the credential-file path go to stderr; stdout is reserved
-for the result line or JSON.
+learned; `id` is the stored account the login wrote. Guidance and the
+credential-file path go to stderr; stdout is reserved for the result line or JSON.
 
 ## `rustain auth logout <provider>`
 
 ```bash
 rustain auth logout anthropic
 rustain auth logout anthropic --json
+rustain auth logout anthropic --id 3
 ```
 
 Logout removes every stored row for that provider, including disabled tombstones,
-without changing environment variables. If a provider env variable is still set,
-the command says that variable will still be used. Repeating logout succeeds and
-reports no stored credentials. Account-specific logout is not offered here.
+and its active-account choice, without changing environment variables. If a
+provider env variable is still set, the command says that variable will still be
+used. Repeating logout succeeds and reports no stored credentials.
+With `--id`, only that account is removed (`Logged out of Anthropic account
+me@example.com (Org).`), and stderr names what now serves the provider
+(`Anthropic now uses <account (#N)>.`, the environment variable, `No Anthropic
+credentials remain.`, or `Anthropic has no usable credential.` when only disabled
+accounts or accounts this endpoint may not receive remain). Other accounts,
+providers, environment and configuration are untouched. `--json` prints
+`{"provider","status":"logged_out","removed":1,"id","remaining","served"}`, or
+`{"provider","status":"not_found","id"}` with a non-zero exit for an unknown id.
 `xai` and `xai-oauth` are separate providers: `rustain auth logout xai-oauth`
 removes only the device-login rows (`XAI_OAUTH_TOKEN` stays effective until
 unset), and `rustain auth logout xai` removes only stored xAI API keys.

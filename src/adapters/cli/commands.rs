@@ -302,9 +302,31 @@ pub enum AuthAction {
         #[arg(long)]
         json: bool,
     },
-    /// Remove all persisted credentials for a provider, leaving environment intact.
+    /// Remove persisted credentials for a provider, leaving environment intact:
+    /// every row, or with `--id` exactly one account (see `auth accounts`).
     Logout {
         provider: String,
+        /// The stored account to remove; other accounts stay.
+        #[arg(long)]
+        id: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the stored accounts of one provider (or of every provider with
+    /// stored rows), the active account and the source a request would use.
+    Accounts {
+        provider: Option<String>,
+        /// Machine-readable JSON output instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Make one stored account the provider's active credential.
+    Use {
+        provider: String,
+        /// The stored account id from `auth accounts`.
+        #[arg(long)]
+        id: u64,
+        /// Machine-readable JSON output instead of human text.
         #[arg(long)]
         json: bool,
     },

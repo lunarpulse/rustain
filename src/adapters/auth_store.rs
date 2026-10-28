@@ -16,7 +16,8 @@ use sha2::{Digest, Sha256};
 use crate::domain::errors::AuthError;
 use crate::domain::models::credential::{
     AuthSnapshot, CasOutcome, Credential, CredentialGeneration, CredentialId, CredentialIdentity,
-    CredentialOrigin, CredentialRouting, CredentialStamp, StoredCredential,
+    CredentialOrigin, CredentialRouting, CredentialStamp, RowRemoval, SelectOutcome,
+    StoredCredential,
 };
 use crate::domain::models::secret::{SecretString, expose_secret_string};
 use crate::domain::ports::{AuthStorePort, RefreshLease};
@@ -27,6 +28,10 @@ struct AuthFile {
     version: u32,
     next_id: u64,
     providers: BTreeMap<String, Vec<AuthRow>>,
+    /// Version 2 keeps this optional key: an older reader ignores it and drops it
+    /// on its next write, falling back to the default row order.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    selected: BTreeMap<String, CredentialId>,
 }
 
 /// Epic 20 rows retain unrecognised credential types verbatim for downgrade safety.
@@ -104,7 +109,10 @@ impl Serialize for AuthRow {
 
 impl AuthFile {
     fn snapshot(self) -> AuthSnapshot {
-        let mut snapshot = AuthSnapshot::default();
+        let mut snapshot = AuthSnapshot {
+            selected: self.selected,
+            ..AuthSnapshot::default()
+        };
         for (provider, rows) in self.providers {
             let known = snapshot.providers.entry(provider).or_default();
             for row in rows {
@@ -115,6 +123,17 @@ impl AuthFile {
             }
         }
         snapshot
+    }
+
+    /// The provider's known row `id`, if any.
+    fn known_row(&self, provider: &str, id: CredentialId) -> Option<&StoredCredential> {
+        self.providers
+            .get(provider)?
+            .iter()
+            .find_map(|row| match row {
+                AuthRow::Known(row) if row.id == id => Some(row),
+                _ => None,
+            })
     }
 }
 
@@ -256,6 +275,7 @@ impl FileAuthStore {
                     version: 2,
                     next_id: 1,
                     providers: BTreeMap::new(),
+                    selected: BTreeMap::new(),
                 });
             }
             Err(e) => return Err(AuthError::Io(e.to_string())),
@@ -279,12 +299,23 @@ impl FileAuthStore {
             #[serde(default)]
             next_id: u64,
             providers: BTreeMap<String, Box<RawValue>>,
+            // A hand-edited choice that is not a map of row ids is ignored
+            // (`null` included), never fatal to the rows.
+            #[serde(default)]
+            selected: serde_json::Value,
         }
         let envelope: Envelope = serde_json::from_str(&contents).map_err(json_error)?;
         let mut data = AuthFile {
             version: 2,
             next_id: if version == 1 { 1 } else { envelope.next_id },
             providers: BTreeMap::new(),
+            selected: envelope
+                .selected
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(provider, id)| Some((provider.clone(), CredentialId(id.as_u64()?))))
+                .collect(),
         };
         let mut max_id: u64 = 0;
         for (provider, raw) in envelope.providers {
@@ -493,29 +524,26 @@ impl AuthStorePort for FileAuthStore {
         let mut result = CredentialId(0);
         Self::modify_locked(&path, |data| {
             let generation = mint_generation()?;
-            let identity = match &cred {
-                Credential::OAuth(oauth) => {
-                    oauth
-                        .identity
-                        .key(crate::adapters::auth::policies::org_scoped_identity(
-                            provider,
-                        ))
-                }
-                Credential::ApiKey(_) => None,
-            };
+            let org_scoped = crate::adapters::auth::policies::org_scoped_identity(provider);
             // A single-grant provider (GitHub Copilot) has no account identity, so
-            // a new login supersedes its served grant instead of appending a row.
+            // a new login supersedes every served grant instead of appending a row.
             let single = crate::adapters::cli::auth::providers::lookup(provider)
                 .is_some_and(|meta| meta.single_oauth_grant);
-            let matches = |row: &StoredCredential| match (&cred, &row.credential) {
-                (Credential::ApiKey(_), Credential::ApiKey(_)) => true,
-                (Credential::OAuth(_), Credential::OAuth(old)) => {
+            // Equal key bytes or the same grant identity update the row; a distinct
+            // key or account is another row. `exact` excludes the one-way claim of a
+            // project-keyed row, so an exact row wins when both exist.
+            let matches = |row: &StoredCredential, exact: bool| match (&cred, &row.credential) {
+                (Credential::ApiKey(_), Credential::ApiKey(_)) => {
+                    cred.expose_api_key() == row.credential.expose_api_key()
+                }
+                (Credential::OAuth(new), Credential::OAuth(old)) => {
                     single
-                        || (identity.is_some()
-                            && identity
-                                == old.identity.key(
-                                    crate::adapters::auth::policies::org_scoped_identity(provider),
-                                ))
+                        || if exact {
+                            new.identity.key(org_scoped).is_some()
+                                && new.identity.key(org_scoped) == old.identity.key(org_scoped)
+                        } else {
+                            new.identity.replaces(&old.identity, org_scoped)
+                        }
                 }
                 _ => false,
             };
@@ -523,13 +551,19 @@ impl AuthStorePort for FileAuthStore {
             // Superseded tombstones must not accumulate across re-login.
             rows.retain(|row| {
                 !matches!(row, AuthRow::Known(row)
-                if row.disabled_cause.is_some() && matches(row))
+                if row.disabled_cause.is_some() && matches(row, false))
             });
+            let enabled_match = |exact: bool| {
+                rows.iter().position(|row| {
+                    matches!(row, AuthRow::Known(row)
+                        if row.disabled_cause.is_none() && matches(row, exact))
+                })
+            };
             let last_validated = validated.then(chrono::Utc::now);
-            if let Some(row) = rows.iter_mut().find_map(|row| match row {
-                AuthRow::Known(row) if row.disabled_cause.is_none() && matches(row) => Some(row),
-                _ => None,
-            }) {
+            if let Some(index) = enabled_match(true).or_else(|| enabled_match(false)) {
+                let AuthRow::Known(row) = &mut rows[index] else {
+                    unreachable!("a matched row is known")
+                };
                 row.rev = row
                     .rev
                     .checked_add(1)
@@ -539,6 +573,12 @@ impl AuthStorePort for FileAuthStore {
                 row.origin = origin;
                 row.last_validated = last_validated;
                 result = row.id;
+                if single {
+                    rows.retain(|row| {
+                        !matches!(row, AuthRow::Known(row)
+                            if row.id != result && matches!(row.credential, Credential::OAuth(_)))
+                    });
+                }
             } else {
                 result = CredentialId(data.next_id);
                 data.next_id = data
@@ -555,6 +595,8 @@ impl AuthStorePort for FileAuthStore {
                     disabled_cause: None,
                 }));
             }
+            // A login makes the account it wrote the provider's active row.
+            data.selected.insert(provider.to_owned(), result);
             Ok(true)
         })?;
         Ok(result)
@@ -587,8 +629,52 @@ impl AuthStorePort for FileAuthStore {
     async fn remove(&self, provider: &str) -> Result<(), AuthError> {
         let _guard = self.lock.lock().await;
         Self::modify_locked(&self.path()?, |data| {
-            Ok(data.providers.remove(provider).is_some())
+            let selection = data.selected.remove(provider).is_some();
+            Ok(data.providers.remove(provider).is_some() | selection)
         })
+    }
+
+    async fn select(&self, provider: &str, id: CredentialId) -> Result<SelectOutcome, AuthError> {
+        let _guard = self.lock.lock().await;
+        let mut outcome = SelectOutcome::NotFound;
+        Self::modify_locked(&self.path()?, |data| {
+            match data.known_row(provider, id) {
+                None => return Ok(false),
+                Some(row) if row.disabled_cause.is_some() => {
+                    outcome = SelectOutcome::Disabled;
+                    return Ok(false);
+                }
+                Some(_) => outcome = SelectOutcome::Selected,
+            }
+            // Re-selecting the active row is not a write.
+            Ok(data.selected.insert(provider.to_owned(), id) != Some(id))
+        })?;
+        Ok(outcome)
+    }
+
+    async fn remove_row(&self, provider: &str, id: CredentialId) -> Result<RowRemoval, AuthError> {
+        let _guard = self.lock.lock().await;
+        let mut outcome = RowRemoval::NotFound;
+        Self::modify_locked(&self.path()?, |data| {
+            let Some(rows) = data.providers.get_mut(provider) else {
+                return Ok(false);
+            };
+            let before = rows.len();
+            rows.retain(|row| !matches!(row, AuthRow::Known(row) if row.id == id));
+            if rows.len() == before {
+                return Ok(false);
+            }
+            // Unrecognised rows keep the provider entry alive (downgrade passthrough).
+            if rows.is_empty() {
+                data.providers.remove(provider);
+            }
+            if data.selected.get(provider) == Some(&id) {
+                data.selected.remove(provider);
+            }
+            outcome = RowRemoval::Removed;
+            Ok(true)
+        })?;
+        Ok(outcome)
     }
 
     /// ADR-19-1-03 no-daemon election: an flock on a sibling file, separate from
@@ -750,22 +836,145 @@ mod tests {
         assert!(store.snapshot().await.unwrap().rows("anthropic").is_empty());
     }
 
+    /// Equal key bytes update the row in place; a distinct key is another row,
+    /// and every write makes its row the active one.
     #[tokio::test]
-    async fn set_replaces_existing_entry() {
+    async fn distinct_keys_coexist_and_an_equal_key_updates_in_place() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileAuthStore::at(tmp.path().join("auth.json"));
         let first = put(&store, "test-provider", "key1").await;
         let first_generation = store.snapshot().await.unwrap().rows("test-provider")[0].generation;
         assert_ne!(first_generation, CredentialGeneration::default());
         let second = put(&store, "test-provider", "key2").await;
-        assert_eq!(first, second);
+        assert_ne!(first, second);
+        let snapshot = store.snapshot().await.unwrap();
+        assert_eq!(snapshot.rows("test-provider").len(), 2);
+        assert_eq!(snapshot.selected("test-provider"), Some(second));
+        let again = put(&store, "test-provider", "key1").await;
+        assert_eq!(again, first);
         let snapshot = store.snapshot().await.unwrap();
         let rows = snapshot.rows("test-provider");
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, first);
         assert_eq!(rows[0].rev, 2);
         assert_ne!(rows[0].generation, CredentialGeneration::default());
         assert_ne!(rows[0].generation, first_generation);
-        assert_eq!(rows[0].credential.expose_api_key(), Some("key2"));
+        assert_eq!(rows[0].credential.expose_api_key(), Some("key1"));
+        assert_eq!(rows[1].credential.expose_api_key(), Some("key2"));
+        // The distinct key's row is new: rev 1 and its own fresh generation.
+        assert_eq!(rows[1].rev, 1);
+        assert_ne!(rows[1].generation, CredentialGeneration::default());
+        assert_ne!(rows[1].generation, rows[0].generation);
+        assert_eq!(snapshot.selected("test-provider"), Some(first));
+    }
+
+    #[tokio::test]
+    async fn select_and_remove_row_touch_only_known_rows_of_the_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("auth.json");
+        let store = FileAuthStore::at(&path);
+        let a = put(&store, "p", "key-a").await;
+        let b = put(&store, "p", "key-b").await;
+        let other = put(&store, "q", "key-q").await;
+        // Unknown and foreign ids write nothing.
+        let before = std::fs::read(&path).unwrap();
+        assert_eq!(
+            store.select("p", other).await.unwrap(),
+            SelectOutcome::NotFound
+        );
+        assert_eq!(
+            store.remove_row("p", CredentialId(99)).await.unwrap(),
+            RowRemoval::NotFound
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(store.select("p", a).await.unwrap(), SelectOutcome::Selected);
+        assert_eq!(store.snapshot().await.unwrap().selected("p"), Some(a));
+        // Re-selecting the active row is not a write.
+        let selected = std::fs::read(&path).unwrap();
+        assert_eq!(store.select("p", a).await.unwrap(), SelectOutcome::Selected);
+        assert_eq!(std::fs::read(&path).unwrap(), selected);
+        let stamp = store.snapshot().await.unwrap().rows("p")[1].stamp();
+        store
+            .disable_if_matches("p", stamp, "revoked")
+            .await
+            .unwrap();
+        assert_eq!(store.select("p", b).await.unwrap(), SelectOutcome::Disabled);
+        // Removing a non-active row keeps the choice; removing the active one clears it.
+        assert_eq!(store.remove_row("p", b).await.unwrap(), RowRemoval::Removed);
+        assert_eq!(store.snapshot().await.unwrap().selected("p"), Some(a));
+        assert_eq!(store.remove_row("p", a).await.unwrap(), RowRemoval::Removed);
+        let snapshot = store.snapshot().await.unwrap();
+        assert!(snapshot.rows("p").is_empty());
+        assert!(!snapshot.providers.contains_key("p"));
+        assert_eq!(snapshot.selected("p"), None);
+        assert_eq!(snapshot.selected("q"), Some(other));
+        store.remove("q").await.unwrap();
+        assert!(store.snapshot().await.unwrap().selected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_row_keeps_unknown_rows_and_downgrade_readers_ignore_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("auth.json");
+        std::fs::write(
+            &path,
+            r#"{"version":2,"next_id":3,"providers":{"p":[{"id":1,"type":"future","x":1},{"id":2,"rev":1,"origin":"login","type":"api_key","api_key":"K","last_validated":null,"disabled_cause":null}]},"selected":{"p":2,"bad":"x"}}"#,
+        )
+        .unwrap();
+        let store = FileAuthStore::at(&path);
+        let snapshot = store.snapshot().await.unwrap();
+        assert_eq!(snapshot.selected("p"), Some(CredentialId(2)));
+        assert_eq!(snapshot.selected("bad"), None);
+        assert_eq!(
+            store.remove_row("p", CredentialId(1)).await.unwrap(),
+            RowRemoval::NotFound
+        );
+        assert_eq!(
+            store.remove_row("p", CredentialId(2)).await.unwrap(),
+            RowRemoval::Removed
+        );
+        let disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            disk["providers"]["p"],
+            serde_json::json!([{"id":1,"type":"future","x":1}])
+        );
+        assert!(disk.get("selected").is_none());
+        // A pre-selection reader's envelope (no `selected` field, unknown keys
+        // allowed) still parses a file that carries one.
+        #[derive(Deserialize)]
+        struct OldEnvelope {
+            #[allow(dead_code)]
+            providers: BTreeMap<String, Box<RawValue>>,
+        }
+        put(&store, "p", "K2").await;
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"selected\""));
+        serde_json::from_str::<OldEnvelope>(&raw).unwrap();
+    }
+
+    /// A `selected` value that is not a map (hand-edited, `null` included) is
+    /// ignored; the rows stay readable.
+    #[tokio::test]
+    async fn a_malformed_selection_never_hides_the_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("auth.json");
+        let store = FileAuthStore::at(&path);
+        let id = put(&store, "p", "key-p").await;
+        for selected in [
+            serde_json::Value::Null,
+            serde_json::json!([1]),
+            serde_json::json!("p"),
+        ] {
+            let mut disk: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            disk["selected"] = selected.clone();
+            std::fs::write(&path, serde_json::to_vec(&disk).unwrap()).unwrap();
+            let snapshot = store.snapshot().await.unwrap();
+            assert_eq!(snapshot.rows("p").len(), 1, "{selected}");
+            assert_eq!(snapshot.rows("p")[0].id, id);
+            assert_eq!(snapshot.selected("p"), None, "{selected}");
+        }
     }
 
     #[tokio::test]

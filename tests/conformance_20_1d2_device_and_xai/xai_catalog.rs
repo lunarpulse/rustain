@@ -1,5 +1,5 @@
 //! xAI live discovery and curation (K10) and the credential gate (K11), through
-//! `init_provider_layer` + `refresh_target` / `rediscover_after_login`. Stored
+//! `init_provider_layer` + `refresh_target` / `rediscover_after_auth_change`. Stored
 //! `xai-oauth` rows come from a real `flows::login` against the loopback stub;
 //! the official API origin is the same stub (`RUSTAIN_TEST_AUTH_ORIGIN`), so
 //! discovery and inference reach `<stub>/v1/...`.
@@ -25,7 +25,7 @@ use rustain::domain::models::{
 };
 use rustain::domain::ports::AuthStorePort;
 use rustain::infrastructure::model_discovery::{
-    RefreshReport, rediscover_after_login, refresh_target,
+    RefreshReport, rediscover_after_auth_change, refresh_target,
 };
 use rustain::infrastructure::provider_availability::{
     Availability, availability, effective_providers,
@@ -314,7 +314,7 @@ async fn k10_login_rediscovery_serves_seed_order_then_new_live_ids_sorted_never_
     )
     .await;
 
-    let report = rediscover_after_login(OAUTH, &cfg, &before)
+    let report = rediscover_after_auth_change(OAUTH, &cfg, &before)
         .await
         .expect("a new xai-oauth row is rediscovered after login");
     assert_eq!(report.status, DiscoveryStatus::Ok);

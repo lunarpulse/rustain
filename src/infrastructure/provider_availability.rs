@@ -92,15 +92,16 @@ impl EffectiveProvider {
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect()
-        // A Gemini CLI credential is a stored login only (token + project).
-        } else if self.cfg.api_key_env.is_empty() || self.kind() == "google-gemini-cli" {
+        // A login-only credential (Gemini CLI token + project) has no env form.
+        } else if self.cfg.api_key_env.is_empty() || providers::login_only(self.kind()) {
             vec![]
         } else {
             vec![&self.cfg.api_key_env]
         }
     }
-    pub fn oauth_allowed(&self, env_lookup: &dyn Fn(&str) -> Option<String>) -> bool {
-        let base = if self.kind() == "anthropic" {
+    /// The endpoint every stored row of this entry would be sent to.
+    fn base_url(&self, env_lookup: &dyn Fn(&str) -> Option<String>) -> String {
+        if self.kind() == "anthropic" {
             super::provider_factory::anthropic_base_url(
                 if self.origin == ProviderOrigin::Config {
                     Some(&self.cfg)
@@ -111,8 +112,18 @@ impl EffectiveProvider {
             )
         } else {
             super::provider_factory::discovery_base_url(&self.id, &self.cfg)
-        };
-        super::provider_factory::oauth_allowed(self.kind(), &base)
+        }
+    }
+    /// The factory's stored-row rule for this entry (`provider_factory::row_policy`).
+    pub fn row_policy(
+        &self,
+        env_lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> crate::domain::services::key_cascade::RowPolicy {
+        super::provider_factory::row_policy(
+            self.kind(),
+            self.rows_key(),
+            &self.base_url(env_lookup),
+        )
     }
     pub fn display_name(&self) -> String {
         providers::lookup(self.kind())
@@ -155,7 +166,7 @@ pub fn availability(
         &entry.env_vars(),
         snapshot,
         env_lookup,
-        entry.oauth_allowed(env_lookup),
+        entry.row_policy(env_lookup),
     ) {
         Some(selected) => Availability::Signed(selected.source),
         None => Availability::Locked {

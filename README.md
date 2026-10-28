@@ -167,6 +167,9 @@ rustain auth status            # show configured providers, source, validation t
 rustain auth status --json     # scriptable status envelope
 rustain auth list              # list all providers, auth methods, signup URLs
 rustain auth list --json       # structured provider catalog
+rustain auth accounts openai   # stored accounts, the active one, what serves
+rustain auth use openai --id 1 # make stored account #1 active
+rustain auth logout openai --id 2  # remove one stored account
 ```
 
 Env vars still win over `~/.rustain/auth.json`; `auth status` reports that

@@ -152,7 +152,7 @@ async fn token_mock(server: &MockServer, expires_in: i64, identity: serde_json::
         .mount(server)
         .await;
 }
-pub(super) async fn login_oauth(
+pub(crate) async fn login_oauth(
     server: &MockServer,
     store: &Arc<dyn AuthStorePort>,
     now: i64,
@@ -544,7 +544,7 @@ fn validation_config(server: &MockServer) -> rustain::domain::models::ProviderCo
 
 #[tokio::test]
 #[serial]
-async fn k07_api_key_frontdoor_validation_precedence_subscription_and_decline() {
+async fn k07_api_key_frontdoor_validation_precedence_subscription_and_second_key() {
     let server = MockServer::start().await;
     let _env = Env::set(&[
         ("FLOW_ENV_KEY", "ENV-MUST-LOSE"),
@@ -586,12 +586,25 @@ async fn k07_api_key_frontdoor_validation_precedence_subscription_and_decline() 
     assert!(
         matches!(&resolved.1,rustain::domain::models::ResolvedAuth::ApiKey(key) if key.expose_secret()=="sk-test-key")
     );
-    // The same UI's non-yes answer declines the overwrite before probing or writing.
-    assert!(matches!(
-        flows::login("anthropic", &AuthMethod::ApiKey, &context, &port).await,
-        Err(flows::FlowError::Declined)
-    ));
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    // A second, distinct key appends and becomes active: no overwrite prompt, one
+    // probe with its own bearer, and the first key is kept (20-1d5 H1–H3).
+    let (mut second, _, _) = recording_ui(false);
+    Arc::get_mut(&mut second).unwrap().secret = Some("sk-second-key".into());
+    let second = flows::login(
+        "anthropic",
+        &AuthMethod::ApiKey,
+        &ctx(second, 0).with_validation_config(validation_config(&server)),
+        &port,
+    )
+    .await
+    .unwrap();
+    let snapshot = port.snapshot().await.unwrap();
+    assert_eq!(snapshot.rows("anthropic").len(), 2);
+    assert_eq!(snapshot.rows("anthropic")[1].id, second.credential_id);
+    assert_eq!(snapshot.selected("anthropic"), Some(second.credential_id));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].headers["x-api-key"], "sk-second-key");
     port.remove("anthropic").await.unwrap();
     server.reset().await;
     Mock::given(method("GET"))
@@ -1255,7 +1268,7 @@ async fn binary_non_tty_method_errors_and_oauth_json_success() {
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         result,
-        serde_json::json!({"provider":"anthropic","status":"authenticated","method":"oauth","validated":true,"identity":{"account_id":"json-account","email":"json@example.test","org_id":"json-org","org_name":"Json Org"}})
+        serde_json::json!({"provider":"anthropic","status":"authenticated","method":"oauth","validated":true,"identity":{"account_id":"json-account","email":"json@example.test","org_id":"json-org","org_name":"Json Org"},"id":1})
     );
     for secret in ["LOGIN-ACCESS-CANARY", "LOGIN-REFRESH-CANARY", "JSON-CODE"] {
         assert!(!guidance.contains(secret));

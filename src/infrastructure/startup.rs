@@ -456,27 +456,8 @@ pub async fn run() -> Result<()> {
                     &app_config,
                 )
                 .await;
-                if result.is_ok()
-                    && let Some(report) =
-                        crate::infrastructure::model_discovery::rediscover_after_login(
-                            provider,
-                            &app_config,
-                            &before,
-                        )
-                        .await
-                {
-                    let display = crate::adapters::cli::auth::providers::lookup(provider)
-                        .map(|meta| meta.display_name)
-                        .unwrap_or(provider);
-                    if let Some(notice) = report.notice {
-                        eprintln!("{notice}");
-                    } else if report.status
-                        == crate::domain::models::provider::DiscoveryStatus::Unavailable
-                    {
-                        eprintln!("Provider {display} unavailable — showing bundled models.");
-                    } else {
-                        eprintln!("Discovered {} models for {display}.", report.model_count);
-                    }
+                if result.is_ok() {
+                    crate::adapters::cli::auth::rediscover(provider, &app_config, &before).await;
                 }
                 return result.map_err(|error| {
                     tracing::error!("Auth login subcommand failed: {error}");
@@ -507,7 +488,11 @@ pub async fn run() -> Result<()> {
                         SubcommandExit(SubcommandExit::GENERIC).into()
                     });
             }
-            AuthAction::Logout { provider, json } => {
+            AuthAction::Logout {
+                provider,
+                id: None,
+                json,
+            } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
                 return crate::adapters::cli::auth::logout::run_auth_logout(
@@ -516,6 +501,58 @@ pub async fn run() -> Result<()> {
                 .await
                 .map_err(|e| {
                     eprintln!("Auth logout failed: {e}");
+                    SubcommandExit(SubcommandExit::GENERIC).into()
+                });
+            }
+            // Per-account changes print their own errors and the discovery line.
+            AuthAction::Logout {
+                provider,
+                id: Some(id),
+                json,
+            } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                let before = store.snapshot().await.unwrap_or_default();
+                crate::adapters::cli::auth::logout::run_auth_logout_row(
+                    provider,
+                    *id,
+                    *json,
+                    &store,
+                    &app_config,
+                )
+                .await
+                .map_err(|_| SubcommandExit(SubcommandExit::GENERIC))?;
+                crate::adapters::cli::auth::rediscover(provider, &app_config, &before).await;
+                return Ok(());
+            }
+            AuthAction::Use { provider, id, json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                let before = store.snapshot().await.unwrap_or_default();
+                crate::adapters::cli::auth::use_account::run_auth_use(
+                    provider,
+                    *id,
+                    *json,
+                    &store,
+                    &app_config,
+                )
+                .await
+                .map_err(|_| SubcommandExit(SubcommandExit::GENERIC))?;
+                crate::adapters::cli::auth::rediscover(provider, &app_config, &before).await;
+                return Ok(());
+            }
+            AuthAction::Accounts { provider, json } => {
+                let store: Arc<dyn crate::domain::ports::AuthStorePort> =
+                    Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+                return crate::adapters::cli::auth::accounts::run_auth_accounts(
+                    provider.as_deref(),
+                    *json,
+                    &store,
+                    &app_config,
+                )
+                .await
+                .map_err(|e| {
+                    eprintln!("Auth accounts failed: {e}");
                     SubcommandExit(SubcommandExit::GENERIC).into()
                 });
             }
@@ -2856,7 +2893,11 @@ fn build_anthropic_provider_from_env(
                 &["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"],
                 &crate::adapters::auth_store::FileAuthStore::snapshot_sync(),
                 &lookup,
-                crate::infrastructure::provider_factory::oauth_allowed("anthropic", &base_url),
+                crate::infrastructure::provider_factory::row_policy(
+                    "anthropic",
+                    "anthropic",
+                    &base_url,
+                ),
             )
             .is_some_and(|selected| {
                 matches!(

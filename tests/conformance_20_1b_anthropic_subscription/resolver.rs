@@ -299,6 +299,20 @@ impl AuthStorePort for FailingWrites {
     async fn remove(&self, p: &str) -> Result<(), AuthError> {
         self.inner.remove(p).await
     }
+    async fn select(
+        &self,
+        p: &str,
+        id: CredentialId,
+    ) -> Result<rustain::domain::models::SelectOutcome, AuthError> {
+        self.inner.select(p, id).await
+    }
+    async fn remove_row(
+        &self,
+        p: &str,
+        id: CredentialId,
+    ) -> Result<rustain::domain::models::RowRemoval, AuthError> {
+        self.inner.remove_row(p, id).await
+    }
     async fn refresh_lease(&self) -> Result<RefreshLease, AuthError> {
         self.inner.refresh_lease().await
     }

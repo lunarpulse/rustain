@@ -134,7 +134,8 @@ impl AnthropicAdapter {
         options: &CompletionOptions,
     ) -> Result<MessagesAttempt, ProviderError> {
         let ctx = RequestContext { messages, options };
-        let url = format!("{}/v1/messages", profile.base_url(resolved)?);
+        let base = profile.base_url(resolved)?;
+        let url = format!("{base}/v1/messages");
         let body = serde_json::to_vec(&AnthropicRequest::from((messages, options)))
             .map_err(|_| ProviderError::Other("Could not serialize Anthropic request".into()))?;
         let mut headers = HeaderMap::new();
@@ -145,7 +146,7 @@ impl AnthropicAdapter {
             super::bearer_header(&*profile.bearer(resolved)?)?,
         );
         profile.headers(resolved, &ctx, &mut headers);
-        let state = profile.begin(resolved, &ctx);
+        let state = profile.begin(resolved, &base, &ctx);
         if let Some(state) = &state {
             state.headers(&mut headers);
         }
@@ -164,22 +165,48 @@ impl AnthropicAdapter {
         })
     }
 
-    /// Per logical request: resolve, send under the profile's attempts and
-    /// identity alternate, recover a rejected stored grant once (then `begin`
-    /// again), and stream through the profile's resilience policy, whose
-    /// provider loop also re-issues a rejected first attempt.
+    /// A profiled request whose credential the wrapping adapter already read
+    /// for this logical request, so its request shaping and the request itself
+    /// come from one store read.
+    pub(crate) async fn stream_resolved(
+        &self,
+        resolved: Resolved,
+        messages: Vec<Message>,
+        options: CompletionOptions,
+    ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+        let Some(profile) = &self.request_profile else {
+            return Err(ProviderError::Other(
+                "a pre-resolved Messages request needs a request profile".into(),
+            ));
+        };
+        if messages.is_empty() {
+            return Err(ProviderError::Other(
+                "Cannot send empty messages list to Anthropic API".to_string(),
+            ));
+        }
+        self.stream_profiled(profile, Some(resolved), messages, options)
+            .await
+    }
+
+    /// Per logical request: resolve (unless `resolved` was read by the caller),
+    /// send under the profile's attempts and identity alternate, recover a
+    /// rejected stored grant once (then `begin` again), and stream through the
+    /// profile's resilience policy, whose provider loop also re-issues a
+    /// rejected first attempt.
     pub(super) async fn stream_profiled(
         &self,
         profile: &Arc<dyn RequestProfile>,
+        resolved: Option<Resolved>,
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         let resilience = profile.resilience();
         // The first-event watchdog is armed before the first attempt.
         let deadline = resilience.map(|_| stream_retry::deadline());
-        let mut resolved = match &self.credential {
-            super::AnthropicCredential::Resolved(handle) => handle.current().await?,
-            super::AnthropicCredential::Fixed(_) => {
+        let mut resolved = match (resolved, &self.credential) {
+            (Some(resolved), _) => resolved,
+            (None, super::AnthropicCredential::Resolved(handle)) => handle.current().await?,
+            (None, super::AnthropicCredential::Fixed(_)) => {
                 return Err(ProviderError::Other(
                     "a profiled Messages transport resolves its credential per request".into(),
                 ));

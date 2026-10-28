@@ -11,7 +11,7 @@
 #[path = "conformance_20_1d3_copilot/catalog.rs"]
 mod catalog;
 #[path = "conformance_20_1d3_copilot/chat_d4.rs"]
-mod chat_d4;
+pub(crate) mod chat_d4;
 #[path = "conformance_20_1d3_copilot/cli.rs"]
 mod cli;
 #[path = "conformance_20_1d3_copilot/common.rs"]

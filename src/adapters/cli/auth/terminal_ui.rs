@@ -96,14 +96,7 @@ impl LoginUi for TerminalUi {
         Box::pin(async move {
             let (tx, rx) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
-                let value = if label.starts_with("Overwrite ") {
-                    eprint!("{label}");
-                    let _ = std::io::stderr().flush();
-                    let mut value = String::new();
-                    std::io::stdin().read_line(&mut value).ok().map(|_| value)
-                } else {
-                    rpassword::prompt_password(label).ok()
-                };
+                let value = rpassword::prompt_password(label).ok();
                 let _ = tx.send(value.map(SecretString::new));
             });
             rx.await.ok().flatten()

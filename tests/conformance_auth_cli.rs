@@ -3,19 +3,21 @@
 
 use clap::CommandFactory;
 
-/// Ratchet: login, status, list and logout are the public auth commands.
+/// Ratchet: login, status, list, logout, accounts and use are the public auth
+/// commands (20-1d5 adds per-account `accounts` and `use`).
 #[test]
-fn test_auth_subcommand_count_is_four() {
-    const EXPECTED_AUTH_SUBCOMMANDS: usize = 4;
+fn test_auth_subcommand_count_is_six() {
+    const EXPECTED_AUTH_SUBCOMMANDS: usize = 6;
     let cmd = rustain::adapters::cli::commands::Cli::command();
     let auth_cmd = cmd
         .find_subcommand("auth")
         .expect("'auth' subcommand should exist");
-    let subcommand_count = auth_cmd.get_subcommands().count();
+    let mut names: Vec<_> = auth_cmd.get_subcommands().map(|c| c.get_name()).collect();
+    names.sort_unstable();
     assert_eq!(
-        subcommand_count, EXPECTED_AUTH_SUBCOMMANDS,
-        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommand(s) (login + status + list + logout), \
-         found {subcommand_count}."
+        names,
+        ["accounts", "list", "login", "logout", "status", "use"],
+        "Expected {EXPECTED_AUTH_SUBCOMMANDS} auth subcommands"
     );
 }
 

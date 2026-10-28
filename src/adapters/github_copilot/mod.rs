@@ -81,18 +81,12 @@ const DEFAULT_CONTEXT: u32 = 128_000;
 const OPENAI_OUTPUT_CLAMP: u32 = 64_000;
 /// Sessions whose native Responses history is warm in this adapter.
 const WARM_SESSIONS: usize = 256;
+/// Credential scopes whose discovery facts one adapter keeps.
+const SCOPES: usize = 16;
 
 /// The canonical root as requests see it (rebased in instrumented builds).
 fn canonical_root() -> String {
     headers::derived(DEFAULT_BASE_URL)
-}
-
-/// A root re-probed by discovery for the credential scope it was found under.
-#[derive(Debug)]
-struct Learned {
-    context: String,
-    scope: String,
-    root: String,
 }
 
 /// Per-id facts of the last live discovery: its output limit and wire id.
@@ -101,41 +95,69 @@ pub(crate) struct LiveRow {
     pub max_output: Option<u32>,
 }
 
-/// State every route of one adapter shares: configured base, learned root,
-/// served catalogue and the last live discovery.
+/// What discovery learned for one credential scope: the re-probed account root
+/// and the ids of its last live listing. One account's discovery never answers,
+/// clears or overwrites another account's requests.
+#[derive(Debug, Clone, Default)]
+struct ScopeFacts {
+    root: Option<String>,
+    live: Arc<HashMap<String, LiveRow>>,
+}
+
+/// State every route of one adapter shares: configured base, the per-scope
+/// discovery facts and the served catalogue.
 #[derive(Debug)]
 pub(crate) struct Shared {
     pub configured_base: Option<String>,
-    learned: ArcSwap<Option<Learned>>,
+    /// The discovery scope context, learned with the first discovery.
+    context: ArcSwap<Option<String>>,
+    facts: Mutex<LruCache<String, ScopeFacts>>,
     served: ArcSwap<Option<Vec<ModelDescriptor>>>,
-    live: ArcSwap<HashMap<String, LiveRow>>,
 }
 
 impl Shared {
     fn new(configured_base: Option<String>) -> Self {
         Self {
             configured_base: configured_base.filter(|base| !base.trim().is_empty()),
-            learned: ArcSwap::from_pointee(None),
+            context: ArcSwap::from_pointee(None),
+            facts: Mutex::new(LruCache::new(
+                NonZeroUsize::new(SCOPES).expect("non-zero capacity"),
+            )),
             served: ArcSwap::from_pointee(None),
-            live: ArcSwap::from_pointee(HashMap::new()),
         }
+    }
+
+    /// The facts discovery learned for this credential's scope.
+    fn facts(&self, resolved: &Resolved) -> Option<ScopeFacts> {
+        let context = self.context.load();
+        let scope = crate::adapters::model_catalog_cache::request_scope(
+            context.as_ref().as_ref()?,
+            resolved,
+        );
+        self.facts.lock().get(&scope).cloned()
     }
 
     /// The re-probed root when it was learned for this credential's scope.
     pub fn learned_root(&self, resolved: &Resolved) -> Option<String> {
-        let learned = self.learned.load();
-        let learned = learned.as_ref().as_ref()?;
-        (crate::adapters::model_catalog_cache::request_scope(&learned.context, resolved)
-            == learned.scope)
-            .then(|| learned.root.clone())
+        self.facts(resolved)?.root
     }
 
+    /// A re-probe result for one scope; a failed re-probe forgets only its root.
     fn learn(&self, context: &str, scope: &str, root: Option<String>) {
-        self.learned.store(Arc::new(root.map(|root| Learned {
-            context: context.to_owned(),
-            scope: scope.to_owned(),
-            root,
-        })));
+        self.update(context, scope, |facts| facts.root = root);
+    }
+
+    /// The live listing of one scope replaces only that scope's listing.
+    fn listed(&self, context: &str, scope: &str, live: HashMap<String, LiveRow>) {
+        self.update(context, scope, |facts| facts.live = Arc::new(live));
+    }
+
+    fn update(&self, context: &str, scope: &str, change: impl FnOnce(&mut ScopeFacts)) {
+        if self.context.load().as_ref().as_deref() != Some(context) {
+            self.context.store(Arc::new(Some(context.to_owned())));
+        }
+        let mut facts = self.facts.lock();
+        change(facts.get_or_insert_mut(scope.to_owned(), ScopeFacts::default));
     }
 
     /// The bundled rows.
@@ -160,16 +182,19 @@ impl Shared {
             .cloned()
     }
 
-    /// The id was returned by this process's last live discovery.
-    pub fn is_live(&self, id: &str) -> bool {
-        self.live.load().contains_key(id)
+    /// The id was returned by the last live discovery of this credential's scope.
+    pub fn is_live(&self, resolved: &Resolved, id: &str) -> bool {
+        self.facts(resolved)
+            .is_some_and(|facts| facts.live.contains_key(id))
     }
 
-    /// The bundled output limit, else the live one.
-    fn max_output(&self, id: &str) -> Option<u32> {
-        catalog::seed_row(id)
-            .map(|row| row.max_output)
-            .or_else(|| self.live.load().get(id).and_then(|row| row.max_output))
+    /// The bundled output limit, else the live one of this credential's scope.
+    fn max_output(&self, facts: Option<&ScopeFacts>, id: &str) -> Option<u32> {
+        catalog::seed_row(id).map(|row| row.max_output).or_else(|| {
+            facts
+                .and_then(|facts| facts.live.get(id))
+                .and_then(|row| row.max_output)
+        })
     }
 }
 
@@ -340,7 +365,8 @@ pub struct CopilotAdapter {
     inner: Arc<Inner>,
     messages: AnthropicAdapter,
     chat: OpenAiAdapter,
-    warm: Arc<Mutex<LruCache<String, ()>>>,
+    /// Warm native Responses histories, keyed by (session, credential scope).
+    warm: Arc<Mutex<LruCache<(String, String), ()>>>,
 }
 
 impl std::fmt::Debug for CopilotAdapter {
@@ -401,19 +427,26 @@ impl CopilotAdapter {
     }
 
     /// omp's per-model request shaping: the wire id, the output clamp and the
-    /// sampling gate, all from the logical id.
-    fn prepare(&self, route: Route, options: &mut CompletionOptions) -> Option<ModelDescriptor> {
+    /// sampling gate, all from the logical id; live limits are those of the
+    /// request credential's own discovery.
+    fn prepare(
+        &self,
+        route: Route,
+        resolved: &Resolved,
+        options: &mut CompletionOptions,
+    ) -> Option<ModelDescriptor> {
         let logical = options.model.clone();
         let descriptor = self.inner.shared.descriptor(&logical);
         let wire = descriptor.as_ref().and_then(|d| d.wire_model_id.clone());
         // A synthetic `-1m` sibling is its base row (omp spreads the base):
         // without its own facts it takes the base's limit and sampling gate.
         let base = wire.as_deref().unwrap_or(&logical);
+        let facts = self.inner.shared.facts(resolved);
         let limit = self
             .inner
             .shared
-            .max_output(&logical)
-            .or_else(|| self.inner.shared.max_output(base));
+            .max_output(facts.as_ref(), &logical)
+            .or_else(|| self.inner.shared.max_output(facts.as_ref(), base));
         if options.max_tokens > 0
             && let Some(limit) = limit
         {
@@ -437,32 +470,44 @@ impl CopilotAdapter {
 
     async fn stream_responses(
         &self,
+        cancel: transport::Armed,
+        resolved: Resolved,
         descriptor: Option<ModelDescriptor>,
         messages: Vec<Message>,
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-        // Armed first: an abort while the credential resolves cancels this request.
-        let cancel = self.inner.abort.arm();
-        let resolved = cancel.run(self.inner.handle.current()).await?;
         let has = |capability: ModelCapability| {
             descriptor
                 .as_ref()
                 .is_some_and(|d| d.capabilities.contains(&capability))
         };
-        let session = options.session_id.clone().filter(|id| !id.is_empty());
+        // A session is warm per account: another account never replays its items.
+        let session = options
+            .session_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .map(|id| {
+                (
+                    id,
+                    crate::adapters::model_catalog_cache::request_scope(PROVIDER_ID, &resolved),
+                )
+            });
         let warm = session
             .as_ref()
-            .is_some_and(|id| self.warm.lock().contains(id));
+            .is_some_and(|key| self.warm.lock().contains(key));
+        // The root is computed once for the logical request.
         let root = self.inner.responses.root(&resolved);
         let mut route_headers = HeaderMap::new();
-        self.inner
-            .responses
-            .route_headers(&messages, session.as_deref(), &mut route_headers);
+        self.inner.responses.route_headers(
+            &messages,
+            session.as_ref().map(|(id, _)| id.as_str()),
+            &mut route_headers,
+        );
         let wire = CopilotWire {
             inner: self.inner.clone(),
             cache_key: session
-                .as_deref()
-                .map(crate::adapters::responses::prompt_cache_key),
+                .as_ref()
+                .map(|(id, _)| crate::adapters::responses::prompt_cache_key(id)),
             reasoning: has(ModelCapability::Thinking),
             vision: has(ModelCapability::Vision),
             max_output_tokens: (options.max_tokens > 0).then_some(options.max_tokens),
@@ -506,11 +551,30 @@ impl StreamingProvider for CopilotAdapter {
         mut options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         let route = catalog::route(&options.model);
-        let descriptor = self.prepare(route, &mut options);
+        // One credential read per logical request: the live limits `prepare`
+        // applies and the grant every route sends belong to the same account.
+        // Armed first: an abort while the credential resolves cancels this
+        // request. Past the read, Messages and Chat keep their own abort state.
+        let cancel = self.inner.abort.arm();
+        let resolved = cancel.run(self.inner.handle.current()).await?;
+        let descriptor = self.prepare(route, &resolved, &mut options);
         match route {
-            Route::Messages => self.messages.stream_completion(messages, options).await,
-            Route::Chat => self.chat.stream_completion(messages, options).await,
-            Route::Responses => self.stream_responses(descriptor, messages, options).await,
+            Route::Messages => {
+                drop(cancel);
+                self.messages
+                    .stream_resolved(resolved, messages, options)
+                    .await
+            }
+            Route::Chat => {
+                drop(cancel);
+                self.chat
+                    .stream_with(Some(resolved), messages, options)
+                    .await
+            }
+            Route::Responses => {
+                self.stream_responses(cancel, resolved, descriptor, messages, options)
+                    .await
+            }
         }
     }
     async fn abort(&self) -> Result<(), ProviderError> {

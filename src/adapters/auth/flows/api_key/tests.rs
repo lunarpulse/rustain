@@ -129,21 +129,27 @@ async fn p3_inconclusive_stored_unvalidated() {
     assert!(snapshot.rows("anthropic")[0].last_validated.is_none());
 }
 #[tokio::test]
-async fn p14_decline_stores_nothing_accept_stores() {
-    let (result, snapshot) = run(200, &["n"], true).await;
-    assert!(matches!(result, Err(FlowError::Declined)));
+async fn p14_a_second_distinct_key_coexists_and_becomes_active() {
+    // No overwrite prompt: the first prompt is the key itself.
+    let (result, snapshot) = run(200, &["SECOND-CANDIDATE"], true).await;
+    let result = result.unwrap();
+    assert!(result.validated);
+    let rows = snapshot.rows("anthropic");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].credential.expose_api_key(), Some("ORIGINAL-KEY"));
+    assert_eq!(rows[0].rev, 1);
     assert_eq!(
-        snapshot.rows("anthropic")[0].credential.expose_api_key(),
-        Some("ORIGINAL-KEY")
+        rows[1].credential.expose_api_key(),
+        Some("SECOND-CANDIDATE")
     );
-    assert_eq!(snapshot.rows("anthropic")[0].rev, 1);
-    let (result, snapshot) = run(200, &["yes", "REPLACEMENT-CANDIDATE"], true).await;
-    assert!(result.unwrap().validated);
-    assert_eq!(
-        snapshot.rows("anthropic")[0].credential.expose_api_key(),
-        Some("REPLACEMENT-CANDIDATE")
-    );
-    assert_eq!(snapshot.rows("anthropic")[0].rev, 2);
+    assert_eq!(rows[1].id, result.credential_id);
+    assert_eq!(snapshot.selected("anthropic"), Some(result.credential_id));
+    // The same key again updates its row in place.
+    let (result, snapshot) = run(200, &["ORIGINAL-KEY"], true).await;
+    let rows = snapshot.rows("anthropic");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, result.unwrap().credential_id);
+    assert_eq!(rows[0].rev, 2);
 }
 #[tokio::test]
 async fn p11_success_output_never_echoes_key() {

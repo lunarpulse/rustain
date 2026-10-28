@@ -216,6 +216,20 @@ pub fn lookup(id: &str) -> Option<&'static ProviderMeta> {
     PROVIDERS.iter().find(|p| p.id == id)
 }
 
+/// A credentialed kind with neither an environment form nor an API-key login
+/// (Google Cloud Code Assist): it serves its stored OAuth login only. This
+/// gates credential serving alone; its live discovery runs like any other kind.
+pub fn login_only(kind: &str) -> bool {
+    lookup(kind).is_some_and(|meta| {
+        meta.requires_key
+            && meta.api_key_env.is_empty()
+            && !meta
+                .auth_methods
+                .iter()
+                .any(|method| matches!(method, AuthMethod::ApiKey))
+    })
+}
+
 /// Return all known provider ids (for error messages listing valid providers).
 pub fn all_provider_ids() -> impl Iterator<Item = &'static str> {
     PROVIDERS.iter().map(|p| p.id)
@@ -295,6 +309,18 @@ mod tests {
         );
         assert!(!meta.org_scoped_identity);
         assert_eq!(meta.default_model, Some("gemini-3.1-pro-preview"));
+        assert!(login_only("google-gemini-cli"));
+        for kind in [
+            "anthropic",
+            "openai-codex",
+            "xai-oauth",
+            "github-copilot",
+            "google",
+            "ollama",
+            "custom",
+        ] {
+            assert!(!login_only(kind), "{kind}");
+        }
         // The API-key Google provider is a different row.
         assert!(matches!(
             lookup("google").unwrap().auth_methods,

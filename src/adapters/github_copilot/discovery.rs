@@ -103,10 +103,12 @@ impl Inner {
         let payload: Value = serde_json::from_slice(&body).map_err(|_| unparseable())?;
         let canonical = root == super::canonical_root();
         let (records, live) = records(&payload, canonical, model_filter).ok_or_else(unparseable)?;
-        self.shared.live.store(Arc::new(live));
+        // The listing belongs to the credential actually sent.
+        let scope = request_scope(scope_context, &resolved);
+        self.shared.listed(scope_context, &scope, live);
         Ok(DiscoveredModels {
             records,
-            credential_scope: request_scope(scope_context, &resolved),
+            credential_scope: scope,
         })
     }
 }

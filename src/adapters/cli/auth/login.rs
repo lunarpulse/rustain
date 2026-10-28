@@ -26,7 +26,7 @@
 
 use crate::{
     adapters::{
-        auth::flows::{self, FlowCtx, FlowError, LoginResult, LoginUi},
+        auth::flows::{self, FlowCtx, LoginResult, LoginUi},
         cli::{
             auth::{providers, terminal_ui::TerminalUi},
             commands::AuthLoginMethod,
@@ -94,33 +94,46 @@ async fn run(
         _=tokio::signal::ctrl_c()=>{ui.cancel_token().cancel();login.await},
         result=&mut login=>result,
     };
-    match result {
-        Ok(result) => {
-            if json {
-                println!("{}", result_json(&result));
-            } else if let Some(login_name) = method.login_name() {
-                println!("{}", oauth_success(login_name, &result.identity));
-            } else if result.validated {
-                println!("✓ {display} credentials stored successfully.");
-            } else {
-                println!(
-                    "⚠  Could not confirm key via /models endpoint — {display} credentials stored unvalidated."
-                );
-            }
-            eprintln!(
-                "Credentials saved to {}",
-                crate::infrastructure::paths::data_dir()?
-                    .join("auth.json")
-                    .display()
-            );
-            Ok(())
-        }
-        Err(FlowError::Declined) => {
-            eprintln!("Aborted — existing credential unchanged.");
-            Ok(())
-        }
-        Err(error) => Err(error.into()),
+    let result = result?;
+    if json {
+        println!("{}", result_json(&result));
+    } else if let Some(login_name) = method.login_name() {
+        println!("{}", oauth_success(login_name, &result.identity));
+    } else if result.validated {
+        println!("✓ {display} credentials stored successfully.");
+    } else {
+        println!("⚠  Could not confirm key — {display} credentials stored unvalidated.");
     }
+    eprintln!(
+        "Credentials saved to {}",
+        crate::infrastructure::paths::data_dir()?
+            .join("auth.json")
+            .display()
+    );
+    // Several accounts: name the one this login made active and how to change
+    // it. The credential is already stored, so an unreadable store only skips
+    // this hint and never fails the login.
+    let Ok(accounts) =
+        crate::infrastructure::auth_accounts::accounts(store, app_config, provider_id).await
+    else {
+        return Ok(());
+    };
+    if accounts
+        .rows
+        .iter()
+        .filter(|row| row.disabled_cause.is_none())
+        .count()
+        > 1
+    {
+        eprintln!(
+            "{}",
+            super::accounts::active_line(&accounts, result.credential_id)
+        );
+        eprintln!(
+            "Switch with `rustain auth use {provider_id} --id <N>`; remove one with `rustain auth logout {provider_id} --id <N>`."
+        );
+    }
+    Ok(())
 }
 fn select_method(
     methods: &[AuthMethod],
@@ -203,7 +216,7 @@ fn result_json(result: &LoginResult) -> serde_json::Value {
             identity.insert(name.into(), value.clone().into());
         }
     }
-    serde_json::json!({"provider":result.provider,"status":"authenticated","method":result.method,"validated":result.validated,"identity":identity})
+    serde_json::json!({"provider":result.provider,"status":"authenticated","method":result.method,"validated":result.validated,"identity":identity,"id":result.credential_id.0})
 }
 pub(super) fn oauth_who(identity: &CredentialIdentity) -> Option<String> {
     let base = identity.email.as_ref().or(identity.account_id.as_ref());
@@ -312,8 +325,10 @@ mod tests {
             method: "oauth",
             validated: true,
             identity,
+            credential_id: crate::domain::models::CredentialId(5),
         });
         assert_eq!(json["method"], "oauth");
+        assert_eq!(json["id"], 5);
         assert!(json["identity"].get("account_id").is_none());
     }
     #[test]

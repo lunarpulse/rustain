@@ -142,7 +142,7 @@ fn handle(store: Arc<dyn AuthStorePort>) -> CredentialHandle {
         compose(store, Arc::new(HttpOAuthRefresher::new()), Arc::new(|| NOW)),
         "anthropic".into(),
         vec![],
-        true,
+        rustain::domain::services::key_cascade::RowPolicy::ANY,
         None,
     )
 }
@@ -1008,6 +1008,20 @@ impl AuthStorePort for FailingWrites {
     }
     async fn remove(&self, provider: &str) -> Result<(), rustain::domain::errors::AuthError> {
         self.inner.remove(provider).await
+    }
+    async fn select(
+        &self,
+        provider: &str,
+        id: rustain::domain::models::CredentialId,
+    ) -> Result<rustain::domain::models::SelectOutcome, rustain::domain::errors::AuthError> {
+        self.inner.select(provider, id).await
+    }
+    async fn remove_row(
+        &self,
+        provider: &str,
+        id: rustain::domain::models::CredentialId,
+    ) -> Result<rustain::domain::models::RowRemoval, rustain::domain::errors::AuthError> {
+        self.inner.remove_row(provider, id).await
     }
     async fn refresh_lease(
         &self,
