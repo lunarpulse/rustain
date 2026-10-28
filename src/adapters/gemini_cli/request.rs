@@ -49,12 +49,14 @@ const TOOL_RESULT_IMAGE: &str = "Tool result image:";
 /// omp's value of a result that has images but no text (G:354).
 const SEE_ATTACHED_IMAGE: &str = "(see attached image)";
 
-/// The POST body, encoded once per logical request.
+/// The POST body, encoded once per logical request. `scope` is the replay
+/// scope of the grant that is sent; only parts it produced are replayed.
 pub(crate) fn encode(
     messages: &[Message],
     options: &CompletionOptions,
     profile: &GeminiModelProfile,
     project: &str,
+    scope: &str,
 ) -> Result<Vec<u8>, serde_json::Error> {
     let (generation_config, route) = generation(options, profile);
     let system = options.system_prompt.as_str();
@@ -62,7 +64,7 @@ pub(crate) fn encode(
         project,
         model: route.unwrap_or(options.model.as_str()),
         request: Request {
-            contents: contents(messages, options, profile),
+            contents: contents(messages, options, profile, scope),
             system_instruction: (!system.trim().is_empty()).then_some(SystemInstruction {
                 parts: [SystemPart { text: system }],
             }),
@@ -74,7 +76,7 @@ pub(crate) fn encode(
                         .map(|tool| FunctionDeclaration {
                             name: &tool.name,
                             description: &tool.description,
-                            parameters_json_schema: super::schema::normalize_for_google(
+                            parameters_json_schema: super::schema::tool_parameters(
                                 &tool.input_schema,
                             ),
                         })
@@ -392,6 +394,7 @@ fn contents<'a>(
     messages: &'a [Message],
     options: &CompletionOptions,
     profile: &GeminiModelProfile,
+    scope: &str,
 ) -> Vec<Content<'a>> {
     let entries = pair(sanitize_malformed(flatten(messages)));
     let mut order = CallOrder::default();
@@ -414,7 +417,7 @@ fn contents<'a>(
                 }
             }
             Entry::Assistant { message, calls } => {
-                let parts = model_parts(message, &calls, options, profile, &mut order);
+                let parts = model_parts(message, &calls, options, profile, scope, &mut order);
                 if !parts.is_empty() {
                     contents.push(Content {
                         role: "model",
@@ -996,16 +999,19 @@ fn fold_thinking(run: &[ReplayPart<'_>], folded: &mut String) {
 }
 
 enum Replay<'a> {
-    /// Same provider and model: native parts with valid signatures.
+    /// Same provider, model and account: native parts with valid signatures.
     Same(Vec<ReplayPart<'a>>),
-    /// Another Gemini model: unsigned, thinking demoted.
+    /// Another Gemini model of the same account: unsigned, thinking demoted.
     OtherModel(Vec<ReplayPart<'a>>),
 }
 
-fn select_replay<'a>(message: &'a Message, model: &str) -> Option<Replay<'a>> {
+/// Only parts the sending account produced are candidates in either tier: a
+/// foreign-scope or unscoped item never serves, so the message falls back to
+/// its plain reconstruction.
+fn select_replay<'a>(message: &'a Message, model: &str, scope: &str) -> Option<Replay<'a>> {
     let mut other = None;
     for item in &message.provider_replay {
-        if item.provider != super::PROVIDER_KIND {
+        if item.provider != super::PROVIDER_KIND || item.scope.as_deref() != Some(scope) {
             continue;
         }
         let Some(parts) = parse_replay(item.payload.as_ref()) else {
@@ -1069,6 +1075,7 @@ fn model_parts<'a>(
     calls: &[Call<'a>],
     options: &CompletionOptions,
     profile: &GeminiModelProfile,
+    scope: &str,
     order: &mut CallOrder<'a>,
 ) -> Vec<Part<'a>> {
     let mut turn = ModelTurn {
@@ -1077,7 +1084,7 @@ fn model_parts<'a>(
         sentinel: profile.first_call_sentinel,
         order,
     };
-    let Some(replay) = select_replay(message, &options.model) else {
+    let Some(replay) = select_replay(message, &options.model, scope) else {
         if let Some(reasoning) = message.reasoning_content.as_deref()
             && !reasoning.trim().is_empty()
         {
@@ -1202,7 +1209,8 @@ mod tests {
     fn wire(messages: &[Message], model: &str) -> String {
         let options = options(model);
         let profile = for_model(model);
-        serde_json::to_string(&contents(messages, &options, &profile)).expect("contents encode")
+        serde_json::to_string(&contents(messages, &options, &profile, SCOPE))
+            .expect("contents encode")
     }
 
     fn generation_json(options: &CompletionOptions, profile: &GeminiModelProfile) -> String {
@@ -1210,6 +1218,8 @@ mod tests {
     }
 
     const PRO31: &str = "gemini-3.1-pro-preview";
+    /// The replay scope of the grant every test request sends.
+    const SCOPE: &str = "0123456789abcdef";
 
     #[test]
     fn default_generation_config_per_bundled_row() {
@@ -1402,8 +1412,8 @@ mod tests {
             let opts = options(id);
             let profile = resolve(id, served);
             assert_eq!(generation_json(&opts, &profile), expected, "{id}");
-            let body =
-                String::from_utf8(encode(&[user("hi")], &opts, &profile, "p").unwrap()).unwrap();
+            let body = encode(&[user("hi")], &opts, &profile, "p", SCOPE).unwrap();
+            let body = String::from_utf8(body).unwrap();
             assert!(
                 body.starts_with(&format!(r#"{{"project":"p","model":"{wire}","request":"#)),
                 "{body}"
@@ -1470,7 +1480,7 @@ mod tests {
         ];
         let mut options = options(PRO31);
         options.system_prompt = "Be terse.".into();
-        let body = encode(&messages, &options, &for_model(PRO31), "proj-1").expect("encode");
+        let body = encode(&messages, &options, &for_model(PRO31), "proj-1", SCOPE).expect("encode");
         let expected = concat!(
             r#"{"project":"proj-1","model":"gemini-3.1-pro-preview","request":{"contents":["#,
             r#"{"role":"user","parts":[{"text":"ctx\n\nLook"},{"inlineData":{"mimeType":"image/png","data":"AAAA"}}]},"#,
@@ -1501,7 +1511,7 @@ mod tests {
             parallel_safe: false,
         });
         let body = String::from_utf8(
-            encode(&[user("hi")], &options, &for_model(PRO31), "p").expect("encode"),
+            encode(&[user("hi")], &options, &for_model(PRO31), "p", SCOPE).expect("encode"),
         )
         .expect("utf-8");
         let normalized =
@@ -1525,6 +1535,7 @@ mod tests {
                 &options,
                 &for_model("gemini-2.0-flash"),
                 "p",
+                SCOPE,
             )
             .expect("encode"),
         )
@@ -1553,7 +1564,12 @@ mod tests {
         });
         let mut profile = for_model(PRO31);
         profile.vision = false;
-        let parts = contents(std::slice::from_ref(&message), &options(PRO31), &profile);
+        let parts = contents(
+            std::slice::from_ref(&message),
+            &options(PRO31),
+            &profile,
+            SCOPE,
+        );
         assert_eq!(
             serde_json::to_string(&parts).expect("encode"),
             r#"[{"role":"user","parts":[{"text":"see"},{"text":"[image omitted: model does not support vision]"}]}]"#
@@ -1576,7 +1592,8 @@ mod tests {
         ];
         let mut profile = for_model(model);
         profile.vision = vision;
-        serde_json::to_string(&contents(&messages, &options(model), &profile)).expect("encode")
+        serde_json::to_string(&contents(&messages, &options(model), &profile, SCOPE))
+            .expect("encode")
     }
 
     #[test]
@@ -1692,6 +1709,46 @@ mod tests {
                 {"functionCall": {"name": "read", "args": {"p": 1}}, "thoughtSignature": call_a_signature, "callId": "a"},
                 {"functionCall": {"name": "grep", "args": {"q": 2}}, "callId": "b"},
             ]})),
+            scope: Some(SCOPE.into()),
+        }
+    }
+
+    /// `replayed_turn` of a scoped (`None`: unscoped) item, with no stored
+    /// reasoning: only an `OtherModel` rebuild of the item could send `T`.
+    fn unreasoned_turn(model: &str, scope: Option<&str>) -> [Message; 2] {
+        let mut item = replay_item(super::super::PROVIDER_KIND, model, "U0lHMg==");
+        item.scope = scope.map(str::to_owned);
+        let mut messages = replayed_turn(item, "V");
+        messages[0].reasoning_content = None;
+        messages
+    }
+
+    /// The account scope gates both tiers: another account's item and an
+    /// unscoped item are neither replayed signed for their own model nor
+    /// rebuilt as `OtherModel` for another; the plain reconstruction is sent.
+    #[test]
+    fn foreign_or_unscoped_item_serves_neither_tier() {
+        const OTHER: &str = "gemini-3-pro-preview";
+        let plain = format!(r#"[{{"role":"model","parts":[{{"text":"V"}},{UNSIGNED}{RESULTS}"#);
+        // Positive controls: the sending account's items serve both tiers.
+        assert!(wire(&unreasoned_turn(PRO31, Some(SCOPE)), PRO31).contains("U0lH"));
+        assert_eq!(
+            wire(&unreasoned_turn(OTHER, Some(SCOPE)), PRO31),
+            format!(
+                r#"[{{"role":"model","parts":[{{"text":"```thinking\nT\n```"}},{{"text":"V"}},{UNSIGNED}{RESULTS}"#
+            )
+        );
+        for scope in [Some("fedcba9876543210"), None] {
+            assert_eq!(
+                wire(&unreasoned_turn(PRO31, scope), PRO31),
+                plain,
+                "{scope:?}"
+            );
+            assert_eq!(
+                wire(&unreasoned_turn(OTHER, scope), PRO31),
+                plain,
+                "{scope:?}"
+            );
         }
     }
 
@@ -1810,6 +1867,7 @@ mod tests {
                 {"thought": true, "text": "T2"},
                 {"text": "V2", "thoughtSignature": "U0lHMQ=="},
             ]})),
+            scope: Some(SCOPE.into()),
         });
         let body = wire(&[turn, results(&[("a", "A", false)])], PRO31);
         assert!(
@@ -1881,6 +1939,7 @@ mod tests {
                 {"functionCall": {"name": "read", "args": {}}, "callId": "a"},
                 {"functionCall": {"name": "bad name", "args": {}}, "thoughtSignature": "U0lHMg==", "callId": "m"},
             ]})),
+            scope: Some(SCOPE.into()),
         });
         let messages = [turn, results(&[("a", "A", false), ("m", "M", true)])];
         assert_eq!(

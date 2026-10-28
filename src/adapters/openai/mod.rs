@@ -68,7 +68,7 @@ pub struct OpenAiAdapter {
 
 /// Consolidated secret exposure: the `Authorization` value of every request
 /// and its construction-time checks. An empty key sends no header.
-fn authorization(bearer: &SecretString) -> Result<Option<HeaderValue>, ProviderError> {
+pub(crate) fn authorization(bearer: &SecretString) -> Result<Option<HeaderValue>, ProviderError> {
     let secret = bearer.expose_secret();
     if secret.is_empty() {
         return Ok(None);
@@ -165,10 +165,11 @@ struct ChatAttempt {
 }
 
 impl ChatAttempt {
+    /// Re-issues send the stored request, which carries a won identity.
     async fn exchange(&mut self) -> Result<Outcome, ProviderError> {
-        http_retry::send(
+        http_retry::send_adopting(
             &self.client,
-            &self.request,
+            &mut self.request,
             self.state
                 .as_deref_mut()
                 .map(|s| s as &mut dyn RequestState),
@@ -413,14 +414,14 @@ impl OpenAiAdapter {
         }
 
         let resilience = self.profile.resilience();
-        // The first-event watchdog is armed before the first attempt.
-        let deadline = resilience.map(|_| stream_retry::deadline());
         let mut resolved = match resolved {
             Some(resolved) => resolved,
             None => self.resolve().await?,
         };
         let mut recovered = false;
         loop {
+            // The first-event watchdog is armed once the credential is read.
+            let deadline = resilience.map(|_| stream_retry::deadline());
             let mut attempt = self.attempt(&resolved, &messages, &options)?;
             let outcome = match (resilience, deadline) {
                 (Some(policy), Some(deadline)) => {

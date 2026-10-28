@@ -8,7 +8,7 @@
 #[path = "conformance_20_1d4b_gemini_cli_discovery/cli.rs"]
 mod cli;
 #[path = "conformance_20_1d4b_gemini_cli_discovery/common.rs"]
-mod common;
+pub(crate) mod common;
 #[path = "conformance_20_1d4b_gemini_cli_discovery/discovery.rs"]
 mod discovery;
 #[path = "conformance_20_1d4b_gemini_cli_discovery/eligibility.rs"]

@@ -2,11 +2,37 @@
 //!
 //! Story 7.6 AC3 — testable without HTTP; no I/O, no clock, minimal logging.
 //! Story 7.7 AC2 — allowlist intersection removed; noise regex + user model_filter only.
+//!
+//! The OpenRouter roster rule (tool-capable rows only; image input and reasoning
+//! mapped) is adapted from oh-my-pi's `catalog/src/provider-models/openai-compat.ts`.
+//!
+//! MIT License
+//!
+//! Copyright (c) 2025-2026 Can Bölük
+//! Copyright (c) 2026 Stencil Labs, Inc.
+//!
+//! Permission is hereby granted, free of charge, to any person obtaining a copy
+//! of this software and associated documentation files (the "Software"), to deal
+//! in the Software without restriction, including without limitation the rights
+//! to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+//! copies of the Software, and to permit persons to whom the Software is
+//! furnished to do so, subject to the following conditions:
+//!
+//! The above copyright notice and this permission notice shall be included in all
+//! copies or substantial portions of the Software.
+//!
+//! THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+//! IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+//! FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+//! AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+//! LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+//! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+//! SOFTWARE.
 
 use std::collections::HashSet;
 
 use crate::adapters::model_filter::{compile_filter_patterns, is_noise_model_id, matches_any};
-use crate::adapters::openai::types::ModelsListResponse;
+use crate::adapters::openai::types::{ModelsListItem, ModelsListResponse};
 use crate::adapters::openai::variant::OpenAiCompatibleVariant;
 use crate::domain::errors::ProviderError;
 use crate::domain::models::provider::{ModelCapability, ModelRecord};
@@ -26,6 +52,7 @@ pub fn parse_and_filter_models(
 
     let compiled_filter = &compile_filter_patterns(model_filter);
     let is_custom = matches!(variant, OpenAiCompatibleVariant::Custom { .. });
+    let openrouter = matches!(variant, OpenAiCompatibleVariant::OpenRouter);
     let data_len = response.data.len();
 
     let mut result = Vec::new();
@@ -42,14 +69,25 @@ pub fn parse_and_filter_models(
             continue;
         }
 
+        // OpenRouter serves only rows that can call tools; a row without
+        // `supported_parameters` is dropped too.
+        if openrouter && !has_parameter(item, "tools") {
+            tracing::debug!("Skipping OpenRouter model without tools: {}", item.id);
+            continue;
+        }
+
         // Preserve absent metadata so lower catalog layers can fill it.
-        let capabilities = item.supported_parameters.as_ref().map(|params| {
-            if params.iter().any(|p| p == "tools") {
-                HashSet::from([ModelCapability::ToolUse])
-            } else {
-                HashSet::new()
-            }
-        });
+        let capabilities = if openrouter {
+            Some(openrouter_capabilities(item))
+        } else {
+            item.supported_parameters.as_ref().map(|params| {
+                if params.iter().any(|p| p == "tools") {
+                    HashSet::from([ModelCapability::ToolUse])
+                } else {
+                    HashSet::new()
+                }
+            })
+        };
 
         result.push(ModelRecord {
             model_id: item.id.clone(),
@@ -73,10 +111,38 @@ pub fn parse_and_filter_models(
     Ok(result)
 }
 
+fn has_parameter(item: &ModelsListItem, name: &str) -> bool {
+    item.supported_parameters
+        .as_ref()
+        .is_some_and(|params| params.iter().any(|p| p == name))
+}
+
+/// A kept OpenRouter row calls tools; it sees images when its input modalities
+/// (else its older `modality` string) name `image`, and reasons when
+/// `supported_parameters` lists `reasoning`.
+fn openrouter_capabilities(item: &ModelsListItem) -> HashSet<ModelCapability> {
+    let mut capabilities = HashSet::from([ModelCapability::ToolUse]);
+    let vision = item.architecture.as_ref().is_some_and(|architecture| {
+        match &architecture.input_modalities {
+            Some(modalities) => modalities.iter().any(|m| m == "image"),
+            None => architecture
+                .modality
+                .as_deref()
+                .is_some_and(|modality| modality.contains("image")),
+        }
+    });
+    if vision {
+        capabilities.insert(ModelCapability::Vision);
+    }
+    if has_parameter(item, "reasoning") {
+        capabilities.insert(ModelCapability::Thinking);
+    }
+    capabilities
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::openai::types::ModelsListItem;
 
     #[test]
     fn parse_minimal_openai_shape() {
@@ -95,10 +161,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_openrouter_with_tools() {
+    fn parse_openrouter_keeps_only_tool_rows() {
+        // Deliberately supersedes Story 7.7's keep-all assertion for OpenRouter:
+        // omp serves only rows that list `tools`.
         let payload = r#"{"data":[
             {"id":"anthropic/claude-3.5-sonnet","supported_parameters":["tools"]},
-            {"id":"anthropic/claude-3-haiku","supported_parameters":["top_p"]}
+            {"id":"anthropic/claude-3-haiku","supported_parameters":["top_p"]},
+            {"id":"meta/no-parameters"}
         ]}"#;
         let result = parse_and_filter_models(
             payload,
@@ -106,19 +175,58 @@ mod tests {
             &["*".to_string()],
         )
         .unwrap();
-        // claude-3.5-sonnet has tools => ToolUse capability
-        // claude-3-haiku does NOT have tools => empty capabilities but still kept
-        assert_eq!(result.len(), 2);
+        assert_eq!(result.len(), 1);
         assert_eq!(result[0].model_id, "anthropic/claude-3.5-sonnet");
-        assert!(
-            result[0]
-                .capabilities
-                .as_ref()
-                .unwrap()
-                .contains(&ModelCapability::ToolUse)
+        assert_eq!(
+            result[0].capabilities,
+            Some(HashSet::from([ModelCapability::ToolUse]))
         );
-        assert_eq!(result[1].model_id, "anthropic/claude-3-haiku");
-        assert!(result[1].capabilities.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_openrouter_maps_image_input_and_reasoning() {
+        let payload = r#"{"data":[
+            {"id":"a/vision","supported_parameters":["tools"],"architecture":{"input_modalities":["text","image"]}},
+            {"id":"a/text","supported_parameters":["tools","reasoning"],"architecture":{"input_modalities":["text"],"modality":"text+image->text"}},
+            {"id":"a/legacy","supported_parameters":["tools"],"architecture":{"modality":"text+image->text"}}
+        ]}"#;
+        let result = parse_and_filter_models(
+            payload,
+            &OpenAiCompatibleVariant::OpenRouter,
+            &["*".to_string()],
+        )
+        .unwrap();
+        let caps = |i: usize| result[i].capabilities.clone().unwrap();
+        assert_eq!(
+            caps(0),
+            HashSet::from([ModelCapability::ToolUse, ModelCapability::Vision])
+        );
+        // `input_modalities` wins over the older `modality` string.
+        assert_eq!(
+            caps(1),
+            HashSet::from([ModelCapability::ToolUse, ModelCapability::Thinking])
+        );
+        assert_eq!(
+            caps(2),
+            HashSet::from([ModelCapability::ToolUse, ModelCapability::Vision])
+        );
+    }
+
+    #[test]
+    fn other_variants_keep_rows_without_tools() {
+        let payload = r#"{"data":[
+            {"id":"gpt-chat","supported_parameters":["top_p"],"architecture":{"input_modalities":["image"]}},
+            {"id":"gpt-other"}
+        ]}"#;
+        let result = parse_and_filter_models(
+            payload,
+            &OpenAiCompatibleVariant::OpenAI,
+            &["*".to_string()],
+        )
+        .unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].capabilities, Some(HashSet::new()));
+        assert_eq!(result[1].capabilities, None);
     }
 
     #[test]
@@ -218,6 +326,7 @@ mod tests {
                 context_length: None,
                 supported_parameters: Some(vec!["tools".to_string()]),
                 object: None,
+                architecture: None,
             };
             let payload = serde_json::to_string(&ModelsListResponse { data: vec![item] }).unwrap();
             let result = parse_and_filter_models(
@@ -267,6 +376,7 @@ mod tests {
                         }
                     }),
                     object: None,
+                    architecture: None,
                 })
                 .collect(),
         })

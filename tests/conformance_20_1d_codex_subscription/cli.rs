@@ -30,7 +30,7 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) struct Fixture {
     pub(crate) home: tempfile::TempDir,
     pub(crate) evidence: PathBuf,
-    binary: PathBuf,
+    pub(crate) binary: PathBuf,
     pub(crate) env: BTreeMap<&'static str, OsString>,
 }
 

@@ -33,7 +33,10 @@ use super::{
     retry,
 };
 use crate::{
-    adapters::{anthropic::sse::SseLineBuffer, provider::request_profile::Alternate},
+    adapters::{
+        anthropic::sse::SseLineBuffer, model_catalog_cache::replay_scope,
+        provider::request_profile::Alternate,
+    },
     domain::{
         errors::ProviderError,
         models::{CompletionOptions, Message, ResolvedAuth, StopReason, StreamChunk},
@@ -324,9 +327,15 @@ struct Opened {
 
 impl<H: Host, W: Wire> Exchange<H, W> {
     fn mapper(&self) -> EventMapper {
-        // Captured items carry the stamp a later request replays them by.
+        // Captured items carry the stamp a later request replays them by: the
+        // provider, model and scope of the credential that produced them (the
+        // recovered one after a 401 recovery).
         let mapper = match self.wire.capture_provider() {
-            Some(provider) => EventMapper::with_replay(provider, &self.model),
+            Some(provider) => EventMapper::with_replay(
+                provider,
+                &self.model,
+                replay_scope(provider, &self.resolved),
+            ),
             None => EventMapper::new(),
         };
         mapper.with_dialect(self.wire.dialect())
@@ -774,8 +783,17 @@ pub async fn stream<H: Host, W: Wire>(
     let policy = RetryPolicy::of(wire.dialect());
     // History, options and request-scoped metadata fix the body: encode it once,
     // then reuse it across transport attempts, 401 recovery and in-band replays.
-    let body = serde_json::to_vec(&ResponsesRequest::new(&messages, &options, &wire))
-        .map_err(|_| ProviderError::Other(policy.texts().encode.into()))?;
+    // Stored items replay only to the credential scope that produced them.
+    let scope = wire
+        .replay_provider()
+        .map(|provider| replay_scope(provider, &resolved));
+    let body = serde_json::to_vec(&ResponsesRequest::new(
+        &messages,
+        &options,
+        &wire,
+        scope.as_deref(),
+    ))
+    .map_err(|_| ProviderError::Other(policy.texts().encode.into()))?;
     drop(messages);
     let request = host
         .client()

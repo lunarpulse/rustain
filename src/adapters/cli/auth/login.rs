@@ -97,12 +97,8 @@ async fn run(
     let result = result?;
     if json {
         println!("{}", result_json(&result));
-    } else if let Some(login_name) = method.login_name() {
-        println!("{}", oauth_success(login_name, &result.identity));
-    } else if result.validated {
-        println!("✓ {display} credentials stored successfully.");
     } else {
-        println!("⚠  Could not confirm key — {display} credentials stored unvalidated.");
+        println!("{}", success_line(method, &result, &display));
     }
     eprintln!(
         "Credentials saved to {}",
@@ -159,7 +155,10 @@ fn select_method_with_input(
                 matches!(
                     (requested, *method),
                     (AuthLoginMethod::ApiKey, AuthMethod::ApiKey)
-                        | (AuthLoginMethod::Oauth, AuthMethod::OAuthCode(_))
+                        | (
+                            AuthLoginMethod::Oauth,
+                            AuthMethod::OAuthCode(_) | AuthMethod::PkceKey(_)
+                        )
                         | (AuthLoginMethod::Device, AuthMethod::Device(_))
                 )
             })
@@ -233,6 +232,19 @@ pub(super) fn oauth_who(identity: &CredentialIdentity) -> Option<String> {
 fn oauth_success(login_name: &str, identity: &CredentialIdentity) -> String {
     let prefix = format!("Logged in to {login_name}");
     oauth_who(identity).map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
+}
+/// The human result line: a minted or pasted browser key names the product (no
+/// identity), a subscription names its account, an API key its validation.
+fn success_line(method: &AuthMethod, result: &LoginResult, display: &str) -> String {
+    if result.method == "browser_key" {
+        format!("✓ Logged in to {}.", method.login_name().unwrap_or(display))
+    } else if let Some(login_name) = method.login_name() {
+        oauth_success(login_name, &result.identity)
+    } else if result.validated {
+        format!("✓ {display} credentials stored successfully.")
+    } else {
+        format!("⚠  Could not confirm key — {display} credentials stored unvalidated.")
+    }
 }
 fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, ProviderConfig)> {
     if let Some(meta) = providers::lookup(provider) {
@@ -383,6 +395,47 @@ mod tests {
         assert_eq!(
             oauth_success(picked.login_name().unwrap(), &CredentialIdentity::default()),
             "Logged in to Device Product"
+        );
+    }
+    #[test]
+    fn openrouter_offers_browser_minting_under_oauth_and_names_the_product_on_success() {
+        let methods = providers::lookup("openrouter").unwrap().auth_methods;
+        assert_eq!(
+            select_method(methods, None, false).unwrap_err().to_string(),
+            "Multiple login methods are available; choose --method oauth or --method api-key."
+        );
+        let minted = select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
+        assert!(matches!(minted, AuthMethod::PkceKey(_)));
+        assert_eq!(minted.label(), "OpenRouter account (browser sign-in)");
+        assert!(matches!(
+            select_method(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
+            AuthMethod::ApiKey
+        ));
+        assert!(select_method(methods, Some(AuthLoginMethod::Device), false).is_err());
+        // Callback and pasted-key outcomes alike, validated or not.
+        for validated in [true, false] {
+            let result = LoginResult {
+                provider: "openrouter".into(),
+                method: "browser_key",
+                validated,
+                identity: CredentialIdentity::default(),
+                credential_id: crate::domain::models::CredentialId(2),
+            };
+            assert_eq!(
+                success_line(minted, &result, "OpenRouter"),
+                "✓ Logged in to OpenRouter."
+            );
+        }
+        let pasted = LoginResult {
+            provider: "openrouter".into(),
+            method: "api_key",
+            validated: true,
+            identity: CredentialIdentity::default(),
+            credential_id: crate::domain::models::CredentialId(3),
+        };
+        assert_eq!(
+            success_line(&AuthMethod::ApiKey, &pasted, "OpenRouter"),
+            "✓ OpenRouter credentials stored successfully."
         );
     }
     #[test]

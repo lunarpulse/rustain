@@ -292,6 +292,10 @@ impl OpenAiRequest {
             }
         }
 
+        if compat.anthropic_cache_control {
+            anthropic_cache_breakpoint(&mut openai_messages);
+        }
+
         let tools: Vec<OpenAiToolDef> = options.tools.iter().map(OpenAiToolDef::from).collect();
 
         OpenAiRequest {
@@ -309,6 +313,40 @@ impl OpenAiRequest {
                 include_usage: true,
             }),
             max_completion_tokens: compat.max_completion_tokens,
+        }
+    }
+}
+
+/// omp `maybeAddAnthropicCacheControl`: walking back from the last message, the
+/// first user or assistant message with a non-blank text part gets an ephemeral
+/// breakpoint on its last such part; plain text becomes one text part.
+fn anthropic_cache_breakpoint(messages: &mut [OpenAiMessage]) {
+    let breakpoint = || json!({"type": "ephemeral"});
+    for msg in messages.iter_mut().rev() {
+        if msg.role != "user" && msg.role != "assistant" {
+            continue;
+        }
+        match &mut msg.content {
+            OpenAiContent::Text(text) => {
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let text = std::mem::take(text);
+                msg.content = OpenAiContent::Parts(vec![
+                    json!({"type": "text", "text": text, "cache_control": breakpoint()}),
+                ]);
+                return;
+            }
+            OpenAiContent::Parts(parts) => {
+                let last = parts.iter_mut().rev().find(|part| {
+                    part["type"] == "text"
+                        && part["text"].as_str().is_some_and(|t| !t.trim().is_empty())
+                });
+                if let Some(part) = last {
+                    part["cache_control"] = breakpoint();
+                    return;
+                }
+            }
         }
     }
 }
@@ -422,6 +460,19 @@ pub struct ModelsListItem {
     pub supported_parameters: Option<Vec<String>>,
     /// Object type literal, e.g. `"model"` (OpenAI).
     pub object: Option<String>,
+    /// Input modalities (OpenRouter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<ModelsArchitecture>,
+}
+
+/// OpenRouter's `architecture` object: the modern `input_modalities` list, or
+/// the older `modality` string such as `"text+image->text"`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelsArchitecture {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<String>,
 }
 
 #[cfg(test)]
@@ -479,5 +530,143 @@ mod tests {
         let text = wire_messages[2]["content"].as_str().unwrap();
         assert!(text.contains("[selected-recipient-item]"));
         assert!(text.ends_with("\n\nordinary prompt"));
+    }
+
+    fn message(role: MessageRole, content: &str) -> Message {
+        Message {
+            role,
+            content: content.into(),
+            images: vec![],
+            tool_results: vec![],
+            tool_uses: vec![],
+            context_prefix: None,
+            reasoning_content: None,
+            provider_replay: vec![],
+        }
+    }
+
+    fn options() -> CompletionOptions {
+        CompletionOptions {
+            session_id: None,
+            model: "anthropic/claude-sonnet-4.6".into(),
+            max_tokens: 8_192,
+            system_prompt: "system".into(),
+            temperature: None,
+            tools: vec![],
+        }
+    }
+
+    fn image() -> crate::domain::models::ImageAttachment {
+        crate::domain::models::ImageAttachment {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        }
+    }
+
+    #[test]
+    fn omitted_images_become_one_placeholder_text_part() {
+        let mut user = message(MessageRole::User, "look");
+        user.images = vec![image(), image()];
+        let compat = ChatCompat {
+            images: ChatImages::Omitted,
+            ..ChatCompat::default()
+        };
+        let json = serde_json::to_value(OpenAiRequest::new(&[user], &options(), &compat)).unwrap();
+        assert_eq!(
+            json["messages"][1]["content"],
+            serde_json::json!([
+                {"type":"text","text":"look"},
+                {"type":"text","text":"[image omitted: model does not support vision]"}
+            ])
+        );
+    }
+
+    #[test]
+    fn the_default_compat_is_the_historical_body() {
+        assert_eq!(
+            ChatCompat::default(),
+            ChatCompat {
+                store_false: false,
+                max_completion_tokens: None,
+                images: ChatImages::Legacy,
+                anthropic_cache_control: false,
+            }
+        );
+        let mut user = message(MessageRole::User, "look");
+        user.images = vec![image()];
+        let json = serde_json::to_value(OpenAiRequest::new(
+            &[user, message(MessageRole::Assistant, "ok")],
+            &options(),
+            &ChatCompat::default(),
+        ))
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "model": "anthropic/claude-sonnet-4.6",
+                "messages": [
+                    {"role":"system","content":"system"},
+                    {"role":"user","content":"look\n[Image: image/png]"},
+                    {"role":"assistant","content":"ok"}
+                ],
+                "stream": true,
+                "stream_options": {"include_usage": true}
+            })
+        );
+    }
+
+    #[test]
+    fn the_cache_breakpoint_lands_on_the_last_user_or_assistant_text() {
+        let compat = ChatCompat {
+            anthropic_cache_control: true,
+            ..ChatCompat::default()
+        };
+        let breakpoint = serde_json::json!({"type": "ephemeral"});
+        // A tool-call-only assistant turn is skipped; the user turn before it
+        // gets the breakpoint, as one text part.
+        let mut call = message(MessageRole::Assistant, "");
+        call.tool_uses = vec![crate::domain::models::ToolUseMessage {
+            id: "c1".into(),
+            name: "read".into(),
+            input: serde_json::json!({}),
+        }];
+        let json = serde_json::to_value(OpenAiRequest::new(
+            &[
+                message(MessageRole::User, "first"),
+                message(MessageRole::User, "second"),
+                call,
+            ],
+            &options(),
+            &compat,
+        ))
+        .unwrap();
+        let messages = json["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], "system");
+        assert_eq!(messages[1]["content"], "first");
+        assert_eq!(
+            messages[2]["content"],
+            serde_json::json!([{"type":"text","text":"second","cache_control":breakpoint}])
+        );
+        assert_eq!(messages[3]["content"], "");
+        // Typed parts: the last non-blank text part of the last eligible message.
+        let mut user = message(MessageRole::User, "with image");
+        user.images = vec![image()];
+        let compat = ChatCompat {
+            images: ChatImages::Omitted,
+            anthropic_cache_control: true,
+            ..ChatCompat::default()
+        };
+        let json = serde_json::to_value(OpenAiRequest::new(&[user], &options(), &compat)).unwrap();
+        let parts = json["messages"][1]["content"].as_array().unwrap();
+        assert!(parts[0].get("cache_control").is_none());
+        assert_eq!(parts[1]["cache_control"], breakpoint);
+        // Off by default: no message changes shape.
+        let json = serde_json::to_value(OpenAiRequest::new(
+            &[message(MessageRole::User, "plain")],
+            &options(),
+            &ChatCompat::default(),
+        ))
+        .unwrap();
+        assert_eq!(json["messages"][1]["content"], "plain");
     }
 }

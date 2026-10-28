@@ -188,13 +188,12 @@ impl Shared {
             .is_some_and(|facts| facts.live.contains_key(id))
     }
 
-    /// The bundled output limit, else the live one of this credential's scope.
+    /// The live output limit of this credential's scope, else the bundled one.
     fn max_output(&self, facts: Option<&ScopeFacts>, id: &str) -> Option<u32> {
-        catalog::seed_row(id).map(|row| row.max_output).or_else(|| {
-            facts
-                .and_then(|facts| facts.live.get(id))
-                .and_then(|row| row.max_output)
-        })
+        facts
+            .and_then(|facts| facts.live.get(id))
+            .and_then(|row| row.max_output)
+            .or_else(|| catalog::seed_row(id).map(|row| row.max_output))
     }
 }
 
@@ -543,6 +542,43 @@ impl CopilotAdapter {
     }
 }
 
+/// The Messages and Chat adapters keep no abort state of their own, so their
+/// stream carries this request's token, as the Responses transport does: an
+/// abort before the turn's terminal ends it with `TurnComplete(Cancelled)`;
+/// dropping the stream deregisters the token.
+fn abortable(
+    cancel: transport::Armed,
+    stream: BoxStream<'static, StreamChunk>,
+) -> BoxStream<'static, StreamChunk> {
+    Box::pin(futures::stream::unfold(
+        Some((cancel, stream, false)),
+        |state| async move {
+            let (cancel, mut stream, ended) = state?;
+            let next = if ended {
+                Some(stream.next().await)
+            } else {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => None,
+                    chunk = stream.next() => Some(chunk),
+                }
+            };
+            match next {
+                None => Some((
+                    StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled,
+                    },
+                    None,
+                )),
+                Some(chunk) => chunk.map(|chunk| {
+                    let ended = ended || matches!(chunk, StreamChunk::TurnComplete { .. });
+                    (chunk, Some((cancel, stream, ended)))
+                }),
+            }
+        },
+    ))
+}
+
 #[async_trait]
 impl StreamingProvider for CopilotAdapter {
     async fn stream_completion(
@@ -553,23 +589,24 @@ impl StreamingProvider for CopilotAdapter {
         let route = catalog::route(&options.model);
         // One credential read per logical request: the live limits `prepare`
         // applies and the grant every route sends belong to the same account.
-        // Armed first: an abort while the credential resolves cancels this
-        // request. Past the read, Messages and Chat keep their own abort state.
+        // Armed first and held for the whole request on every route: an abort
+        // while the credential resolves or the request opens cancels it, and
+        // one mid-stream ends the stream as `Cancelled`.
         let cancel = self.inner.abort.arm();
         let resolved = cancel.run(self.inner.handle.current()).await?;
         let descriptor = self.prepare(route, &resolved, &mut options);
         match route {
             Route::Messages => {
-                drop(cancel);
-                self.messages
-                    .stream_resolved(resolved, messages, options)
-                    .await
+                let stream = cancel
+                    .run(self.messages.stream_resolved(resolved, messages, options))
+                    .await?;
+                Ok(abortable(cancel, stream))
             }
             Route::Chat => {
-                drop(cancel);
-                self.chat
-                    .stream_with(Some(resolved), messages, options)
-                    .await
+                let stream = cancel
+                    .run(self.chat.stream_with(Some(resolved), messages, options))
+                    .await?;
+                Ok(abortable(cancel, stream))
             }
             Route::Responses => {
                 self.stream_responses(cancel, resolved, descriptor, messages, options)
@@ -686,5 +723,165 @@ mod tests {
             "nothing is sent after the abort"
         );
         assert_eq!(adapter.inner.abort.live(), 0);
+    }
+
+    /// The routes whose adapters keep no abort state of their own.
+    const MESSAGES_AND_CHAT: [(&str, Route); 2] = [
+        ("claude-sonnet-4.6", Route::Messages),
+        ("gpt-4o", Route::Chat),
+    ];
+
+    /// Keystone (DF-20-1D5A-COPILOT-ROOT-KEYSTONES (c)): on the Messages and
+    /// Chat routes, an abort during the one up-front credential read returns
+    /// `Cancelled` with nothing sent.
+    #[tokio::test]
+    async fn abort_while_the_credential_resolves_cancels_messages_and_chat() {
+        use crate::adapters::responses::transport::test_support::{
+            loopback, options, stored_oauth, user, within,
+        };
+        use futures::FutureExt;
+
+        for (model, route) in MESSAGES_AND_CHAT {
+            assert_eq!(catalog::route(model), route);
+            let (handle, refresh, _dir) = stored_oauth(
+                PROVIDER_ID,
+                true,
+                crate::domain::models::CredentialIdentity::default(),
+            )
+            .await;
+            let (listener, origin) = loopback().await;
+            let adapter =
+                Arc::new(CopilotAdapter::new(handle, model.into(), Some(origin)).unwrap());
+            let task = tokio::spawn({
+                let adapter = adapter.clone();
+                async move {
+                    adapter
+                        .stream_completion(vec![user("hi")], options(model))
+                        .await
+                        .map(drop)
+                }
+            });
+            within(refresh.entered.notified()).await;
+            adapter.abort().await.unwrap();
+            let result = within(task).await.unwrap();
+            assert!(
+                matches!(result, Err(ProviderError::Cancelled)),
+                "{route:?}: {result:?}"
+            );
+            assert!(
+                listener.accept().now_or_never().is_none(),
+                "{route:?}: nothing is sent after the abort"
+            );
+            assert_eq!(adapter.inner.abort.live(), 0, "{route:?}");
+        }
+    }
+
+    /// Keystone (the same DF item's window past the read): on the Messages and
+    /// Chat routes, an abort while the request opens cancels it, and one after
+    /// the stream opened ends it with `TurnComplete(Cancelled)`; neither leaves
+    /// the token registered.
+    #[tokio::test]
+    async fn abort_while_messages_or_chat_opens_or_streams_cancels_it() {
+        use crate::adapters::responses::transport::test_support::{
+            accept, hold_open, loopback, options, stored_oauth, user, within,
+        };
+
+        for (model, route) in MESSAGES_AND_CHAT {
+            let (handle, _refresh, _dir) = stored_oauth(
+                PROVIDER_ID,
+                false,
+                crate::domain::models::CredentialIdentity::default(),
+            )
+            .await;
+            let (listener, origin) = loopback().await;
+            let adapter =
+                Arc::new(CopilotAdapter::new(handle, model.into(), Some(origin)).unwrap());
+            let open = || {
+                let adapter = adapter.clone();
+                tokio::spawn(async move {
+                    adapter
+                        .stream_completion(vec![user("hi")], options(model))
+                        .await
+                })
+            };
+
+            // The request is sent and never answered.
+            let task = open();
+            let _unanswered = within(accept(&listener)).await;
+            adapter.abort().await.unwrap();
+            let result = within(task).await.unwrap().map(drop);
+            assert!(
+                matches!(result, Err(ProviderError::Cancelled)),
+                "{route:?}: {result:?}"
+            );
+            assert_eq!(adapter.inner.abort.live(), 0, "{route:?}");
+
+            // The stream opened; no event has arrived.
+            let task = open();
+            let mut socket = within(accept(&listener)).await;
+            hold_open(&mut socket).await;
+            let mut stream = within(task).await.unwrap().expect("the stream opens");
+            adapter.abort().await.unwrap();
+            assert!(
+                matches!(
+                    within(stream.next()).await,
+                    Some(StreamChunk::TurnComplete {
+                        stop_reason: StopReason::Cancelled
+                    })
+                ),
+                "{route:?}"
+            );
+            assert!(within(stream.next()).await.is_none(), "{route:?}");
+            assert_eq!(adapter.inner.abort.live(), 0, "{route:?}");
+        }
+    }
+
+    /// An attempt set keeps the root it began with; a recovery re-derives the
+    /// root from the recovered credential once, at the recovery, so a root this
+    /// scope learned meanwhile is taken then and only then.
+    #[tokio::test]
+    async fn recovered_rederives_the_root_once_from_the_recovered_credential() {
+        use crate::adapters::responses::transport::test_support::stored_oauth;
+
+        const TENANT: &str = "https://api.individual.githubcopilot.com/tenant";
+        let (handle, _refresh, _dir) = stored_oauth(
+            PROVIDER_ID,
+            false,
+            crate::domain::models::CredentialIdentity::default(),
+        )
+        .await;
+        let resolved = handle.current().await.unwrap();
+        let adapter = CopilotAdapter::new(handle, "gpt-5".into(), None).unwrap();
+        let begun = adapter.inner.responses.root(&resolved);
+        assert_eq!(begun, canonical_root());
+        let mut wire = CopilotWire {
+            inner: adapter.inner.clone(),
+            cache_key: None,
+            reasoning: false,
+            vision: false,
+            max_output_tokens: None,
+            temperature: None,
+            warm: false,
+            route_headers: HeaderMap::new(),
+            state: adapter.inner.responses.state(&resolved, &begun),
+        };
+        let scope = crate::adapters::model_catalog_cache::request_scope("ctx", &resolved);
+        adapter
+            .inner
+            .shared
+            .learn("ctx", &scope, Some(TENANT.into()));
+        let tenant = headers::derived(TENANT);
+        assert_eq!(
+            wire.recovered(&resolved).unwrap().as_deref(),
+            Some(format!("{tenant}/responses").as_str())
+        );
+        // The derivation happened at that recovery: a later re-probe of the
+        // scope changes only what a further recovery would derive.
+        adapter.inner.shared.learn("ctx", &scope, None);
+        assert_eq!(adapter.inner.responses.root(&resolved), canonical_root());
+        assert_eq!(
+            wire.recovered(&resolved).unwrap().as_deref(),
+            Some(format!("{}/responses", canonical_root()).as_str())
+        );
     }
 }

@@ -50,9 +50,6 @@ use crate::domain::models::{
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-/// omp's defaults for an id no reference describes.
-const DEFAULT_CONTEXT: u32 = 128_000;
-const DEFAULT_MAX_OUTPUT: u32 = 8_192;
 const ENVELOPE_KEYS: [&str; 4] = ["data", "models", "result", "items"];
 const LONG_CONTEXT_ID_SUFFIX: &str = "-1m";
 const LONG_CONTEXT_NAME_SUFFIX: &str = " (1M)";
@@ -153,7 +150,7 @@ fn live_rows(node: &Value) -> Option<Vec<&serde_json::Map<String, Value>>> {
 struct Reference {
     name: String,
     context: u32,
-    max_output: u32,
+    max_output: Option<u32>,
     vision: bool,
     thinking: bool,
 }
@@ -166,7 +163,7 @@ fn reference(id: &str) -> Option<Reference> {
     Some(Reference {
         name: descriptor.display_name.clone(),
         context: descriptor.context_window,
-        max_output: catalog::seed_row(id).map_or(DEFAULT_MAX_OUTPUT, |row| row.max_output),
+        max_output: catalog::seed_row(id).map(|row| row.max_output),
         vision: descriptor.capabilities.contains(&ModelCapability::Vision),
         thinking: descriptor.capabilities.contains(&ModelCapability::Thinking),
     })
@@ -226,7 +223,7 @@ fn tier_max(row: &serde_json::Map<String, Value>, tier: &str) -> Option<f64> {
 fn map_row(
     row: &serde_json::Map<String, Value>,
     canonical: bool,
-) -> Option<(ModelRecord, u32, Option<(ModelRecord, u32)>)> {
+) -> Option<(ModelRecord, Option<u32>, Option<(ModelRecord, Option<u32>)>)> {
     let id = row.get("id")?.as_str()?.to_owned();
     let capabilities = row.get("capabilities").filter(|c| c.is_object());
     if capabilities
@@ -241,18 +238,15 @@ fn map_row(
         .filter(|l| l.is_object());
     let limit = |key: &str| positive(limits.and_then(|l| l.get(key)));
     let reference = reference(&id);
+    // An id no layer describes keeps no window and no output limit.
     let context = limit("max_context_window_tokens")
         .or_else(|| positive(row.get("context_length")))
         .or_else(|| limit("max_prompt_tokens"))
-        .unwrap_or_else(|| reference.as_ref().map_or(DEFAULT_CONTEXT, |r| r.context));
+        .or_else(|| reference.as_ref().map(|r| r.context));
     let max_output = limit("max_output_tokens")
         .or_else(|| positive(row.get("max_completion_tokens")))
         .or_else(|| limit("max_non_streaming_output_tokens"))
-        .unwrap_or_else(|| {
-            reference
-                .as_ref()
-                .map_or(DEFAULT_MAX_OUTPUT, |r| r.max_output)
-        });
+        .or_else(|| reference.as_ref().and_then(|r| r.max_output));
     let live_name = row
         .get("name")
         .and_then(Value::as_str)
@@ -286,8 +280,14 @@ fn map_row(
         } else {
             billed
         };
-    let window = |max: f64| (f64::from(context)).min(max + f64::from(max_output)) as u32;
-    let base_window = default_max.filter(|max| *max > 0.0).map_or(context, window);
+    let window = |max: f64| {
+        let tier = max + f64::from(max_output.unwrap_or(0));
+        context.map_or(tier, |context| f64::from(context).min(tier)) as u32
+    };
+    let base_window = match default_max.filter(|max| *max > 0.0) {
+        Some(max) => Some(window(max)),
+        None => context,
+    };
     let mut caps = HashSet::from([ModelCapability::ToolUse]);
     if vision {
         caps.insert(ModelCapability::Vision);
@@ -297,7 +297,7 @@ fn map_row(
     }
     let sibling = long
         .map(window)
-        .filter(|long_window| *long_window > base_window)
+        .filter(|long_window| base_window.is_none_or(|base| *long_window > base))
         .map(|long_window| {
             let name = live_name
                 .map(str::to_owned)
@@ -315,18 +315,16 @@ fn map_row(
                 max_output,
             )
         });
-    let (mut context, mut output) = (Some(base_window), Some(max_output));
-    catalog::pin_limits(&id, &mut context, &mut output);
     Some((
         ModelRecord {
             model_id: id,
             display_name: live_name.map(str::to_owned),
-            context_window: context,
+            context_window: base_window,
             capabilities: Some(caps),
             pricing_tier: None,
             wire_model_id: None,
         },
-        output.unwrap_or(max_output),
+        max_output,
         sibling,
     ))
 }
@@ -338,7 +336,7 @@ fn records(
     canonical: bool,
     model_filter: &[String],
 ) -> Option<(Vec<ModelRecord>, HashMap<String, LiveRow>)> {
-    let mut mapped: BTreeMap<String, (ModelRecord, u32)> = BTreeMap::new();
+    let mut mapped: BTreeMap<String, (ModelRecord, Option<u32>)> = BTreeMap::new();
     let mut siblings = Vec::new();
     for row in live_rows(payload)? {
         if let Some((record, output, sibling)) = map_row(row, canonical) {
@@ -357,7 +355,7 @@ fn records(
             (
                 id.clone(),
                 LiveRow {
-                    max_output: Some(*output),
+                    max_output: *output,
                 },
             )
         })
@@ -372,7 +370,7 @@ fn records(
                         model_id: id.clone(),
                         ..Default::default()
                     },
-                    0,
+                    None,
                 ),
             );
         }
@@ -420,12 +418,12 @@ mod tests {
         assert_eq!(long.display_name.as_deref(), Some("Claude Opus 5 (1M)"));
         assert_eq!(long.context_window, Some(1_000_000));
         let fresh = &records[position("new-model")];
-        assert_eq!(fresh.context_window, Some(128_000));
+        assert_eq!(fresh.context_window, None);
         assert_eq!(
             fresh.capabilities,
             Some(HashSet::from([ModelCapability::ToolUse]))
         );
-        assert_eq!(live["new-model"].max_output, Some(8_192));
+        assert_eq!(live["new-model"].max_output, None);
         assert_eq!(live["claude-opus-5-1m"].max_output, Some(64_000));
         assert!(!live.contains_key("gpt-4o"));
         // Live ids keep their limits; bundled ids live omits are bare.
@@ -434,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn vision_follows_the_root_rule_and_pins_apply() {
+    fn vision_follows_the_root_rule_and_live_limits_stay_unpinned() {
         let payload = json!([
             {"id":"gpt-4o"},
             {"id":"claude-opus-4.6","capabilities":{"limits":{"max_context_window_tokens":200000,"max_output_tokens":64000}}}
@@ -458,9 +456,10 @@ mod tests {
         );
         assert_eq!(
             find(&tenant, "claude-opus-4.6").context_window,
-            Some(168_000)
+            Some(200_000)
         );
-        assert_eq!(live["claude-opus-4.6"].max_output, Some(32_000));
+        assert_eq!(live["claude-opus-4.6"].max_output, Some(64_000));
+        assert_eq!(live["gpt-4o"].max_output, Some(4096));
     }
 
     #[test]

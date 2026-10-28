@@ -275,8 +275,31 @@ fn assert_no_leak(outputs: &[&Output], secrets: &[&str]) {
 /// policy POST answered 200, the live roster under `/tenant-a` and the three
 /// inference routes under `/tenant-a`, each answering its own text.
 async fn mount_copilot(server: &MockServer) {
+    mount_session(server, TOKEN).await;
+    let [messages, responses, chat] = [TURNS[0].2, TURNS[1].2, TURNS[2].2];
+    reply(
+        server,
+        "POST",
+        &messages_path(ROOT_A),
+        messages_sse(messages),
+    )
+    .await;
+    reply(
+        server,
+        "POST",
+        &responses_path(ROOT_A),
+        responses_ok(responses),
+    )
+    .await;
+    reply(server, "POST", &chat_path(ROOT_A), chat_sse(chat)).await;
+}
+
+/// The login and discovery routes of one session whose grant is `token`: device
+/// start, a first-poll success, the probe reporting `ENDPOINT_A`, every policy
+/// POST answered 200 and the live roster under `/tenant-a`.
+async fn mount_session(server: &MockServer, token: &str) {
     reply(server, "POST", DEVICE_PATH, device_reply(5.0, 900.0)).await;
-    reply(server, "POST", TOKEN_PATH, token_reply(TOKEN)).await;
+    reply(server, "POST", TOKEN_PATH, token_reply(token)).await;
     reply(server, "GET", PROBE_PATH, probe_reply(ENDPOINT_A)).await;
     Mock::given(method("POST"))
         .and(path_regex(r"^/tenant-a/models/[^/]+/policy$"))
@@ -299,22 +322,6 @@ async fn mount_copilot(server: &MockServer) {
         ),
     )
     .await;
-    let [messages, responses, chat] = [TURNS[0].2, TURNS[1].2, TURNS[2].2];
-    reply(
-        server,
-        "POST",
-        &messages_path(ROOT_A),
-        messages_sse(messages),
-    )
-    .await;
-    reply(
-        server,
-        "POST",
-        &responses_path(ROOT_A),
-        responses_ok(responses),
-    )
-    .await;
-    reply(server, "POST", &chat_path(ROOT_A), chat_sse(chat)).await;
 }
 
 /// K12 (M12): the debug binary logs in through the device flow (blank Enterprise
@@ -503,4 +510,85 @@ async fn k12_debug_binary_copilot_device_login_status_ask_routes_logout() {
     })
     .await
     .expect("K12 Copilot debug-binary flow exceeded its structural deadline");
+}
+
+/// K20: a Copilot 403 on inference is an organization or policy denial, never a
+/// rejected credential: after it, `auth status --json` still reports the stored
+/// grant as `oauth` and the row is kept enabled.
+#[tokio::test]
+#[serial]
+async fn k20_status_reports_oauth_after_a_copilot_403() {
+    // Distinct per test: the identity cache is keyed by the grant.
+    const DENIED_TOKEN: &str = "gho_K20CopilotCliSecretToken0001";
+    tokio::time::timeout(Duration::from_secs(240), async {
+        let server = MockServer::start().await;
+        let fixture = fixture(
+            &server,
+            "k20-forbidden-status",
+            &copilot_config("grok-code-fast-1"),
+        );
+        preflight(&fixture, &server).await;
+        mount_session(&server, DENIED_TOKEN).await;
+        reply(
+            &server,
+            "POST",
+            &chat_path(ROOT_A),
+            json_reply(403, json!({"error": {"message": "denied by policy"}})),
+        )
+        .await;
+        let login = login_with_blank_answer(&fixture).await;
+        assert_eq!(rows(&fixture).await.len(), 1, "one Copilot grant");
+
+        // ── a denied turn ────────────────────────────────────────────────────
+        let before = fixture.requests(&server, "before-ask").await.len();
+        let label = "ask-403";
+        let ask = tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            fixture
+                .command(label, &["ask", "hi", "--output-format", "json"])
+                .output(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{label} exceeded {COMMAND_TIMEOUT:?}"))
+        .unwrap_or_else(|error| panic!("cannot execute {label}: {error}"));
+        fixture.capture(label, &ask, &ask.stderr);
+        let ask_out = format!("{}{}", text(&ask.stdout), text(&ask.stderr));
+        assert!(
+            ask_out.contains("GitHub Copilot access denied (HTTP 403)"),
+            "{ask_out}"
+        );
+        let after = fixture.requests(&server, label).await;
+        let denied = find(&after[before..], "POST", &chat_path(ROOT_A));
+        assert!(!denied.is_empty(), "the turn reached the Chat route");
+        let bearer = format!("Bearer {DENIED_TOKEN}");
+        for request in &denied {
+            assert_eq!(header(request, "authorization"), bearer);
+        }
+
+        // ── status after the 403 ─────────────────────────────────────────────
+        let status = fixture.run("status", &["auth", "status", "--json"]).await;
+        let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(provider_row(&status_json, PROVIDER)["source"], "oauth");
+        let stored = rows(&fixture).await;
+        assert_eq!(stored.len(), 1, "the grant is kept");
+        assert!(
+            matches!(stored[0].credential, Credential::OAuth(_)),
+            "still the device login's OAuth row"
+        );
+        assert_eq!(
+            stored[0].disabled_cause, None,
+            "a 403 never disables the row"
+        );
+        assert_no_leak(&[&login, &ask, &status], &[DENIED_TOKEN, DEVICE_CODE]);
+        fixture.json(
+            "passed.json",
+            &json!({
+                "test": "conformance_20_1d3_copilot::cli::k20_status_reports_oauth_after_a_copilot_403",
+                "denied_posts": denied.len(),
+                "status_source": provider_row(&status_json, PROVIDER)["source"],
+            }),
+        );
+    })
+    .await
+    .expect("K20 Copilot 403 status flow exceeded its structural deadline");
 }

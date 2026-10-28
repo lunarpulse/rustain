@@ -122,7 +122,8 @@ fn build_list_rows(
 pub(super) fn auth_method_token(m: &AuthMethod) -> &'static str {
     match m {
         AuthMethod::ApiKey => "api-key",
-        AuthMethod::OAuthCode(_) => "oauth",
+        // Browser key minting is selected with `--method oauth`.
+        AuthMethod::OAuthCode(_) | AuthMethod::PkceKey(_) => "oauth",
         AuthMethod::Device(_) => "device",
     }
 }
@@ -133,6 +134,8 @@ fn auth_method_json_token(m: &AuthMethod) -> &'static str {
         AuthMethod::ApiKey => "api_key",
         AuthMethod::OAuthCode(_) => "oauth",
         AuthMethod::Device(_) => "device_code",
+        // The stored credential is a key, as `LoginResult.method` reports it.
+        AuthMethod::PkceKey(_) => "browser_key",
     }
 }
 
@@ -385,6 +388,11 @@ mod tests {
             (AuthMethod::ApiKey, "api-key", "api_key"),
             (oauth, "oauth", "oauth"),
             (AuthMethod::Device(&DEVICE), "device", "device_code"),
+            (
+                AuthMethod::PkceKey(&crate::adapters::auth::policies::OPENROUTER_KEY_MINT),
+                "oauth",
+                "browser_key",
+            ),
         ] {
             assert_eq!(auth_method_token(&method), human);
             assert_eq!(auth_method_json_token(&method), json);

@@ -285,7 +285,8 @@ async fn df_tool_schema_inlining_is_byte_and_depth_bounded_and_warns_once() {
     );
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(
-        logs.matches("exceeded a $ref inlining bound").count(),
+        logs.matches("exceeded the $ref inlining byte budget")
+            .count(),
         1,
         "one warning per walk: {logs}"
     );
@@ -296,11 +297,11 @@ async fn df_tool_schema_inlining_is_byte_and_depth_bounded_and_warns_once() {
     assert_eq!(raw.matches(r#""properties":"#).count(), 65, "{raw}");
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(
-        logs.matches("exceeded a $ref inlining bound").count(),
+        logs.matches("Gemini CLI tool schema exceeded").count(),
         2,
         "{logs}"
     );
-    assert!(logs.contains("Depth"), "{logs}");
+    assert!(logs.contains("exceeded the nesting depth bound"), "{logs}");
 
     // Within both bounds nothing is cut and nothing warns (positive control).
     stream(&provider, MODEL, vec![tool("small", doubling_literals(3))]).await;
@@ -316,7 +317,7 @@ async fn df_tool_schema_inlining_is_byte_and_depth_bounded_and_warns_once() {
     drop(trace_guard);
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert_eq!(
-        logs.matches("exceeded a $ref inlining bound").count(),
+        logs.matches("Gemini CLI tool schema exceeded").count(),
         2,
         "{logs}"
     );

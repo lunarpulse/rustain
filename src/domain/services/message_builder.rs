@@ -264,6 +264,7 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
             payload: std::sync::Arc::new(serde_json::json!({"m": marker})),
+            scope: Some("s".into()),
         }
     }
 

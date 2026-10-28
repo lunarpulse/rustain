@@ -6,6 +6,9 @@ pub enum AuthMethod {
     OAuthCode(&'static OAuthCodePolicy),
     /// Headless device login; the stored row is an OAuth credential.
     Device(&'static DevicePolicy),
+    /// Browser PKCE flow whose exchange mints a durable API key; the stored row
+    /// is an API key, never an OAuth credential.
+    PkceKey(&'static PkceKeyPolicy),
 }
 impl AuthMethod {
     /// Operator-facing name for interactive method pickers.
@@ -14,6 +17,7 @@ impl AuthMethod {
             Self::ApiKey => "API key",
             Self::OAuthCode(policy) => policy.label,
             Self::Device(policy) => policy.label,
+            Self::PkceKey(policy) => policy.label,
         }
     }
     /// Product name in the success line of a subscription login; API keys have none.
@@ -22,6 +26,7 @@ impl AuthMethod {
             Self::ApiKey => None,
             Self::OAuthCode(policy) => Some(policy.login_name),
             Self::Device(policy) => Some(policy.login_name),
+            Self::PkceKey(policy) => Some(policy.login_name),
         }
     }
 }
@@ -149,6 +154,25 @@ pub struct OAuthCodePolicy {
     pub projection: &'static TokenProjection,
     pub identity_hook: Option<IdentityHook>,
     pub post_exchange: Option<PostExchangeHook>,
+}
+
+/// Browser key minting: an S256 challenge without client, scope or state on the
+/// authorization URL; the code and verifier are exchanged (JSON) for an API key.
+/// A pasted value starting with `paste_key_prefix` is validated as a key instead.
+#[derive(Debug)]
+pub struct PkceKeyPolicy {
+    pub label: &'static str,
+    pub login_name: &'static str,
+    pub instructions: &'static str,
+    pub paste_prompt: &'static str,
+    pub authorize_url: &'static str,
+    pub port: u16,
+    pub port_fallback: bool,
+    pub callback_host: CallbackHost,
+    pub callback_path: &'static str,
+    pub exchange_url: &'static str,
+    pub timeout_ms: u64,
+    pub paste_key_prefix: &'static str,
 }
 
 /// One login method, two device protocols sharing display, time, cancellation and storage.

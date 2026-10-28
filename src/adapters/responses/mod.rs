@@ -83,6 +83,15 @@ pub trait WireProfile {
     fn system_role(&self) -> SystemRole {
         SystemRole::Instructions
     }
+    /// `Generic`: a top-level `session_id` routing hint, sent right after
+    /// `prompt_cache_key`.
+    fn routing_session_id(&self) -> Option<&str> {
+        None
+    }
+    /// `Generic`: a top-level `cache_control` breakpoint, sent right after `store`.
+    fn cache_control(&self) -> Option<&serde_json::Value> {
+        None
+    }
 }
 
 /// Where a `Generic` request carries its system texts.
@@ -96,14 +105,19 @@ pub enum SystemRole {
     Developer,
 }
 
-/// omp `normalizeOpenAIPromptCacheKey`: at most 64 UTF-16 units are kept,
-/// longer identities become `pc_` + Bun.hash base 36.
-pub fn prompt_cache_key(id: &str) -> String {
-    if id.encode_utf16().count() <= 64 {
+/// omp `normalizeOpenAIStableId`: at most `limit` UTF-16 units are kept, longer
+/// identities become `prefix` + Bun.hash base 36.
+pub fn stable_id(id: &str, limit: usize, prefix: &str) -> String {
+    if id.encode_utf16().count() <= limit {
         id.to_owned()
     } else {
-        format!("pc_{}", repair::stable_hash(id))
+        format!("{prefix}{}", repair::stable_hash(id))
     }
+}
+
+/// omp `normalizeOpenAIPromptCacheKey`: the 64-unit, `pc_` stable id.
+pub fn prompt_cache_key(id: &str) -> String {
+    stable_id(id, 64, "pc_")
 }
 
 #[cfg(test)]

@@ -72,8 +72,9 @@ pub struct EventMapper {
     terminal: bool,
     committed: bool,
     tool_emitted: bool,
-    /// `(provider, model)` stamping captured reasoning; `None` captures nothing.
-    replay_owner: Option<(String, String)>,
+    /// `(provider, model, scope)` stamping captured reasoning; `None` captures
+    /// nothing. `scope` is the producing credential's replay scope.
+    replay_owner: Option<(String, String, String)>,
     /// This attempt's reduced reasoning items, released only at a terminal event.
     replay: Vec<Value>,
     dialect: Dialect,
@@ -131,10 +132,11 @@ impl EventMapper {
     pub fn new() -> Self {
         Self::default()
     }
-    /// A mapper that keeps reasoning items for replay to `provider` and `model`.
-    pub fn with_replay(provider: &str, model: &str) -> Self {
+    /// A mapper that keeps reasoning items for replay to `provider` and `model`
+    /// under the credential scope `scope` that produced them.
+    pub fn with_replay(provider: &str, model: &str, scope: String) -> Self {
         Self {
-            replay_owner: Some((provider.to_owned(), model.to_owned())),
+            replay_owner: Some((provider.to_owned(), model.to_owned(), scope)),
             ..Self::default()
         }
     }
@@ -284,13 +286,14 @@ impl EventMapper {
                 // follow a terminal event (the generic empty-completion retry) is
                 // decided by the transport before this batch is forwarded and
                 // discards it whole, so only the attempt that is kept persists.
-                if let Some((provider, model)) = &self.replay_owner {
+                if let Some((provider, model, scope)) = &self.replay_owner {
                     chunks.extend(self.replay.drain(..).map(|payload| {
                         StreamChunk::ProviderReplay {
                             item: ProviderReplayItem {
                                 provider: provider.clone(),
                                 model: model.clone(),
                                 payload: std::sync::Arc::new(payload),
+                                scope: Some(scope.clone()),
                             },
                         }
                     }));
@@ -536,8 +539,8 @@ fn failure(value: &Value, dialect: Dialect) -> EventError {
 
 /// omp `isProviderRetryableError` over a provider stream message: transient
 /// transport/overload wording (`TRANSIENT_TRANSPORT_PATTERN`,
-/// `PROVIDER_TRANSIENT_EXTRA_PATTERN`, unexpected socket close), never an
-/// account usage limit.
+/// `PROVIDER_TRANSIENT_EXTRA_PATTERN`, unexpected socket close, a body read
+/// failure `STREAM_READ_ERROR_PATTERN`), never an account usage limit.
 pub(crate) fn generic_retryable(message: &str) -> bool {
     static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
@@ -551,7 +554,7 @@ pub(crate) fn generic_retryable(message: &str) -> bool {
             r"|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)",
             r"|\bE(?:TIMEOUT|NOTFOUND|NETUNREACH|HOSTUNREACH)\b|\bFailedToOpenSocket\b|no internet connection|couldn.?t reach",
             r"|couldn.?t connect to|tls certificate verification failed|malformed.?function.?call",
-            r"|bad record mac|stream error.*received from peer|1302",
+            r"|bad record mac|stream error.*received from peer|1302|stream[_ -]?read[_ -]?error",
             r"|\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b|^\s*(?:error:\s*)?socket is closed\.?\s*$",
         ))
         .expect("fixed transient expression")
@@ -572,6 +575,35 @@ pub(crate) fn usage_limit(message: &str) -> bool {
         .expect("fixed usage-limit expression")
     });
     USAGE_LIMIT.is_match(message)
+}
+
+/// omp `isOpaqueStatusBody`: a usage-limit status (429/402) body that carries
+/// nothing beyond the status — empty, whitespace, the status digits with
+/// HTTP/JSON framing, or punctuation — and no Chinese quota or throttle
+/// phrasing the classifier reads (`CN_QUOTA_EXHAUSTED_PATTERN`,
+/// `CN_TRANSIENT_CAP_PATTERN`, `CN_THROTTLE_PATTERN`). Such an answer is an
+/// account limit.
+pub(crate) fn opaque_status_body(body: &str) -> bool {
+    static FRAMING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?i-u)\b(?:429|402|http|https|status|error|code|response|message)\b",
+            r"|\(?\bno body\b\)?",
+        ))
+        .expect("fixed framing expression")
+    });
+    static WORD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"[A-Za-z0-9]{3,}").expect("fixed word expression"));
+    static CN_SIGNAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?:使用|用量).{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足",
+            r"|速率.{0,30}上限|频率.{0,30}上限|每分钟.{0,30}上限|并发.{0,30}上限",
+            r"|使用.{0,30}(?:速率|频率|每分钟|并发).{0,30}上限",
+            r"|速率(?:限制|过快)|频率(?:过高|过快)|过于频繁|稍后[重再]试",
+        ))
+        .expect("fixed Chinese signal expression")
+    });
+    let cleaned = FRAMING.replace_all(body, "");
+    !WORD.is_match(&cleaned) && !CN_SIGNAL.is_match(&cleaned)
 }
 
 fn nullish(value: &Value) -> Option<&Value> {
@@ -704,5 +736,59 @@ fn codex_failure(value: &Value) -> EventError {
                 | "unsupported_native_inflight_message"
         ) || RETRYABLE.is_match(message),
         whitespace_loop: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_read_errors_are_transient() {
+        for message in [
+            "Stream read error: error decoding response body",
+            "stream_read_error",
+            "STREAM-READ-ERROR from upstream",
+            "streamreaderror",
+        ] {
+            assert!(generic_retryable(message), "{message}");
+        }
+        assert!(!generic_retryable("stream reader closed"));
+        assert!(!generic_retryable(
+            "Stream read error: usage limit reached for this account"
+        ));
+    }
+
+    #[test]
+    fn opaque_status_bodies_follow_omp() {
+        for body in [
+            "",
+            "   \n\t",
+            "429",
+            "HTTP 429",
+            "429 status code (no body)",
+            "402 status code (no body)",
+            "{}",
+            r#"{"error":{"code":429,"message":""}}"#,
+            r#"{"status": 429}"#,
+            "Error: 429!",
+            // Han text the classifier cannot read stays opaque.
+            "429 利用上限に達しました",
+        ] {
+            assert!(opaque_status_body(body), "{body:?} is opaque");
+        }
+        for body in [
+            "Too many requests, retry later",
+            r#"{"error":{"message":"rate limited"}}"#,
+            "Please retry in 5s",
+            "monthly quota exceeded",
+            // The three Chinese patterns: quota, transient cap, throttle.
+            "429 已达到 5 小时的使用上限",
+            "并发请求数已达上限",
+            "已达到速率限制",
+            "请求过于频繁，请稍后重试",
+        ] {
+            assert!(!opaque_status_body(body), "{body:?} is informative");
+        }
     }
 }

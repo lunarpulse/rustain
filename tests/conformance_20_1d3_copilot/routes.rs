@@ -156,6 +156,7 @@ async fn messages_literal_has_no_claude_code_profile() {
     assert!(!raw(&request).contains(IDENTITY), "no identity block");
     let body = json_body(&request);
     assert_eq!(body["max_tokens"], 8192);
+    assert_eq!(body, messages_body(8192), "the whole Messages body");
 
     complete(
         &provider,
@@ -166,6 +167,22 @@ async fn messages_literal_has_no_claude_code_profile() {
     .unwrap();
     let all = requests(&server, "POST", &messages_path(ROOT_A)).await;
     assert_eq!(json_body(all.last().unwrap())["max_tokens"], 32000);
+    assert_eq!(
+        json_body(all.last().unwrap()),
+        messages_body(32000),
+        "the whole clamped Messages body"
+    );
+}
+
+/// The complete Messages body of one `hi` turn: nothing beyond the model, the
+/// limit, the message and `stream`.
+fn messages_body(max_tokens: u32) -> Value {
+    json!({
+        "model": "claude-sonnet-4.5",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+        "stream": true
+    })
 }
 
 /// K06 (M06): Responses body for a reasoning row: developer system item, no
@@ -210,6 +227,24 @@ async fn responses_body_for_reasoning_row() {
         .expect("input_image item");
     assert_eq!(image["detail"], "auto");
     assert_eq!(
+        body,
+        json!({
+            "model": "gpt-5.5",
+            "input": [
+                {"role": "developer", "content": "SYS"},
+                {"role": "user", "content": [
+                    {"type": "input_text", "text": "look"},
+                    {"type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,AA=="}
+                ]}
+            ],
+            "stream": true,
+            "store": false,
+            "max_output_tokens": 8192,
+            "include": ["reasoning.encrypted_content"]
+        }),
+        "the whole Responses body"
+    );
+    assert_eq!(
         header(&request, "copilot-vision-request").as_deref(),
         Some("true")
     );
@@ -253,6 +288,21 @@ async fn chat_body_for_grok_code() {
     assert_eq!(body["max_completion_tokens"], 8192);
     assert_eq!(body["stream_options"]["include_usage"], true);
     assert_eq!(
+        body,
+        json!({
+            "model": "grok-code-fast-1",
+            "messages": [
+                {"role": "system", "content": "SYS"},
+                {"role": "user", "content": "hi"}
+            ],
+            "stream": true,
+            "store": false,
+            "stream_options": {"include_usage": true},
+            "max_completion_tokens": 8192
+        }),
+        "the whole Chat body"
+    );
+    assert_eq!(
         header(&request, "x-stainless-timeout").as_deref(),
         Some("300")
     );
@@ -279,6 +329,21 @@ async fn chat_body_for_gpt_4o_vision() {
         .find_map(|item| item["image_url"]["url"].as_str().map(str::to_owned))
         .expect("image_url part");
     assert_eq!(url, "data:image/png;base64,AA==");
+    assert_eq!(
+        body,
+        json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+            ]}],
+            "stream": true,
+            "store": false,
+            "stream_options": {"include_usage": true},
+            "max_completion_tokens": 4096
+        }),
+        "the whole Chat vision body"
+    );
 }
 
 /// K06 (M06): `gemini-3.1-pro-preview` sends no `store` key.
@@ -296,6 +361,17 @@ async fn chat_body_for_gemini_has_no_store() {
     .unwrap();
     let body = json_body(&only(&server, &chat_path(ROOT_A)).await);
     assert!(body.get("store").is_none(), "no store key");
+    assert_eq!(
+        body,
+        json!({
+            "model": "gemini-3.1-pro-preview",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "stream_options": {"include_usage": true},
+            "max_completion_tokens": 8192
+        }),
+        "the whole Chat body without store"
+    );
 }
 
 // ── K07: headers ────────────────────────────────────────────────────────────

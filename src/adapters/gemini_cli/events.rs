@@ -114,6 +114,8 @@ pub(crate) enum Finish {
 #[derive(Debug)]
 pub(crate) struct Mapper {
     model: String,
+    /// Replay scope of the credential that produced this response.
+    scope: String,
     flash_leak: bool,
     tool_names: HashSet<String>,
     parts: Vec<Part>,
@@ -134,10 +136,18 @@ pub(crate) struct Mapper {
 }
 
 impl Mapper {
-    /// `model` = options.model (replay stamp); `flash_leak` = profile.flash_leak; `tool_names` = declared tool names (planning-leak classifier).
-    pub(crate) fn new(model: &str, flash_leak: bool, tool_names: HashSet<String>) -> Self {
+    /// `model` = options.model and `scope` = the sending credential's replay
+    /// scope (replay stamps); `flash_leak` = profile.flash_leak; `tool_names` =
+    /// declared tool names (planning-leak classifier).
+    pub(crate) fn new(
+        model: &str,
+        scope: String,
+        flash_leak: bool,
+        tool_names: HashSet<String>,
+    ) -> Self {
         Self {
             model: model.to_owned(),
+            scope,
             flash_leak,
             tool_names,
             parts: Vec::new(),
@@ -278,6 +288,7 @@ impl Mapper {
                     provider: super::PROVIDER_KIND.into(),
                     model: self.model.clone(),
                     payload: Arc::new(Value::Object(payload)),
+                    scope: Some(self.scope.clone()),
                 },
             });
         }
@@ -687,6 +698,7 @@ mod tests {
     fn mapper(flash_leak: bool) -> Mapper {
         Mapper::new(
             "gemini-test",
+            "scope-test".into(),
             flash_leak,
             HashSet::from(["read".to_owned()]),
         )
@@ -1019,6 +1031,7 @@ mod tests {
         };
         assert_eq!(item.provider, super::super::PROVIDER_KIND);
         assert_eq!(item.model, "gemini-test");
+        assert_eq!(item.scope.as_deref(), Some("scope-test"));
         let (call_a, call_b) = (&ids[0], &ids[1]);
         assert_eq!(
             *item.payload,

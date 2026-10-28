@@ -100,6 +100,9 @@ pub mod openai;
 pub mod openai_codex;
 
 #[cfg(feature = "openai")]
+pub mod openrouter;
+
+#[cfg(feature = "openai")]
 pub mod responses;
 
 #[cfg(feature = "openai")]

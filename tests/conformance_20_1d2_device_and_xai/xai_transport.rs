@@ -600,13 +600,14 @@ fn plain_tool() -> ToolDefinition {
         parallel_safe: false,
     }
 }
-fn replay(provider: &str, model: &str, marker: &str) -> ProviderReplayItem {
+fn replay(provider: &str, model: &str, marker: &str, scope: Option<&str>) -> ProviderReplayItem {
     ProviderReplayItem {
         provider: provider.into(),
         model: model.into(),
         payload: Arc::new(
             json!({"type":"reasoning","summary":[],"encrypted_content":format!("ENC-{marker}")}),
         ),
+        scope: scope.map(str::to_owned),
     }
 }
 
@@ -619,12 +620,22 @@ async fn k07_generic_bodies_per_model_class_and_codex_unchanged_in_process() {
     let provider = build("xai-oauth", None);
     mount_attempts(&server, vec![ok_sse()]).await;
 
-    // Reasoning, vision model: every optional field, `include` last.
+    // Reasoning, vision model: every optional field, `include` last. Only the
+    // item this account produced (its replay scope) for this kind and model replays.
+    let scope = provider.discovery_scope("xai-oauth").await;
+    let scope = scope.as_deref();
     let mut assistant = message(MessageRole::Assistant, "hi");
     assistant.provider_replay = vec![
-        replay("xai-oauth", MODEL, "same"),
-        replay("xai-oauth", "grok-4.5", "other-model"),
-        replay("xai", MODEL, "other-kind"),
+        replay("xai-oauth", MODEL, "same", scope),
+        replay("xai-oauth", "grok-4.5", "other-model", scope),
+        replay("xai", MODEL, "other-kind", scope),
+        replay(
+            "xai-oauth",
+            MODEL,
+            "other-account",
+            Some("0000000000000000"),
+        ),
+        replay("xai-oauth", MODEL, "unscoped", None),
     ];
     let history = vec![
         message(MessageRole::System, "History rule"),

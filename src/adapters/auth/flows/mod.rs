@@ -37,6 +37,8 @@ mod oauth_code;
 mod paste;
 mod pkce;
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+mod pkce_key;
+#[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
 pub mod refresh;
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
 mod token;
@@ -168,6 +170,20 @@ pub async fn login(
                     ));
                 }
             }
+            // The same wait-only 300 s bound; the exchange carries its own timeout.
+            AuthMethod::PkceKey(policy) => {
+                #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+                {
+                    pkce_key::run(provider_id, policy, ctx).await?
+                }
+                #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
+                {
+                    let _ = policy;
+                    return Err(FlowError::configuration(
+                        "this build has no HTTP client; rebuild with default features",
+                    ));
+                }
+            }
             // Self-bounded (Codex: 120 polls; RFC 8628 and Copilot: `expires_in`).
             AuthMethod::Device(policy) => {
                 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
@@ -211,6 +227,8 @@ pub async fn login(
                 AuthMethod::ApiKey => "api_key",
                 // The stored row is an OAuth credential for both subscription methods.
                 AuthMethod::OAuthCode(_) | AuthMethod::Device(_) => "oauth",
+                // A browser-minted (or pasted) key: the stored row is an API key.
+                AuthMethod::PkceKey(_) => "browser_key",
             },
             validated,
             identity,

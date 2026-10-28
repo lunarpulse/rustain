@@ -102,6 +102,7 @@ fn request_images_tools_instructions_and_wire_order() {
         ],
         &options,
         &profile,
+        None,
     );
     let encoded = serde_json::to_string(&request).unwrap();
     let expected_input = json!([
@@ -144,6 +145,7 @@ fn request_instruction_only_fallback_and_blank_content() {
         ],
         &base_options,
         &profile,
+        None,
     );
     let value = serde_json::to_value(request).unwrap();
     assert_eq!(
@@ -168,7 +170,7 @@ fn request_instruction_only_fallback_and_blank_content() {
     }
     let mut options = options();
     options.system_prompt = "  ".into();
-    let value = serde_json::to_value(ResponsesRequest::new(&[], &options, &Bare)).unwrap();
+    let value = serde_json::to_value(ResponsesRequest::new(&[], &options, &Bare, None)).unwrap();
     for key in [
         "instructions",
         "tools",
@@ -693,6 +695,35 @@ fn prompt_cache_key_counts_utf16_and_uses_reference_hash() {
     assert!(super::prompt_cache_key(&"a".repeat(65)).len() < 64);
 }
 
+#[test]
+fn stable_id_keeps_up_to_its_limit_and_hashes_longer_ids_with_its_prefix() {
+    // The 64-unit `pc_` form is byte-identical to the historical cache key.
+    let long = "a".repeat(65);
+    assert_eq!(
+        super::stable_id(&long, 64, "pc_"),
+        super::prompt_cache_key(&long)
+    );
+    assert_eq!(
+        super::stable_id(&long, 64, "pc_"),
+        format!("pc_{}", repair::stable_hash(&long))
+    );
+    for (units, kept) in [(255, true), (256, true), (257, false)] {
+        let id = "s".repeat(units);
+        let normalised = super::stable_id(&id, 256, "session_");
+        if kept {
+            assert_eq!(normalised, id);
+        } else {
+            assert_eq!(normalised, format!("session_{}", repair::stable_hash(&id)));
+        }
+    }
+    // UTF-16 units, not bytes or chars: 128 crabs are 256 units, 129 are 258.
+    assert_eq!(
+        super::stable_id(&"🦀".repeat(128), 256, "session_"),
+        "🦀".repeat(128)
+    );
+    assert!(super::stable_id(&"🦀".repeat(129), 256, "session_").starts_with("session_"));
+}
+
 struct Generic {
     reasoning: bool,
     vision: bool,
@@ -749,11 +780,20 @@ fn tool(name: &str, input_schema: Value) -> ToolDefinition {
     }
 }
 
-fn replay(model: &str, provider: &str, marker: &str) -> crate::domain::models::ProviderReplayItem {
+/// The replay scope the generic request below sends.
+const SCOPE: &str = "0123456789abcdef";
+
+fn replay(
+    model: &str,
+    provider: &str,
+    marker: &str,
+    scope: Option<&str>,
+) -> crate::domain::models::ProviderReplayItem {
     crate::domain::models::ProviderReplayItem {
         provider: provider.into(),
         model: model.into(),
         payload: std::sync::Arc::new(json!({"type":"reasoning","encrypted_content":marker})),
+        scope: scope.map(str::to_owned),
     }
 }
 
@@ -766,9 +806,11 @@ fn generic_request_reasoning_literal_and_wire_order() {
     });
     let mut assistant = message(MessageRole::Assistant, "answer");
     assistant.provider_replay = vec![
-        replay("grok-4.6", "xai", "keep"),
-        replay("grok-4.3", "xai", "other model"),
-        replay("grok-4.6", "openai-codex", "other provider"),
+        replay("grok-4.6", "xai", "keep", Some(SCOPE)),
+        replay("grok-4.3", "xai", "other model", Some(SCOPE)),
+        replay("grok-4.6", "openai-codex", "other provider", Some(SCOPE)),
+        replay("grok-4.6", "xai", "other account", Some("fedcba9876543210")),
+        replay("grok-4.6", "xai", "unscoped legacy", None),
     ];
     assistant.tool_uses.push(ToolUseMessage {
         id: "call_1".into(),
@@ -809,6 +851,7 @@ fn generic_request_reasoning_literal_and_wire_order() {
         ],
         &options,
         &profile,
+        Some(SCOPE),
     ))
     .unwrap();
     let value: Value = serde_json::from_str(&encoded).unwrap();
@@ -870,6 +913,7 @@ fn generic_request_non_reasoning_non_vision_and_no_synthetic_user_item() {
         &[look, only_image],
         &options,
         &profile,
+        None,
     ))
     .unwrap();
     let placeholder =
@@ -893,12 +937,49 @@ fn generic_request_non_reasoning_non_vision_and_no_synthetic_user_item() {
         &[message(MessageRole::System, "only system")],
         &options,
         &profile,
+        None,
     ))
     .unwrap();
     assert_eq!(value["input"], json!([]));
     assert_eq!(value["instructions"], "only system");
-    let value = serde_json::to_value(ResponsesRequest::new(&[], &options, &profile)).unwrap();
+    let value = serde_json::to_value(ResponsesRequest::new(&[], &options, &profile, None)).unwrap();
     assert!(value.get("instructions").is_none());
+}
+
+/// Only an item produced under the request's own scope is replayed: another
+/// account's item, an unscoped (pre-scope) item, and every item of a request
+/// without a scope are dropped.
+#[test]
+fn replay_requires_the_producing_scope() {
+    let mut assistant = message(MessageRole::Assistant, "answer");
+    assistant.provider_replay = vec![
+        replay("grok-4.6", "xai", "account a", Some(SCOPE)),
+        replay("grok-4.6", "xai", "account b", Some("fedcba9876543210")),
+        replay("grok-4.6", "xai", "unscoped", None),
+    ];
+    let mut options = options();
+    options.model = "grok-4.6".into();
+    let profile = generic(true, true, false);
+    let replayed = |scope: Option<&str>| -> Vec<Value> {
+        let value = serde_json::to_value(ResponsesRequest::new(
+            std::slice::from_ref(&assistant),
+            &options,
+            &profile,
+            scope,
+        ))
+        .unwrap();
+        value["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .map(|item| item["encrypted_content"].clone())
+            .collect()
+    };
+    assert_eq!(replayed(Some(SCOPE)), [json!("account a")]);
+    assert_eq!(replayed(Some("fedcba9876543210")), [json!("account b")]);
+    assert!(replayed(Some("0000000000000000")).is_empty());
+    assert!(replayed(None).is_empty());
 }
 
 #[test]

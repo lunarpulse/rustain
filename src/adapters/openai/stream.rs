@@ -1,6 +1,6 @@
 //! Transforms SSE frames into domain `StreamChunk` values for OpenAI-compatible APIs.
 
-use crate::domain::models::{StreamChunk, UsageInfo};
+use crate::domain::models::{StopReason, StreamChunk, UsageInfo};
 
 use super::types::OpenAiStreamEvent;
 use crate::adapters::anthropic::sse::SseFrame;
@@ -20,6 +20,10 @@ pub struct OpenAiStreamTransformer {
     input_tokens: u32,
     /// Cumulative output tokens.
     output_tokens: u32,
+    /// The turn produced text, thinking or a tool call.
+    output: bool,
+    /// A `finish_reason` ended the turn.
+    finished: bool,
 }
 
 impl Default for OpenAiStreamTransformer {
@@ -34,14 +38,50 @@ impl OpenAiStreamTransformer {
             active_tools: std::collections::HashMap::new(),
             input_tokens: 0,
             output_tokens: 0,
+            output: false,
+            finished: false,
         }
+    }
+
+    /// Ends the turn with `reason`, emitting the accumulated tool calls first
+    /// (in index order). A natural stop that produced tool calls finishes as
+    /// `ToolUse`: a tool call always means "execute and continue" (omp
+    /// openai-completions promotes `stop` → `toolUse`).
+    fn finish(&mut self, reason: StopReason, chunks: &mut Vec<StreamChunk>) {
+        self.finished = true;
+        let mut tools: Vec<_> = self.active_tools.drain().collect();
+        tools.sort_unstable_by_key(|(index, _)| *index);
+        let called = !tools.is_empty();
+        for (_, tool) in tools {
+            let input = serde_json::from_str(&tool.arguments_json).unwrap_or_else(|e| {
+                tracing::warn!("Failed to parse tool arguments JSON: {}", e);
+                serde_json::Value::Object(serde_json::Map::new())
+            });
+            chunks.push(StreamChunk::ToolUse {
+                id: tool.id,
+                name: tool.name,
+                input,
+            });
+        }
+        let stop_reason = if called && reason == StopReason::EndTurn {
+            StopReason::ToolUse
+        } else {
+            reason
+        };
+        chunks.push(StreamChunk::TurnComplete { stop_reason });
     }
 
     /// Transform an SSE frame into zero or more domain StreamChunks.
     pub fn transform(&mut self, frame: &SseFrame) -> Vec<StreamChunk> {
-        // Skip [DONE] sentinel
+        // `[DONE]` is the protocol's terminal: a turn that produced output but
+        // no `finish_reason` completed by server agreement and ends as a
+        // default stop; after a `finish_reason` it adds nothing.
         if frame.data.trim() == "[DONE]" {
-            return vec![];
+            let mut chunks = Vec::new();
+            if self.output && !self.finished {
+                self.finish(StopReason::EndTurn, &mut chunks);
+            }
+            return chunks;
         }
 
         // Parse the SSE data as an OpenAI stream event
@@ -65,6 +105,7 @@ impl OpenAiStreamTransformer {
             // Text content
             if let Some(text) = &delta.content {
                 if !text.is_empty() {
+                    self.output = true;
                     chunks.push(StreamChunk::Text {
                         content: text.clone(),
                         parent_tool_use_id: None,
@@ -75,6 +116,7 @@ impl OpenAiStreamTransformer {
             // DeepSeek v4 reasoning/thinking content
             if let Some(reasoning) = &delta.reasoning_content {
                 if !reasoning.is_empty() {
+                    self.output = true;
                     chunks.push(StreamChunk::Thinking {
                         content: reasoning.clone(),
                         parent_tool_use_id: None,
@@ -119,6 +161,7 @@ impl OpenAiStreamTransformer {
                                 );
                                 continue;
                             };
+                            self.output = true;
                             entry.insert(ToolAccumulator {
                                 id: id.clone(),
                                 name: String::new(),
@@ -137,40 +180,21 @@ impl OpenAiStreamTransformer {
                 }
             }
 
-            // Finish reason — emit TurnComplete or ToolUse
+            // Finish reason — emit the tool calls (if any) and TurnComplete
             if let Some(reason) = &choice.finish_reason {
                 match reason.as_str() {
-                    "stop" => {
-                        chunks.push(StreamChunk::TurnComplete {
-                            stop_reason: crate::domain::models::StopReason::EndTurn,
-                        });
-                    }
-                    "tool_calls" => {
-                        // Emit all accumulated tool calls
-                        for (_idx, tool) in self.active_tools.drain() {
-                            let input: serde_json::Value =
-                                serde_json::from_str(&tool.arguments_json).unwrap_or_else(|e| {
-                                    tracing::warn!("Failed to parse tool arguments JSON: {}", e);
-                                    serde_json::Value::Object(serde_json::Map::new())
-                                });
-                            chunks.push(StreamChunk::ToolUse {
-                                id: tool.id,
-                                name: tool.name,
-                                input,
-                            });
-                        }
-                        chunks.push(StreamChunk::TurnComplete {
-                            stop_reason: crate::domain::models::StopReason::ToolUse,
-                        });
-                    }
+                    "stop" => self.finish(StopReason::EndTurn, &mut chunks),
+                    "tool_calls" => self.finish(StopReason::ToolUse, &mut chunks),
                     "length" => {
+                        self.finished = true;
                         chunks.push(StreamChunk::TurnComplete {
-                            stop_reason: crate::domain::models::StopReason::MaxTokens,
+                            stop_reason: StopReason::MaxTokens,
                         });
                     }
                     _ => {
+                        self.finished = true;
                         chunks.push(StreamChunk::TurnComplete {
-                            stop_reason: crate::domain::models::StopReason::EndTurn,
+                            stop_reason: StopReason::EndTurn,
                         });
                     }
                 }
@@ -551,5 +575,103 @@ mod tests {
                 .any(|c| matches!(c, StreamChunk::ToolUse { .. })),
             "empty id must not create an uncorrelatable ToolUse"
         );
+    }
+
+    const DONE: &str = "[DONE]";
+
+    fn text_delta(text: &str) -> String {
+        serde_json::json!({"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"content":text},"finish_reason":null}]})
+        .to_string()
+    }
+    fn tool_delta(index: usize, id: &str, name: &str, arguments: &str) -> String {
+        serde_json::json!({"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"tool_calls":[{"index":index,"id":id,"type":"function",
+            "function":{"name":name,"arguments":arguments}}]},"finish_reason":null}]})
+        .to_string()
+    }
+    fn finish_delta(reason: &str) -> String {
+        serde_json::json!({"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{},"finish_reason":reason}]})
+        .to_string()
+    }
+
+    /// Every chunk of `frames`, rendered compactly.
+    fn run(frames: &[&str]) -> Vec<String> {
+        let mut t = OpenAiStreamTransformer::new();
+        frames
+            .iter()
+            .flat_map(|data| t.transform(&frame(data)))
+            .filter_map(|chunk| match chunk {
+                StreamChunk::Text { content, .. } => Some(format!("text:{content}")),
+                StreamChunk::ToolUse { id, input, .. } => Some(format!("tool:{id}:{input}")),
+                StreamChunk::TurnComplete { stop_reason } => Some(format!("stop:{stop_reason:?}")),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn done_after_output_without_finish_reason_ends_the_turn_once() {
+        let text = text_delta("hi");
+        assert_eq!(
+            run(&[text.as_str(), DONE, DONE]),
+            ["text:hi", "stop:EndTurn"],
+            "[DONE] is a terminal; a repeated [DONE] adds nothing"
+        );
+    }
+
+    #[test]
+    fn done_after_tool_deltas_emits_the_calls_in_index_order_and_tool_use() {
+        let second = tool_delta(1, "call_b", "read", r#"{"path":"b"}"#);
+        let first = tool_delta(0, "call_a", "read", r#"{"path":"a"}"#);
+        assert_eq!(
+            run(&[second.as_str(), first.as_str(), DONE]),
+            [
+                r#"tool:call_a:{"path":"a"}"#,
+                r#"tool:call_b:{"path":"b"}"#,
+                "stop:ToolUse"
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_with_tool_calls_finishes_as_tool_use() {
+        let text = text_delta("let me look");
+        let call = tool_delta(0, "call_a", "read", r#"{"path":"a"}"#);
+        let stop = finish_delta("stop");
+        assert_eq!(
+            run(&[text.as_str(), call.as_str(), stop.as_str(), DONE]),
+            [
+                "text:let me look",
+                r#"tool:call_a:{"path":"a"}"#,
+                "stop:ToolUse"
+            ]
+        );
+        // Without tool calls a stop stays a stop; `length` is unchanged.
+        assert_eq!(
+            run(&[text.as_str(), stop.as_str(), DONE]),
+            ["text:let me look", "stop:EndTurn"]
+        );
+        let length = finish_delta("length");
+        assert_eq!(
+            run(&[call.as_str(), length.as_str(), DONE]),
+            ["stop:MaxTokens"]
+        );
+    }
+
+    #[test]
+    fn done_after_a_finish_reason_or_without_output_adds_nothing() {
+        let text = text_delta("hi");
+        let calls = finish_delta("tool_calls");
+        let usage = r#"{"object":"chat.completion.chunk","choices":[],
+            "usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+        assert_eq!(
+            run(&[text.as_str(), calls.as_str(), usage, DONE]),
+            ["text:hi", "stop:ToolUse"]
+        );
+        let role = r#"{"object":"chat.completion.chunk","choices":[
+            {"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#;
+        assert!(run(&[role, DONE]).is_empty(), "no output: no terminal");
     }
 }

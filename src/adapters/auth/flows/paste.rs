@@ -39,8 +39,9 @@ pub(super) fn parse(input: &str, expected: &str) -> Option<String> {
     } else {
         (input.to_owned(), None)
     };
-    // A supplied, non-empty state must match; an absent or empty one is accepted.
-    let wrong_state = state.is_some_and(|s| !s.is_empty() && s != expected);
+    // A supplied, non-empty state must match a non-empty expected one; an absent or
+    // empty state is accepted, and a stateless flow (empty `expected`) ignores it.
+    let wrong_state = !expected.is_empty() && state.is_some_and(|s| !s.is_empty() && s != expected);
     if code.trim().is_empty() || wrong_state {
         return None;
     }

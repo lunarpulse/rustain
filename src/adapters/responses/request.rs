@@ -79,7 +79,11 @@ struct GenericBody<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,13 +116,16 @@ struct Converted {
 }
 
 impl<'a> ResponsesRequest<'a> {
+    /// `scope` is the replay scope of the credential this request sends; a
+    /// stored item is replayed only when it was produced under that scope.
     pub fn new(
         messages: &[Message],
         options: &'a CompletionOptions,
         profile: &'a dyn WireProfile,
+        scope: Option<&str>,
     ) -> Self {
         let dialect = profile.dialect();
-        let converted = convert(messages, options, profile, dialect);
+        let converted = convert(messages, options, profile, dialect, scope);
         let body = match dialect {
             Dialect::Codex => Body::Codex(CodexBody::new(converted, options, profile)),
             Dialect::Generic => Body::Generic(GenericBody::new(converted, options, profile)),
@@ -235,7 +242,9 @@ impl<'a> GenericBody<'a> {
             instructions: (!instructions.is_empty()).then_some(instructions),
             stream: true,
             prompt_cache_key: profile.prompt_cache_key(),
+            session_id: profile.routing_session_id(),
             store: false,
+            cache_control: profile.cache_control(),
             max_output_tokens: profile.max_output_tokens(),
             temperature: profile.temperature(),
             tools,
@@ -249,6 +258,7 @@ fn convert(
     options: &CompletionOptions,
     profile: &dyn WireProfile,
     dialect: Dialect,
+    scope: Option<&str>,
 ) -> Converted {
     let vision = dialect == Dialect::Codex || profile.vision();
     let mut converted = Converted::default();
@@ -305,13 +315,19 @@ fn convert(
             }
             MessageRole::Assistant => {
                 // omp replays native items only to the producing provider
-                // and model, ahead of that turn's output and calls.
-                if let Some(provider) = profile.replay_provider() {
+                // and model, ahead of that turn's output and calls; rustain
+                // also requires the producing account, so an item never
+                // follows the conversation to another credential.
+                if let (Some(provider), Some(scope)) = (profile.replay_provider(), scope) {
                     input.extend(
                         message
                             .provider_replay
                             .iter()
-                            .filter(|item| item.provider == provider && item.model == options.model)
+                            .filter(|item| {
+                                item.provider == provider
+                                    && item.model == options.model
+                                    && item.scope.as_deref() == Some(scope)
+                            })
                             .map(|item| item.payload.as_ref().clone()),
                     );
                 }

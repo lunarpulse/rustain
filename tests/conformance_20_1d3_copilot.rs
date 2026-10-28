@@ -9,7 +9,7 @@
 #![cfg(all(feature = "test-instrumentation", feature = "openai"))]
 
 #[path = "conformance_20_1d3_copilot/catalog.rs"]
-mod catalog;
+pub(crate) mod catalog;
 #[path = "conformance_20_1d3_copilot/chat_d4.rs"]
 pub(crate) mod chat_d4;
 #[path = "conformance_20_1d3_copilot/cli.rs"]

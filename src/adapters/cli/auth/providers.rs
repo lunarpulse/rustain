@@ -2,7 +2,7 @@
 //!
 //! Canonical source of display names, signup URLs, key requirements and login methods.
 //!
-//! The xAI rows are adapted from oh-my-pi's catalog auth rules.
+//! The xAI and OpenRouter rows are adapted from oh-my-pi's catalog auth rules.
 //! Portions adapted from NousResearch/hermes-agent, Copyright (c) 2025 Nous Research (MIT)
 //!
 //! MIT License
@@ -106,10 +106,15 @@ static PROVIDERS: &[ProviderMeta] = &[
         signup_url: "https://openrouter.ai/keys",
         requires_key: true,
         api_key_env: "OPENROUTER_API_KEY",
-        auth_methods: &[AuthMethod::ApiKey],
+        // Browser key minting first (omp's only login); masked key paste stays
+        // for headless use.
+        auth_methods: &[
+            AuthMethod::PkceKey(&policies::OPENROUTER_KEY_MINT),
+            AuthMethod::ApiKey,
+        ],
         oauth_api: None,
         org_scoped_identity: false,
-        default_model: None,
+        default_model: Some("openai/gpt-5.5"),
         single_oauth_grant: false,
     },
     ProviderMeta {

@@ -8,8 +8,7 @@ use crate::domain::{
 /// A distinct key is another account (a new active row); the same key again
 /// updates its row in place. Nothing is asked before the key itself.
 pub(super) async fn run(provider: &str, ctx: &FlowCtx) -> Result<(Credential, bool), FlowError> {
-    let meta = providers::lookup(provider);
-    let display = meta.map_or(provider, |m| m.display_name);
+    let display = providers::lookup(provider).map_or(provider, |m| m.display_name);
     let key = ctx
         .ui
         .prompt_secret(&format!("Enter {display} API key: "))
@@ -19,6 +18,14 @@ pub(super) async fn run(provider: &str, ctx: &FlowCtx) -> Result<(Credential, bo
     if key.is_empty() {
         return Err(FlowError::configuration("API key cannot be empty."));
     }
+    let validated = verify(provider, ctx, key).await?;
+    Ok((Credential::new_api_key(key.to_owned()), validated))
+}
+/// The one key check every key-producing engine runs before storing a key: the
+/// validation entry, the progress line, the provider's probe and its decision.
+pub(super) async fn verify(provider: &str, ctx: &FlowCtx, key: &str) -> Result<bool, FlowError> {
+    let meta = providers::lookup(provider);
+    let display = meta.map_or(provider, |m| m.display_name);
     let cfg = match &ctx.validation_config {
         Some(cfg) => cfg.clone(),
         None => {
@@ -42,8 +49,7 @@ pub(super) async fn run(provider: &str, ctx: &FlowCtx) -> Result<(Credential, bo
     ctx.ui
         .on_progress(&format!("Validating key against {display}…"));
     let validation = validate_key(provider, &cfg, key).await;
-    let validated = decision(display, meta.map_or("", |m| m.signup_url), validation)?;
-    Ok((Credential::new_api_key(key.to_owned()), validated))
+    decision(display, meta.map_or("", |m| m.signup_url), validation)
 }
 fn expose(value: &crate::domain::models::SecretString) -> &str {
     value.expose_secret()

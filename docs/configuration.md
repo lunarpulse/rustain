@@ -154,7 +154,7 @@ Configured aliases may use another map key with `kind = "openai-codex"` and
 models and models.dev currently has no Codex source (OpenAI API-only models are
 not promoted). With `discover_models = true` a signed Codex entry discovers its
 live roster (`/codex/models`, then `/models`) and encrypted reasoning items are
-replayed privately to the same provider and model; see `docs/auth.md`.
+replayed privately to the same provider, model and account; see `docs/auth.md`.
 Upstream's 128,000-token maximum-output metadata has no rustain descriptor
 consumer and is not a transmitted limit.
 
@@ -257,6 +257,35 @@ credentials are eligible only when that base has the official
 leaves the provider locked and never receives the token. `provider_id` selects the
 login rows, so an alias map key with `provider_id = "google-gemini-cli"` uses the
 same login. This provider is unrelated to the `google` API-key provider.
+
+### OpenRouter
+
+`openrouter` is a built-in provider; its bundled default is `openai/gpt-5.5`. An
+explicit entry looks like:
+
+```toml
+[provider.openrouter]
+provider_id = "openrouter"
+kind = "openrouter"
+model_id = "openai/gpt-5.5"
+api_key_env = "OPENROUTER_API_KEY"
+enabled = true
+```
+
+Authenticate with `rustain auth login openrouter` (browser key minting or a
+pasted `sk-or-` key, see `docs/auth.md`) or set `OPENROUTER_API_KEY`. Requests go
+to OpenRouter's Responses API, `<base>/responses`; set
+`RUSTAIN_OPENROUTER_RESPONSES=0` to use Chat Completions
+(`<base>/chat/completions`) instead. The base is `base_url` with trailing slashes
+stripped, else `https://openrouter.ai/api/v1`. Every inference request carries
+`User-Agent: rustain/<version>`, `HTTP-Referer: https://github.com/lunarpulse/rustain`,
+`X-OpenRouter-Title: rustain`, `X-OpenRouter-Categories: cli-agent` and enables
+response caching (`X-OpenRouter-Cache: true`, `X-OpenRouter-Cache-TTL: 3600`).
+No output cap is sent for the default token budget; `anthropic/*` models get an
+ephemeral prompt-cache breakpoint. A model id with a routing suffix such as
+`:nitro` is sent verbatim and keeps its base model's reasoning and image support.
+Chat Completions resends a 408, 429, 5xx or transport failure at open up to five
+times, as omp does.
 
 ### Field-level merge
 

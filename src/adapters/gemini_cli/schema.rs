@@ -46,29 +46,112 @@
 //   broken in `dereference_json_schema` exactly as omp does.
 // - Rustain robustness addition: `$ref` inlining is bounded by
 //   `MAX_DEREF_DEPTH` (with or without definitions) and the emitted-bytes
-//   budget `MAX_DEREF_BYTES`, warning once per walk; omp inlines without bound.
+//   budget `MAX_DEREF_BYTES`; a degraded node drops every `not` above it, and
+//   the bound that fired is warned once per distinct tool schema; omp inlines
+//   without bound.
 // - JavaScript prototype-chain lookups (`key in Record`) are treated as own-key
 //   lookups.
 
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
+use std::num::NonZeroUsize;
+use std::sync::LazyLock;
 
+use lru::LruCache;
+use parking_lot::Mutex;
 use serde_json::{Map, Number, Value, json};
 
 type JsonObject = Map<String, Value>;
 
 /// omp `normalizeSchemaForGoogle`: draft-07 upgrade, local `$ref` inlining,
 /// then the Google walker. Pure; never panics on any JSON input.
+#[cfg(test)]
 pub(crate) fn normalize_for_google(schema: &Value) -> Value {
+    normalize_with_budget(schema).0
+}
+
+/// A tool's `parametersJsonSchema` (omp `normalizeSchemaForGoogle`), warning
+/// with the bound that degraded it the first time this process sees the schema.
+pub(crate) fn tool_parameters(schema: &Value) -> Value {
+    let (normalized, budget) = normalize_with_budget(schema);
+    if let Some(budget) = budget
+        && first_degradation(schema)
+    {
+        match budget {
+            DerefBudget::Bytes => tracing::warn!(
+                max_bytes = MAX_DEREF_BYTES,
+                "Gemini CLI tool schema exceeded the $ref inlining byte budget; the excess is sent as {{}}"
+            ),
+            DerefBudget::Depth => tracing::warn!(
+                max_depth = MAX_DEREF_DEPTH,
+                "Gemini CLI tool schema exceeded the nesting depth bound; the excess is sent as {{}}"
+            ),
+        }
+    }
+    normalized
+}
+
+/// The normalized schema and the first bound that degraded it.
+fn normalize_with_budget(schema: &Value) -> (Value, Option<DerefBudget>) {
     let upgraded = upgrade_json_schema_to_202012(schema);
-    let dereferenced = dereference_json_schema(&upgraded);
-    normalize_schema_node(
+    let (dereferenced, budget) = dereference_with_budget(&upgraded);
+    let normalized = normalize_schema_node(
         &dereferenced,
         WalkOptions {
             inside_schema_map: false,
             boolean_is_subschema: true,
         },
-    )
+    );
+    (normalized, budget)
+}
+
+/// Distinct degraded tool schemas one process remembers having warned about.
+const WARNED_SCHEMAS: usize = 256;
+
+/// Digests of the degraded tool schemas this process already warned about.
+static WARNED: LazyLock<Mutex<LruCache<u64, ()>>> = LazyLock::new(|| {
+    Mutex::new(LruCache::new(
+        NonZeroUsize::new(WARNED_SCHEMAS).expect("non-zero capacity"),
+    ))
+});
+
+/// Whether this is the first degradation of `schema` the process records.
+fn first_degradation(schema: &Value) -> bool {
+    let digest = schema_digest(schema);
+    WARNED.lock().put(digest, ()).is_none()
+}
+
+/// A structural digest of `value`, without recursion or serialization.
+fn schema_digest(value: &Value) -> u64 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    let mut stack = vec![value];
+    while let Some(value) = stack.pop() {
+        match value {
+            Value::Null => 0_u8.hash(&mut hasher),
+            Value::Bool(flag) => (1_u8, flag).hash(&mut hasher),
+            Value::Number(number) => (
+                2_u8,
+                number.as_u64(),
+                number.as_i64(),
+                number.as_f64().map(f64::to_bits),
+            )
+                .hash(&mut hasher),
+            Value::String(text) => (3_u8, text).hash(&mut hasher),
+            Value::Array(items) => {
+                (4_u8, items.len()).hash(&mut hasher);
+                stack.extend(items);
+            }
+            Value::Object(map) => {
+                (5_u8, map.len()).hash(&mut hasher);
+                for (key, entry) in map {
+                    key.hash(&mut hasher);
+                    stack.push(entry);
+                }
+            }
+        }
+    }
+    hasher.finish()
 }
 
 // ---------------------------------------------------------------------------
@@ -781,26 +864,21 @@ enum DerefBudget {
 }
 
 /// State of one dereference walk: the `$ref`s on the current resolution path, the
-/// bytes emitted so far and the first bound that degraded the output.
+/// bytes emitted so far, the first bound that degraded the output and how many
+/// nodes the bounds degraded.
 #[derive(Default)]
 struct DerefWalk {
     visiting: HashSet<String>,
     bytes: usize,
     exhausted: Option<DerefBudget>,
+    degraded: usize,
 }
 
 impl DerefWalk {
-    /// The degraded `{}`; the first exhaustion of a walk warns once.
+    /// The degraded `{}`; the walk remembers the first bound that fired.
     fn exhaust(&mut self, budget: DerefBudget) -> Value {
-        if self.exhausted.is_none() {
-            self.exhausted = Some(budget);
-            tracing::warn!(
-                ?budget,
-                max_depth = MAX_DEREF_DEPTH,
-                max_bytes = MAX_DEREF_BYTES,
-                "Gemini CLI tool schema exceeded a $ref inlining bound; the excess is sent as {{}}"
-            );
-        }
+        self.exhausted.get_or_insert(budget);
+        self.degraded += 1;
         Value::Object(JsonObject::new())
     }
 }
@@ -847,17 +925,46 @@ fn deeper_than(value: &Value, limit: usize) -> bool {
 /// dereference.ts:123-131 `dereferenceJsonSchema`: inline local `$ref`s from the
 /// root `$defs`/`definitions`, which are dropped from the output. A schema without
 /// definitions is walked only when it nests past [`MAX_DEREF_DEPTH`].
+#[cfg(test)]
 fn dereference_json_schema(schema: &Value) -> Cow<'_, Value> {
+    dereference_with_budget(schema).0
+}
+
+/// `dereference_json_schema` and the first bound that degraded the output.
+fn dereference_with_budget(schema: &Value) -> (Cow<'_, Value>, Option<DerefBudget>) {
     let Value::Object(root) = schema else {
-        return Cow::Borrowed(schema);
+        return (Cow::Borrowed(schema), None);
     };
     if !root.contains_key("$defs")
         && !root.contains_key("definitions")
         && !deeper_than(schema, MAX_DEREF_DEPTH)
     {
-        return Cow::Borrowed(schema);
+        return (Cow::Borrowed(schema), None);
     }
-    Cow::Owned(dereference_node(schema, root, &mut DerefWalk::default(), 0))
+    let mut walk = DerefWalk::default();
+    let dereferenced = dereference_node(schema, root, &mut walk, 0);
+    (Cow::Owned(dereferenced), walk.exhausted)
+}
+
+/// Inlines the keyword `key` of a schema node into `out`. A `not` whose subtree
+/// a bound degraded is dropped (with any `not` it would have replaced):
+/// negating the permissive `{}` would reject every value, and every `not` on
+/// the degraded node's path is dropped the same way.
+fn insert_keyword(
+    out: &mut JsonObject,
+    key: &str,
+    value: &Value,
+    root: &JsonObject,
+    walk: &mut DerefWalk,
+    depth: usize,
+) {
+    let degraded = walk.degraded;
+    let inlined = dereference_keyword(key, value, root, walk, depth);
+    if key == "not" && walk.degraded > degraded {
+        out.remove(key);
+        return;
+    }
+    out.insert(key.to_owned(), inlined);
 }
 
 /// dereference.ts:39-50 `dereferenceKeyword`; `depth` is the owning node's depth.
@@ -952,10 +1059,7 @@ fn dereference_node(node: &Value, root: &JsonObject, walk: &mut DerefWalk, depth
             if is_definition_key(key) {
                 continue;
             }
-            merged.insert(
-                key.clone(),
-                dereference_keyword(key, entry, root, walk, depth),
-            );
+            insert_keyword(&mut merged, key, entry, root, walk, depth);
         }
         return Value::Object(merged);
     }
@@ -965,10 +1069,7 @@ fn dereference_node(node: &Value, root: &JsonObject, walk: &mut DerefWalk, depth
         if key == "$defs" || key == "definitions" {
             continue;
         }
-        result.insert(
-            key.clone(),
-            dereference_keyword(key, entry, root, walk, depth),
-        );
+        insert_keyword(&mut result, key, entry, root, walk, depth);
     }
     Value::Object(result)
 }
@@ -2632,23 +2733,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dereference_depth_bound_applies_without_definitions() {
+    /// `levels` nested `not`s over a string schema, built without recursion.
+    fn not_chain(levels: usize) -> Value {
         let mut deep = json!({"type": "string"});
-        for _ in 0..(MAX_DEREF_DEPTH + 20) {
+        for _ in 0..levels {
             let mut wrapper = JsonObject::new();
             wrapper.insert("not".into(), deep);
             deep = Value::Object(wrapper);
         }
-        let dereferenced = dereference_json_schema(&deep).into_owned();
+        deep
+    }
+
+    /// Tears a deep tree down along `key` without recursive drops.
+    fn drop_chain(mut rest: Value, key: &str) {
+        while let Value::Object(mut map) = rest {
+            match map.remove(key) {
+                Some(child) => rest = child,
+                None => break,
+            }
+        }
+    }
+
+    #[test]
+    fn dereference_depth_bound_applies_without_definitions() {
+        // Nesting past the bound is cut to `{}` at exactly `MAX_DEREF_DEPTH + 1`.
+        let mut nested = json!({"type": "string"});
+        for _ in 0..(MAX_DEREF_DEPTH + 20) {
+            nested = json!({"type": "object", "properties": {"a": nested}});
+        }
+        let dereferenced = dereference_json_schema(&nested).into_owned();
         let mut node = &dereferenced;
         let mut levels = 0;
-        while let Some(child) = node.get("not") {
+        while let Some(child) = node.get("properties") {
             levels += 1;
-            node = child;
+            node = &child["a"];
         }
         assert_eq!(levels, MAX_DEREF_DEPTH + 1);
         assert_eq!(node, &json!({}));
+
+        // A `not` chain past the bound: every `not` above the degraded node is
+        // dropped, so the cut never inverts into "reject everything".
+        let deep = not_chain(MAX_DEREF_DEPTH + 20);
+        let Value::Object(root) = &deep else {
+            unreachable!()
+        };
+        let mut walk = DerefWalk::default();
+        assert_eq!(dereference_node(&deep, root, &mut walk, 0), json!({}));
+        assert_eq!(walk.exhausted, Some(DerefBudget::Depth));
+        assert_eq!(walk.degraded, 1, "one node is cut");
+
+        // Dropped wherever the `not` sits on the path; a `not` off it is kept.
+        let schema = json!({"type": "object", "properties": {
+            "cut": {"not": {"properties": {"a": not_chain(MAX_DEREF_DEPTH + 20)}}},
+            "kept": {"not": {"type": "string"}}
+        }});
+        assert_eq!(
+            dereference_json_schema(&schema).into_owned(),
+            json!({"type": "object", "properties": {
+                "cut": {},
+                "kept": {"not": {"type": "string"}}
+            }})
+        );
+        let normalized = normalize_for_google(&schema);
+        assert!(normalized["properties"]["kept"].get("not").is_some());
+        assert!(normalized["properties"]["cut"].get("not").is_none());
+
         // Shallow schemas without definitions are still borrowed untouched.
         let shallow = json!({"type": "object", "properties": {"a": {"not": {"type": "string"}}}});
         assert!(matches!(
@@ -2658,22 +2807,30 @@ mod tests {
     }
 
     /// A process-wide capture (scoped dispatchers race the callsite interest
-    /// cache when parallel tests hit the same warning).
+    /// cache when parallel tests hit the same warning). The schemas are unique
+    /// to this test: the warned set is process-wide.
     #[test]
     #[tracing_test::traced_test]
     fn an_exhausted_walk_warns_once() {
-        // Thousands of refs past the budget, one warning.
-        dereference_json_schema(&doubling_literal_schema(30, &"L".repeat(4096)));
+        const BYTES: &str = "Gemini CLI tool schema exceeded the $ref inlining byte budget; the excess is sent as {}";
+        const DEPTH: &str =
+            "Gemini CLI tool schema exceeded the nesting depth bound; the excess is sent as {}";
+        // Thousands of refs past the budget, one warning, and none for a repeat.
+        let bytes = doubling_literal_schema(30, &"W".repeat(4096));
+        tool_parameters(&bytes);
+        tool_parameters(&bytes);
+        // The depth bound names itself.
+        let depth =
+            json!({"type": "object", "properties": {"warned": not_chain(MAX_DEREF_DEPTH + 7)}});
+        let first = tool_parameters(&depth);
+        assert_eq!(first, tool_parameters(&depth));
         // A walk within both bounds never warns.
-        dereference_json_schema(&doubling_schema(3));
+        tool_parameters(&doubling_schema(3));
         logs_assert(|lines| {
-            let warnings: Vec<_> = lines
-                .iter()
-                .filter(|line| line.contains("exceeded a $ref inlining bound"))
-                .collect();
-            match warnings.as_slice() {
-                [one] if one.contains("WARN") && one.contains("Bytes") => Ok(()),
-                other => Err(format!("{other:?}")),
+            let count = |text: &str| lines.iter().filter(|line| line.contains(text)).count();
+            match (count(BYTES), count(DEPTH), count("exceeded")) {
+                (1, 1, 2) => Ok(()),
+                other => Err(format!("{other:?}: {lines:?}")),
             }
         });
     }
@@ -2738,33 +2895,44 @@ mod tests {
         );
         assert!(normalize_for_google(&schema).is_object());
 
-        // Deeply nested literal input, built and torn down without recursion.
+        // Deeply nested literal input, built and torn down without recursion: a
+        // subschema chain is cut to `{}` at exactly `MAX_DEREF_DEPTH + 1`.
         let mut deep = json!({"type": "string"});
         for _ in 0..CHAIN {
             let mut wrapper = JsonObject::new();
-            wrapper.insert("not".into(), deep);
+            wrapper.insert("additionalProperties".into(), deep);
             deep = Value::Object(wrapper);
         }
         let mut root = JsonObject::new();
         root.insert("$defs".into(), Value::Object(JsonObject::new()));
-        root.insert("not".into(), deep);
+        root.insert("additionalProperties".into(), deep);
         let schema = Value::Object(root);
         let dereferenced = dereference_json_schema(&schema).into_owned();
         let mut node = &dereferenced;
         let mut levels = 0;
-        while let Some(child) = node.get("not") {
+        while let Some(child) = node.get("additionalProperties") {
             levels += 1;
             assert!(levels <= MAX_DEREF_DEPTH + 1, "copied past the depth bound");
             node = child;
         }
         assert_eq!(levels, MAX_DEREF_DEPTH + 1);
         assert_eq!(node, &json!({}));
-        let mut rest = schema;
-        while let Value::Object(mut map) = rest {
-            match map.remove("not") {
-                Some(child) => rest = child,
-                None => break,
-            }
-        }
+        drop_chain(dereferenced, "additionalProperties");
+        drop_chain(schema, "additionalProperties");
+
+        // The same chain of `not`s: one node is cut and every `not` above it is
+        // dropped, so nothing of the chain inverts into "reject everything".
+        let mut root = JsonObject::new();
+        root.insert("$defs".into(), Value::Object(JsonObject::new()));
+        root.insert("not".into(), not_chain(CHAIN));
+        let schema = Value::Object(root);
+        let Value::Object(root) = &schema else {
+            unreachable!()
+        };
+        let mut walk = DerefWalk::default();
+        assert_eq!(dereference_node(&schema, root, &mut walk, 0), json!({}));
+        assert_eq!(walk.exhausted, Some(DerefBudget::Depth));
+        assert_eq!(walk.degraded, 1, "one node is cut");
+        drop_chain(schema, "not");
     }
 }

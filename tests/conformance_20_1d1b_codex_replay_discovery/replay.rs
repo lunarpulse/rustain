@@ -20,7 +20,7 @@ use wiremock::{
     matchers::{method, path},
 };
 
-fn options(model: &str, session: &str) -> CompletionOptions {
+pub(crate) fn options(model: &str, session: &str) -> CompletionOptions {
     CompletionOptions {
         model: model.into(),
         max_tokens: 4096,
@@ -31,7 +31,7 @@ fn options(model: &str, session: &str) -> CompletionOptions {
     }
 }
 
-async fn collect(
+pub(crate) async fn collect(
     provider: &Arc<dyn StreamingProvider>,
     messages: Vec<rustain::domain::models::Message>,
     options: CompletionOptions,
@@ -44,7 +44,7 @@ async fn collect(
         .await
 }
 
-fn replay_chunks(chunks: &[StreamChunk]) -> usize {
+pub(crate) fn replay_chunks(chunks: &[StreamChunk]) -> usize {
     chunks
         .iter()
         .filter(|c| matches!(c, StreamChunk::ProviderReplay { .. }))
@@ -52,7 +52,7 @@ fn replay_chunks(chunks: &[StreamChunk]) -> usize {
 }
 
 /// Fold chunks through the TUI reducer and its persisted message mirror.
-fn fold(conversation: &mut Conversation, chunks: Vec<StreamChunk>) {
+pub(crate) fn fold(conversation: &mut Conversation, chunks: Vec<StreamChunk>) {
     let clock = SystemClock::default();
     let mut state = ReducerState::new(0, std::time::Instant::now());
     for chunk in chunks {
@@ -64,7 +64,7 @@ fn fold(conversation: &mut Conversation, chunks: Vec<StreamChunk>) {
     }
 }
 
-fn user(text: &str) -> ChatMessage {
+pub(crate) fn user(text: &str) -> ChatMessage {
     ChatMessage {
         id: format!("user-{text}"),
         role: MessageRole::User,
@@ -449,7 +449,7 @@ fn events(mapper: &mut EventMapper, events: &[Value]) -> Vec<StreamChunk> {
 
 #[test]
 fn null_encrypted_content_and_multipart_summary_are_kept_verbatim() {
-    let mut mapper = EventMapper::with_replay("openai-codex", MODEL);
+    let mut mapper = EventMapper::with_replay("openai-codex", MODEL, "scope-a".into());
     let item = json!({"type":"response.output_item.done","item":{"type":"reasoning","id":"rs_1",
         "summary":[{"type":"summary_text","text":"one"},{"type":"summary_text","text":"two"}],
         "content":[{"type":"reasoning_text","text":"raw"}],"encrypted_content":null,"status":"completed"}});
@@ -459,6 +459,7 @@ fn null_encrypted_content_and_multipart_summary_are_kept_verbatim() {
     };
     assert_eq!(item.provider, "openai-codex");
     assert_eq!(item.model, MODEL);
+    assert_eq!(item.scope.as_deref(), Some("scope-a"));
     assert_eq!(
         *item.payload,
         json!({"type":"reasoning","summary":[{"type":"summary_text","text":"one"},{"type":"summary_text","text":"two"}],
@@ -469,7 +470,7 @@ fn null_encrypted_content_and_multipart_summary_are_kept_verbatim() {
 #[test]
 fn non_reasoning_items_and_neutral_mappers_capture_nothing() {
     let message = json!({"type":"response.output_item.done","item":{"type":"message","id":"msg_1","content":[]}});
-    let mut mapper = EventMapper::with_replay("openai-codex", MODEL);
+    let mut mapper = EventMapper::with_replay("openai-codex", MODEL, "scope-a".into());
     assert_eq!(
         replay_chunks(&events(&mut mapper, &[message, completed()])),
         0
@@ -483,7 +484,7 @@ fn non_reasoning_items_and_neutral_mappers_capture_nothing() {
 
 #[test]
 fn reasoning_flushes_only_at_terminal_after_tools_and_before_usage() {
-    let mut mapper = EventMapper::with_replay("openai-codex", MODEL);
+    let mut mapper = EventMapper::with_replay("openai-codex", MODEL, "scope-a".into());
     assert!(mapper.event(reasoning("order")).unwrap().is_empty());
     assert!(
         !mapper.committed(),
@@ -510,16 +511,17 @@ fn reasoning_flushes_only_at_terminal_after_tools_and_before_usage() {
         .collect();
     assert_eq!(kinds, ["tool", "replay", "usage", "complete"]);
     // A failed terminal releases nothing.
-    let mut failed_mapper = EventMapper::with_replay("openai-codex", MODEL);
+    let mut failed_mapper = EventMapper::with_replay("openai-codex", MODEL, "scope-a".into());
     assert!(failed_mapper.event(reasoning("lost")).unwrap().is_empty());
     assert!(failed_mapper.event(failed()).is_err());
 }
 
 #[test]
 fn replay_item_debug_omits_the_payload() {
-    let mut mapper = EventMapper::with_replay("openai-codex", MODEL);
+    let mut mapper = EventMapper::with_replay("openai-codex", MODEL, "scope-a".into());
     let chunks = events(&mut mapper, &[reasoning("debug"), completed()]);
     let rendered = format!("{chunks:?}");
     assert!(!mentions(&rendered, "debug"), "{rendered}");
     assert!(rendered.contains("openai-codex") && rendered.contains("bytes"));
+    assert!(rendered.contains("scoped: true") && !rendered.contains("scope-a"));
 }

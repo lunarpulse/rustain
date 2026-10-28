@@ -80,6 +80,12 @@ pub fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
             }),
         );
     }
+    #[cfg(feature = "openai")]
+    if kind == "openrouter" {
+        // The adapter, its Chat profile, the origin guard and the cache scope
+        // read this one base, so they agree under the test origin too.
+        return crate::adapters::openrouter::base_url(configured_base(cfg));
+    }
     let base = cfg
         .base_url
         .as_ref()
@@ -184,7 +190,8 @@ pub fn build_provider_for_config(
         "xai" | "xai-oauth" => build_xai_from_config(provider_id, cfg, kind),
         "google-gemini-cli" => build_gemini_cli_from_config(cfg),
         "github-copilot" => build_copilot_from_config(cfg),
-        "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
+        "openrouter" => build_openrouter_from_config(provider_id, cfg, None),
+        "openai" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
                 let adapter = build_openai_from_config(provider_id, cfg, None)?;
@@ -268,7 +275,8 @@ pub fn build_provider_for_config_with_key(
         "github-copilot" => Err(ProviderError::Other(
             "github-copilot has no API-key login".into(),
         )),
-        "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
+        "openrouter" => build_openrouter_from_config(provider_id, cfg, Some(key)),
+        "openai" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
                 let adapter = build_openai_from_config(provider_id, cfg, Some(key))?;
@@ -602,6 +610,50 @@ fn build_xai_with_key(
             crate::adapters::xai::XaiKind::Xai,
             configured_base(cfg).map(str::to_owned),
         )?))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = (provider_id, cfg, key);
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
+/// OpenRouter: the env key or a stored key row (the shared Chat-family precheck),
+/// or an explicit candidate key for the API-key engine's `/auth/key` probe.
+fn build_openrouter_from_config(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+    key: Option<&str>,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        use crate::adapters::openai::ChatCredential;
+        let handle = match key {
+            Some(key) => crate::infrastructure::key_resolver::CredentialHandle::runtime(
+                crate::infrastructure::key_resolver::shared(),
+                provider_id.to_owned(),
+                crate::domain::models::SecretString::new(key.to_owned()),
+            ),
+            None => match chat_credential(provider_id, cfg, None)? {
+                ChatCredential::Resolved(handle) => handle,
+                // Only a candidate key or a keyless `openai-compatible` entry is
+                // fixed; an `openrouter` entry always resolves per request.
+                ChatCredential::Fixed(_) => {
+                    return Err(ProviderError::Other(
+                        "OpenRouter credential did not resolve per request".into(),
+                    ));
+                }
+            },
+        };
+        Ok(Arc::new(
+            crate::adapters::openrouter::OpenRouterAdapter::new(
+                handle,
+                cfg.model_id.clone(),
+                configured_base(cfg).map(str::to_owned),
+            )?,
+        ))
     }
     #[cfg(not(feature = "openai"))]
     {

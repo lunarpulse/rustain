@@ -14,4 +14,4 @@ mod discovery;
 #[path = "conformance_20_1d1b_codex_replay_discovery/privacy.rs"]
 mod privacy;
 #[path = "conformance_20_1d1b_codex_replay_discovery/replay.rs"]
-mod replay;
+pub(crate) mod replay;

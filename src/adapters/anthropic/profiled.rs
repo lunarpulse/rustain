@@ -87,10 +87,11 @@ struct MessagesAttempt {
 }
 
 impl MessagesAttempt {
+    /// Re-issues send the stored request, which carries a won identity.
     async fn exchange(&mut self) -> Result<Outcome, ProviderError> {
-        http_retry::send(
+        http_retry::send_adopting(
             &self.client,
-            &self.request,
+            &mut self.request,
             self.state
                 .as_deref_mut()
                 .map(|s| s as &mut dyn RequestState),
@@ -201,8 +202,6 @@ impl AnthropicAdapter {
         options: CompletionOptions,
     ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
         let resilience = profile.resilience();
-        // The first-event watchdog is armed before the first attempt.
-        let deadline = resilience.map(|_| stream_retry::deadline());
         let mut resolved = match (resolved, &self.credential) {
             (Some(resolved), _) => resolved,
             (None, super::AnthropicCredential::Resolved(handle)) => handle.current().await?,
@@ -214,6 +213,8 @@ impl AnthropicAdapter {
         };
         let mut recovered = false;
         loop {
+            // The first-event watchdog is armed once the credential is read.
+            let deadline = resilience.map(|_| stream_retry::deadline());
             let mut attempt = self.profiled_attempt(profile, &resolved, &messages, &options)?;
             let opened = match (resilience, deadline) {
                 (Some(policy), Some(deadline)) => {
@@ -251,11 +252,9 @@ impl AnthropicAdapter {
                 ),
                 Err(rejected) => rejected,
             };
-            return match (resilience, deadline) {
-                (Some(policy), Some(deadline)) => {
-                    stream_retry::reopen(Box::new(attempt), policy, deadline, rejected).await
-                }
-                _ => Err(rejected.error),
+            return match resilience {
+                Some(policy) => stream_retry::reopen(Box::new(attempt), policy, rejected).await,
+                None => Err(rejected.error),
             };
         }
     }

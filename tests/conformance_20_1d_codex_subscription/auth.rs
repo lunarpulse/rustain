@@ -585,10 +585,17 @@ async fn callback_override_applies_to_every_policy_and_never_changes_fallback() 
     ] {
         assert!(policy.port_fallback);
         assert_eq!(
-            rustain::adapters::auth::policies::callback_port(policy).to_string(),
+            rustain::adapters::auth::policies::callback_port(policy.port).to_string(),
             port
         );
     }
+    // The browser key-minting policy takes the same override and keeps its fallback.
+    let mint = &rustain::adapters::auth::policies::OPENROUTER_KEY_MINT;
+    assert!(mint.port_fallback);
+    assert_eq!(
+        rustain::adapters::auth::policies::callback_port(mint.port).to_string(),
+        port
+    );
     assert!(!CODEX_OAUTH.port_fallback);
     let temp = tempfile::tempdir().unwrap();
     let store = store(&temp);

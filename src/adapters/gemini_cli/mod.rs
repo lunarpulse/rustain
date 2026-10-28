@@ -261,12 +261,19 @@ struct Call {
 }
 
 impl Call {
+    /// Replay scope of the grant this call sends: stored parts replay only to
+    /// it, and parts this call produces are stamped with it.
+    fn replay_scope(&self) -> String {
+        crate::adapters::model_catalog_cache::replay_scope(PROVIDER_KIND, &self.resolved)
+    }
+
     fn encode(&mut self) -> Result<(), ProviderError> {
         let body = request::encode(
             &self.messages,
             &self.options,
             &self.profile,
             project(&self.resolved)?,
+            &self.replay_scope(),
         )
         .map_err(|_| ProviderError::Other("Could not encode Cloud Code Assist request".into()))?;
         self.request = Some(
@@ -374,6 +381,7 @@ impl Call {
     fn mapper(&self) -> events::Mapper {
         events::Mapper::new(
             &self.options.model,
+            self.replay_scope(),
             self.profile.flash_leak,
             self.tool_names.clone(),
         )

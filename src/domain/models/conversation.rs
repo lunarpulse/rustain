@@ -788,6 +788,8 @@ mod tests {
             payload: std::sync::Arc::new(serde_json::json!({
                 "type": "reasoning", "summary": [], "encrypted_content": "ENC"
             })),
+            // Kept with the item: the scope must survive persistence and rebuilds.
+            scope: Some("0123456789abcdef".into()),
         };
         let mut conversation = Conversation::default();
         conversation.messages = vec![
@@ -1131,6 +1133,7 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
             payload: std::sync::Arc::new(serde_json::json!({ "m": marker })),
+            scope: Some("s".into()),
         }
     }
 

@@ -32,7 +32,7 @@ const NEW: &str = "new-model";
 // ── fixtures ────────────────────────────────────────────────────────────────
 
 /// No configured providers: `github-copilot` is the bundled entry.
-fn app_config() -> AppConfig {
+pub(crate) fn app_config() -> AppConfig {
     AppConfig {
         model: DEFAULT_MODEL.into(),
         ..Default::default()
@@ -49,7 +49,7 @@ fn configured(model: &str, base: &str) -> AppConfig {
 
 /// The live `/models` payload of K10: a chat row, a row with a long-context
 /// billing tier, an embedding row and a row without capabilities.
-fn live_payload() -> Value {
+pub(crate) fn live_payload() -> Value {
     json!({"data": [
         {"id": DEFAULT_MODEL, "name": "GPT-5.5", "capabilities": {"type": "chat"}},
         {
@@ -73,11 +73,11 @@ fn live_payload() -> Value {
     ]})
 }
 
-fn models_path(root: &str) -> String {
+pub(crate) fn models_path(root: &str) -> String {
     format!("{root}/models")
 }
 
-fn target<'a>(layer: &'a ProviderLayer, id: &str) -> &'a DiscoveryTarget {
+pub(crate) fn target<'a>(layer: &'a ProviderLayer, id: &str) -> &'a DiscoveryTarget {
     layer
         .discovery_targets
         .iter()
@@ -102,19 +102,19 @@ fn is_locked(layer: &ProviderLayer, id: &str) -> bool {
         .any(|p| p.provider_id == id)
 }
 
-fn served(layer: &ProviderLayer, id: &str) -> Vec<ModelDescriptor> {
+pub(crate) fn served(layer: &ProviderLayer, id: &str) -> Vec<ModelDescriptor> {
     layer.registry.list_models_by_provider(id)
 }
 
-fn ids(models: &[ModelDescriptor]) -> Vec<String> {
+pub(crate) fn ids(models: &[ModelDescriptor]) -> Vec<String> {
     models.iter().map(|m| m.model_id.clone()).collect()
 }
 
-fn has(ids: &[String], id: &str) -> bool {
+pub(crate) fn has(ids: &[String], id: &str) -> bool {
     ids.iter().any(|m| m == id)
 }
 
-async fn refresh(layer: &ProviderLayer, id: &str) -> RefreshReport {
+pub(crate) async fn refresh(layer: &ProviderLayer, id: &str) -> RefreshReport {
     refresh_target(
         target(layer, id),
         &ModelCatalogCache::new(),
@@ -134,14 +134,14 @@ async fn disk(id: &str) -> CachedDiscoveryEntry {
 }
 
 /// `(method, path)` of every request the stub saw from index `from` on.
-async fn seen_since(server: &MockServer, from: usize) -> Vec<(String, String)> {
+pub(crate) async fn seen_since(server: &MockServer, from: usize) -> Vec<(String, String)> {
     server.received_requests().await.unwrap()[from..]
         .iter()
         .map(|r| (r.method.to_string(), r.url.path().to_owned()))
         .collect()
 }
 
-async fn seen_count(server: &MockServer) -> usize {
+pub(crate) async fn seen_count(server: &MockServer) -> usize {
     server.received_requests().await.unwrap().len()
 }
 

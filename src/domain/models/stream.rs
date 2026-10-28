@@ -107,6 +107,13 @@ pub struct ProviderReplayItem {
     pub model: String,
     #[serde(with = "shared_value")]
     pub payload: std::sync::Arc<serde_json::Value>,
+    /// Opaque replay scope (`model_catalog_cache::replay_scope` over `provider`)
+    /// of the credential that produced the item. Replay sends an item only to
+    /// a request of the same scope, so it never follows a conversation to
+    /// another account; an unscoped item (written before scoping) is never
+    /// replayed. Additive: readers without the field ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 mod shared_value {
@@ -153,6 +160,7 @@ impl std::fmt::Debug for ProviderReplayItem {
         f.debug_struct("ProviderReplayItem")
             .field("provider", &self.provider)
             .field("model", &self.model)
+            .field("scoped", &self.scope.is_some())
             .field("type", &self.payload["type"].as_str().unwrap_or(""))
             .field("bytes", &self.encoded_len())
             .finish()
@@ -198,5 +206,70 @@ impl StreamingState {
     /// Clear the thinking buffer (called on tab switch to avoid stale state).
     pub fn reset_thinking_buffer(&mut self) {
         self.thinking_buffer.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderReplayItem;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn item(scope: Option<&str>) -> ProviderReplayItem {
+        ProviderReplayItem {
+            provider: "openai-codex".into(),
+            model: "m".into(),
+            payload: Arc::new(json!({"type":"reasoning","encrypted_content":"ENC-private"})),
+            scope: scope.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn scoped_item_serializes_its_scope_and_round_trips() {
+        let scoped = item(Some("0123456789abcdef"));
+        let encoded = serde_json::to_value(&scoped).unwrap();
+        assert_eq!(encoded["scope"], "0123456789abcdef");
+        let decoded: ProviderReplayItem = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, scoped);
+        // The scope is part of the carrier's identity.
+        assert_ne!(scoped, item(Some("fedcba9876543210")));
+        assert_ne!(scoped, item(None));
+    }
+
+    #[test]
+    fn unscoped_item_omits_the_key_and_a_pre_scope_file_reads_as_unscoped() {
+        let encoded = serde_json::to_value(item(None)).unwrap();
+        assert!(encoded.get("scope").is_none(), "{encoded}");
+        let legacy = json!({"provider":"openai-codex","model":"m",
+            "payload":{"type":"reasoning","encrypted_content":"ENC-private"}});
+        let decoded: ProviderReplayItem = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.scope, None);
+        assert_eq!(decoded, item(None));
+    }
+
+    /// The reader shape of builds without the field still loads a scoped item.
+    #[test]
+    fn pre_scope_reader_shape_loads_a_scoped_item() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct PreScope {
+            provider: String,
+            model: String,
+            payload: serde_json::Value,
+        }
+        let encoded = serde_json::to_string(&item(Some("0123456789abcdef"))).unwrap();
+        assert!(encoded.contains("\"scope\""), "{encoded}");
+        let old: PreScope = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(old.provider, "openai-codex");
+        assert_eq!(old.model, "m");
+        assert_eq!(old.payload["encrypted_content"], "ENC-private");
+    }
+
+    #[test]
+    fn debug_shows_only_scope_presence() {
+        let rendered = format!("{:?}", item(Some("0123456789abcdef")));
+        assert!(rendered.contains("scoped: true"), "{rendered}");
+        assert!(!rendered.contains("0123456789abcdef"), "{rendered}");
+        assert!(!rendered.contains("ENC-private"), "{rendered}");
     }
 }

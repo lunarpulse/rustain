@@ -229,7 +229,9 @@ async fn handle(
         return;
     }
     let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    if params.get("state").map(String::as_str) != Some(state) {
+    // omp compares state only when one is expected (a stateless key mint sends none);
+    // an `error` is then a denial whether or not a state came back.
+    if !state.is_empty() && params.get("state").map(String::as_str) != Some(state) {
         respond(
             &mut stream,
             "400 Bad Request",

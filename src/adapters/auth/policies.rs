@@ -324,7 +324,8 @@ pub fn org_scoped_identity(provider: &str) -> bool {
 
 /// Instrumented callers may replace any requested port, never the fallback policy,
 /// so tests never bind a provider's fixed port and can hold the requested one.
-pub fn callback_port(policy: &OAuthCodePolicy) -> u16 {
+/// Every browser policy (`OAuthCode`, `PkceKey`) passes its preferred port here.
+pub fn callback_port(port: u16) -> u16 {
     #[cfg(feature = "test-instrumentation")]
     if let Some(port) =
         crate::infrastructure::utils::env_var_trimmed("RUSTAIN_TEST_AUTH_CALLBACK_PORT")
@@ -332,8 +333,26 @@ pub fn callback_port(policy: &OAuthCodePolicy) -> u16 {
     {
         return port;
     }
-    policy.port
+    port
 }
+
+/// OpenRouter browser key minting (omp `catalog/src/compat/rules/auth/openrouter.kdl`):
+/// no client id, scope or state; the exchange answers a durable key. A pasted
+/// `sk-or-` key skips the exchange and is validated at `/api/v1/auth/key`.
+pub static OPENROUTER_KEY_MINT: PkceKeyPolicy = PkceKeyPolicy {
+    label: "OpenRouter account (browser sign-in)",
+    login_name: "OpenRouter",
+    instructions: "Sign in to OpenRouter in your browser to create an API key for rustain.",
+    paste_prompt: "Paste the redirect URL, authorization code, or an OpenRouter key (sk-or-…):",
+    authorize_url: "https://openrouter.ai/auth",
+    port: 54549,
+    port_fallback: true,
+    callback_host: CallbackHost::Localhost,
+    callback_path: "/callback",
+    exchange_url: "https://openrouter.ai/api/v1/auth/keys",
+    timeout_ms: 30_000,
+    paste_key_prefix: "sk-or-",
+};
 
 pub fn claude_code_version() -> String {
     if let Some(version) =
@@ -424,10 +443,11 @@ mod tests {
         unsafe {
             std::env::set_var("RUSTAIN_TEST_AUTH_CALLBACK_PORT", "1");
         }
-        assert_eq!(callback_port(&CODEX_OAUTH), 1455);
-        assert_eq!(callback_port(&ANTHROPIC_OAUTH), 54545);
+        assert_eq!(callback_port(CODEX_OAUTH.port), 1455);
+        assert_eq!(callback_port(ANTHROPIC_OAUTH.port), 54545);
         // The override reaches fallback policies only in instrumented builds.
-        assert_eq!(callback_port(&GEMINI_CLI_OAUTH), 8085);
+        assert_eq!(callback_port(GEMINI_CLI_OAUTH.port), 8085);
+        assert_eq!(callback_port(OPENROUTER_KEY_MINT.port), 54549);
     }
 
     #[test]
@@ -459,6 +479,13 @@ mod tests {
                             https(rfc.token.url);
                             assert!(rfc.instructions.contains("{user_code}"));
                         }
+                    }
+                    AuthMethod::PkceKey(policy) => {
+                        for url in [policy.authorize_url, policy.exchange_url] {
+                            assert_eq!(url::Url::parse(url).unwrap().scheme(), "https");
+                        }
+                        assert!(policy.callback_path.starts_with('/'));
+                        assert!(!policy.paste_key_prefix.is_empty());
                     }
                     AuthMethod::ApiKey => {}
                 }

@@ -27,6 +27,9 @@ pub struct ChatCompat {
     /// Send `max_completion_tokens`.
     pub max_completion_tokens: Option<u32>,
     pub images: ChatImages,
+    /// Put an ephemeral `cache_control` on the last user/assistant text part
+    /// (Anthropic-class models behind a gateway that forwards it).
+    pub anthropic_cache_control: bool,
 }
 
 pub trait ChatProfile: RequestProfile {

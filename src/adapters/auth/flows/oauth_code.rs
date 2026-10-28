@@ -42,7 +42,7 @@ pub(super) async fn run(
     ctx: &FlowCtx,
 ) -> Result<(Credential, bool), FlowError> {
     let mut listener = Loopback::bind(
-        crate::adapters::auth::policies::callback_port(policy),
+        crate::adapters::auth::policies::callback_port(policy.port),
         policy.port_fallback,
         policy.callback_host,
         policy.callback_path,

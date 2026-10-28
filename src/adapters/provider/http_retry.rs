@@ -107,9 +107,40 @@ pub enum Outcome {
 pub async fn send(
     client: &reqwest::Client,
     request: &reqwest::Request,
-    mut state: Option<&mut (dyn RequestState + '_)>,
+    state: Option<&mut (dyn RequestState + '_)>,
     policy: Option<&HttpRetryPolicy>,
 ) -> Result<Outcome, ProviderError> {
+    exchange(client, request, state, policy)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
+/// [`send`] for a stored request that provider re-issues send again: an
+/// identity alternate that wins is written into `request`, so every later
+/// re-issue of the same logical request sends the won identity directly
+/// (omp rebuilds its headers from the learned identity on each re-issue).
+pub async fn send_adopting(
+    client: &reqwest::Client,
+    request: &mut reqwest::Request,
+    state: Option<&mut (dyn RequestState + '_)>,
+    policy: Option<&HttpRetryPolicy>,
+) -> Result<Outcome, ProviderError> {
+    let (outcome, won) = exchange(client, request, state, policy).await?;
+    if let Some(won) = won {
+        for (name, value) in &won {
+            request.headers_mut().insert(name, value.clone());
+        }
+    }
+    Ok(outcome)
+}
+
+/// One logical exchange, and the headers of an identity alternate that won.
+async fn exchange(
+    client: &reqwest::Client,
+    request: &reqwest::Request,
+    mut state: Option<&mut (dyn RequestState + '_)>,
+    policy: Option<&HttpRetryPolicy>,
+) -> Result<(Outcome, Option<HeaderMap>), ProviderError> {
     let reuse = || {
         request
             .try_clone()
@@ -129,7 +160,7 @@ pub async fn send(
             }
         };
         if response.status().is_success() {
-            return Ok(Outcome::Success(response));
+            return Ok((Outcome::Success(response), None));
         }
         let mut status = response.status().as_u16();
         let mut headers = response.headers().clone();
@@ -148,7 +179,7 @@ pub async fn send(
             match client.execute(resend).await {
                 Ok(response) if response.status().is_success() => {
                     (alternate.settle)(true);
-                    return Ok(Outcome::Success(response));
+                    return Ok((Outcome::Success(response), Some(alternate.headers)));
                 }
                 Ok(response) => {
                     (alternate.settle)(false);
@@ -173,11 +204,14 @@ pub async fn send(
             tokio::time::sleep(retry::delay(delay)).await;
             continue;
         }
-        return Ok(Outcome::Failure {
-            status,
-            headers,
-            body,
-        });
+        return Ok((
+            Outcome::Failure {
+                status,
+                headers,
+                body,
+            },
+            None,
+        ));
     }
 }
 

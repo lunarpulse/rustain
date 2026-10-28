@@ -190,6 +190,8 @@ mod tests {
     fn bundled_default_model_prefers_the_provider_default_in_its_seed() {
         assert_eq!(bundled("xai").cfg.model_id, "grok-4.6");
         assert_eq!(bundled("xai-oauth").cfg.model_id, "grok-4.6");
+        // Not the seed's first row (`anthropic/claude-opus-4.7`): omp's default.
+        assert_eq!(bundled("openrouter").cfg.model_id, "openai/gpt-5.5");
         // Providers without a declared default keep their first seed row.
         assert_eq!(bundled("anthropic").cfg.model_id, "claude-opus-4-7");
         assert_eq!(bundled("openai-codex").cfg.model_id, "gpt-5.6-luna");

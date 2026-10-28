@@ -681,6 +681,29 @@ async fn ac2_enterprise_login_uses_the_cli_client_and_the_enterprise_root() {
         .collect();
     assert_eq!(paths, expected);
     assert_eq!(policy_posts(&server).await.len(), SEED_IDS);
+
+    // Inference from the stored Enterprise row goes to the same Enterprise
+    // root as the CLI identity, with the stored grant.
+    mount_routes(&server, "", "ok").await;
+    let provider = build("grok-code-fast-1");
+    let chunks = complete(
+        &provider,
+        vec![user("hi")],
+        options("grok-code-fast-1", 8192, None),
+    )
+    .await
+    .expect("the Enterprise inference succeeds");
+    assert_eq!(text_of(&chunks), "ok");
+    let sent = requests(&server, "POST", &chat_path("")).await;
+    assert_eq!(sent.len(), 1, "one POST to the Enterprise root");
+    assert_eq!(
+        header(&sent[0], "authorization").as_deref(),
+        Some("Bearer t-ac2-enterprise")
+    );
+    assert_eq!(
+        header(&sent[0], "copilot-integration-id").as_deref(),
+        Some("copilot-developer-cli")
+    );
 }
 
 /// AC2: an unparsable Enterprise answer fails before any request and stores

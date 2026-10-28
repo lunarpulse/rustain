@@ -128,9 +128,11 @@ impl AnthropicAdapter {
     }
 
     /// A Messages transport whose base URL, bearer, headers, errors and attempts
-    /// come from `profile`; Claude Code detection never applies.
+    /// come from `profile`; Claude Code detection never applies. Health checks
+    /// and model discovery belong to the owning gateway adapter, so a profiled
+    /// instance answers them locally without a request or a credential read.
     #[cfg(feature = "openai")]
-    pub fn with_profile(
+    pub(crate) fn with_profile(
         handle: crate::infrastructure::key_resolver::CredentialHandle,
         model: String,
         profile: Arc<dyn crate::adapters::provider::request_profile::RequestProfile>,
@@ -218,6 +220,19 @@ impl AnthropicAdapter {
 
     fn official(&self) -> bool {
         crate::infrastructure::provider_factory::oauth_allowed("anthropic", &self.base_url)
+    }
+
+    /// The Anthropic base URL and health and discovery routes do not apply to a
+    /// gateway's Messages transport.
+    fn profiled(&self) -> bool {
+        #[cfg(feature = "openai")]
+        {
+            self.request_profile.is_some()
+        }
+        #[cfg(not(feature = "openai"))]
+        {
+            false
+        }
     }
 }
 
@@ -438,11 +453,17 @@ impl StreamingProvider for AnthropicAdapter {
         model_filter: &[String],
         scope_context: &str,
     ) -> Option<Result<crate::domain::models::provider::DiscoveredModels, ProviderError>> {
+        if self.profiled() {
+            return None;
+        }
         Some(self.fetch_remote_models(model_filter, scope_context).await)
     }
 
     /// Credentials resolve per request, so the scope is read through that same path.
     async fn discovery_scope(&self, scope_context: &str) -> Option<String> {
+        if self.profiled() {
+            return None;
+        }
         let (resolved, _) = self.current_auth().await.ok()?;
         Some(crate::adapters::model_catalog_cache::request_scope(
             scope_context,
@@ -455,6 +476,9 @@ impl StreamingProvider for AnthropicAdapter {
     }
 
     async fn health_check(&self) -> Result<(), ProviderError> {
+        if self.profiled() {
+            return Err(ProviderError::EndpointUnsupported(404));
+        }
         let (mut resolved, plan) = self.current_auth().await?;
         let mut auth_retried = false;
         loop {
@@ -701,5 +725,122 @@ mod tests {
             !debug.contains(token),
             "Bearer token leaked in Debug output"
         );
+    }
+
+    #[cfg(feature = "openai")]
+    struct NoRefresh;
+
+    #[cfg(feature = "openai")]
+    #[async_trait::async_trait]
+    impl crate::domain::ports::OAuthRefreshPort for NoRefresh {
+        async fn refresh(
+            &self,
+            _: &str,
+            _: &crate::domain::models::OAuthCredential,
+        ) -> Result<crate::domain::ports::RefreshedTokens, crate::domain::ports::RefreshFailure>
+        {
+            Err(crate::domain::ports::RefreshFailure::Transient(
+                "never called".into(),
+            ))
+        }
+    }
+
+    /// A gateway profile whose base URL is the loopback stub.
+    #[cfg(feature = "openai")]
+    #[derive(Debug)]
+    struct StubProfile(String);
+
+    #[cfg(feature = "openai")]
+    impl crate::adapters::provider::request_profile::RequestProfile for StubProfile {
+        fn base_url(&self, _: &Resolved) -> Result<String, ProviderError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A runtime-key handle whose resolver reads its clock once per resolution,
+    /// so the counter records every credential resolution.
+    #[cfg(feature = "openai")]
+    fn recording_handle() -> (
+        crate::infrastructure::key_resolver::CredentialHandle,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let resolutions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = resolutions.clone();
+        let resolver = crate::infrastructure::key_resolver::compose(
+            Arc::new(crate::adapters::noop::NoOpAuthStore),
+            Arc::new(NoRefresh),
+            Arc::new(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                0
+            }),
+        );
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::runtime(
+            resolver,
+            "github-copilot".into(),
+            crate::domain::models::SecretString::new("k18-gateway-key".into()),
+        );
+        (handle, resolutions)
+    }
+
+    #[cfg(feature = "openai")]
+    async fn answering_stub() -> wiremock::MockServer {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": [], "has_more": false})),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// K18: a profiled instance answers its health and discovery surface
+    /// locally: no request reaches the stub and the credential is never read.
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn profiled_surface_sends_no_request_and_resolves_no_credential() {
+        let server = answering_stub().await;
+        let (handle, resolutions) = recording_handle();
+        let mut adapter = AnthropicAdapter::with_profile(
+            handle,
+            "claude-sonnet-4.5".into(),
+            Arc::new(StubProfile(server.uri())),
+        )
+        .unwrap();
+        // Any request this instance sent would reach the loopback stub as well.
+        adapter.base_url = server.uri();
+
+        assert!(matches!(
+            adapter.health_check().await,
+            Err(ProviderError::EndpointUnsupported(404))
+        ));
+        assert!(adapter.discover_models(&[], "k18").await.is_none());
+        assert!(adapter.discovery_scope("k18").await.is_none());
+
+        assert_eq!(server.received_requests().await.unwrap().len(), 0);
+        assert_eq!(resolutions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// K18 positive control: the same handle and stub without a profile are
+    /// resolved and reached by `health_check`.
+    #[cfg(feature = "openai")]
+    #[tokio::test]
+    async fn unprofiled_health_check_resolves_and_reaches_the_stub() {
+        let server = answering_stub().await;
+        let (handle, resolutions) = recording_handle();
+        let adapter = AnthropicAdapter::with_credential(
+            AnthropicCredential::Resolved(handle),
+            "claude-sonnet-4-6".into(),
+            Some(server.uri()),
+        )
+        .unwrap();
+
+        adapter.health_check().await.unwrap();
+
+        let received = server.received_requests().await.unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].url.path(), "/v1/messages");
+        assert!(resolutions.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     }
 }

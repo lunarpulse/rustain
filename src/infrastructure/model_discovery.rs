@@ -123,10 +123,23 @@ pub fn merge_catalog(layers: CatalogLayers, live: LiveOutcome) -> MergeResult {
             records.push(record);
         }
     }
+    // A row the live roster lists is owned by bundled ⊕ models.dev ⊕ live:
+    // the cache layer is never folded under it.
+    let listed: HashSet<&str> = live_records
+        .iter()
+        .flatten()
+        .map(|record| record.model_id.as_str())
+        .collect();
     let cached = layers
         .models_dev
         .iter()
-        .chain(layers.cache.iter().flat_map(|cache| &cache.models))
+        .chain(
+            layers
+                .cache
+                .iter()
+                .flat_map(|cache| &cache.models)
+                .filter(|record| !listed.contains(record.model_id.as_str())),
+        )
         .map(|record| (record, false));
     for (record, live) in cached.chain(live_records.iter().flatten().map(|record| (record, true))) {
         let index = if let Some(&index) = indices.get(&record.model_id) {
@@ -702,6 +715,39 @@ mod tests {
             served(LiveOutcome::Success(vec![wired])).as_deref(),
             Some("live-wire")
         );
+    }
+
+    #[test]
+    fn a_live_roster_owns_its_rows_and_the_cache_serves_only_without_it() {
+        let served = |live| {
+            let mut layers = catalog();
+            layers.cache = Some(CachedDiscoveryEntry {
+                fetched_at_unix: 0,
+                credential_fingerprint: "scope".into(),
+                authoritative: true,
+                models: vec![record(
+                    "model",
+                    Some("Cached"),
+                    Some(999),
+                    Some(vec![ModelCapability::Vision]),
+                )],
+            });
+            merge_catalog(layers, live).served.remove(0)
+        };
+        let cached = served(LiveOutcome::NotAttempted);
+        assert_eq!(
+            (&*cached.display_name, cached.context_window),
+            ("Cached", 999)
+        );
+        assert!(cached.capabilities.contains(&ModelCapability::Vision));
+        let live = served(LiveOutcome::Success(vec![record(
+            "model", None, None, None,
+        )]));
+        assert_eq!(
+            (&*live.display_name, live.context_window),
+            ("Metadata", 200)
+        );
+        assert!(!live.capabilities.contains(&ModelCapability::Vision));
     }
 
     #[test]

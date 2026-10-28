@@ -414,6 +414,7 @@ impl ChatProfile for CopilotProfile {
             } else {
                 ChatImages::Omitted
             },
+            anthropic_cache_control: false,
         }
     }
 }

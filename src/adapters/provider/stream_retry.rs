@@ -36,7 +36,7 @@ use reqwest::header::HeaderMap;
 use tokio::time::Instant;
 
 use crate::adapters::responses::{
-    events::{generic_retryable, usage_limit},
+    events::{generic_retryable, opaque_status_body, usage_limit},
     retry,
 };
 use crate::domain::{
@@ -113,12 +113,15 @@ impl From<ProviderError> for Rejected {
 
 impl Rejected {
     /// A final non-2xx answer: 408, 429 and ≥ 500 are re-issued unless the body
-    /// reads as an account usage limit; every other status (409 included) is
-    /// terminal. `x-should-retry` is not consulted.
+    /// reads as an account usage limit — a 429/402 whose body says nothing
+    /// beyond the status included (omp `isUsageLimitOutcome`); every other
+    /// status (409 included) is terminal. `x-should-retry` is not consulted.
     pub fn status(error: ProviderError, status: u16, headers: &HeaderMap, body: &str) -> Self {
+        let limited =
+            usage_limit(body) || (matches!(status, 402 | 429) && opaque_status_body(body));
         Self {
             error,
-            retryable: (matches!(status, 408 | 429) || status >= 500) && !usage_limit(body),
+            retryable: (matches!(status, 408 | 429) || status >= 500) && !limited,
             hint_ms: retry_after(headers, crate::infrastructure::utils::auth_now_ms()),
         }
     }
@@ -210,7 +213,8 @@ impl StreamResilience {
     }
 }
 
-/// The first-event watchdog deadline, armed before the first attempt.
+/// The first attempt's first-event watchdog deadline, armed once its
+/// credential is read; every re-opened attempt arms its own.
 pub fn deadline() -> Instant {
     Instant::now() + retry::stream_timeout()
 }
@@ -239,14 +243,15 @@ pub fn resume(
 
 /// omp's provider loop over a rejected first attempt: re-issues it within the
 /// route budget and streams the first attempt that opens (the budget it spent
-/// carries over); a final rejection is the request's error.
+/// carries over); a final rejection is the request's error. Each re-open has
+/// its own first-event window.
 pub async fn reopen(
     attempt: Box<dyn Attempt>,
     policy: &'static StreamResilience,
-    first_deadline: Instant,
     rejected: Rejected,
 ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
-    let mut state = State::new(attempt, policy, None, first_deadline);
+    // No attempt is live: `reissue` arms the re-open's window before use.
+    let mut state = State::new(attempt, policy, None, Instant::now());
     match state.reissue(Ending::Rejected(rejected)).await {
         Reissued::Opened | Reissued::Finished => Ok(state.into_stream()),
         Reissued::Rejected(error) => Err(error),
@@ -258,8 +263,9 @@ struct State {
     attempt: Box<dyn Attempt>,
     policy: &'static StreamResilience,
     inner: Option<BoxStream<'static, StreamChunk>>,
-    /// Armed before the first attempt; spans re-issues until any event arrives.
-    first_deadline: Instant,
+    /// The live attempt's first-event deadline: the caller's for the first
+    /// attempt, armed afresh for each re-opened one (omp's per-attempt timer).
+    attempt_deadline: Instant,
     seen_event: bool,
     /// The current attempt produced a chunk.
     attempt_event: bool,
@@ -315,7 +321,7 @@ impl State {
             attempt,
             policy,
             inner,
-            first_deadline,
+            attempt_deadline: first_deadline,
             seen_event: false,
             attempt_event: false,
             idle_deadline: first_deadline,
@@ -375,7 +381,7 @@ impl State {
             let deadline = if self.seen_event || self.attempt_event {
                 self.idle_deadline
             } else {
-                self.first_deadline
+                self.attempt_deadline
             };
             let next = {
                 let inner = self.inner.as_mut().expect("live attempt");
@@ -496,11 +502,9 @@ impl State {
             self.inner = None;
             self.buffered.clear();
             tokio::time::sleep(retry::delay(delay)).await;
-            let deadline = if self.seen_event {
-                Instant::now() + retry::stream_timeout()
-            } else {
-                self.first_deadline
-            };
+            // Every re-opened attempt gets its own full first-event window.
+            let deadline = Instant::now() + retry::stream_timeout();
+            self.attempt_deadline = deadline;
             match tokio::time::timeout_at(deadline, self.attempt.open()).await {
                 Ok(Ok(inner)) => {
                     self.inner = Some(inner);
@@ -700,7 +704,8 @@ mod tests {
             texts(&chunks),
             ["error:OpenAI completions stream timed out while waiting for the first event"]
         );
-        // The first-event watchdog spans a re-issue: an empty attempt, then a stall.
+        // A re-issued attempt has its own first-event window: an empty attempt,
+        // then a stall fires the re-issue's window with the first-event text.
         let (chunks, opened) = run(vec![Some(vec![]), None], &MESSAGES).await;
         assert_eq!(opened, 2);
         assert_eq!(
@@ -784,7 +789,7 @@ mod tests {
             opened: opened.clone(),
         };
         let start = Instant::now();
-        let result = match reopen(Box::new(attempt), &MESSAGES, deadline(), first).await {
+        let result = match reopen(Box::new(attempt), &MESSAGES, first).await {
             Ok(stream) => Ok(texts(&stream.collect::<Vec<_>>().await)),
             Err(error) => Err(error.to_string()),
         };
@@ -868,6 +873,145 @@ mod tests {
         .await;
         assert_eq!(result.unwrap_err(), "HTTP 429");
         assert_eq!(opened, 1);
+    }
+
+    /// K15 (M15): a 429 whose body says nothing beyond the status is an
+    /// account limit, final at once; an informative 429 is re-issued.
+    #[tokio::test(start_paused = true)]
+    async fn an_opaque_429_is_final_and_an_informative_429_is_reissued() {
+        let ok = || Ok(vec![text("ok"), stop()]);
+        for body in [
+            "",
+            "  \n",
+            "429 status code (no body)",
+            "{}",
+            r#"{"error":{"code":429}}"#,
+        ] {
+            let (result, opened, _) = reopened(status(429, &[], body), vec![ok()]).await;
+            assert_eq!(result.unwrap_err(), "HTTP 429", "{body:?}");
+            assert_eq!(opened, 0, "{body:?} is final");
+        }
+        for first in [
+            status(429, &[], "Too many requests, retry later"),
+            status(429, &[], "请求过于频繁，请稍后重试"),
+            status(503, &[], ""),
+        ] {
+            let (result, opened, _) = reopened(first, vec![ok()]).await;
+            assert_eq!(result.unwrap(), ["text:ok", "stop"]);
+            assert_eq!(opened, 1);
+        }
+    }
+
+    /// Timed opens: each answers after its delay; an opened stream yields its
+    /// chunks, the first after its own delay.
+    type TimedReply = (
+        std::time::Duration,
+        Result<(std::time::Duration, Vec<StreamChunk>), Rejected>,
+    );
+    struct Timed(VecDeque<TimedReply>);
+    #[async_trait]
+    impl Attempt for Timed {
+        async fn open(&mut self) -> Result<BoxStream<'static, StreamChunk>, Rejected> {
+            let (open_after, reply) = self.0.pop_front().expect("an open within the script");
+            tokio::time::sleep(open_after).await;
+            let (first_after, chunks) = reply?;
+            Ok(futures::stream::once(async move {
+                tokio::time::sleep(first_after).await;
+                futures::stream::iter(chunks)
+            })
+            .flatten()
+            .boxed())
+        }
+    }
+
+    /// The adapters' shape over `Timed`: arm, open the first attempt (a
+    /// rejected one goes to `reopen`), stream; the chunks and the time taken.
+    async fn timed(
+        policy: &'static StreamResilience,
+        replies: Vec<TimedReply>,
+    ) -> (Vec<String>, std::time::Duration) {
+        let start = Instant::now();
+        let mut attempt = Timed(replies.into());
+        let deadline = deadline();
+        let opened = first_open(deadline, policy, attempt.open()).await;
+        let stream = match opened {
+            Ok(first) => resume(first, Box::new(attempt), policy, deadline),
+            Err(rejected) => match reopen(Box::new(attempt), policy, rejected).await {
+                Ok(stream) => stream,
+                Err(error) => return (vec![format!("open:{error}")], start.elapsed()),
+            },
+        };
+        (texts(&stream.collect::<Vec<_>>().await), start.elapsed())
+    }
+
+    /// K15 (AC16, paused clock): every re-opened attempt has its own full
+    /// first-event window. (i) A rejected open late in the first window, then
+    /// a re-issue whose first event comes after more than the original window's
+    /// remainder but within its own window → served; (ii) a first event later
+    /// than its own window → the route's first-event text. Likewise after a
+    /// pre-commit ending (an empty Chat attempt, a transient Messages failure).
+    #[tokio::test(start_paused = true)]
+    async fn every_reopened_attempt_has_its_own_first_event_window() {
+        use std::time::Duration;
+        let window = retry::stream_timeout();
+        let late = window - Duration::from_secs(10);
+        let served = || Ok((Duration::from_secs(30), vec![text("late"), stop()]));
+
+        // (i) rejected open, then a first event 30 s into the re-issue.
+        let (chunks, elapsed) = timed(
+            &MESSAGES,
+            vec![(late, Err(busy())), (Duration::ZERO, served())],
+        )
+        .await;
+        assert_eq!(chunks, ["text:late", "stop"]);
+        assert!(elapsed >= window + Duration::from_secs(20), "{elapsed:?}");
+
+        // (ii) the re-issue's first event after its own window → watchdog.
+        let (chunks, elapsed) = timed(
+            &MESSAGES,
+            vec![
+                (late, Err(busy())),
+                (
+                    Duration::ZERO,
+                    Ok((window + Duration::from_secs(1), vec![text("never")])),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(
+            chunks,
+            ["error:Anthropic stream timed out while waiting for the first event"]
+        );
+        assert!(elapsed >= late + window, "{elapsed:?}");
+
+        // Re-issued after a pre-commit ending: an empty Chat attempt, a
+        // transient Messages failure.
+        for (policy, ending) in [(&CHAT, vec![]), (&MESSAGES, overloaded())] {
+            let (chunks, _) = timed(
+                policy,
+                vec![
+                    (late, Ok((Duration::ZERO, ending))),
+                    (Duration::ZERO, served()),
+                ],
+            )
+            .await;
+            assert_eq!(chunks, ["text:late", "stop"], "{policy:?}");
+        }
+        let (chunks, _) = timed(
+            &CHAT,
+            vec![
+                (late, Ok((Duration::ZERO, vec![]))),
+                (
+                    Duration::ZERO,
+                    Ok((window + Duration::from_secs(1), vec![text("never")])),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(
+            chunks,
+            ["error:OpenAI completions stream timed out while waiting for the first event"]
+        );
     }
 
     #[test]

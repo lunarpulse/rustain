@@ -141,36 +141,6 @@ pub fn seed_row(id: &str) -> Option<&'static Row> {
     SEED.iter().find(|row| row.id == id)
 }
 
-/// Effective limits Copilot serves below its `/models` metadata (omp
-/// `model-limits provider="github-copilot"`): `(context, max output)`.
-const LIMITS: [(&str, u32, u32); 5] = [
-    ("claude-opus-4.6", 168_000, 32_000),
-    ("gpt-5.2", 272_000, 128_000),
-    ("gpt-5.4", 272_000, 128_000),
-    ("gpt-5.4-mini", 272_000, 128_000),
-    ("grok-code-fast-1", 192_000, 64_000),
-];
-
-/// Default-tier windows of the two-tier OpenAI flagships (omp provider
-/// `limits-patch context-window 272000`); the `-1m` siblings are the long tier.
-const CONTEXT_PATCH: [&str; 4] = [
-    "gpt-5.6-sol",
-    "gpt-5.6-luna",
-    "gpt-5.6-terra",
-    "gpt-6-astra",
-];
-
-/// Applies the limit pins and context patch to an upstream-sourced row.
-pub fn pin_limits(id: &str, context: &mut Option<u32>, max_output: &mut Option<u32>) {
-    if let Some((_, pinned_context, pinned_output)) = LIMITS.iter().find(|(row, ..)| *row == id) {
-        *context = Some(*pinned_context);
-        *max_output = Some(*pinned_output);
-    }
-    if CONTEXT_PATCH.contains(&id) {
-        *context = Some(272_000);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,18 +212,5 @@ mod tests {
         assert!(seed_row("grok-code-fast-1").is_some_and(|r| r.store && r.sampling));
         assert!(seed_row("gemini-3.1-pro-preview").is_some_and(|r| !r.store));
         assert!(seed_row("gpt-5.5").is_some_and(|r| !r.sampling));
-    }
-
-    #[test]
-    fn limit_pins_and_context_patch_override_upstream_values() {
-        let (mut context, mut output) = (Some(200_000), Some(64_000));
-        pin_limits("claude-opus-4.6", &mut context, &mut output);
-        assert_eq!((context, output), (Some(168_000), Some(32_000)));
-        let (mut context, mut output) = (Some(1_050_000), Some(128_000));
-        pin_limits("gpt-5.6-sol", &mut context, &mut output);
-        assert_eq!((context, output), (Some(272_000), Some(128_000)));
-        let (mut context, mut output) = (Some(5), None);
-        pin_limits("unpinned", &mut context, &mut output);
-        assert_eq!((context, output), (Some(5), None));
     }
 }

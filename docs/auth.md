@@ -66,8 +66,9 @@ ChatGPT Codex supports browser and device-code subscription login. xAI Grok OAut
 (`xai-oauth`) supports device-code subscription login only. GitHub Copilot
 (`github-copilot`) supports device login only, for github.com or a GitHub
 Enterprise domain. Google Cloud Code Assist (`google-gemini-cli`) supports browser
-subscription login only. Other keyed providers, including `xai` and `google`, use
-masked API-key entry with pre-storage validation.
+subscription login only. OpenRouter supports browser key minting and API keys.
+Other keyed providers, including `xai` and `google`, use masked API-key entry with
+pre-storage validation.
 
 ### Usage
 
@@ -81,6 +82,8 @@ rustain auth login xai-oauth                    # SuperGrok / X Premium+ device 
 rustain auth login xai                          # store an xAI API key
 rustain auth login github-copilot               # GitHub Copilot device login (github.com or Enterprise)
 rustain auth login google-gemini-cli            # Gemini CLI (Cloud Code Assist) browser login
+rustain auth login openrouter --method oauth    # mint an OpenRouter key in the browser
+rustain auth login openrouter --method api-key  # store an existing sk-or- key
 rustain auth login ollama       # reports "no API key required"
 ```
 
@@ -139,6 +142,44 @@ os_type=darwin; arch=arm64; cl=963137146)`). Its availability does not imply Goo
 approval. Provider policies or backend changes may restrict access or put your
 account at risk. rustain does not refuse subscription tokens. Use the separate
 `google` API-key provider if you do not accept subscription-client risk.
+
+### OpenRouter
+
+`rustain auth login openrouter --method oauth` creates a durable OpenRouter API
+key through OpenRouter's browser PKCE flow, as oh-my-pi does: the authorization
+URL (`https://openrouter.ai/auth`) carries only `callback_url`, an S256
+`code_challenge` and `code_challenge_method` (no client id, scope or state). The
+callback listens on `http://localhost:54549/callback`, falling back to a free port
+(`Preferred port 54549 unavailable, using port N`); the advertised `callback_url`
+always names the port actually bound. In a terminal you may instead paste the
+redirect URL, the authorization code, or an existing OpenRouter key: a pasted
+value starting with `sk-or-` skips the exchange and is validated like
+`--method api-key`. The code is exchanged once at
+`https://openrouter.ai/api/v1/auth/keys` (JSON `code`, `code_verifier`,
+`code_challenge_method`, 30 s); the returned key is stored as an ordinary API-key
+row (method `browser_key` in `auth login --json`), and the success line is
+`✓ Logged in to OpenRouter.`. Failures store nothing and never echo the response:
+`OpenRouter key exchange failed (HTTP <status>)`, `OpenRouter key exchange
+returned no key`, `OpenRouter key exchange failed: transport unavailable`, or
+`OAuth authorization was denied`.
+
+Both `--method api-key` and a pasted key are validated with one
+`GET <base>/auth/key` (bearer only, 5 s); `/models` answers 200 to any bearer and
+never validates a key. A rejected key is not stored (`✗ Invalid API key for
+OpenRouter.`); a base without `/auth/key` or an unreachable endpoint stores
+nothing either. Startup health uses the same request, so an invalid
+`OPENROUTER_API_KEY` shows as unauthenticated.
+
+Inference uses OpenRouter's Responses API (`<base>/responses`) by default and
+Chat Completions (`<base>/chat/completions`) when `RUSTAIN_OPENROUTER_RESPONSES=0`;
+no error ever switches transports. Both send rustain's attribution
+(`User-Agent: rustain/<version>`, `HTTP-Referer: https://github.com/lunarpulse/rustain`,
+`X-OpenRouter-Title: rustain`, `X-OpenRouter-Categories: cli-agent`) and enable
+OpenRouter response caching (`X-OpenRouter-Cache: true`,
+`X-OpenRouter-Cache-TTL: 3600`). With a credential, discovery lists only
+tool-capable models from `<base>/models`; without one, OpenRouter stays locked
+with the bundled catalogue. Several keys are account rows (see
+[Multiple accounts](#multiple-accounts)).
 
 ### ChatGPT Plus/Pro (Codex Subscription)
 
@@ -199,7 +240,11 @@ inspect only the models endpoint's status.
 Encrypted reasoning items are captured privately from each response that reaches
 its terminal completion event, persisted with the session (local sessions,
 `rustain --session <id> ask` resume and the daemon), and replayed only to the same
-provider kind and model; as in omp, they are not bound to the account. They are
+provider kind, model and account. Unlike omp, an item is bound to the account that
+produced it: a stored login's account identity (or, for a login without one, that
+login across its token refreshes) or the API key itself. After `auth use` another
+account sends none of them; switching back replays them; items saved before
+account binding are not replayed. They are
 never shown in transcripts, observers, ACP, `ask` output or logs. A failed or
 cancelled attempt discards its items, so it replays nothing.
 Upstream lists a 128,000-token maximum output, but rustain has no descriptor field
@@ -416,7 +461,8 @@ Requests use Cloud Code Assist's native
 with the Gemini CLI headers above and omp's envelope, roles, images, tool schemas,
 retries (4 attempts; server retry hints up to 5 minutes) and error texts. Gemini
 thought signatures are kept privately per response and replayed only to the same
-provider and model within a tool round and across text turns; they never appear in
+provider, model and account (never another account's, not even as a demoted
+other-model rebuild) within a tool round and across text turns; they never appear in
 transcripts, observers, ACP, `ask` output or logs.
 
 **Model discovery.** A signed Gemini CLI entry discovers its models live, as
@@ -477,6 +523,10 @@ rustain auth accounts openai       # one provider (also --json)
 rustain auth use openai --id 1     # make account #1 active
 rustain auth logout openai --id 2  # remove account #2 only
 ```
+
+OpenRouter keys, browser-minted or pasted, are ordinary API-key account rows:
+minting the same key again updates its row, and each new key becomes the active
+account.
 
 `auth accounts` prints one header per provider — `OpenAI (openai): serving API key #1`,
 `serving OPENAI_API_KEY`, or `no usable credential` — and one line per stored
@@ -799,7 +849,7 @@ PROVIDER                                  AUTH METHODS    CONFIGURED  SIGNUP URL
 Anthropic *                               oauth, api-key  ✓           https://console.anthropic.com/
 ChatGPT Plus/Pro (Codex Subscription)     oauth, device               https://chatgpt.com/
 OpenAI                                    api-key         ✓           https://platform.openai.com/api-keys
-OpenRouter                                api-key                     https://openrouter.ai/keys
+OpenRouter                                oauth, api-key              https://openrouter.ai/keys
 Google AI                                 api-key                     https://aistudio.google.com/apikey
 DeepSeek                                  api-key                     https://platform.deepseek.com/api_keys
 Moonshot AI                               api-key                     https://platform.moonshot.cn/console/api-keys
