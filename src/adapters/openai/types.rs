@@ -1,16 +1,24 @@
 //! OpenAI-compatible API wire-format types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
+use super::profile::{ChatCompat, ChatImages};
 use crate::domain::models::{CompletionOptions, Message, MessageRole, ToolDefinition};
+
+/// omp `NON_VISION_IMAGE_PLACEHOLDER`, sent once per message in place of its images.
+const NON_VISION_IMAGE_PLACEHOLDER: &str = "[image omitted: model does not support vision]";
 
 // ─── Request Types ──────────────────────────────────────────────────────────
 
+/// Declaration order is wire order.
 #[derive(Debug, Serialize)]
 pub struct OpenAiRequest {
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -21,6 +29,8 @@ pub struct OpenAiRequest {
     /// deserialization) — worst case is `None` usage, same as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
 }
 
 /// `stream_options` payload — currently only `include_usage` is defined by the
@@ -60,7 +70,7 @@ impl From<&ToolDefinition> for OpenAiToolDef {
 #[derive(Debug, Serialize)]
 pub struct OpenAiMessage {
     pub role: String,
-    pub content: String,
+    pub content: OpenAiContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +78,36 @@ pub struct OpenAiMessage {
     /// DeepSeek v4 thinking mode: echoed back verbatim on assistant messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+}
+
+/// A message's content: plain text, or typed parts when images are encoded.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum OpenAiContent {
+    Text(String),
+    Parts(Vec<Value>),
+}
+
+impl OpenAiContent {
+    /// The plain text; empty for typed parts.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Text(text) => text,
+            Self::Parts(_) => "",
+        }
+    }
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Text(text) => text.is_empty(),
+            Self::Parts(parts) => parts.is_empty(),
+        }
+    }
+}
+
+impl PartialEq<&str> for OpenAiContent {
+    fn eq(&self, other: &&str) -> bool {
+        matches!(self, Self::Text(text) if text == other)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -86,7 +126,70 @@ pub struct OpenAiToolCallFunction {
 
 impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
     fn from((messages, options): (&[Message], &CompletionOptions)) -> Self {
+        Self::new(messages, options, &ChatCompat::default())
+    }
+}
+
+/// One message's text and images under the profile's image encoding.
+fn content(msg: &Message, images: ChatImages) -> OpenAiContent {
+    let text = match &msg.context_prefix {
+        Some(prefix) if !prefix.is_empty() => {
+            let mut content = String::with_capacity(prefix.len() + 2 + msg.content.len());
+            content.push_str(prefix);
+            content.push_str("\n\n");
+            content.push_str(&msg.content);
+            content
+        }
+        _ => msg.content.clone(),
+    };
+    if msg.images.is_empty() {
+        return OpenAiContent::Text(text);
+    }
+    match images {
+        ChatImages::Legacy => {
+            let mut text = text;
+            for img in &msg.images {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&format!("[Image: {}]", img.media_type));
+            }
+            OpenAiContent::Text(text)
+        }
+        ChatImages::Parts => {
+            let mut parts = Vec::with_capacity(1 + msg.images.len());
+            if !text.is_empty() {
+                parts.push(json!({"type":"text","text":text}));
+            }
+            for img in &msg.images {
+                parts.push(json!({"type":"image_url","image_url":{"url":format!("data:{};base64,{}", img.media_type, img.data)}}));
+            }
+            OpenAiContent::Parts(parts)
+        }
+        ChatImages::Omitted => {
+            let mut parts = Vec::with_capacity(2);
+            if !text.is_empty() {
+                parts.push(json!({"type":"text","text":text}));
+            }
+            parts.push(json!({"type":"text","text":NON_VISION_IMAGE_PLACEHOLDER}));
+            OpenAiContent::Parts(parts)
+        }
+    }
+}
+
+impl OpenAiRequest {
+    pub fn new(messages: &[Message], options: &CompletionOptions, compat: &ChatCompat) -> Self {
         let mut openai_messages: Vec<OpenAiMessage> = Vec::new();
+        // The turn's system prompt leads the conversation.
+        if !options.system_prompt.trim().is_empty() {
+            openai_messages.push(OpenAiMessage {
+                role: "system".to_string(),
+                content: OpenAiContent::Text(options.system_prompt.clone()),
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            });
+        }
 
         for msg in messages {
             let role = match msg.role {
@@ -96,23 +199,14 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             };
 
             // Build text content (text + images only; tool results are
-            // emitted as separate role:"tool" messages per the OpenAI spec)
-            let mut content = match &msg.context_prefix {
-                Some(prefix) if !prefix.is_empty() => {
-                    let mut content = String::with_capacity(prefix.len() + 2 + msg.content.len());
-                    content.push_str(prefix);
-                    content.push_str("\n\n");
-                    content.push_str(&msg.content);
-                    content
-                }
-                _ => msg.content.clone(),
+            // emitted as separate role:"tool" messages per the OpenAI spec).
+            // Typed image parts are a user-message encoding.
+            let images = if msg.role == MessageRole::User {
+                compat.images
+            } else {
+                ChatImages::Legacy
             };
-            for img in &msg.images {
-                if !content.is_empty() {
-                    content.push('\n');
-                }
-                content.push_str(&format!("[Image: {}]", img.media_type));
-            }
+            let content = content(msg, images);
 
             let has_tool_results = !msg.tool_results.is_empty();
             let has_text = !content.is_empty();
@@ -132,7 +226,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
                     };
                     openai_messages.push(OpenAiMessage {
                         role: "tool".to_string(),
-                        content: tool_content,
+                        content: OpenAiContent::Text(tool_content),
                         tool_calls: None,
                         tool_call_id: Some(tr.tool_use_id.clone()),
                         reasoning_content: None,
@@ -204,6 +298,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             model: options.model.clone(),
             messages: openai_messages,
             stream: true,
+            store: compat.store_false.then_some(false),
             temperature: options.temperature,
             tools,
             // Always ask for usage stats when streaming. Providers that don't
@@ -213,6 +308,7 @@ impl From<(&[Message], &CompletionOptions)> for OpenAiRequest {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }),
+            max_completion_tokens: compat.max_completion_tokens,
         }
     }
 }

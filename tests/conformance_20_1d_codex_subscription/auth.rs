@@ -84,6 +84,9 @@ impl LoginUi for Ui {
     fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
         None
     }
+    fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async { None })
+    }
     fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }

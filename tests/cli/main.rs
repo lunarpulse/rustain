@@ -48,6 +48,9 @@ mod conformance_20_1d1b_codex_replay_discovery;
 #[path = "../conformance_20_1d2_device_and_xai.rs"]
 mod conformance_20_1d2_device_and_xai;
 
+#[path = "../conformance_20_1d3_copilot.rs"]
+mod conformance_20_1d3_copilot;
+
 #[path = "../conformance_20_1d4_gemini_cli.rs"]
 mod conformance_20_1d4_gemini_cli;
 

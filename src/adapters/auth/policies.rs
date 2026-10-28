@@ -102,7 +102,8 @@ pub static ANTHROPIC_REFRESH: RefreshPolicy = RefreshPolicy {
 };
 pub static ANTHROPIC_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://api.anthropic.com",
-    refresh: &ANTHROPIC_REFRESH,
+    api_host_suffix: None,
+    refresh: Refresh::Http(&ANTHROPIC_REFRESH),
 };
 
 pub const CODEX_ORIGINATOR: &str = "omp";
@@ -159,7 +160,8 @@ pub static CODEX_REFRESH: RefreshPolicy = RefreshPolicy {
 };
 pub static CODEX_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://chatgpt.com",
-    refresh: &CODEX_REFRESH,
+    api_host_suffix: None,
+    refresh: Refresh::Http(&CODEX_REFRESH),
 };
 
 /// OpenAI's custom device protocol; its endpoints and client are protocol-fixed in
@@ -226,7 +228,26 @@ pub static XAI_REFRESH: RefreshPolicy = RefreshPolicy {
 };
 pub static XAI_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://api.x.ai",
-    refresh: &XAI_REFRESH,
+    api_host_suffix: None,
+    refresh: Refresh::Http(&XAI_REFRESH),
+};
+
+/// omp `FAR_FUTURE_MS`: ten Julian years, the lifetime of a stored Copilot grant.
+pub const COPILOT_GRANT_LIFETIME_MS: i64 = 315_576_000_000;
+/// GitHub Copilot's custom device hook; its constants are protocol-fixed in the flow.
+pub static COPILOT_DEVICE: DevicePolicy = DevicePolicy {
+    label: "GitHub Copilot subscription (device code)",
+    login_name: "GitHub Copilot",
+    flow: DeviceFlow::GitHubCopilot,
+};
+/// The GitHub token is served as is: no token exchange and a refresh without HTTP.
+/// Account API hosts are `*.githubcopilot.com` (individual, business, enterprise).
+pub static COPILOT_API: OAuthApiPolicy = OAuthApiPolicy {
+    api_origin: "https://api.githubcopilot.com",
+    api_host_suffix: Some("githubcopilot.com"),
+    refresh: Refresh::StoredGrant {
+        lifetime_ms: COPILOT_GRANT_LIFETIME_MS,
+    },
 };
 
 // Google Cloud Code Assist (Gemini CLI): omp `catalog/src/compat/rules/auth/google-gemini-cli.kdl`.
@@ -292,7 +313,8 @@ pub static GEMINI_CLI_REFRESH: RefreshPolicy = RefreshPolicy {
 };
 pub static GEMINI_CLI_API: OAuthApiPolicy = OAuthApiPolicy {
     api_origin: "https://cloudcode-pa.googleapis.com",
-    refresh: &GEMINI_CLI_REFRESH,
+    api_host_suffix: None,
+    refresh: Refresh::Http(&GEMINI_CLI_REFRESH),
 };
 
 pub fn org_scoped_identity(provider: &str) -> bool {
@@ -443,7 +465,9 @@ mod tests {
             }
             if let Some(api) = provider.oauth_api {
                 assert_eq!(url::Url::parse(api.api_origin).unwrap().scheme(), "https");
-                https(api.refresh.request.url);
+                if let Refresh::Http(refresh) = api.refresh {
+                    https(refresh.request.url);
+                }
             }
         }
     }

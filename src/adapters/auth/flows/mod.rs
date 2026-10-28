@@ -82,6 +82,21 @@ impl FlowCtx {
         self.sleep = sleep;
         self
     }
+    /// The flow's no-redirect client, for provider-owned login hooks.
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+}
+/// The whitelisted OAuth error id of a failed response body, if any; provider
+/// login hooks append it to a status without echoing the body.
+#[cfg(feature = "openai")]
+pub(crate) fn safe_error_id(status: u16, body: &str) -> Option<String> {
+    token::TokenFailure {
+        status: Some(status),
+        body: body.to_owned(),
+    }
+    .safe_id()
 }
 fn real_sleep(duration: Duration) -> BoxFuture<'static, ()> {
     let duration = scaled(duration);
@@ -151,7 +166,7 @@ pub async fn login(
                     ));
                 }
             }
-            // Self-bounded (Codex: 120 polls; RFC 8628: `expires_in`).
+            // Self-bounded (Codex: 120 polls; RFC 8628 and Copilot: `expires_in`).
             AuthMethod::Device(policy) => {
                 #[cfg(any(feature = "anthropic", feature = "openai", feature = "ollama"))]
                 {
@@ -159,6 +174,16 @@ pub async fn login(
                     match policy.flow {
                         DeviceFlow::Rfc8628(rfc) => device_code::run(provider_id, rfc, ctx).await?,
                         DeviceFlow::OpenAiCodex => codex_device::run(ctx).await?,
+                        #[cfg(feature = "openai")]
+                        DeviceFlow::GitHubCopilot => {
+                            crate::adapters::github_copilot::login::run(ctx).await?
+                        }
+                        #[cfg(not(feature = "openai"))]
+                        DeviceFlow::GitHubCopilot => {
+                            return Err(FlowError::configuration(
+                                "github-copilot requires the openai feature",
+                            ));
+                        }
                     }
                 }
                 #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "ollama")))]
@@ -252,6 +277,9 @@ mod no_http_tests {
             _: &str,
         ) -> Option<futures::future::BoxFuture<'static, Option<String>>> {
             None
+        }
+        fn prompt_line(&self, _: &str) -> futures::future::BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
         }
         fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
             tokio_util::sync::CancellationToken::new()

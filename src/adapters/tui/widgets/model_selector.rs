@@ -443,6 +443,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
                 ModelDescriptor {
                     model_id: "ghost-model".to_string(),
@@ -452,6 +453,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: true,
+                    wire_model_id: None,
                 },
             ],
         }];
@@ -494,6 +496,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 })
                 .collect(),
         }

@@ -48,10 +48,15 @@ pub trait WireProfile {
     fn prompt_cache_key(&self) -> Option<&str>;
     /// Sent by `Dialect::Codex` only.
     fn client_metadata(&self) -> Option<&serde_json::Value>;
-    /// Provider kind whose stored replay items this request may carry back,
-    /// and the stamp the transport puts on captured ones; `None` replays nothing.
+    /// Provider kind whose stored replay items this request may carry back;
+    /// `None` replays nothing.
     fn replay_provider(&self) -> Option<&str> {
         None
+    }
+    /// The stamp the transport puts on captured replay items; the replay
+    /// provider unless a provider replays only part of its history.
+    fn capture_provider(&self) -> Option<&str> {
+        self.replay_provider()
     }
     /// `Generic`: the model reasons, so `include` requests encrypted reasoning.
     fn reasoning(&self) -> bool {
@@ -74,6 +79,21 @@ pub trait WireProfile {
     fn reject_root_object_union(&self) -> bool {
         false
     }
+    /// `Generic`: how system texts reach the model.
+    fn system_role(&self) -> SystemRole {
+        SystemRole::Instructions
+    }
+}
+
+/// Where a `Generic` request carries its system texts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SystemRole {
+    /// Joined with a blank line into `instructions`.
+    #[default]
+    Instructions,
+    /// One leading `{"role":"developer","content":<text>}` input item per text
+    /// (reasoning models with a developer role); no `instructions`.
+    Developer,
 }
 
 /// omp `normalizeOpenAIPromptCacheKey`: at most 64 UTF-16 units are kept,

@@ -122,6 +122,7 @@ pub(super) async fn run(
             expires_at_ms: projected.expires_at_ms,
             authorized_at_ms: Some(now),
             identity: projected.identity,
+            routing: Default::default(),
         }),
         true,
     ))

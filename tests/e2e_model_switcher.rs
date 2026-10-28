@@ -32,6 +32,7 @@ fn model(id: &str, display: &str, provider: &str, ctx: u32) -> ModelDescriptor {
         capabilities: HashSet::new(),
         pricing_tier: None,
         stale: false,
+        wire_model_id: None,
     }
 }
 

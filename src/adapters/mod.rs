@@ -108,5 +108,8 @@ pub mod xai;
 #[cfg(feature = "openai")]
 pub mod gemini_cli;
 
+#[cfg(feature = "openai")]
+pub mod github_copilot;
+
 #[cfg(feature = "ollama")]
 pub mod ollama;

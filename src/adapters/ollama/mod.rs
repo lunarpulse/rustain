@@ -310,6 +310,7 @@ impl StreamingProvider for OllamaAdapter {
                             capabilities,
                             pricing_tier: Some("local".to_string()),
                             stale: false,
+                            wire_model_id: None,
                         }
                     })
                     .collect();

@@ -164,6 +164,9 @@ pub enum DeviceFlow {
     Rfc8628(&'static Rfc8628Policy),
     /// OpenAI's custom device-authorization protocol; its constants are protocol-fixed.
     OpenAiCodex,
+    /// GitHub Copilot's custom device hook (Enterprise prompt, routing probe and
+    /// model-policy enablement); its constants are protocol-fixed.
+    GitHubCopilot,
 }
 
 /// RFC 8628 device authorization grant.
@@ -196,8 +199,21 @@ pub struct RefreshPolicy {
     pub require_project_id: bool,
 }
 
+/// How a stored grant is renewed.
+#[derive(Debug, Clone, Copy)]
+pub enum Refresh {
+    /// A token-endpoint refresh request.
+    Http(&'static RefreshPolicy),
+    /// No HTTP: the stored long-lived grant is re-served as the access token with
+    /// a new lifetime (GitHub Copilot).
+    StoredGrant { lifetime_ms: i64 },
+}
+
 #[derive(Debug)]
 pub struct OAuthApiPolicy {
     pub api_origin: &'static str,
-    pub refresh: &'static RefreshPolicy,
+    /// Stored grants may also leave for an `https` host equal to this suffix or
+    /// ending with `.<suffix>` (account-specific API hosts).
+    pub api_host_suffix: Option<&'static str>,
+    pub refresh: Refresh,
 }

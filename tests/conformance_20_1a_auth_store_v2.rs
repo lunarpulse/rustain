@@ -17,7 +17,7 @@ use rustain::domain::models::{
 };
 use rustain::domain::ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure, RefreshedTokens};
 use rustain::infrastructure::key_resolver::{KeyResolver, ResolveError};
-use rustain::infrastructure::provider_factory::{resolve_api_key, resolve_auth};
+use rustain::infrastructure::provider_factory::resolve_auth;
 use serde_json::{Value, json};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
@@ -104,6 +104,7 @@ fn oauth(token: &str, expires_at_ms: i64, account: Option<&str>) -> Credential {
         expires_at_ms,
         identity: identity(account, None, None),
         authorized_at_ms: None,
+        routing: Default::default(),
     })
 }
 
@@ -271,7 +272,9 @@ async fn k02_m01_env_beats_migrated_v1_through_production_resolver() {
     let path = tmp.path().join("auth.json");
     std::fs::write(&path, br#"{"version":1,"providers":{"migration":{"type":"api_key","api_key":"MIGRATION-STORED-LOSER","last_validated":null}}}"#).unwrap();
     assert_eq!(
-        resolve_api_key("STORY20_AUTH_KEY", "migration").as_deref(),
+        resolve_auth("STORY20_AUTH_KEY", "migration")
+            .map(|auth| auth.bearer_secret().expose_secret().to_owned())
+            .as_deref(),
         Some("MIGRATION-ENV-WINNER")
     );
     let store = FileAuthStore::at(path);
@@ -374,6 +377,7 @@ async fn k05_m04_oauth_models_mask_both_tokens_but_disk_retains_them() {
         access: "MASKING-ACCESS-CANARY".into(),
         account_id: None,
         project_id: None,
+        routing: Default::default(),
     };
     for output in [
         format!("{credential:?}"),
@@ -880,7 +884,9 @@ async fn k12_m12_binary_status_list_and_construction_share_six_fixture_cascade()
             env.remove("ANTHROPIC_API_KEY");
         }
         assert_eq!(
-            resolve_api_key("ANTHROPIC_API_KEY", "anthropic").as_deref(),
+            resolve_auth("ANTHROPIC_API_KEY", "anthropic")
+                .map(|auth| auth.bearer_secret().expose_secret().to_owned())
+                .as_deref(),
             expected_token,
             "construction fixture {case}"
         );
@@ -987,6 +993,7 @@ async fn k13_m11_missing_refresh_is_retained_and_identity_merges_per_field() {
         expires_at_ms: NOW,
         identity: identity(Some("old-account"), Some("old@email"), Some("old-project")),
         authorized_at_ms: None,
+        routing: Default::default(),
     });
     let id = store
         .upsert("merge", credential, CredentialOrigin::Login, false)
@@ -1239,6 +1246,7 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
                 expires_at_ms: FRESH,
                 identity: ident.clone(),
                 authorized_at_ms: None,
+                routing: Default::default(),
             })
         };
         let id = store
@@ -1273,6 +1281,7 @@ async fn oauth_upsert_matches_first_present_identity_and_never_matches_none() {
             expires_at_ms: FRESH,
             identity: identity(Some(account), Some("shared@email"), None),
             authorized_at_ms: None,
+            routing: Default::default(),
         })
     };
     let a = store
@@ -1814,6 +1823,7 @@ async fn refresh_loop_waiter_refreshes_peer_still_stale_revision_once() {
         expires_at_ms: NOW,
         identity: identity(Some("stale-peer"), None, None),
         authorized_at_ms: None,
+        routing: Default::default(),
     });
     assert_eq!(
         FileAuthStore::at(&path)
@@ -1994,7 +2004,9 @@ async fn sync_construction_skips_stale_rows_individually_before_env_and_stored_k
         let store = FileAuthStore::at(&path);
         let before = disk_state(&path);
         assert_eq!(
-            resolve_api_key("STORY20_AUTH_KEY", "sync").as_deref(),
+            resolve_auth("STORY20_AUTH_KEY", "sync")
+                .map(|auth| auth.bearer_secret().expose_secret().to_owned())
+                .as_deref(),
             expected,
             "fixture {case}"
         );

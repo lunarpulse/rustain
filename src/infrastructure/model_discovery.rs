@@ -60,6 +60,9 @@ fn fold_record(earlier: &mut ModelRecord, later: &ModelRecord) {
     if later.pricing_tier.is_some() {
         earlier.pricing_tier.clone_from(&later.pricing_tier);
     }
+    if later.wire_model_id.is_some() {
+        earlier.wire_model_id.clone_from(&later.wire_model_id);
+    }
 }
 
 /// D11 bottom: the adapter's canonical lookup, else (adapterless locked and
@@ -179,6 +182,7 @@ pub fn merge_catalog(layers: CatalogLayers, live: LiveOutcome) -> MergeResult {
                     .unwrap_or_else(|| HashSet::from([ModelCapability::ToolUse])),
                 pricing_tier: record.pricing_tier.clone(),
                 stale: rejected,
+                wire_model_id: record.wire_model_id.clone(),
             })
         })
         .collect();
@@ -606,6 +610,7 @@ mod tests {
             context_window: context,
             capabilities: capabilities.map(|caps| caps.into_iter().collect()),
             pricing_tier: None,
+            wire_model_id: None,
         }
     }
     fn catalog() -> CatalogLayers {
@@ -620,6 +625,7 @@ mod tests {
                 capabilities: HashSet::from([ModelCapability::ToolUse]),
                 pricing_tier: Some("base".into()),
                 stale: false,
+                wire_model_id: None,
             }],
             models_dev: vec![record(
                 "model",

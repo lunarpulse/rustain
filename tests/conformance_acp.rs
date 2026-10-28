@@ -756,6 +756,7 @@ async fn acp_authenticate_checks_credential_presence() {
         expires_at_ms: 0,
         identity: CredentialIdentity::default(),
         authorized_at_ms: None,
+        routing: Default::default(),
     });
     let available = run_case(vec![stale]).await;
     assert!(

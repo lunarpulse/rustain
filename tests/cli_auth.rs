@@ -12,7 +12,7 @@ use serial_test::serial;
 /// P0-4 negative control: auth.json has a key, NO env var → resolution yields auth.json key.
 #[test]
 #[serial]
-fn resolve_api_key_auth_json_fallback() {
+fn resolve_auth_auth_json_fallback() {
     use rustain::infrastructure::provider_factory;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -40,7 +40,8 @@ fn resolve_api_key_auth_json_fallback() {
     )
     .unwrap();
 
-    let key = provider_factory::resolve_api_key("TEST_AUTH_PROVIDER_KEY", "test-provider");
+    let key = provider_factory::resolve_auth("TEST_AUTH_PROVIDER_KEY", "test-provider")
+        .map(|auth| auth.bearer_secret().expose_secret().to_owned());
     assert_eq!(
         key.as_deref(),
         Some("stored-in-auth-json"),
@@ -56,7 +57,7 @@ fn resolve_api_key_auth_json_fallback() {
 /// P0-4 positive control: env var set → resolution yields env var (auth.json ignored).
 #[test]
 #[serial]
-fn resolve_api_key_env_var_wins_over_auth_json() {
+fn resolve_auth_env_var_wins_over_auth_json() {
     use rustain::infrastructure::provider_factory;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -82,7 +83,8 @@ fn resolve_api_key_env_var_wins_over_auth_json() {
     )
     .unwrap();
 
-    let key = provider_factory::resolve_api_key("TEST_AUTH_ENV_WIN_KEY", "test-provider");
+    let key = provider_factory::resolve_auth("TEST_AUTH_ENV_WIN_KEY", "test-provider")
+        .map(|auth| auth.bearer_secret().expose_secret().to_owned());
     assert_eq!(
         key.as_deref(),
         Some("from-env-var"),

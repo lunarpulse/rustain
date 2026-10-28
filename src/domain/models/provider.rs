@@ -51,6 +51,10 @@ pub struct ModelDescriptor {
     /// The credential was rejected; requests require signing in again.
     #[serde(default)]
     pub stale: bool,
+    /// The id sent on the wire when it differs from `model_id` (a synthetic
+    /// long-context sibling served under its base model's id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_model_id: Option<String>,
 }
 
 /// Lightweight descriptor for a registered provider.
@@ -78,6 +82,8 @@ pub struct ModelRecord {
     pub context_window: Option<u32>,
     pub capabilities: Option<std::collections::HashSet<ModelCapability>>,
     pub pricing_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_model_id: Option<String>,
 }
 
 /// Live discovery bound to the cache scope of the credential its request sent.
@@ -95,6 +101,7 @@ impl From<&ModelDescriptor> for ModelRecord {
             context_window: Some(model.context_window),
             capabilities: Some(model.capabilities.clone()),
             pricing_tier: model.pricing_tier.clone(),
+            wire_model_id: model.wire_model_id.clone(),
         }
     }
 }

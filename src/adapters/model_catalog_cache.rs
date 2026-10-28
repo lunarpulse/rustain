@@ -29,10 +29,15 @@ pub enum ScopeCredential<'a> {
     OAuthIdentity(&'a str),
     /// The bearer/API key actually sent (also for an OAuth row with no identity).
     Secret(&'a crate::domain::models::SecretString),
+    /// A resolved grant: its bearer, plus the routing of the row that produced it.
+    Grant(&'a crate::domain::models::ResolvedAuth),
     Keyless,
 }
 
 /// Opaque 16-hex cache scope over the endpoint `context` and the credential.
+/// Routing (enterprise domain, API endpoint) is part of the credential: two
+/// grants that differ only by where they are served never share a roster.
+/// Grants without routing keep their pre-routing digests.
 pub fn credential_scope(context: &str, credential: ScopeCredential<'_>) -> String {
     use crate::domain::models::secret::scope_digest;
     match credential {
@@ -40,14 +45,23 @@ pub fn credential_scope(context: &str, credential: ScopeCredential<'_>) -> Strin
             scope_digest(&[context.as_bytes(), b"oauth".as_slice(), identity.as_bytes()])
         }
         ScopeCredential::Secret(secret) => secret.fingerprint(context),
+        ScopeCredential::Grant(auth) => match auth.routing().filter(|r| !r.is_empty()) {
+            None => auth.bearer_secret().fingerprint(context),
+            Some(routing) => auth.bearer_secret().fingerprint(&format!(
+                "{context}\0enterprise={}\0endpoint={}",
+                routing.enterprise_domain.as_deref().unwrap_or_default(),
+                routing.api_endpoint.as_deref().unwrap_or_default()
+            )),
+        },
         ScopeCredential::Keyless => scope_digest(&[context.as_bytes(), b"keyless".as_slice()]),
     }
 }
 
 /// Cache scope of the credential a request resolved: a stored OAuth login by
 /// the account identity of that same row (stable across access rotation),
-/// otherwise — including an identity-less OAuth row — the exact bearer sent.
-/// Every request-resolving adapter stamps its discovery with this one function.
+/// otherwise — including an identity-less OAuth row — the exact bearer sent and
+/// the row's routing. Every request-resolving adapter stamps its discovery with
+/// this one function.
 pub fn request_scope(
     context: &str,
     resolved: &crate::infrastructure::key_resolver::Resolved,
@@ -56,10 +70,7 @@ pub fn request_scope(
         (crate::domain::models::AuthSource::StoredOAuth, Some(identity)) => {
             credential_scope(context, ScopeCredential::OAuthIdentity(identity))
         }
-        _ => credential_scope(
-            context,
-            ScopeCredential::Secret(resolved.auth.bearer_secret()),
-        ),
+        _ => credential_scope(context, ScopeCredential::Grant(&resolved.auth)),
     }
 }
 
@@ -392,6 +403,7 @@ mod tests {
                     context_window: Some(128_000),
                     capabilities: Some([ModelCapability::ToolUse].into_iter().collect()),
                     pricing_tier: Some("flagship".to_string()),
+                    wire_model_id: None,
                 },
                 ModelRecord {
                     model_id: "m2".to_string(),
@@ -491,6 +503,7 @@ mod tests {
                         capabilities: Default::default(),
                         pricing_tier: None,
                         stale: false,
+                        wire_model_id: None,
                     },
                 }],
             },

@@ -30,6 +30,9 @@ impl LoginUi for Ui {
     fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
         None
     }
+    fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+        panic!("API-key login never prompts for a plain line")
+    }
     fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         tokio_util::sync::CancellationToken::new()
     }
@@ -167,6 +170,9 @@ impl LoginUi for PatientUi {
     }
     fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
         None
+    }
+    fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+        panic!("API-key login never prompts for a plain line")
     }
     fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         tokio_util::sync::CancellationToken::new()

@@ -10,5 +10,8 @@ pub trait LoginUi: Send + Sync {
     fn on_progress(&self, message: &str);
     fn prompt_secret(&self, label: &str) -> BoxFuture<'_, Option<SecretString>>;
     fn manual_input(&self, prompt: &str) -> Option<BoxFuture<'static, Option<String>>>;
+    /// One plain, non-secret line; works without a terminal (piped input).
+    /// `prompt` is shown verbatim without a newline. End of input yields `None`.
+    fn prompt_line(&self, prompt: &str) -> BoxFuture<'_, Option<String>>;
     fn cancel_token(&self) -> CancellationToken;
 }

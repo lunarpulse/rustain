@@ -206,6 +206,7 @@ impl StreamingProvider for FailingHealthCheckProvider {
             capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
             pricing_tier: None,
             stale: false,
+            wire_model_id: None,
         }]
     }
 

@@ -18,6 +18,8 @@ const KEYS: &[&str] = &[
     "XAI_API_KEY",
     "XAI_OAUTH_TOKEN",
     "XAI_BASE_URL",
+    "COPILOT_GITHUB_TOKEN",
+    "COPILOT_INTEGRATION_ID",
     "ANTHROPIC_BASE_URL",
     "GW_TOKEN",
     "RUSTAIN_DATA_DIR",
@@ -116,6 +118,7 @@ async fn k01_home_key_provisions_without_config_and_env_unlocks() {
         [
             "anthropic",
             "deepseek",
+            "github-copilot",
             "google",
             "google-gemini-cli",
             "moonshot",
@@ -663,6 +666,9 @@ async fn recreated_store_real_login_rediscovery_detects_reused_id_and_revision()
         fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
             None
         }
+        fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
+        }
         fn cancel_token(&self) -> CancellationToken {
             CancellationToken::new()
         }
@@ -1051,7 +1057,7 @@ fn bundled_cc_token_future_store_warning_and_locked_filter_use_no_account_cache(
 
 #[tokio::test]
 #[serial]
-async fn v2_cache_refetches_once_and_captured_static_key_defines_scope() {
+async fn v2_cache_refetches_once_and_the_key_a_request_sends_defines_scope() {
     let world = World::new();
     let server = MockServer::start().await;
     world.set("OPENAI_API_KEY", "captured-key-A");
@@ -1066,15 +1072,15 @@ async fn v2_cache_refetches_once_and_captured_static_key_defines_scope() {
     let target = &layer.discovery_targets[0];
     let original = target.credential_fingerprint.clone();
     world.set("OPENAI_API_KEY", "different-current-key-B");
-    assert_eq!(
-        rustain::infrastructure::provider_factory::discovery_fingerprint(
-            "openai",
-            &["OPENAI_API_KEY"],
-            &cfg.provider["openai"],
-            target.provider.as_ref()
-        ),
-        original
+    // OpenAI-family adapters resolve their key per request (14-0 D-4): the scope
+    // follows the key the next request sends, never one captured at startup.
+    let current = rustain::infrastructure::provider_factory::discovery_fingerprint(
+        "openai",
+        &["OPENAI_API_KEY"],
+        &cfg.provider["openai"],
+        target.provider.as_ref(),
     );
+    assert_ne!(current, original);
     refresh_target(
         target,
         &ModelCatalogCache::new(),
@@ -1082,19 +1088,31 @@ async fn v2_cache_refetches_once_and_captured_static_key_defines_scope() {
         false,
     )
     .await;
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].headers["authorization"],
+        "Bearer different-current-key-B"
+    );
     let cached = ModelCatalogCache::new().load().await;
     assert_eq!(cached.providers["openai"].models[0].model_id, "v3-live");
+    assert_eq!(cached.providers["openai"].credential_fingerprint, current);
     let file = std::fs::read_to_string(world.dir.path().join("models_cache.json")).unwrap();
     for secret in ["captured-key-A", "different-current-key-B", &server.uri()] {
         assert!(!file.contains(secret));
     }
+    // A restart with key B scopes exactly as the refresh that sent key B stamped.
+    assert_eq!(
+        init_provider_layer(&cfg).discovery_targets[0].credential_fingerprint,
+        current
+    );
+    // Same key B, another endpoint: the endpoint alone changes the scope.
     let mut other = cfg;
     other.provider.get_mut("openai").unwrap().base_url =
         Some(format!("{}/another/v1", server.uri()).into());
     assert_ne!(
         init_provider_layer(&other).discovery_targets[0].credential_fingerprint,
-        original
+        current
     );
 }
 
@@ -1116,6 +1134,7 @@ async fn anthropic_stale_oauth_scope_survives_access_rotation_and_gateway_never_
             expires_at_ms: 0,
             authorized_at_ms: Some(1),
             identity: identity.clone(),
+            routing: Default::default(),
         })
     };
     let store = FileAuthStore::new();
@@ -1395,6 +1414,7 @@ async fn anthropic_fallthrough_roster_is_never_served_for_the_oauth_account() {
                     account_id: Some("account-A".into()),
                     ..Default::default()
                 },
+                routing: Default::default(),
             }),
             CredentialOrigin::Login,
             true,
@@ -1497,6 +1517,7 @@ async fn recreated_store_reusing_a_row_id_never_serves_the_previous_account() {
                 account_id: Some(account.into()),
                 ..Default::default()
             },
+            routing: Default::default(),
         })
     };
     let store = FileAuthStore::new();

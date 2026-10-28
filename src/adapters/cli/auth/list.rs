@@ -436,6 +436,7 @@ mod tests {
             expires_at_ms: 0,
             identity: CredentialIdentity::default(),
             authorized_at_ms: None,
+            routing: Default::default(),
         });
         let rows = build_list_rows(
             providers::all_providers(),

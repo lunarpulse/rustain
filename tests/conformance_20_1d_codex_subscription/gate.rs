@@ -32,6 +32,8 @@ const ENV: &[&str] = &[
     "XAI_API_KEY",
     "XAI_OAUTH_TOKEN",
     "XAI_BASE_URL",
+    "COPILOT_GITHUB_TOKEN",
+    "COPILOT_INTEGRATION_ID",
     "RUSTAIN_DATA_DIR",
     "RUSTAIN_CONFIG_DIR",
     "RUSTAIN_MODELS_DEV_URL",
@@ -716,6 +718,7 @@ async fn codex_rows_origin_gate_current_handle_and_exact_endpoint_spellings_agre
                 email: Some("gate@example.test".into()),
                 ..Default::default()
             },
+            routing: Default::default(),
         })
     };
     // Gate fixtures do not claim to exercise the login engine or JWT profile.

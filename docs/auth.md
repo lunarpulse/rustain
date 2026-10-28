@@ -63,10 +63,11 @@ neither stored nor environment credentials can serve.
 
 Anthropic supports Claude Pro/Max browser subscription login and API keys.
 ChatGPT Codex supports browser and device-code subscription login. xAI Grok OAuth
-(`xai-oauth`) supports device-code subscription login only. Google Cloud Code
-Assist (`google-gemini-cli`) supports browser subscription login only. Other keyed
-providers, including `xai` and `google`, use masked API-key entry with pre-storage
-validation.
+(`xai-oauth`) supports device-code subscription login only. GitHub Copilot
+(`github-copilot`) supports device login only, for github.com or a GitHub
+Enterprise domain. Google Cloud Code Assist (`google-gemini-cli`) supports browser
+subscription login only. Other keyed providers, including `xai` and `google`, use
+masked API-key entry with pre-storage validation.
 
 ### Usage
 
@@ -78,6 +79,7 @@ rustain auth login openai-codex --method oauth  # ChatGPT Plus/Pro browser login
 rustain auth login openai-codex --method device # ChatGPT Plus/Pro device code (headless)
 rustain auth login xai-oauth                    # SuperGrok / X Premium+ device code
 rustain auth login xai                          # store an xAI API key
+rustain auth login github-copilot               # GitHub Copilot device login (github.com or Enterprise)
 rustain auth login google-gemini-cli            # Gemini CLI (Cloud Code Assist) browser login
 rustain auth login ollama       # reports "no API key required"
 ```
@@ -118,6 +120,13 @@ omp-compatible request profile (`User-Agent: omp/18.12.6`); its availability doe
 not imply xAI approval. Provider policies or backend changes may restrict access
 or put your account at risk. rustain does not refuse subscription tokens. Use the
 separate `xai` API-key provider if you do not accept subscription-client risk.
+
+**GitHub Copilot subscription policy risk:** This third-party client uses GitHub
+Copilot subscription credentials obtained through GitHub's device login, with an
+omp-compatible wire identity (`copilot/1.0.82`, `copilot-developer-action/0.0.1` and
+the OpenCode / Copilot CLI OAuth client ids); its availability does not imply GitHub
+approval. Provider policies, organization settings or backend changes may restrict
+access or put your account at risk. rustain does not refuse subscription tokens.
 
 **Gemini CLI subscription policy risk:** This third-party client signs in with
 Google's Gemini CLI installed-app OAuth client and sends requests with the Gemini
@@ -275,6 +284,74 @@ A stored row's 401 refreshes once; a remaining 401/403 marks the provider
 `⚠ sign in again`. Health checks and login probes classify 404/405 as an
 unsupported endpoint. A login that changes stored rows triggers the post-login
 discovery described above.
+
+### GitHub Copilot (Individual, Business, Enterprise)
+
+Run `rustain auth login github-copilot`. It is a device login (no TTY, browser or
+local listener required). rustain first asks
+`GitHub Enterprise URL/domain (blank for github.com) (company.ghe.com): ` on one
+plain line: press Enter for github.com, or type a GitHub Enterprise Cloud domain or
+URL (`company.ghe.com`, `https://company.ghe.com/...`). For headless Enterprise
+logins pipe the answer on stdin (`printf 'company.ghe.com\n' | rustain auth login
+github-copilot`); end of input counts as blank. An answer that is not a host fails
+with `Invalid GitHub Enterprise URL/domain` before any request. github.com uses the
+minimal-grant OpenCode OAuth app; Enterprise domains use the GitHub Copilot CLI app.
+
+rustain then requests a device code from `https://<host>/login/device/code` (scope
+`read:user`) and prints `Enter code: <code>` and GitHub's verification URL on
+stderr. Polling follows omp's cadence: each poll waits 1.2 × the interval first;
+a `slow_down` adds 5 s to the interval (or replaces it with the one GitHub sends)
+and switches to 1.4 ×, until the code's
+`expires_in`, then fails with `Device flow timed out` (with a clock-drift hint after
+a `slow_down`). A rejected authorization ends with `Device flow failed: <error>`;
+other failures name only the HTTP status and a recognised OAuth error id. Ctrl-C
+cancels the login and nothing is stored.
+
+After approval rustain asks `https://api.github.com/copilot_internal/user` (always
+the public API, also for Enterprise accounts) for the account's Copilot API
+endpoint, then prints `Enabling models...` and enables every bundled Copilot model
+for the account (`POST <endpoint>/models/<id>/policy`, five at a time). Both steps
+are best-effort: a failed probe or policy request never fails the login. The
+GitHub token is stored as is (there is no token exchange) with the Enterprise
+domain and the API endpoint; its "refresh" sends no HTTP and re-serves the same
+token. A second `rustain auth login github-copilot` replaces the served Copilot
+login instead of adding a row, and the next request uses the new token.
+
+Alternatively, set `COPILOT_GITHUB_TOKEN` to a GitHub token, or to a JSON envelope
+`{"token":"…","enterpriseUrl":"company.ghe.com","apiEndpoint":"https://api.<plan>.githubcopilot.com"}`;
+only its `token` is ever sent. With neither source the selector shows
+``Set COPILOT_GITHUB_TOKEN or run `rustain auth login github-copilot` ``.
+
+**Requests.** Each request picks omp's wire API by model: `claude-haiku-*`,
+`claude-sonnet-*`, `claude-opus-*`, `claude-fable-*` and `claude-mythos-*` use
+Anthropic Messages (`<root>/v1/messages`, Bearer auth, no Claude Code betas),
+GPT-5/6, Grok 4.x, `oswe` and MAI models use Responses (`<root>/responses`), and
+every other model (older Claude ids such as `claude-3-5-sonnet` included) uses
+Chat Completions (`<root>/chat/completions`). The root is
+the stored or envelope API endpoint, else the Enterprise root
+(`https://copilot-api.<domain>`), else the endpoint re-probed by discovery, else
+`https://api.githubcopilot.com`; a configured `base_url` off `githubcopilot.com`
+is used verbatim (see `docs/configuration.md`). Requests carry omp's Copilot
+headers (`Copilot-Integration-Id`, `X-Initiator`, `Openai-Intent`,
+`X-GitHub-Api-Version`, `Copilot-Vision-Request` for image turns). The
+integration id is `copilot-chat` for github.com accounts and
+`copilot-developer-cli` for Enterprise accounts; set `COPILOT_INTEGRATION_ID` to
+pin another. When an unpinned request is denied (HTTP 403, or 400
+`model_not_supported`) rustain retries it once with the other identity and
+remembers the identity that worked for that credential and endpoint (in memory).
+
+**401 vs 403.** HTTP 401 means the GitHub token was revoked: the request fails
+with an authentication error and nothing can repair it except a new login. HTTP
+403 is a plan, model-policy or organization denial: the token stays valid, the
+login is never disabled, and the error explains the Copilot plan, model policy and
+integration-id options.
+
+Copilot discovers its live roster from `GET <root>/models` with the Copilot CLI
+identity (`copilot-developer-cli`, as omp; listing is not policy-gated); rows whose
+`capabilities.type` is not `chat` (embeddings) are dropped, and models with a
+long-context tier also get an opt-in `<id>-1m` sibling. Unlike other providers, a
+Copilot listing 403 keeps the cached roster (a plan or policy denial, not a
+rejected credential); only a 401 asks to sign in again.
 
 ### Google Cloud Code Assist (Gemini CLI)
 
@@ -491,6 +568,7 @@ same post-login path, as described above.
 | moonshot   | `MOONSHOT_API_KEY`   | ✓            |
 | xai        | `XAI_API_KEY`        | ✓            |
 | xai-oauth  | `XAI_OAUTH_TOKEN`    | ✓            |
+| github-copilot | `COPILOT_GITHUB_TOKEN` | ✓       |
 | google-gemini-cli | —             | ✓ (login)    |
 | ollama     | —                    | ✗            |
 

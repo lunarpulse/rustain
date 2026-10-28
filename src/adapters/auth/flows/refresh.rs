@@ -23,6 +23,7 @@
 //! SOFTWARE.
 
 use super::token::{self, Grant, Values};
+use crate::domain::models::auth_policy::Refresh;
 use crate::domain::{
     models::OAuthCredential,
     ports::{OAuthRefreshPort, RefreshFailure, RefreshedTokens},
@@ -53,11 +54,25 @@ impl OAuthRefreshPort for HttpOAuthRefresher {
         provider: &str,
         credential: &OAuthCredential,
     ) -> Result<RefreshedTokens, RefreshFailure> {
-        let policy = crate::adapters::auth::policies::oauth_api(provider)
+        let policy = match crate::adapters::auth::policies::oauth_api(provider)
             .ok_or_else(|| {
                 RefreshFailure::Transient("oauth refresh unavailable for provider".into())
             })?
-            .refresh;
+            .refresh
+        {
+            Refresh::Http(policy) => policy,
+            // omp refresh-same: the stored grant is the access token, so the
+            // resolver's fenced write only bumps the revision and lifetime.
+            Refresh::StoredGrant { lifetime_ms } => {
+                return Ok(RefreshedTokens {
+                    access: credential.refresh.clone(),
+                    refresh: Some(credential.refresh.clone()),
+                    expires_at_ms: crate::infrastructure::utils::auth_now_ms()
+                        .saturating_add(lifetime_ms),
+                    identity: credential.identity.clone(),
+                });
+            }
+        };
         // Checked before any HTTP. Transient, as omp does not classify it definitive,
         // so the row is never disabled for it.
         if policy.require_project_id && credential.identity.project_id.is_none() {

@@ -201,6 +201,37 @@ is still sent). `xai` keys have no origin rule. For `xai-oauth`, `provider_id`
 selects the login credential rows, so an alias map key with
 `provider_id = "xai-oauth"` uses the same login.
 
+### GitHub Copilot
+
+`github-copilot` is a built-in provider that needs no configuration; it defaults
+to `gpt-5.5` and bundles GitHub Copilot's 55 models. An explicit entry looks like:
+
+```toml
+[provider.copilot]
+provider_id = "github-copilot"
+kind = "github-copilot"
+model_id = "claude-sonnet-4.5"
+api_key_env = "COPILOT_GITHUB_TOKEN"
+enabled = true
+```
+
+Authenticate with `rustain auth login github-copilot` (device code, see
+`docs/auth.md`) or set `COPILOT_GITHUB_TOKEN`. Each request picks its wire API
+from the model id (Messages for `claude-haiku-*`, `claude-sonnet-*`,
+`claude-opus-*`, `claude-fable-*` and `claude-mythos-*`; Responses for GPT-5/6,
+Grok 4.x, `oswe` and MAI; Chat Completions otherwise, including older Claude ids
+such as `claude-3-5-sonnet`). Leave `base_url` unset: requests then go to the
+account's API endpoint learned at login (or its Enterprise root, or
+`https://api.githubcopilot.com`). A `base_url` on `githubcopilot.com` or a
+`*.githubcopilot.com` host still yields to the account endpoint; any other
+`base_url` (a proxy) is used verbatim. The origin guard applies to the configured
+`base_url`: a stored Copilot login is eligible only when it is unset or an
+`https` host on `githubcopilot.com`; another `base_url` makes the stored login
+ineligible, while an explicitly set `COPILOT_GITHUB_TOKEN` is still sent there.
+The account endpoint reported by GitHub at login (and an Enterprise
+`copilot-api.<domain>` root) is trusted as is, as in omp.
+`COPILOT_INTEGRATION_ID` pins the `Copilot-Integration-Id` header.
+
 ### Google Cloud Code Assist (Gemini CLI subscription)
 
 `google-gemini-cli` is a built-in provider that needs no configuration; its
@@ -240,6 +271,11 @@ field; live IDs are authoritative. Empty success is not an outage, and does not
 replace the last-good disk cache. Cache writes are advisory-locked across
 processes, so a login CLI and long-lived sessions retain each other's provider
 entries. The cache is scoped to the effective endpoint and credential.
+
+OpenAI-family Chat Completions providers (`openai`, `openrouter`, `google`,
+`deepseek`, `moonshot`, `openai-compatible`) resolve their key for every request,
+so a key changed with `rustain auth login` applies without a restart, and they now
+send the system prompt as the leading `system` message (it was previously dropped).
 
 The model selector retains empty providers and distinguishes **connected**,
 **sign in again** (401/403), **using cached model list**, **unavailable**, and

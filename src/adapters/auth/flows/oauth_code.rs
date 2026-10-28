@@ -176,6 +176,7 @@ pub(super) async fn run(
                 expires_at_ms: projected.expires_at_ms,
                 authorized_at_ms: Some(now),
                 identity: projected.identity,
+                routing: Default::default(),
             }),
             true,
         ))
@@ -211,6 +212,9 @@ mod tests {
         fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
             Some(Box::pin(std::future::pending()))
         }
+        fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
+        }
         fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
             tokio_util::sync::CancellationToken::new()
         }
@@ -231,6 +235,9 @@ mod tests {
         fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
             let pasted = self.0.try_lock().ok()?.take()?;
             Some(Box::pin(async move { pasted.await.ok() }))
+        }
+        fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
         }
         fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
             tokio_util::sync::CancellationToken::new()

@@ -57,6 +57,8 @@ pub(crate) enum Event {
         instructions: String,
     },
     Progress(String),
+    /// A plain-line prompt shown to the operator, verbatim.
+    Prompt(String),
     Sleep(u64),
     Request {
         method: String,
@@ -97,6 +99,8 @@ pub(crate) struct Recorder {
     timeline: Arc<Mutex<Vec<Event>>>,
     pub(crate) cancel: CancellationToken,
     cancel_at_sleep: Option<usize>,
+    /// The operator's answer to a plain-line prompt; `None` is end of input.
+    answer: Option<String>,
 }
 
 impl Recorder {
@@ -106,7 +110,13 @@ impl Recorder {
             timeline: Arc::new(Mutex::new(Vec::new())),
             cancel: CancellationToken::new(),
             cancel_at_sleep: None,
+            answer: None,
         }
+    }
+    /// The operator answers a plain-line prompt with `line` (as typed).
+    pub(crate) fn answering(mut self, line: &str) -> Self {
+        self.answer = Some(line.into());
+        self
     }
     /// The operator cancels while the flow waits in sleep number `index` (0-based);
     /// that sleep never finishes and the clock does not advance.
@@ -250,6 +260,11 @@ impl LoginUi for RecordingUi {
     }
     fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
         None
+    }
+    fn prompt_line(&self, prompt: &str) -> BoxFuture<'_, Option<String>> {
+        self.0.push(Event::Prompt(prompt.into()));
+        let answer = self.0.answer.clone();
+        Box::pin(async move { answer })
     }
     fn cancel_token(&self) -> CancellationToken {
         self.0.cancel.clone()

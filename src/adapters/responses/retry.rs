@@ -32,19 +32,19 @@ use std::{sync::LazyLock, time::Duration};
 /// Codex: a retry hint above this ends the attempt loop.
 pub(super) const CODEX_MAX_DELAY_MS: u64 = 300_000;
 /// `fetchWithRetry` default `maxDelayMs`: hint ceiling and default-delay cap.
-pub(super) const GENERIC_MAX_DELAY_MS: u64 = 60_000;
-pub(super) fn retry_status(status: u16) -> bool {
+pub(crate) const GENERIC_MAX_DELAY_MS: u64 = 60_000;
+pub(crate) fn retry_status(status: u16) -> bool {
     status == 408 || status == 429 || status >= 500
 }
 /// `resolveDefaultDelay` for the `n`-th retry (1-based): `min(500·2^(n-1), 60 000)`.
-pub(super) fn generic_delay(n: u32) -> u64 {
+pub(crate) fn generic_delay(n: u32) -> u64 {
     500u64
         .saturating_mul(1u64 << (n.saturating_sub(1)).min(32))
         .min(GENERIC_MAX_DELAY_MS)
 }
 /// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 /// reached no model, so the transport surfaces it instead of retrying.
-pub(super) fn admission_rejection(headers: &HeaderMap, body: &str) -> bool {
+pub(crate) fn admission_rejection(headers: &HeaderMap, body: &str) -> bool {
     static BODY: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r#""rate_limit_type"\s*:\s*"max_parallel_requests""#)
             .expect("fixed admission pattern")
@@ -56,7 +56,7 @@ pub(super) fn admission_rejection(headers: &HeaderMap, body: &str) -> bool {
         || BODY.is_match(body)
 }
 /// omp `isRequestBodyReadTimeout`: a full-replay request is not resent after it.
-pub(super) fn request_body_read_timeout(status: u16, body: &str) -> bool {
+pub(crate) fn request_body_read_timeout(status: u16, body: &str) -> bool {
     static BODY: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)\btimed out reading request body\b").expect("fixed timeout pattern")
     });
@@ -68,7 +68,9 @@ fn finite(s: &str) -> Option<f64> {
 fn millis(v: f64) -> u64 {
     v.clamp(0.0, u64::MAX as f64) as u64
 }
-fn date(s: &str) -> Option<i64> {
+/// JavaScript `Date.parse` over the forms providers send: RFC 2822, RFC 3339,
+/// or a naive UTC `YYYY-MM-DD HH:MM:SS`.
+pub(crate) fn date(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc2822(s)
         .or_else(|_| chrono::DateTime::parse_from_rfc3339(s))
         .ok()
@@ -262,10 +264,10 @@ fn scale() -> f64 {
 fn scale() -> f64 {
     1.0
 }
-pub(super) fn delay(ms: u64) -> Duration {
+pub(crate) fn delay(ms: u64) -> Duration {
     Duration::from_secs_f64((ms as f64 * scale() / 1000.0).min(86_400.0))
 }
-pub(super) fn stream_timeout() -> Duration {
+pub(crate) fn stream_timeout() -> Duration {
     let scale = scale();
     Duration::from_secs_f64(300.0 * if scale > 0.0 { scale } else { 1.0 })
 }

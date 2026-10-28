@@ -101,6 +101,7 @@ impl OpenAiCompatibleVariant {
                     capabilities: caps,
                     pricing_tier: Some("local".to_string()),
                     stale: false,
+                    wire_model_id: None,
                 }]
             }
             _ => {

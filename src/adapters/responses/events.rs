@@ -538,7 +538,7 @@ fn failure(value: &Value, dialect: Dialect) -> EventError {
 /// transport/overload wording (`TRANSIENT_TRANSPORT_PATTERN`,
 /// `PROVIDER_TRANSIENT_EXTRA_PATTERN`, unexpected socket close), never an
 /// account usage limit.
-fn generic_retryable(message: &str) -> bool {
+pub(crate) fn generic_retryable(message: &str) -> bool {
     static TRANSIENT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"(?i)\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b",
@@ -556,6 +556,12 @@ fn generic_retryable(message: &str) -> bool {
         ))
         .expect("fixed transient expression")
     });
+    !usage_limit(message) && TRANSIENT.is_match(message)
+}
+
+/// omp `matchesUsageLimitText`: an account usage/quota limit, which no
+/// seconds-scale provider retry clears.
+pub(crate) fn usage_limit(message: &str) -> bool {
     static USAGE_LIMIT: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(concat!(
             r"(?i)usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)",
@@ -565,7 +571,7 @@ fn generic_retryable(message: &str) -> bool {
         ))
         .expect("fixed usage-limit expression")
     });
-    !USAGE_LIMIT.is_match(message) && TRANSIENT.is_match(message)
+    USAGE_LIMIT.is_match(message)
 }
 
 fn nullish(value: &Value) -> Option<&Value> {

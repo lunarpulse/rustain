@@ -130,6 +130,7 @@ fn model(id: &str, name: &str) -> rustain::domain::models::provider::ModelDescri
         capabilities: std::collections::HashSet::from([ModelCapability::ToolUse]),
         pricing_tier: None,
         stale: false,
+        wire_model_id: None,
     }
 }
 

@@ -135,16 +135,21 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
         "adapters/auth/flows/token.rs",
         // One boundary builds the sensitive Cloud Code Assist bearer header (`bearer`).
         "adapters/gemini_cli/mod.rs",
+        // One boundary builds the sensitive `Authorization` value of every Chat
+        // Completions request (`authorization`); keys resolve per request.
         "adapters/openai/mod.rs",
         // One boundary builds the sensitive bearer header and decodes its request JWT.
         "adapters/openai_codex/profile.rs",
         // One boundary builds the sensitive xAI bearer header (`profile::bearer`).
         "adapters/xai/profile.rs",
+        // One boundary reads the GitHub token of a Copilot credential (`expose`):
+        // the bearer header, the env JSON envelope parse, the identity-cache
+        // digest and the routing probe; the token is never logged or stored.
+        "adapters/github_copilot/headers.rs",
         "domain/models/credential.rs",
         "domain/models/secret.rs",
         // Recovery compares the rejected bearer once to refuse same-token replay.
         "infrastructure/key_resolver.rs",
-        "infrastructure/provider_factory.rs",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -162,11 +167,13 @@ fn expose_secret_file_set_is_exactly_the_allowlist() {
     );
     // Exact pinned count of non-test expose_secret() calls.
     assert_eq!(
-        count, 23,
-        "expose_secret() pinned count changed: got {count}, expected 23. \
-         Codex, xAI and Gemini CLI each add one consolidated bearer-header boundary, \
-         the Gemini CLI project hook one provisioning-header boundary; \
-         stored credentials otherwise retain their secret wrappers."
+        count, 20,
+        "expose_secret() pinned count changed: got {count}, expected 20. \
+         Codex, xAI, GitHub Copilot and Gemini CLI each add one consolidated bearer \
+         boundary, the Gemini CLI project hook one provisioning-header boundary; \
+         Chat Completions keys resolve per request through one header boundary \
+         (the factory's `resolved_key` exposure is gone) and the profiled Messages \
+         transport adds one bearer-header boundary."
     );
 }
 
@@ -199,8 +206,12 @@ fn expose_secret_per_sink_positive_control() {
         "secret.rs must call expose_secret() (expose_secret_string helper)"
     );
     assert!(
-        files.contains("infrastructure/provider_factory.rs"),
-        "provider_factory.rs must call expose_secret() (resolve_api_key boundary)"
+        files.contains("adapters/github_copilot/headers.rs"),
+        "github_copilot/headers.rs must call expose_secret() (Copilot token boundary)"
+    );
+    assert!(
+        !files.contains("infrastructure/provider_factory.rs"),
+        "provider_factory.rs must not expose secrets: adapters resolve per request"
     );
 }
 
@@ -231,9 +242,9 @@ fn expose_url_file_set_is_exactly_the_allowlist() {
         // (in `tests/integration_mcp_http.rs`) drives a `user:pass@` URL through
         // a failed connect and greps every surfaced string for the password.
         "adapters/mcp/client.rs",
-        // Codex's, xAI's and Gemini CLI's distinct configured bases are each exposed
-        // once, only for their actual HTTP endpoint (`xai_configured_base`,
-        // `gemini_cli_base_url`).
+        // The Codex base and the xAI / GitHub Copilot configured bases
+        // (`configured_base`) and the Gemini CLI base (`gemini_cli_base_url`) are
+        // each exposed once, only for their actual HTTP endpoint.
         "infrastructure/provider_factory.rs",
     ]
     .iter()

@@ -127,6 +127,24 @@ impl LoginUi for TerminalUi {
         });
         Some(Box::pin(async move { rx.await.ok().flatten() }))
     }
+    fn prompt_line(&self, prompt: &str) -> BoxFuture<'_, Option<String>> {
+        let prompt = prompt.to_owned();
+        Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // Detached like `manual_input`: a cancelled login never waits on stdin.
+            std::thread::spawn(move || {
+                eprint!("{prompt}");
+                let _ = std::io::stderr().flush();
+                let mut value = String::new();
+                let value = match std::io::stdin().read_line(&mut value) {
+                    Ok(0) | Err(_) => None,
+                    Ok(_) => Some(value),
+                };
+                let _ = tx.send(value);
+            });
+            rx.await.ok().flatten()
+        })
+    }
     fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }

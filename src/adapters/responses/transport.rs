@@ -33,7 +33,7 @@ use super::{
     retry,
 };
 use crate::{
-    adapters::anthropic::sse::SseLineBuffer,
+    adapters::{anthropic::sse::SseLineBuffer, provider::request_profile::Alternate},
     domain::{
         errors::ProviderError,
         models::{CompletionOptions, Message, ResolvedAuth, StopReason, StreamChunk},
@@ -78,6 +78,28 @@ pub trait Wire: WireProfile + Send + Sync + 'static {
     ) -> ProviderError;
     /// Removes credential material of `request` from provider-supplied text.
     fn redact(&self, message: &str, request: &HeaderMap) -> String;
+    /// A 401 recovery replaced the credential: request-scoped state keyed by it
+    /// restarts, and `Some(url)` re-derives an endpoint that depends on it.
+    fn recovered(&mut self, _resolved: &Resolved) -> Result<Option<String>, ProviderError> {
+        Ok(None)
+    }
+    /// At most one header-only resend of a denied (400/403) attempt, decided
+    /// from this request's state only; `sent` holds the denied attempt's headers.
+    fn alternate(&mut self, _status: u16, _body: &str, _sent: &HeaderMap) -> Option<Alternate> {
+        None
+    }
+}
+
+/// What a denied attempt's identity alternate produced.
+enum Resent {
+    Opened(Opened),
+    Answer {
+        status: u16,
+        headers: HeaderMap,
+        body: String,
+    },
+    /// The resend got no answer (`None`: its deadline passed); it settled nothing.
+    Unanswered(Option<reqwest::Error>),
 }
 
 /// The cancellation token of the adapter's in-flight request.
@@ -240,8 +262,8 @@ struct Opened {
 
 impl<H: Host, W: Wire> Exchange<H, W> {
     fn mapper(&self) -> EventMapper {
-        // The capture stamp is the same profile value the request replays by.
-        let mapper = match self.wire.replay_provider() {
+        // Captured items carry the stamp a later request replays them by.
+        let mapper = match self.wire.capture_provider() {
             Some(provider) => EventMapper::with_replay(provider, &self.model),
             None => EventMapper::new(),
         };
@@ -303,6 +325,11 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                 )
                 .await?
             {
+                if let Some(url) = self.wire.recovered(&self.resolved)? {
+                    *self.request.url_mut() = url
+                        .parse()
+                        .map_err(|_| ProviderError::Other(texts.reuse.into()))?;
+                }
                 self.headers = self.wire.headers(&self.model, &self.resolved.auth)?;
                 continue;
             }
@@ -322,6 +349,34 @@ impl<H: Host, W: Wire> Exchange<H, W> {
                         continue;
                     }
                     return Err(ProviderError::ConnectionFailed(texts.error_body.into()));
+                }
+            };
+            let (status, headers, body) = match self
+                .resend_alternate(status, headers, body, deadline)
+                .await?
+            {
+                Resent::Opened(opened) => return Ok(opened),
+                Resent::Answer {
+                    status,
+                    headers,
+                    body,
+                } => (status, headers, body),
+                // As an unanswered send above: the denial is not the answer.
+                Resent::Unanswered(error) => {
+                    if error.is_none() && policy == RetryPolicy::Generic {
+                        return Err(policy.first_event_timeout());
+                    }
+                    if attempt + 1 < ATTEMPTS {
+                        attempt += 1;
+                        policy
+                            .backoff(&self.cancel, policy.default_delay(attempt), watchdog)
+                            .await?;
+                        continue;
+                    }
+                    return Err(match error {
+                        Some(e) => crate::adapters::provider::classify_reqwest_error(&e),
+                        None => policy.first_event_timeout(),
+                    });
                 }
             };
             let hint = retry::hint(&headers, &body, crate::infrastructure::utils::auth_now_ms());
@@ -348,6 +403,66 @@ impl<H: Host, W: Wire> Exchange<H, W> {
             }
             return Err(self.wire.http_error(status, &headers, &body, &self.headers));
         }
+    }
+
+    /// The identity alternate of a denied attempt: one resend with the state's
+    /// headers, settled with its answer. Without one, the denial is the answer.
+    async fn resend_alternate(
+        &mut self,
+        status: u16,
+        headers: HeaderMap,
+        body: String,
+        deadline: Instant,
+    ) -> Result<Resent, ProviderError> {
+        if !matches!(status, 400 | 403) {
+            return Ok(Resent::Answer {
+                status,
+                headers,
+                body,
+            });
+        }
+        let Some(alternate) = self.wire.alternate(status, &body, &self.headers) else {
+            return Ok(Resent::Answer {
+                status,
+                headers,
+                body,
+            });
+        };
+        let mut request = self
+            .request
+            .try_clone()
+            .ok_or_else(|| ProviderError::Other(self.policy.texts().reuse.into()))?;
+        let mut sent = self.headers.clone();
+        for (name, value) in &alternate.headers {
+            sent.insert(name, value.clone());
+        }
+        *request.headers_mut() = sent;
+        let answer = tokio::select! {biased;()=self.cancel.cancelled()=>return Err(ProviderError::Cancelled),result=tokio::time::timeout_at(deadline,self.host.client().execute(request))=>result};
+        let response = match answer {
+            Ok(Ok(response)) => response,
+            // omp: a resend that never answered settles nothing (the learned
+            // identity stays); the attempt loop retries its failure.
+            Ok(Err(error)) => return Ok(Resent::Unanswered(Some(error))),
+            Err(_) => return Ok(Resent::Unanswered(None)),
+        };
+        let ok = response.status().is_success();
+        (alternate.settle)(ok);
+        if ok {
+            self.wire.capture(response.headers()).await;
+            let deadline = match self.policy {
+                RetryPolicy::Codex => deadline,
+                RetryPolicy::Generic => Instant::now() + retry::stream_timeout(),
+            };
+            return Ok(Resent::Opened(Opened { response, deadline }));
+        }
+        let status = response.status().as_u16();
+        let headers = response.headers().clone();
+        let body = tokio::select! {biased;()=self.cancel.cancelled()=>return Err(ProviderError::Cancelled),body=tokio::time::timeout_at(deadline,response.text())=>body};
+        Ok(Resent::Answer {
+            status,
+            headers,
+            body: body.ok().and_then(Result::ok).unwrap_or_default(),
+        })
     }
 }
 

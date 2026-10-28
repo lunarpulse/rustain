@@ -152,7 +152,10 @@ fn test_anthropic_adapter_provider_id_and_models() {
 #[test]
 #[cfg(feature = "openai")]
 fn test_openai_adapter_variant_provider_ids() {
-    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use rustain::adapters::openai::{
+        ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+    };
+    use rustain::domain::models::SecretString;
 
     let cases = vec![
         (OpenAiCompatibleVariant::OpenAI, "openai"),
@@ -165,9 +168,9 @@ fn test_openai_adapter_variant_provider_ids() {
     for (variant, expected) in cases {
         let adapter = OpenAiAdapter::new(
             variant.clone(),
-            "test-key".to_string(),
+            ChatCredential::Fixed(SecretString::new("test-key".to_string())),
             "model-x".to_string(),
-            None,
+            StaticChatProfile::new(variant.default_base_url()),
         )
         .unwrap();
         assert_eq!(
@@ -187,7 +190,10 @@ fn test_openai_adapter_variant_provider_ids() {
 #[test]
 #[cfg(feature = "openai")]
 fn test_openai_adapter_known_catalog_for_each_variant() {
-    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use rustain::adapters::openai::{
+        ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+    };
+    use rustain::domain::models::SecretString;
 
     let cases = vec![
         (
@@ -211,9 +217,9 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
     for (variant, expected_ids) in cases {
         let adapter = OpenAiAdapter::new(
             variant.clone(),
-            "test-key".to_string(),
+            ChatCredential::Fixed(SecretString::new("test-key".to_string())),
             "model-x".to_string(),
-            None,
+            StaticChatProfile::new(variant.default_base_url()),
         )
         .unwrap();
         let models = adapter.list_models();
@@ -227,9 +233,9 @@ fn test_openai_adapter_known_catalog_for_each_variant() {
     // OpenRouter returns the full 8-model curated seed catalog
     let adapter = OpenAiAdapter::new(
         OpenAiCompatibleVariant::OpenRouter,
-        "test-key".to_string(),
+        ChatCredential::Fixed(SecretString::new("test-key".to_string())),
         "anthropic/claude-opus-4.7".to_string(),
-        None,
+        StaticChatProfile::new(OpenAiCompatibleVariant::OpenRouter.default_base_url()),
     )
     .unwrap();
     let models = adapter.list_models();
@@ -538,6 +544,7 @@ fn test_domain_models_no_adapter_imports() {
         capabilities: Default::default(),
         pricing_tier: None,
         stale: false,
+        wire_model_id: None,
     };
     assert_eq!(desc.model_id, "test");
     assert_eq!(desc.provider_id, "test");
@@ -648,7 +655,10 @@ fn test_ollama_adapter_show_absent_falls_back_to_tooluse() {
 #[test]
 #[cfg(feature = "openai")]
 fn test_openai_compatible_custom_unauthenticated() {
-    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use rustain::adapters::openai::{
+        ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+    };
+    use rustain::domain::models::SecretString;
 
     let adapter = OpenAiAdapter::new(
         OpenAiCompatibleVariant::Custom {
@@ -657,9 +667,9 @@ fn test_openai_compatible_custom_unauthenticated() {
             context_window: None,
             supports_tools: None,
         },
-        String::new(),
+        ChatCredential::Fixed(SecretString::new(String::new())),
         "qwen2.5-coder".to_string(),
-        Some("http://localhost:8080/v1".to_string()),
+        StaticChatProfile::new("http://localhost:8080/v1"),
     )
     .unwrap();
 
@@ -675,8 +685,10 @@ fn test_openai_compatible_custom_unauthenticated() {
 #[test]
 #[cfg(feature = "openai")]
 fn test_openai_compatible_custom_metadata() {
-    use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
-    use rustain::domain::models::ModelCapability;
+    use rustain::adapters::openai::{
+        ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+    };
+    use rustain::domain::models::{ModelCapability, SecretString};
 
     let adapter = OpenAiAdapter::new(
         OpenAiCompatibleVariant::Custom {
@@ -685,9 +697,9 @@ fn test_openai_compatible_custom_metadata() {
             context_window: Some(16_384),
             supports_tools: Some(false),
         },
-        String::new(),
+        ChatCredential::Fixed(SecretString::new(String::new())),
         "qwen2.5-coder".to_string(),
-        Some("http://localhost:8080/v1".to_string()),
+        StaticChatProfile::new("http://localhost:8080/v1"),
     )
     .unwrap();
 
@@ -751,6 +763,7 @@ fn descriptor(provider_id: &str, model_id: &str) -> ModelDescriptor {
         capabilities: Default::default(),
         pricing_tier: None,
         stale: false,
+        wire_model_id: None,
     }
 }
 

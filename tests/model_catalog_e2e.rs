@@ -16,6 +16,7 @@ fn model(id: &str, provider: &str, ctx: u32) -> ModelDescriptor {
         capabilities: HashSet::new(),
         pricing_tier: None,
         stale: false,
+        wire_model_id: None,
     }
 }
 
@@ -100,13 +101,16 @@ async fn discovery_cache_ttl_marks_recent_entry_fresh() {
 fn fresh_adapter_uses_bundled_models_before_discovery() {
     #[cfg(feature = "openai")]
     {
-        use rustain::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+        use rustain::adapters::openai::{
+            ChatCredential, OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile,
+        };
+        use rustain::domain::models::SecretString;
         use rustain::domain::ports::StreamingProvider;
         let adapter = OpenAiAdapter::new(
             OpenAiCompatibleVariant::OpenAI,
-            "test-key".to_string(),
+            ChatCredential::Fixed(SecretString::new("test-key".to_string())),
             "gpt-4o".to_string(),
-            None,
+            StaticChatProfile::new(OpenAiCompatibleVariant::OpenAI.default_base_url()),
         )
         .unwrap();
         let models = adapter.list_models();
@@ -166,6 +170,7 @@ fn keyword_search_accepts_unicode() {
             capabilities: HashSet::new(),
             pricing_tier: None,
             stale: false,
+            wire_model_id: None,
         }],
     }];
     ms.search_active = true;

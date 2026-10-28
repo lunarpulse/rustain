@@ -57,6 +57,7 @@ pub fn parse_and_filter_models(
             context_window: item.context_length,
             capabilities,
             pricing_tier: None,
+            wire_model_id: None,
         });
     }
 

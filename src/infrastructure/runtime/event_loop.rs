@@ -10973,6 +10973,7 @@ mod tests {
             capabilities: Default::default(),
             pricing_tier: None,
             stale: false,
+            wire_model_id: None,
         }
     }
 

@@ -3843,6 +3843,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 }],
             },
             ProviderColumn {
@@ -3860,6 +3861,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 }],
             },
         ];
@@ -3890,6 +3892,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
                 ModelDescriptor {
                     model_id: "m2".to_string(),
@@ -3899,6 +3902,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
             ],
         }];
@@ -3948,6 +3952,7 @@ mod tests {
                 capabilities: Default::default(),
                 pricing_tier: None,
                 stale: false,
+                wire_model_id: None,
             }],
         }];
         ms.selected_provider = 0;
@@ -3977,6 +3982,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
                 ModelDescriptor {
                     model_id: "claude-sonnet".to_string(),
@@ -3986,6 +3992,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
             ],
         }];
@@ -4027,6 +4034,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
                 ModelDescriptor {
                     model_id: "openai/gpt-4o".to_string(),
@@ -4036,6 +4044,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
                 ModelDescriptor {
                     model_id: "google/gemini-flash".to_string(),
@@ -4045,6 +4054,7 @@ mod tests {
                     capabilities: Default::default(),
                     pricing_tier: None,
                     stale: false,
+                    wire_model_id: None,
                 },
             ],
         }];
@@ -4173,6 +4183,7 @@ mod tests {
                 capabilities: Default::default(),
                 pricing_tier: None,
                 stale: false,
+                wire_model_id: None,
             }],
         });
         ms.search_active = true;

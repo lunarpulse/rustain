@@ -433,6 +433,7 @@ mod tests {
             expires_at_ms: 0,
             identity: CredentialIdentity::default(),
             authorized_at_ms: None,
+            routing: Default::default(),
         });
         let rows = build_status_rows(providers::all_providers(), &[disabled, stale], |_| None);
         let human = render_human(&rows);

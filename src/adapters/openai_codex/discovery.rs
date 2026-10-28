@@ -265,6 +265,7 @@ fn records(payload: &Value, model_filter: &[String]) -> Option<Vec<ModelRecord>>
         },
         capabilities: entry.capabilities.clone(),
         pricing_tier: None,
+        wire_model_id: None,
     };
     let mut ranked = Vec::with_capacity(entries.len());
     for entry in &entries {

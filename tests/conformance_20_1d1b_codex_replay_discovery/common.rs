@@ -52,6 +52,8 @@ const ENV: &[&str] = &[
     "XAI_API_KEY",
     "XAI_OAUTH_TOKEN",
     "XAI_BASE_URL",
+    "COPILOT_GITHUB_TOKEN",
+    "COPILOT_INTEGRATION_ID",
 ];
 
 /// Environment guard; callers hold the shared `#[serial]` lock.

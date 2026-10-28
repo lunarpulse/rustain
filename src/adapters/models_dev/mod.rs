@@ -239,6 +239,7 @@ fn reduce_model_metadata(catalog: &Catalog) -> BTreeMap<String, Vec<ModelRecord>
                 capabilities: (tool_call.is_some() || reasoning.is_some() || input.is_some())
                     .then_some(capabilities),
                 pricing_tier: None,
+                wire_model_id: None,
             });
         }
         records.sort_by(|a, b| a.model_id.cmp(&b.model_id));

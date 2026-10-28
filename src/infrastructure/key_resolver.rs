@@ -37,7 +37,8 @@ use tokio::sync::Mutex;
 use crate::domain::errors::{AuthError, ProviderError};
 use crate::domain::models::{
     AuthSource, CasOutcome, Credential, CredentialGeneration, CredentialId, CredentialIdentity,
-    CredentialStamp, OAuthCredential, ResolvedAuth, SecretString, StoredCredential,
+    CredentialRouting, CredentialStamp, OAuthCredential, ResolvedAuth, SecretString,
+    StoredCredential,
 };
 use crate::domain::ports::{AuthStorePort, OAuthRefreshPort, RefreshFailure};
 use crate::domain::services::key_cascade::{self, CascadeInputs, SelectionMaterial};
@@ -78,6 +79,7 @@ fn resolved_oauth(
     row: CredentialStamp,
     access: SecretString,
     identity: &CredentialIdentity,
+    routing: &CredentialRouting,
 ) -> Resolved {
     Resolved {
         source: AuthSource::StoredOAuth,
@@ -85,6 +87,7 @@ fn resolved_oauth(
             access,
             account_id: identity.account_id.clone(),
             project_id: identity.project_id.clone(),
+            routing: routing.clone(),
         },
         row: Some(row),
         identity: identity.key(crate::adapters::auth::policies::org_scoped_identity(
@@ -438,6 +441,7 @@ impl KeyResolver {
                         expires_at_ms: tokens.expires_at_ms,
                         authorized_at_ms: oauth.authorized_at_ms,
                         identity: identity.clone(),
+                        routing: oauth.routing.clone(),
                     })
                 };
                 let mut persisted = self
@@ -462,6 +466,7 @@ impl KeyResolver {
                             row.stamp(),
                             access,
                             &identity,
+                            &oauth.routing,
                         )));
                     }
                 }
@@ -476,6 +481,7 @@ impl KeyResolver {
                             },
                             access,
                             &identity,
+                            &oauth.routing,
                         )))
                     }
                     Ok(CasOutcome::Stale) => self.peer_fresh(provider, row.stamp()).await,
@@ -544,6 +550,7 @@ impl KeyResolver {
                     row.stamp(),
                     oauth.access.clone(),
                     &oauth.identity,
+                    &oauth.routing,
                 ))
             }
             _ => None,

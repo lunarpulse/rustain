@@ -99,6 +99,9 @@ impl LoginUi for Ui {
     fn on_device_code(&self, _: &str, _: &str, _: &str) {
         panic!("a browser login never shows a device code");
     }
+    fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+        panic!("a browser login never prompts for a line");
+    }
     fn on_progress(&self, message: &str) {
         let _ = self.progress.send(message.into());
     }
@@ -682,6 +685,9 @@ impl LoginUi for PasteUi {
     }
     fn on_device_code(&self, _: &str, _: &str, _: &str) {
         panic!("a browser login never shows a device code");
+    }
+    fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+        panic!("a browser login never prompts for a line");
     }
     fn on_progress(&self, _: &str) {}
     fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {

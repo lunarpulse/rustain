@@ -182,6 +182,7 @@ fn records(kind: &str, payload: &Value, model_filter: &[String]) -> Option<Vec<M
             context_window: row.context,
             capabilities: None,
             pricing_tier: None,
+            wire_model_id: None,
         });
     Some(
         bundled

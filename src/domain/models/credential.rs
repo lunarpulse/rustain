@@ -22,6 +22,25 @@ pub struct OAuthCredential {
     #[serde(default, rename = "authorized_at")]
     pub authorized_at_ms: Option<i64>,
     pub identity: CredentialIdentity,
+    /// Where the grant's API is served; empty for every provider without routing.
+    #[serde(default)]
+    pub routing: CredentialRouting,
+}
+
+/// Non-secret request routing learned at login (GitHub Copilot Enterprise domain
+/// and the account's API endpoint). Absent on disk when empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRouting {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enterprise_domain: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_endpoint: Option<String>,
+}
+
+impl CredentialRouting {
+    pub fn is_empty(&self) -> bool {
+        self.enterprise_domain.is_none() && self.api_endpoint.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +195,9 @@ impl Serialize for Credential {
                 if let Some(authorized_at) = oauth.authorized_at_ms {
                     map.serialize_entry("authorized_at", &authorized_at)?;
                 }
+                if !oauth.routing.is_empty() {
+                    map.serialize_entry("routing", &oauth.routing)?;
+                }
             }
         }
         map.end()
@@ -197,6 +219,8 @@ impl<'de> Deserialize<'de> for Credential {
                 #[serde(default)]
                 authorized_at: Option<i64>,
                 identity: CredentialIdentity,
+                #[serde(default)]
+                routing: CredentialRouting,
             },
         }
         Ok(match Tagged::deserialize(deserializer)? {
@@ -207,12 +231,14 @@ impl<'de> Deserialize<'de> for Credential {
                 expires_at,
                 authorized_at,
                 identity,
+                routing,
             } => Self::OAuth(OAuthCredential {
                 access,
                 refresh,
                 expires_at_ms: expires_at,
                 authorized_at_ms: authorized_at,
                 identity,
+                routing,
             }),
         })
     }
@@ -246,6 +272,8 @@ pub enum ResolvedAuth {
         account_id: Option<String>,
         /// The project of the same row as `access` (Cloud Code Assist); not a secret.
         project_id: Option<String>,
+        /// Routing of the same stored row that produced `access`.
+        routing: CredentialRouting,
     },
 }
 
@@ -260,6 +288,14 @@ impl ResolvedAuth {
     pub fn bearer_secret(&self) -> &SecretString {
         match self {
             Self::ApiKey(s) | Self::OAuth { access: s, .. } => s,
+        }
+    }
+
+    /// The routing of the stored row behind an OAuth grant; `None` for keys.
+    pub fn routing(&self) -> Option<&CredentialRouting> {
+        match self {
+            Self::ApiKey(_) => None,
+            Self::OAuth { routing, .. } => Some(routing),
         }
     }
 }
@@ -349,6 +385,41 @@ mod tests {
         assert!(old.get("authorized_at").is_none());
         assert!(old["identity"].get("org_id").is_none());
         assert!(old["identity"].get("org_name").is_none());
+        assert!(old.get("routing").is_none());
+    }
+
+    #[test]
+    fn tagged_oauth_read_keeps_routing_and_legacy_rows_read_empty() {
+        let routed: Credential = serde_json::from_value(serde_json::json!({
+            "type": "oauth", "access": "a", "refresh": "a", "expires_at": 1, "identity": {},
+            "routing": {"enterprise_domain": "company.ghe.com",
+                        "api_endpoint": "https://api.business.githubcopilot.com"}
+        }))
+        .unwrap();
+        let Credential::OAuth(oauth) = &routed else {
+            panic!("an OAuth row")
+        };
+        assert_eq!(
+            oauth.routing,
+            CredentialRouting {
+                enterprise_domain: Some("company.ghe.com".into()),
+                api_endpoint: Some("https://api.business.githubcopilot.com".into()),
+            }
+        );
+        // The routing is not secret: the masked projection carries it verbatim.
+        assert_eq!(
+            serde_json::to_value(&routed).unwrap()["routing"],
+            serde_json::json!({"enterprise_domain": "company.ghe.com",
+                               "api_endpoint": "https://api.business.githubcopilot.com"})
+        );
+        let legacy: Credential = serde_json::from_value(serde_json::json!({
+            "type": "oauth", "access": "a", "refresh": "a", "expires_at": 1, "identity": {}
+        }))
+        .unwrap();
+        let Credential::OAuth(oauth) = legacy else {
+            panic!("an OAuth row")
+        };
+        assert!(oauth.routing.is_empty());
     }
 
     #[test]
@@ -367,6 +438,7 @@ mod tests {
             expires_at_ms: 123,
             authorized_at_ms: None,
             identity,
+            routing: CredentialRouting::default(),
         });
         assert!(credential.expose_api_key().is_none());
         let row = StoredCredential {
@@ -382,6 +454,7 @@ mod tests {
             access: "ACCESS-CANARY".into(),
             account_id: None,
             project_id: None,
+            routing: CredentialRouting::default(),
         };
         for output in [
             format!("{row:?} {row}"),

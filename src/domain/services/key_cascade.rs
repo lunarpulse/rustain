@@ -60,6 +60,7 @@ pub fn select<'a>(
                         access: oauth.access.clone(),
                         account_id: oauth.identity.account_id.clone(),
                         project_id: oauth.identity.project_id.clone(),
+                        routing: oauth.routing.clone(),
                     })
                 } else {
                     SelectionMaterial::NeedsRefresh {
@@ -141,6 +142,7 @@ mod tests {
                 expires_at_ms,
                 identity: CredentialIdentity::default(),
                 authorized_at_ms: None,
+                routing: Default::default(),
             }),
             last_validated: None,
             disabled_cause: None,

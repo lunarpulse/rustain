@@ -1,5 +1,11 @@
+#[cfg(feature = "openai")]
+pub mod http_retry;
 pub mod registry;
+#[cfg(feature = "openai")]
+pub mod request_profile;
 pub mod router;
+#[cfg(feature = "openai")]
+pub mod stream_retry;
 
 pub use registry::ProviderRegistry;
 pub use router::ProviderRouter;

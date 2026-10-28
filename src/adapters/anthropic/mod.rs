@@ -29,6 +29,8 @@
 
 pub mod claude_code;
 mod discovery;
+#[cfg(feature = "openai")]
+mod profiled;
 pub mod sse;
 pub mod stream;
 pub mod types;
@@ -78,6 +80,9 @@ pub struct AnthropicAdapter {
     #[allow(dead_code)] // Used by abort() method
     abort_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     discovered_models: arc_swap::ArcSwap<Option<Vec<crate::domain::models::ModelDescriptor>>>,
+    /// A gateway's request policy; `None` keeps the Anthropic and Claude Code rules.
+    #[cfg(feature = "openai")]
+    request_profile: Option<Arc<dyn crate::adapters::provider::request_profile::RequestProfile>>,
 }
 
 impl AnthropicAdapter {
@@ -117,7 +122,26 @@ impl AnthropicAdapter {
             ),
             abort_handle: Arc::new(Mutex::new(None)),
             discovered_models: arc_swap::ArcSwap::from_pointee(None),
+            #[cfg(feature = "openai")]
+            request_profile: None,
         })
+    }
+
+    /// A Messages transport whose base URL, bearer, headers, errors and attempts
+    /// come from `profile`; Claude Code detection never applies.
+    #[cfg(feature = "openai")]
+    pub fn with_profile(
+        handle: crate::infrastructure::key_resolver::CredentialHandle,
+        model: String,
+        profile: Arc<dyn crate::adapters::provider::request_profile::RequestProfile>,
+    ) -> Result<Self, ProviderError> {
+        let mut adapter = Self::with_credential(
+            AnthropicCredential::Resolved(handle),
+            model,
+            Some("https://api.anthropic.com".into()),
+        )?;
+        adapter.request_profile = Some(profile);
+        Ok(adapter)
     }
 
     /// Resolve once per logical request; only a rejected stored row can be recovered.
@@ -218,6 +242,19 @@ fn validate_credential(value: &str) -> Result<(), ProviderError> {
     Ok(())
 }
 
+/// The one exposure of a profiled transport's bearer: a sensitive header value.
+#[cfg(feature = "openai")]
+fn bearer_header(
+    secret: &crate::domain::models::SecretString,
+) -> Result<reqwest::header::HeaderValue, ProviderError> {
+    let value = secret.expose_secret();
+    validate_credential(value)?;
+    let mut header = reqwest::header::HeaderValue::try_from(format!("Bearer {value}"))
+        .map_err(|_| ProviderError::Other("Invalid credential".into()))?;
+    header.set_sensitive(true);
+    Ok(header)
+}
+
 impl fmt::Debug for AnthropicAdapter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let auth_display = match &self.credential {
@@ -244,6 +281,11 @@ impl StreamingProvider for AnthropicAdapter {
             return Err(ProviderError::Other(
                 "Cannot send empty messages list to Anthropic API".to_string(),
             ));
+        }
+
+        #[cfg(feature = "openai")]
+        if let Some(profile) = &self.request_profile {
+            return self.stream_profiled(profile, messages, options).await;
         }
 
         let (mut resolved, plan) = self.current_auth().await?;

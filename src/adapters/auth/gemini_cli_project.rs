@@ -553,6 +553,9 @@ mod timeout_tests {
         ) -> Option<futures::future::BoxFuture<'static, Option<String>>> {
             None
         }
+        fn prompt_line(&self, _: &str) -> futures::future::BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
+        }
         fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
             tokio_util::sync::CancellationToken::new()
         }

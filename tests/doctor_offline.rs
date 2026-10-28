@@ -499,9 +499,11 @@ async fn test_probe_non_billable_uses_get_models() {
     // Build an OpenAI-compatible adapter pointing at the mock server
     let adapter = rustain::adapters::openai::OpenAiAdapter::new(
         rustain::adapters::openai::OpenAiCompatibleVariant::OpenAI,
-        "test-key".to_string(),
+        rustain::adapters::openai::ChatCredential::Fixed(
+            rustain::domain::models::SecretString::new("test-key".to_string()),
+        ),
         "gpt-4o".to_string(),
-        Some(format!("{}/v1", mock_server.uri())),
+        rustain::adapters::openai::StaticChatProfile::new(&format!("{}/v1", mock_server.uri())),
     )
     .unwrap();
 

@@ -18,16 +18,6 @@ pub fn resolve_auth(
     resolve_auth_with_runtime(api_key_env, provider_id, None)
 }
 
-/// Convenience wrapper that unwraps `ResolvedAuth` to a plain `String` key.
-/// Used by the OpenAI-compatible builders that take a bare `String`.
-pub fn resolve_api_key(api_key_env: &str, provider_id: &str) -> Option<String> {
-    resolved_key(resolve_auth(api_key_env, provider_id))
-}
-
-fn resolved_key(auth: Option<crate::domain::models::ResolvedAuth>) -> Option<String> {
-    auth.map(|a| a.bearer_secret().expose_secret().to_owned())
-}
-
 fn resolve_auth_with_runtime(
     api_key_env: &str,
     provider_id: &str,
@@ -74,6 +64,18 @@ pub fn discovery_base_url(provider_id: &str, cfg: &ProviderConfig) -> String {
     #[cfg(feature = "openai")]
     if let Some(xai) = crate::adapters::xai::XaiKind::from_id(kind) {
         return xai_base_url(xai, cfg);
+    }
+    #[cfg(feature = "openai")]
+    if kind == "github-copilot" {
+        // Origin guard and cache identity: the configured base, else the
+        // canonical API root; requests derive their root per credential.
+        return crate::infrastructure::utils::normalize_base_url(
+            &configured_base(cfg).map(str::to_owned).unwrap_or_else(|| {
+                crate::adapters::auth::policies::endpoint(
+                    crate::adapters::github_copilot::DEFAULT_BASE_URL,
+                )
+            }),
+        );
     }
     let base = cfg
         .base_url
@@ -144,7 +146,7 @@ pub fn discovery_fingerprint(
             (crate::domain::models::AuthSource::StoredOAuth, Some(identity), _) => {
                 ScopeCredential::OAuthIdentity(identity)
             }
-            (_, _, SelectionMaterial::Ready(auth)) => ScopeCredential::Secret(auth.bearer_secret()),
+            (_, _, SelectionMaterial::Ready(auth)) => ScopeCredential::Grant(auth),
             // An identity-less OAuth row awaiting refresh: the bearer a request
             // will send is unknown, so no cached roster can match at startup.
             _ => return String::new(),
@@ -178,12 +180,11 @@ pub fn build_provider_for_config(
         "openai-codex" => build_codex_from_config(cfg),
         "xai" | "xai-oauth" => build_xai_from_config(provider_id, cfg, kind),
         "google-gemini-cli" => build_gemini_cli_from_config(cfg),
+        "github-copilot" => build_copilot_from_config(cfg),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                // Story 13.4a AC7: env var → auth.json → empty.
-                let api_key = resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default();
-                let adapter = build_openai_from_config(provider_id, cfg, api_key)?;
+                let adapter = build_openai_from_config(provider_id, cfg, None)?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -208,9 +209,7 @@ pub fn build_provider_for_config(
         "openai-compatible" => {
             #[cfg(feature = "openai")]
             {
-                // Story 13.4a AC7: env var → auth.json → empty.
-                let api_key = resolve_api_key(&cfg.api_key_env, provider_id).unwrap_or_default();
-                let adapter = build_openai_compatible_from_config(provider_id, cfg, api_key)?;
+                let adapter = build_openai_compatible_from_config(provider_id, cfg, None)?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -244,7 +243,7 @@ pub fn build_provider_for_config_with_key(
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
     let auth = (!matches!(
         kind,
-        "openai-codex" | "xai" | "xai-oauth" | "google-gemini-cli"
+        "openai-codex" | "xai" | "xai-oauth" | "google-gemini-cli" | "github-copilot"
     ))
     .then(|| {
         crate::domain::models::ResolvedAuth::ApiKey(crate::domain::models::SecretString::new(
@@ -263,14 +262,13 @@ pub fn build_provider_for_config_with_key(
         "google-gemini-cli" => Err(ProviderError::Other(
             "google-gemini-cli has no API-key login".into(),
         )),
+        "github-copilot" => Err(ProviderError::Other(
+            "github-copilot has no API-key login".into(),
+        )),
         "openai" | "openrouter" | "google" | "deepseek" | "moonshot" => {
             #[cfg(feature = "openai")]
             {
-                let adapter = build_openai_from_config(
-                    provider_id,
-                    cfg,
-                    resolved_key(auth).unwrap_or_default(),
-                )?;
+                let adapter = build_openai_from_config(provider_id, cfg, Some(key))?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -295,11 +293,7 @@ pub fn build_provider_for_config_with_key(
         "openai-compatible" => {
             #[cfg(feature = "openai")]
             {
-                let adapter = build_openai_compatible_from_config(
-                    provider_id,
-                    cfg,
-                    resolved_key(auth).unwrap_or_default(),
-                )?;
+                let adapter = build_openai_compatible_from_config(provider_id, cfg, Some(key))?;
                 Ok(adapter)
             }
             #[cfg(not(feature = "openai"))]
@@ -377,16 +371,26 @@ pub(crate) fn anthropic_base_url(
         .unwrap_or_else(|| crate::adapters::auth::policies::endpoint("https://api.anthropic.com"))
 }
 
-/// Stored subscription credentials may only leave for their policy origin.
+/// Stored subscription credentials may only leave for their policy origin, or an
+/// `https` host under the policy's API host suffix.
 pub fn oauth_allowed(kind: &str, base_url: &str) -> bool {
     let Some(policy) = crate::adapters::auth::policies::oauth_api(kind) else {
         return true;
     };
     let official = crate::adapters::auth::policies::endpoint(policy.api_origin);
-    match (url::Url::parse(base_url), url::Url::parse(&official)) {
-        (Ok(base), Ok(official)) => base.origin() == official.origin(),
-        _ => false,
-    }
+    let Ok(base) = url::Url::parse(base_url) else {
+        return false;
+    };
+    let suffixed = policy.api_host_suffix.is_some_and(|suffix| {
+        base.scheme() == "https"
+            && base.host_str().is_some_and(|host| {
+                host == suffix
+                    || host
+                        .strip_suffix(suffix)
+                        .is_some_and(|label| label.ends_with('.'))
+            })
+    });
+    suffixed || url::Url::parse(&official).is_ok_and(|official| base.origin() == official.origin())
 }
 
 #[cfg(feature = "anthropic")]
@@ -485,9 +489,10 @@ fn build_codex_from_config(
     }
 }
 
-/// The one exposure of an xAI entry's configured base: its actual HTTP endpoint.
+/// The one exposure of an xAI or GitHub Copilot entry's configured base: its
+/// actual HTTP endpoint, passed to the adapter verbatim.
 #[cfg(feature = "openai")]
-fn xai_configured_base(cfg: &ProviderConfig) -> Option<&str> {
+fn configured_base(cfg: &ProviderConfig) -> Option<&str> {
     cfg.base_url.as_ref().map(|url| url.expose_url())
 }
 
@@ -496,7 +501,7 @@ fn xai_configured_base(cfg: &ProviderConfig) -> Option<&str> {
 fn xai_base_url(kind: crate::adapters::xai::XaiKind, cfg: &ProviderConfig) -> String {
     crate::infrastructure::utils::normalize_base_url(&crate::adapters::xai::base_url(
         kind,
-        xai_configured_base(cfg),
+        configured_base(cfg),
     ))
 }
 
@@ -548,7 +553,7 @@ fn build_xai_from_config(
         Ok(Arc::new(XaiAdapter::new(
             handle,
             xai,
-            xai_configured_base(cfg).map(str::to_owned),
+            configured_base(cfg).map(str::to_owned),
         )?))
     }
     #[cfg(not(feature = "openai"))]
@@ -576,7 +581,7 @@ fn build_xai_with_key(
         Ok(Arc::new(crate::adapters::xai::XaiAdapter::new(
             handle,
             crate::adapters::xai::XaiKind::Xai,
-            xai_configured_base(cfg).map(str::to_owned),
+            configured_base(cfg).map(str::to_owned),
         )?))
     }
     #[cfg(not(feature = "openai"))]
@@ -635,6 +640,59 @@ fn build_gemini_cli_from_config(
         );
         Ok(Arc::new(
             crate::adapters::gemini_cli::GeminiCliAdapter::new(handle, base)?,
+        ))
+    }
+    #[cfg(not(feature = "openai"))]
+    {
+        let _ = cfg;
+        Err(ProviderError::Other(
+            "openai feature not enabled — rebuild with --features openai".into(),
+        ))
+    }
+}
+
+/// GitHub Copilot: the stored subscription row or `COPILOT_GITHUB_TOKEN`, with
+/// the Codex builder shape; the configured base goes to the adapter verbatim.
+fn build_copilot_from_config(
+    cfg: &ProviderConfig,
+) -> Result<Arc<dyn StreamingProvider>, ProviderError> {
+    #[cfg(feature = "openai")]
+    {
+        let rows_key = cfg.provider_id.as_str();
+        let base = discovery_base_url(rows_key, cfg);
+        // A subscription row keeps its own origin rule under any entry name.
+        let allowed = oauth_allowed("github-copilot", &base) && oauth_allowed(rows_key, &base);
+        let env_vars = if cfg.api_key_env.is_empty() {
+            vec![]
+        } else {
+            vec![cfg.api_key_env.clone()]
+        };
+        let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+        let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
+        if crate::adapters::cli::auth::source_for(
+            rows_key,
+            &names,
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+            allowed,
+        )
+        .is_none()
+        {
+            return Err(ProviderError::AuthenticationFailed);
+        }
+        let handle = crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            rows_key.to_owned(),
+            env_vars,
+            allowed,
+            None,
+        );
+        Ok(Arc::new(
+            crate::adapters::github_copilot::CopilotAdapter::new(
+                handle,
+                cfg.model_id.clone(),
+                configured_base(cfg).map(str::to_owned),
+            )?,
         ))
     }
     #[cfg(not(feature = "openai"))]
@@ -749,13 +807,77 @@ impl StreamingProvider for ConfiguredProvider {
     }
 }
 
+/// The credential of an OpenAI-family entry: an explicit candidate key, else a
+/// per-request handle over env and stored rows (precheck: something resolves).
+/// An `openai-compatible` entry without `api_key_env` uses a stored key when one
+/// exists and is otherwise keyless.
+#[cfg(feature = "openai")]
+fn chat_credential(
+    provider_id: &str,
+    cfg: &ProviderConfig,
+    key: Option<&str>,
+) -> Result<crate::adapters::openai::ChatCredential, ProviderError> {
+    use crate::adapters::openai::ChatCredential;
+    if let Some(key) = key {
+        return Ok(ChatCredential::Fixed(
+            crate::domain::models::SecretString::new(key.to_owned()),
+        ));
+    }
+    let kind = cfg.kind.as_deref().unwrap_or(provider_id);
+    let snapshot = crate::adapters::auth_store::FileAuthStore::snapshot_sync();
+    let handle = |env_vars: Vec<String>, allowed: bool| {
+        crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            provider_id.to_owned(),
+            env_vars,
+            allowed,
+            None,
+        )
+    };
+    // A subscription row keeps its own origin rule under any kind:
+    // `[provider.github-copilot] kind = "openai"` must not carry it to another origin.
+    let base = discovery_base_url(provider_id, cfg);
+    let allowed = oauth_allowed(kind, &base) && oauth_allowed(provider_id, &base);
+    if cfg.api_key_env.is_empty() && kind == "openai-compatible" {
+        let stored = crate::adapters::cli::auth::source_for(
+            provider_id,
+            &[],
+            &snapshot,
+            &crate::infrastructure::utils::env_var_trimmed,
+            allowed,
+        );
+        return Ok(match stored {
+            Some(_) => ChatCredential::Resolved(handle(vec![], allowed)),
+            None => ChatCredential::Fixed(crate::domain::models::SecretString::new(String::new())),
+        });
+    }
+    let env_vars = if cfg.api_key_env.is_empty() {
+        vec![]
+    } else {
+        vec![cfg.api_key_env.clone()]
+    };
+    let names: Vec<&str> = env_vars.iter().map(String::as_str).collect();
+    if crate::adapters::cli::auth::source_for(
+        provider_id,
+        &names,
+        &snapshot,
+        &crate::infrastructure::utils::env_var_trimmed,
+        allowed,
+    )
+    .is_none()
+    {
+        return Err(ProviderError::AuthenticationFailed);
+    }
+    Ok(ChatCredential::Resolved(handle(env_vars, allowed)))
+}
+
 #[cfg(feature = "openai")]
 fn build_openai_from_config(
     provider_id: &str,
     cfg: &ProviderConfig,
-    api_key: String,
+    key: Option<&str>,
 ) -> Result<Arc<crate::adapters::openai::OpenAiAdapter>, ProviderError> {
-    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile};
 
     let kind = cfg.kind.as_deref().unwrap_or(provider_id);
 
@@ -766,26 +888,23 @@ fn build_openai_from_config(
             context_window: None,
             supports_tools: None,
         });
+    let credential = chat_credential(provider_id, cfg, key)?;
+    let profile = StaticChatProfile::new(&discovery_base_url(provider_id, cfg));
 
     let adapter = Arc::new(
-        OpenAiAdapter::new(
-            variant,
-            api_key,
-            cfg.model_id.clone(),
-            Some(discovery_base_url(provider_id, cfg)),
-        )
-        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+        OpenAiAdapter::new(variant, credential, cfg.model_id.clone(), profile)
+            .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
     );
     Ok(adapter)
 }
 
 #[cfg(feature = "openai")]
 fn build_openai_compatible_from_config(
-    _provider_id: &str,
+    provider_id: &str,
     cfg: &ProviderConfig,
-    api_key: String,
+    key: Option<&str>,
 ) -> Result<Arc<crate::adapters::openai::OpenAiAdapter>, ProviderError> {
-    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant};
+    use crate::adapters::openai::{OpenAiAdapter, OpenAiCompatibleVariant, StaticChatProfile};
 
     if cfg.base_url.is_none() {
         return Err(ProviderError::Other(format!(
@@ -793,7 +912,7 @@ fn build_openai_compatible_from_config(
             cfg.provider_id
         )));
     }
-    let base_url = discovery_base_url(_provider_id, cfg);
+    let base_url = discovery_base_url(provider_id, cfg);
 
     let variant = OpenAiCompatibleVariant::Custom {
         provider_id: cfg.provider_id.clone(),
@@ -801,10 +920,16 @@ fn build_openai_compatible_from_config(
         context_window: cfg.context_window,
         supports_tools: cfg.supports_tools,
     };
+    let credential = chat_credential(provider_id, cfg, key)?;
 
     let adapter = Arc::new(
-        OpenAiAdapter::new(variant, api_key, cfg.model_id.clone(), Some(base_url))
-            .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
+        OpenAiAdapter::new(
+            variant,
+            credential,
+            cfg.model_id.clone(),
+            StaticChatProfile::new(&base_url),
+        )
+        .map_err(|e| ProviderError::Other(format!("Failed to create OpenAI adapter: {}", e)))?,
     );
     Ok(adapter)
 }

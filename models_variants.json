@@ -694,6 +694,506 @@
         }
       ]
     },
+    "github-copilot": {
+      "fetchedAtUnix": 0,
+      "models": [
+        {
+          "modelId": "claude-fable-5",
+          "displayName": "Claude Fable 5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-fable-5.1",
+          "displayName": "Claude Fable 5.1",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-haiku-4.5",
+          "displayName": "Claude Haiku 4.5",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-haiku-5.5",
+          "displayName": "Claude Haiku 5.5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-4.5",
+          "displayName": "Claude Opus 4.5",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-4.6",
+          "displayName": "Claude Opus 4.6",
+          "providerId": "github-copilot",
+          "contextWindow": 168000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-4.7",
+          "displayName": "Claude Opus 4.7",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-4.8",
+          "displayName": "Claude Opus 4.8",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-5",
+          "displayName": "Claude Opus 5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-opus-5.5",
+          "displayName": "Claude Opus 5.5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-sonnet-4",
+          "displayName": "Claude Sonnet 4",
+          "providerId": "github-copilot",
+          "contextWindow": 216000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-sonnet-4.5",
+          "displayName": "Claude Sonnet 4.5",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-sonnet-4.6",
+          "displayName": "Claude Sonnet 4.6",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-sonnet-5",
+          "displayName": "Claude Sonnet 5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "claude-sonnet-5.5",
+          "displayName": "Claude Sonnet 5.5",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-2.5-pro",
+          "displayName": "Gemini 2.5 Pro",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3-flash-preview",
+          "displayName": "Gemini 3 Flash Preview",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3-pro-preview",
+          "displayName": "Gemini 3 Pro Preview",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.1-pro-preview",
+          "displayName": "Gemini 3.1 Pro Preview",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.5-flash",
+          "displayName": "Gemini 3.5 Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 200000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.6-flash",
+          "displayName": "Gemini 3.6 Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.7-flash",
+          "displayName": "Gemini 3.7 Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-3.8-flash",
+          "displayName": "Gemini 3.8 Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 1000000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gemini-4-argon",
+          "displayName": "Gemini 4 Argon",
+          "providerId": "github-copilot",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-4.1",
+          "displayName": "GPT-4.1",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-4o",
+          "displayName": "GPT-4o",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5",
+          "displayName": "GPT-5",
+          "providerId": "github-copilot",
+          "contextWindow": 128000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5-mini",
+          "displayName": "GPT-5 Mini",
+          "providerId": "github-copilot",
+          "contextWindow": 264000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.1",
+          "displayName": "GPT-5.1",
+          "providerId": "github-copilot",
+          "contextWindow": 264000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.1-codex",
+          "displayName": "GPT-5.1 Codex",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.1-codex-max",
+          "displayName": "GPT-5.1 Codex Max",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.1-codex-mini",
+          "displayName": "GPT-5.1 Codex Mini",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.2",
+          "displayName": "GPT-5.2",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.2-codex",
+          "displayName": "GPT-5.2 Codex",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.3-codex",
+          "displayName": "GPT-5.3 Codex",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.4",
+          "displayName": "GPT-5.4",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.4-mini",
+          "displayName": "GPT-5.4 mini",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.4-nano",
+          "displayName": "GPT-5.4 nano",
+          "providerId": "github-copilot",
+          "contextWindow": 400000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.5",
+          "displayName": "GPT-5.5",
+          "providerId": "github-copilot",
+          "contextWindow": 1050000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.6-luna",
+          "displayName": "GPT-5.6 Luna",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.6-sol",
+          "displayName": "GPT-5.6 Sol",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-5.6-terra",
+          "displayName": "GPT-5.6 Terra",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-astra",
+          "displayName": "GPT-6 Astra",
+          "providerId": "github-copilot",
+          "contextWindow": 272000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-luna",
+          "displayName": "GPT-6 Luna",
+          "providerId": "github-copilot",
+          "contextWindow": 1050000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6-sol",
+          "displayName": "GPT-6 Sol",
+          "providerId": "github-copilot",
+          "contextWindow": 1050000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "gpt-6.1-sol",
+          "displayName": "GPT-6.1 Sol",
+          "providerId": "github-copilot",
+          "contextWindow": 1050000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.5",
+          "displayName": "Grok 4.5",
+          "providerId": "github-copilot",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.6",
+          "displayName": "Grok 4.6",
+          "providerId": "github-copilot",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-4.7",
+          "displayName": "Grok 4.7",
+          "providerId": "github-copilot",
+          "contextWindow": 500000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "grok-code-fast-1",
+          "displayName": "Grok Code Fast 1",
+          "providerId": "github-copilot",
+          "contextWindow": 192000,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "kimi-k2.7-code",
+          "displayName": "Kimi K2.7 Code",
+          "providerId": "github-copilot",
+          "contextWindow": 256000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "kimi-k3",
+          "displayName": "Kimi K3",
+          "providerId": "github-copilot",
+          "contextWindow": 1048576,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "mai-code-1-flash-picker",
+          "displayName": "MAI-Code-1-Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 256000,
+          "capabilities": ["ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "mai-code-1.1-flash",
+          "displayName": "MAI-Code-1.1-Flash",
+          "providerId": "github-copilot",
+          "contextWindow": 256000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        },
+        {
+          "modelId": "raptor-mini",
+          "displayName": "Raptor mini",
+          "providerId": "github-copilot",
+          "contextWindow": 400000,
+          "capabilities": ["Vision", "ToolUse", "Thinking"],
+          "pricingTier": null,
+          "stale": false
+        }
+      ]
+    },
     "google-gemini-cli": {
       "fetchedAtUnix": 0,
       "models": [

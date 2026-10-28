@@ -26,7 +26,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use super::{Dialect, WireProfile, repair, schema};
+use super::{Dialect, SystemRole, WireProfile, repair, schema};
 use crate::domain::models::{CompletionOptions, Message, MessageRole};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -178,17 +178,28 @@ impl<'a> GenericBody<'a> {
         profile: &'a dyn WireProfile,
     ) -> Self {
         // omp repairs orphan outputs, then orphan calls, then hoists wedged messages.
-        let input = repair::hoist(repair::repair(converted.input, Dialect::Generic));
-        // The system prompt first, then history system texts: one `instructions`.
-        let mut instructions = String::new();
-        for text in std::iter::once(options.system_prompt.as_str())
+        let mut input = repair::hoist(repair::repair(converted.input, Dialect::Generic));
+        let texts = std::iter::once(options.system_prompt.as_str())
             .chain(converted.system.iter().map(String::as_str))
-            .filter(|text| !text.trim().is_empty())
-        {
-            if !instructions.is_empty() {
-                instructions.push_str("\n\n");
+            .filter(|text| !text.trim().is_empty());
+        let mut instructions = String::new();
+        match profile.system_role() {
+            // The system prompt first, then history system texts: one `instructions`.
+            SystemRole::Instructions => {
+                for text in texts {
+                    if !instructions.is_empty() {
+                        instructions.push_str("\n\n");
+                    }
+                    instructions.push_str(text);
+                }
             }
-            instructions.push_str(text);
+            // omp unshifts each system text as a developer item, in order.
+            SystemRole::Developer => {
+                let developer: Vec<Value> = texts
+                    .map(|text| json!({"role":"developer","content":text}))
+                    .collect();
+                input.splice(0..0, developer);
+            }
         }
         let reject = profile.reject_root_object_union();
         let tools = (!options.tools.is_empty()).then(|| {

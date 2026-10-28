@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::domain::errors::AuthError;
 use crate::domain::models::credential::{
     AuthSnapshot, CasOutcome, Credential, CredentialGeneration, CredentialId, CredentialIdentity,
-    CredentialOrigin, CredentialStamp, StoredCredential,
+    CredentialOrigin, CredentialRouting, CredentialStamp, StoredCredential,
 };
 use crate::domain::models::secret::{SecretString, expose_secret_string};
 use crate::domain::ports::{AuthStorePort, RefreshLease};
@@ -53,7 +53,14 @@ enum DiskCredential<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         authorized_at: Option<i64>,
         identity: &'a CredentialIdentity,
+        #[serde(skip_serializing_if = "no_routing")]
+        routing: &'a CredentialRouting,
     },
+}
+
+/// Rows without routing keep their pre-routing bytes.
+fn no_routing(routing: &&CredentialRouting) -> bool {
+    routing.is_empty()
 }
 
 impl Serialize for AuthRow {
@@ -86,6 +93,7 @@ impl Serialize for AuthRow {
                         expires_at: oauth.expires_at_ms,
                         authorized_at: oauth.authorized_at_ms,
                         identity: &oauth.identity,
+                        routing: &oauth.routing,
                     },
                 },
             }
@@ -495,14 +503,19 @@ impl AuthStorePort for FileAuthStore {
                 }
                 Credential::ApiKey(_) => None,
             };
+            // A single-grant provider (GitHub Copilot) has no account identity, so
+            // a new login supersedes its served grant instead of appending a row.
+            let single = crate::adapters::cli::auth::providers::lookup(provider)
+                .is_some_and(|meta| meta.single_oauth_grant);
             let matches = |row: &StoredCredential| match (&cred, &row.credential) {
                 (Credential::ApiKey(_), Credential::ApiKey(_)) => true,
                 (Credential::OAuth(_), Credential::OAuth(old)) => {
-                    identity.is_some()
-                        && identity
-                            == old.identity.key(
-                                crate::adapters::auth::policies::org_scoped_identity(provider),
-                            )
+                    single
+                        || (identity.is_some()
+                            && identity
+                                == old.identity.key(
+                                    crate::adapters::auth::policies::org_scoped_identity(provider),
+                                ))
                 }
                 _ => false,
             };

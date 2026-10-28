@@ -51,6 +51,9 @@ pub struct ProviderMeta {
     pub org_scoped_identity: bool,
     /// Bundled default model when it differs from the provider's first seed row.
     pub default_model: Option<&'static str>,
+    /// One OAuth grant per provider: a new login supersedes the served row
+    /// instead of appending (the grant carries no account identity).
+    pub single_oauth_grant: bool,
 }
 
 /// All known providers. Order is display order for `auth list`.
@@ -68,6 +71,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: Some(&policies::ANTHROPIC_API),
         org_scoped_identity: true,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "openai-codex",
@@ -82,6 +86,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: Some(&policies::CODEX_API),
         org_scoped_identity: true,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "openai",
@@ -93,6 +98,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "openrouter",
@@ -104,6 +110,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "google",
@@ -115,6 +122,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
     },
     // A structured subscription credential (token + project) has no env form.
     ProviderMeta {
@@ -127,6 +135,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: Some(&policies::GEMINI_CLI_API),
         org_scoped_identity: false,
         default_model: Some("gemini-3.1-pro-preview"),
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "deepseek",
@@ -138,6 +147,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "moonshot",
@@ -149,6 +159,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "xai",
@@ -160,6 +171,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: Some("grok-4.6"),
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "xai-oauth",
@@ -171,6 +183,7 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: Some(&policies::XAI_API),
         org_scoped_identity: false,
         default_model: Some("grok-4.6"),
+        single_oauth_grant: false,
     },
     ProviderMeta {
         id: "ollama",
@@ -182,6 +195,19 @@ static PROVIDERS: &[ProviderMeta] = &[
         oauth_api: None,
         org_scoped_identity: false,
         default_model: None,
+        single_oauth_grant: false,
+    },
+    ProviderMeta {
+        id: "github-copilot",
+        display_name: "GitHub Copilot",
+        signup_url: "https://github.com/features/copilot",
+        requires_key: true,
+        api_key_env: "COPILOT_GITHUB_TOKEN",
+        auth_methods: &[AuthMethod::Device(&policies::COPILOT_DEVICE)],
+        oauth_api: Some(&policies::COPILOT_API),
+        org_scoped_identity: false,
+        default_model: Some("gpt-5.5"),
+        single_oauth_grant: true,
     },
 ];
 

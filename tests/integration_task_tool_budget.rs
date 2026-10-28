@@ -98,6 +98,7 @@ async fn make_provider() -> (
                 capabilities: std::collections::HashSet::new(),
                 pricing_tier: None,
                 stale: false,
+                wire_model_id: None,
             })
         }
         fn get_model_provider(&self, _model_id: &str, _prefer: Option<&str>) -> Option<String> {
