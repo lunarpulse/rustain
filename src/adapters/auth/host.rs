@@ -357,3 +357,73 @@ pub fn known_provider(app: &AppConfig, id: &str) -> bool {
             .iter()
             .any(|entry| entry.rows_key() == id)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{Credential, CredentialOrigin, StoredCredential};
+    use crate::infrastructure::auth_accounts::Unread;
+
+    #[test]
+    fn stored_accounts_orders_builtins_then_display_and_id() {
+        let mut app = AppConfig::default();
+        let mut snapshot = AuthSnapshot::default();
+        for (id, kind) in [
+            ("z-google", "google"),
+            ("google", "google"),
+            ("z-claude", "anthropic"),
+            ("openrouter", "openrouter"),
+            ("a-google", "google"),
+            ("openai", "openai"),
+        ] {
+            let mut cfg = plan("openai", &app).unwrap().validation_config;
+            cfg.provider_id = id.into();
+            cfg.kind = Some(kind.into());
+            cfg.enabled = id != "google";
+            app.provider.insert(id.into(), cfg);
+            snapshot.providers.insert(
+                id.into(),
+                vec![StoredCredential {
+                    id: CredentialId(1),
+                    rev: 1,
+                    generation: Default::default(),
+                    origin: CredentialOrigin::Login,
+                    credential: Credential::new_api_key("ordering-fixture".into()),
+                    last_validated: None,
+                    disabled_cause: None,
+                }],
+            );
+        }
+        snapshot.providers.insert("empty".into(), vec![]);
+        let listed = stored_accounts(&snapshot, &app, &|_| None);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|row| row.provider.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "openai",
+                "openrouter",
+                "google",
+                "z-claude",
+                "a-google",
+                "z-google"
+            ]
+        );
+        assert_eq!(
+            listed
+                .iter()
+                .map(|row| row.display_name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "OpenAI",
+                "OpenRouter",
+                "Google AI",
+                "Anthropic",
+                "Google AI",
+                "Google AI"
+            ]
+        );
+        assert_eq!(listed[2].unread, Some(Unread::Disabled));
+    }
+}

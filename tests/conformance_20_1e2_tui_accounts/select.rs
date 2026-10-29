@@ -4,7 +4,7 @@
 
 use super::common::{
     K1, K2, Tui, World, accept, activate_openai, answer_models, bearer, config_with, key_login,
-    openai, row_ids, stub, turn_bearer, until_accounts, until_changed,
+    listing, openai, row_ids, stub, turn_bearer, until_accounts, until_changed,
 };
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::domain::events::{DomainKey, LoginEvent};
@@ -55,9 +55,29 @@ async fn k2_accounts_select_serves_and_rediscovers_the_chosen_account() {
         "{frame}"
     );
     tui.key(DomainKey::Down);
+    tui.drain();
+    let seen = tui.event_log.len();
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
-    let seen = tui.event_log.len();
+    let held = accept(&listener).await;
+    assert_eq!(held.path(), "/openai/v1/models");
+    assert_eq!(bearer(&held), Some(format!("Bearer {K1}")));
+    assert!(
+        !tui.live
+            .list_models_by_provider("openai")
+            .iter()
+            .any(|entry| entry.model_id == "m-select-fresh")
+    );
+    // Phase 1 announces the credential replacement before AccountsChanged;
+    // the held HTTP response must produce a second, newer publication.
+    assert_eq!(
+        tui.event_log[seen..]
+            .iter()
+            .filter(|event| *event == REFRESHED)
+            .count(),
+        1
+    );
+    let discovery_seen = tui.event_log.len();
     assert_eq!(
         tui.state.feedback_blocks["accounts-result"].message,
         format!("Active OpenAI account: API key #{id1}.")
@@ -74,16 +94,33 @@ async fn k2_accounts_select_serves_and_rediscovers_the_chosen_account() {
     assert!(chosen.selected && chosen.served);
 
     // Phase 2 rediscovers with the chosen account; its roster reaches the picker.
-    assert_eq!(answer_models(&listener).await, K1);
-    refreshed_since(&mut tui, seen).await;
-    assert!(
+    held.json(&listing(&["m-select-fresh"])).await;
+    refreshed_since(&mut tui, discovery_seen).await;
+    assert_eq!(
+        tui.event_log[seen..]
+            .iter()
+            .filter(|event| *event == REFRESHED)
+            .count(),
+        2
+    );
+    assert_eq!(
         tui.live
             .list_models_by_provider("openai")
             .iter()
-            .any(|entry| entry.model_id == "m-one")
+            .map(|entry| entry.model_id.as_str())
+            .collect::<Vec<_>>(),
+        ["m-select-fresh"]
     );
     tui.submit("/models");
-    assert!(tui.frame().contains("m-one"), "{}", tui.frame());
+    let frame = tui.frame();
+    assert!(
+        frame.contains("OpenAI") && frame.contains("m-select-fresh"),
+        "{frame}"
+    );
+    assert!(
+        !frame.contains("m-one") && !frame.contains("m-two"),
+        "{frame}"
+    );
     tui.key(DomainKey::Esc);
     assert_eq!(
         turn_bearer(&tui, &listener, &model).await,

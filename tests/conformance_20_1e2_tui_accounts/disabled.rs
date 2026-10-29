@@ -3,7 +3,8 @@
 //! and selectable, and are left out of the sign-in lists.
 
 use super::common::{
-    K1, Tui, World, config_with, key_login, openai, row_ids, stub, until_accounts, until_changed,
+    K1, K2, Tui, World, config_with, key_login, openai, row_ids, stub, until_accounts,
+    until_changed,
 };
 use rustain::adapters::auth::host;
 use rustain::adapters::auth_store::FileAuthStore;
@@ -119,19 +120,21 @@ async fn k5_disabled_configuration_leaves_stored_rows_unread() {
 /// are read by no enabled provider.
 #[tokio::test]
 #[serial]
-async fn alias_shadowed_built_in_rows_have_no_reader() {
+async fn alias_shadowed_logout_reports_the_real_remaining_row() {
     let server = MockServer::start().await;
     let _world = World::new(&server);
     let (listener, base) = stub().await;
     let enabled = config_with(&[("openai", openai(&base, true))]);
     let mut tui = Tui::new(enabled);
     key_login(&mut tui, &listener, K1).await;
-    let [id] = row_ids().await[..] else {
-        panic!("one row");
+    key_login(&mut tui, &listener, K2).await;
+    let [id1, id2] = row_ids().await[..] else {
+        panic!("two rows");
     };
     let mut work = openai(&base, true);
     work.provider_id = "work".into();
-    let alias: AppConfig = config_with(&[("work", work)]);
+    let mut alias: AppConfig = config_with(&[("work", work)]);
+    alias.provider.remove("openai");
     let that = accounts(&store(), &alias, "openai").await.unwrap();
     assert_eq!(
         (that.served.clone(), that.unread),
@@ -142,9 +145,24 @@ async fn alias_shadowed_built_in_rows_have_no_reader() {
             .iter()
             .any(|target| target.id == "openai")
     );
-    // A logout that leaves this row behind names the missing reader.
+    let mut tui = Tui::new(alias.clone());
+    tui.submit("/logout openai");
+    until_accounts(&mut tui).await;
+    // With no served row the picker starts at the first label.
+    tui.key(DomainKey::Enter);
+    until_changed(&mut tui).await;
     assert_eq!(
-        host::logout_lines(&that, CredentialId(id + 1), None)[1],
-        "No enabled provider reads OpenAI credentials."
+        tui.state.feedback_blocks["accounts-result"].message,
+        format!(
+            "Logged out of OpenAI account API key #{id1}.\nNo enabled provider reads OpenAI credentials."
+        )
+    );
+    assert_eq!(row_ids().await, [id2]);
+    let remaining = accounts(&store(), &alias, "openai").await.unwrap();
+    assert_eq!(remaining.rows.len(), 1);
+    assert_eq!(remaining.rows[0].id, CredentialId(id2));
+    assert_eq!(
+        (remaining.served, remaining.unread),
+        (None, Some(Unread::NoReader))
     );
 }

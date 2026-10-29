@@ -914,9 +914,14 @@ mod tests {
     struct Recorder {
         calls: std::sync::mpsc::Sender<(String, String)>,
         fail: bool,
+        provider_settings: serde_json::Value,
     }
     impl InitSignIn for Recorder {
         fn login<'a>(&'a self, provider: &'a str, app: &'a AppConfig) -> BoxFuture<'a, Result<()>> {
+            assert_eq!(
+                serde_json::to_value(&app.provider).unwrap(),
+                self.provider_settings
+            );
             let _ = self.calls.send((provider.to_owned(), app.model.clone()));
             let fail = self.fail;
             Box::pin(async move {
@@ -935,14 +940,29 @@ mod tests {
     }
 
     async fn step(tty: TtyFlags, answers: &[Option<&str>], fail: bool) -> Step {
+        step_with_config(
+            tty,
+            answers,
+            fail,
+            AppConfig {
+                model: "reload-marker".into(),
+                ..AppConfig::default()
+            },
+        )
+        .await
+    }
+
+    async fn step_with_config(
+        tty: TtyFlags,
+        answers: &[Option<&str>],
+        fail: bool,
+        app: AppConfig,
+    ) -> Step {
         let tmp = tempfile::TempDir::new().unwrap();
         let store: Arc<dyn AuthStorePort> = Arc::new(
             crate::adapters::auth_store::FileAuthStore::at(tmp.path().join("auth.json")),
         );
-        let reload = || AppConfig {
-            model: "reload-marker".into(),
-            ..AppConfig::default()
-        };
+        let reload = || app.clone();
         let (calls, recorded) = std::sync::mpsc::channel();
         let mut lines = Answers::new(answers);
         let mut output = Vec::new();
@@ -952,7 +972,11 @@ mod tests {
             &store,
             &mut lines,
             &mut output,
-            &Recorder { calls, fail },
+            &Recorder {
+                calls,
+                fail,
+                provider_settings: serde_json::to_value(&app.provider).unwrap(),
+            },
         )
         .await
         .unwrap();
@@ -1023,6 +1047,89 @@ mod tests {
         assert!(no.calls.is_empty());
         assert!(!no.output.contains("  1. "));
         assert_eq!(no.reads, 1);
+    }
+
+    /// K-H6: inspect actual numbered output, not the target helper alone.
+    #[tokio::test]
+    async fn sign_in_step_omits_unread_provider_rows() {
+        for case in ["disabled", "alias", "enabled"] {
+            let mut app = AppConfig {
+                model: format!("reload-{case}"),
+                ..AppConfig::default()
+            };
+            let mut cfg = crate::adapters::auth::host::plan("openai", &app)
+                .unwrap()
+                .validation_config;
+            cfg.enabled = case != "disabled";
+            cfg.api_key_env = "RUSTAIN_INIT_EVIDENCE_UNUSED_KEY".into();
+            app.provider.insert("openai".into(), cfg.clone());
+            if case == "alias" {
+                app.provider.remove("openai");
+                cfg.provider_id = "work".into();
+                cfg.kind = Some("openai".into());
+                // The alias also displays as OpenAI; omit its own login target
+                // so printed OpenAI rows unambiguously mean the built-in.
+                cfg.api_key_env.clear();
+                app.provider.insert("work".into(), cfg.clone());
+            }
+            cfg.provider_id = "readable".into();
+            cfg.kind = Some("openai-compatible".into());
+            cfg.api_key_env = "RUSTAIN_INIT_EVIDENCE_UNUSED_KEY".into();
+            cfg.enabled = true;
+            app.provider.insert("readable".into(), cfg);
+            let targets = crate::adapters::auth::host::login_targets(&app);
+            let selected = targets
+                .iter()
+                .position(|target| target.id == "readable")
+                .unwrap()
+                + 1;
+            let choice = format!("{selected}\n");
+            let run =
+                step_with_config(TTY, &[Some("y\n"), Some(&choice), Some("\n")], false, app).await;
+            let rows: Vec<_> = run
+                .output
+                .lines()
+                .filter_map(|line| {
+                    let (number, rest) = line.trim_start().split_once(". ")?;
+                    number.parse::<usize>().ok().map(|n| (n, rest))
+                })
+                .collect();
+            let openai_rows: Vec<_> = rows
+                .iter()
+                .filter(|(_, row)| row.starts_with("OpenAI — "))
+                .collect();
+            assert_eq!(
+                openai_rows.len(),
+                if case == "enabled" { 2 } else { 0 },
+                "{case}: {}",
+                run.output
+            );
+            if case == "enabled" {
+                assert!(
+                    openai_rows
+                        .iter()
+                        .all(|(_, row)| *row == "OpenAI — not signed in"),
+                    "{}",
+                    run.output
+                );
+            }
+            assert!(
+                rows.iter()
+                    .any(|(n, row)| *n == selected && row.starts_with("readable — ")),
+                "{}",
+                run.output
+            );
+            assert!(
+                run.output.contains(&format!(
+                    "Provider [1-{}, Enter to finish]: ",
+                    targets.len()
+                )),
+                "{}",
+                run.output
+            );
+            assert_eq!(run.calls, [("readable".into(), format!("reload-{case}"))]);
+            assert_eq!(run.reads, 3);
+        }
     }
 
     /// K7 gate: stdout or stderr off a terminal skips the step without a read.

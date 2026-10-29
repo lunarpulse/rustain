@@ -171,6 +171,100 @@ async fn k1_k3_logout_reserves_then_relocks_the_provider_live() {
     assert_no_keys(&tui, &[K1, K2]);
 }
 
+/// One real login, active model selection and last-row logout, with a
+/// successful inference and unlocked frame as positive controls.
+async fn last_logout() -> (Tui, String) {
+    let (listener, base) = stub().await;
+    let mut tui = Tui::new(config_with(&[("openai", openai(&base, true))]));
+    key_login(&mut tui, &listener, K1).await;
+    let model = activate_openai(&mut tui).await;
+    assert_eq!(
+        turn_bearer(&tui, &listener, &model).await,
+        format!("Bearer {K1}")
+    );
+    tui.submit("/models");
+    let before = tui.frame();
+    assert!(
+        before.contains("OpenAI") && before.contains(&model),
+        "{before}"
+    );
+    assert!(!before.contains("not signed in"), "{before}");
+    tui.key(DomainKey::Esc);
+    tui.submit("/logout openai");
+    until_accounts(&mut tui).await;
+    tui.key(DomainKey::Enter);
+    until_changed(&mut tui).await;
+    (tui, model)
+}
+
+#[tokio::test]
+#[serial]
+async fn last_logout_preserves_the_complete_sign_in_hint() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    let (tui, model) = last_logout().await;
+    let locked = tui.live.registry().list_locked();
+    let openai = locked
+        .iter()
+        .find(|entry| entry.provider_id == "openai")
+        .unwrap();
+    assert_eq!(
+        openai.sign_in_hint,
+        "Set OPENAI_API_KEY or run `rustain auth login openai`"
+    );
+    match tui.live.router().stream_completion(
+        vec![crate::conformance_20_1d3_copilot::common::user("hello")],
+        crate::conformance_20_1d3_copilot::common::options(&model, 64, None),
+    ).await {
+        Err(error) => assert!(error.to_string().contains(
+            "OpenAI has no credentials configured. Set OPENAI_API_KEY or run `rustain auth login openai`"
+        ), "{error}"),
+        Ok(_) => panic!("the relocked router cannot infer"),
+    }
+    assert_no_keys(&tui, &[K1]);
+}
+
+#[tokio::test]
+#[serial]
+async fn last_logout_renders_the_locked_openai_column() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    let (mut tui, _) = last_logout().await;
+    tui.submit("/models");
+    for _ in 0..tui.state.model_selector.columns.len() {
+        if tui.state.model_selector.columns[tui.state.model_selector.selected_provider].provider_id
+            == "openai"
+        {
+            break;
+        }
+        tui.key(DomainKey::Right);
+    }
+    assert_eq!(
+        tui.state.model_selector.columns[tui.state.model_selector.selected_provider].provider_id,
+        "openai"
+    );
+    let frame = tui.frame();
+    for text in [
+        "OpenAI",
+        "not signed in",
+        "OpenAI has no credentials configured",
+        "Enter sign in",
+    ] {
+        assert!(frame.contains(text), "{text:?}\n{frame}");
+    }
+    // Remove only frame border/padding; preserve every word across wrapping.
+    let joined = frame
+        .lines()
+        .map(|line| line.trim_matches([' ', '│']))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("Set OPENAI_API_KEY or run `rustain auth login openai`"),
+        "{frame}"
+    );
+    assert_no_keys(&tui, &[K1]);
+}
+
 /// K4 (M10): a row removed underneath the open step (as a concurrent
 /// `rustain auth logout --id` does) leaves the step open with fresh rows and
 /// a notice; the positive control removes and closes. The step fits 60×16.

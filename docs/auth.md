@@ -824,6 +824,9 @@ The [common slash syntax](#signing-in-from-the-tui) applies to both commands.
   with stored accounts — including disabled ones and providers disabled in
   configuration (`OpenAI · disabled in configuration`), whose credentials are
   still worth removing — as `<Provider> · <status>` (`OpenAI · login · 2 accounts`).
+  Built-ins follow the provider-table order, before other stored keys sorted
+  by display name and then provider id.
+  Empty store keys do not appear.
   Search and keys are the login picker's; Enter opens the provider's account
   step. With nothing stored they answer `No stored provider credentials to log
   out. Remove env or config auth at its source.` / `No stored provider
@@ -869,7 +872,10 @@ login <provider>` to sign in later.``
   continues.
 - The list is the `/login` picker's, read from the same configuration `rustain
   auth login` and the TUI use (`  2. OpenAI — not signed in`), then
-  `Provider [1-N, Enter to finish]: `.
+  `Provider [1-N, Enter to finish]: `. Disabled built-ins and built-ins shadowed
+  by an enabled kind alias configured to use its own credential key are omitted
+  when no enabled provider reads the built-in's credentials. The alias need not
+  have stored rows; explicit `auth login <id>` still works.
 - The chosen provider signs in exactly as `rustain auth login <provider>` does
   (method menu, masked key, success line, discovery line); its offline result is
   that command's (`⚠  Could not confirm key — … stored unvalidated.`). After a

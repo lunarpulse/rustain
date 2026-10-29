@@ -191,11 +191,20 @@ async fn select_method(
     requested: Option<AuthLoginMethod>,
     tty: bool,
 ) -> Result<&AuthMethod> {
+    select_method_with_line(methods, requested, tty, super::stdin_lines::line()).await
+}
+
+async fn select_method_with_line(
+    methods: &[AuthMethod],
+    requested: Option<AuthLoginMethod>,
+    tty: bool,
+    line: impl Future<Output = Option<String>>,
+) -> Result<&AuthMethod> {
     if let Some(method) = decided_method(methods, requested, tty)? {
         return Ok(method);
     }
     print_method_menu(methods)?;
-    let value = super::stdin_lines::line().await.unwrap_or_default();
+    let value = line.await.unwrap_or_default();
     parse_method_choice(&value, methods)
 }
 fn print_method_menu(methods: &[AuthMethod]) -> Result<()> {
@@ -295,6 +304,67 @@ mod tests {
             parse_method_choice("", methods).unwrap_err().to_string(),
             "Invalid login method selection"
         );
+    }
+
+    /// K-H7: the shared production menu core requests one real owner-thread
+    /// line, while decisions that do not need a menu never poll its input.
+    #[tokio::test]
+    async fn method_menu_reads_through_the_terminal_owner() {
+        use super::super::stdin_lines::{Pump, TerminalInput};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Scripted {
+            value: Option<String>,
+            reads: Arc<AtomicUsize>,
+        }
+        impl TerminalInput for Scripted {
+            fn read_line(&mut self) -> std::io::Result<Option<String>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                Ok(self.value.take())
+            }
+            fn read_secret(&mut self, _: &str) -> std::io::Result<Option<String>> {
+                panic!("method selection must not request a secret")
+            }
+        }
+        let methods = providers::lookup("anthropic").unwrap().auth_methods;
+        let invalid = Err("Invalid login method selection");
+        let non_tty =
+            Err("Multiple login methods are available; choose --method oauth or --method api-key.");
+        let oauth = Some(AuthLoginMethod::Oauth);
+        for (answer, requested, tty, single, expected, reads) in [
+            (Some("2\n"), None, true, false, Ok("api-key"), 1),
+            (Some("0\n"), None, true, false, invalid, 1),
+            (Some("\n"), None, true, false, invalid, 1),
+            (None, None, true, false, invalid, 1),
+            (Some("2\n"), oauth, false, false, Ok("oauth"), 0),
+            (Some("2\n"), None, false, true, Ok("api-key"), 0),
+            (Some("2\n"), None, false, false, non_tty, 0),
+        ] {
+            let count = Arc::new(AtomicUsize::new(0));
+            let pump = Pump::spawn(Box::new(Scripted {
+                value: answer.map(str::to_owned),
+                reads: count.clone(),
+            }));
+            let single_method = [AuthMethod::ApiKey];
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                select_method_with_line(
+                    if single { &single_method } else { methods },
+                    requested,
+                    tty,
+                    pump.line(),
+                ),
+            )
+            .await
+            .expect("hang guard");
+            let actual = result
+                .map(super::super::list::auth_method_token)
+                .map_err(|error| error.to_string());
+            assert_eq!(actual, expected.map_err(str::to_owned), "answer={answer:?}");
+            assert_eq!(count.load(Ordering::SeqCst), reads, "answer={answer:?}");
+        }
     }
     #[test]
     fn success_identity_and_json_never_contain_credentials() {
