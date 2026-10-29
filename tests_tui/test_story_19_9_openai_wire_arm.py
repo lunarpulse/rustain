@@ -79,6 +79,9 @@ def _env(stub_url: str, home: Path, *, key: str) -> dict[str, str]:
         "ANTHROPIC_BASE_URL": "",
         "ANTHROPIC_DEFAULT_SONNET_MODEL": "",
         "RUSTAIN_MODELS_DEV_URL": stub_url,
+        # OpenRouter now defaults to Responses; this test specifically exercises
+        # its explicit Chat Completions transport.
+        "RUSTAIN_OPENROUTER_RESPONSES": "0",
         "OPENROUTER_API_KEY": key,
         "HOME": str(home),
         "NO_COLOR": "1",
@@ -176,9 +179,9 @@ def test_config_path_text_turn_streams_on_the_openai_wire(stub, scratch_home, wo
         assert "other wire ping" in row["last_user"], row
         assert "anthropic/" in row["model"], row
 
-        # The OpenAI health check is GET {base_url}/models — the same endpoint
-        # the connectivity probe hits, so it logs `kind: "probe"`.
-        assert any(r.get("kind") == "probe" for r in stub.rows()), stub.rows()
+        # OpenRouter validates credentials at /auth/key; model discovery is a
+        # separate queryless GET /models. Neither may consume the scene turn.
+        assert any(r.get("kind") == "key_check" for r in stub.rows()), stub.rows()
         # No Anthropic-wire turn happened: the config path replaced that door.
         assert not [r for r in stub.rows() if r.get("path") == "/v1/messages"], stub.rows()
 

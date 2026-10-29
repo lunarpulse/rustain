@@ -373,6 +373,10 @@ def _exercise(binary, evidence, root, monkeypatch):
             elif method == "GET" and path == OPERATION:
                 status, kind, body = ok({"done": True, "response": {
                     "cloudaicompanionProject": {"id": PROJECT}}})
+            elif method == "POST" and path == "/v1internal:fetchAvailableModels":
+                status, kind, body = 403, "application/json", b'{"error":"unavailable"}'
+            elif method == "POST" and path == "/v1internal:retrieveUserQuota":
+                status, kind, body = ok({"buckets": []})
             elif method == "GET" and path == "/api.json":
                 status, kind, body = ok({})
             elif method == "POST" and path == STREAM:
@@ -490,7 +494,9 @@ def _exercise(binary, evidence, root, monkeypatch):
             pytest.skip(skip)
         with lock:
             login_paths = [urlsplit(r["path"]).path for r in requests if r["path"] != "/api.json"]
-        assert login_paths == [TOKEN, USERINFO, LOAD, ONBOARD, OPERATION], login_paths
+        assert login_paths == [TOKEN, USERINFO, LOAD, ONBOARD, OPERATION,
+                               "/v1internal:fetchAvailableModels", "/v1internal:fetchAvailableModels",
+                               "/v1internal:retrieveUserQuota"], login_paths
         auth_file = (data / "auth.json").read_text()
         assert CODE not in auth_file and PROVIDER in auth_file
 
@@ -628,6 +634,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             assert post["raw"].startswith(
                 f'{{"project":"{PROJECT}","model":"{MODEL}","request":{{"contents":['), post["raw"][:200]
         assert all(urlsplit(r["path"]).path in {TOKEN, USERINFO, LOAD, ONBOARD, OPERATION,
+                                                "/v1internal:fetchAvailableModels",
+                                                "/v1internal:retrieveUserQuota",
                                                 "/api.json", STREAM} for r in observed), observed
         image, echo = names["image"], names["echo"]
         third = replies[3]["body"]["request"]["contents"]

@@ -35,11 +35,15 @@ Endpoints answered (nothing else — any other verb or path is logged
   (``title_trigger = conversation.turns.len() == 2``, `event_loop.rs`), answered with
   a fixed title and **never consuming a scene turn**. It bypasses ``run_turn``, so it
   writes no ledger row — the ledger stays one row per user turn.
-* ``GET /v1/models`` (also ``/models``)  → ``200 {"data":[]}`` — the connectivity
-  probe (`doctor`/`auth` use it, and a 404 there fills a receipt with WARNs).
-  The alias mirrors ``OPENAI_PATHS`` below: the OpenAI adapter's health check is
-  ``GET {base_url}/models`` (``openai/mod.rs``), so a ``base_url`` without the
-  ``/v1`` suffix probes instead of 404ing into ``kind:"unknown"`` + exit 1.
+* ``GET /v1/models`` (also ``/models``) → ``200 {"data":[],"has_more":false}``
+  for connectivity probes and model discovery on both wires. Requests with a query
+  (such as Anthropic discovery's ``?limit=1000``) log ``kind:"discovery"``;
+  queryless requests log ``kind:"probe"``. OpenAI discovery and probes both use
+  the queryless URL, so they cannot be distinguished from the request path alone.
+  The ``/models`` alias supports OpenAI base URLs without the ``/v1`` suffix.
+* ``GET /v1/auth/key`` (also ``/auth/key``) → OpenRouter's boot credential
+  check: 200 for any nonempty Bearer token, 401 otherwise. This is a fixture
+  check, not validation against a real provider, and does not consume a turn.
 * ``GET /api.json``   → ``200 {}`` (models.dev; point ``RUSTAIN_MODELS_DEV_URL`` here
   or the default ``models-dev`` feature reaches the real host on a stale cache).
 * ``POST /v1/chat/completions`` (also ``/chat/completions``) with ``"stream": true``
@@ -114,10 +118,11 @@ request's tool definitions, sorted for deterministic identity checks; ``tools``
 retains the existing cardinality.
 
 Boot calls log ``"kind":"health_check"`` (``stream`` absent, ``max_tokens`` 1),
-``"kind":"probe"`` (``GET /v1/models``), ``"kind":"models_dev"`` (``GET /api.json``)
-and ``"kind":"title"`` (the product's title call); any other path logs
-``"kind":"unknown"`` + 404. A scene-turn row carries ``turn`` and no ``kind``, which
-is how a consumer selects the rows that are user turns.
+``"kind":"probe"`` (queryless model GET), ``"kind":"discovery"`` (model GET
+with a query), ``"kind":"key_check"`` (OpenRouter credential check),
+``"kind":"models_dev"`` (``GET /api.json``) and ``"kind":"title"`` (the
+product's title call); any other path logs ``"kind":"unknown"`` + 404.
+A scene-turn row carries ``turn`` and no ``kind``, which selects user turns.
 
 Story 19.19 scenes may opt into ``request_observations: {"needles": {"name":
 "fixture bytes"}}``: 1–32 names (<=64 UTF-8 bytes) and nonempty needles (<=4096
@@ -780,9 +785,16 @@ class SceneHandler(BaseHTTPRequestHandler):
 
     # ── verbs ────────────────────────────────────────────────────────────
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook
-        if self.path in self.PROBE_PATHS:
-            self.log.write({"method": "GET", "path": self.path, "kind": "probe"})
-            self._respond(200, "application/json", b'{"data":[]}')
+        path, separator, _query = self.path.partition("?")
+        if path in self.PROBE_PATHS:
+            kind = "discovery" if separator else "probe"
+            self.log.write({"method": "GET", "path": self.path, "kind": kind})
+            self._respond(200, "application/json", b'{"data":[],"has_more":false}')
+        elif path in ("/v1/auth/key", "/auth/key"):
+            authorization = self.headers.get("authorization", "")
+            bearer = authorization[:7].lower() == "bearer " and bool(authorization[7:].strip())
+            self.log.write({"method": "GET", "path": self.path, "kind": "key_check"})
+            self._respond(200 if bearer else 401, "application/json", b"{}")
         elif self.path == "/api.json":
             self.log.write({"method": "GET", "path": self.path, "kind": "models_dev"})
             self._respond(200, "application/json", b"{}")

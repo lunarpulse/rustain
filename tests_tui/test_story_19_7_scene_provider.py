@@ -225,16 +225,43 @@ def test_desync_is_loud_product_side(stub, scratch_home):
         assert all(row["desync"] is True for row in turns), turns
 
 
+@pytest.mark.parametrize("path", ["/v1/models", "/models"])
+def test_models_discovery_with_query_and_queryless_probe_are_clean(stub, path):
+    """Both model paths accept discovery queries without consuming scene turns."""
+    for suffix, kind in [("", "probe"), ("?limit=1000&after_id=next", "discovery")]:
+        with urllib.request.urlopen(f"{stub.url}{path}{suffix}", timeout=5) as response:
+            assert response.status == 200
+            assert json.load(response) == {"data": [], "has_more": False}
+        row = stub.rows()[-1]
+        assert (row["method"], row["path"], row["kind"]) == ("GET", path + suffix, kind)
+    assert not _turn_rows(stub)
+
+
+@pytest.mark.parametrize("path", ["/v1/auth/key", "/auth/key"])
+def test_openrouter_key_check_accepts_bearer_without_logging_it(stub, path):
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        urllib.request.urlopen(f"{stub.url}{path}", timeout=5)
+    assert excinfo.value.code == 401
+    request = urllib.request.Request(
+        f"{stub.url}{path}", headers={"Authorization": f"Bearer {SENTINEL}"}
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+    assert [row["kind"] for row in stub.rows()] == ["key_check", "key_check"]
+    assert SENTINEL not in stub.log_path.read_text()
+    assert not _turn_rows(stub)
+
+
 def test_unknown_path_is_loud(stub):
-    """AC2(b): anything outside the three answered endpoints is 404 + exit 1."""
+    """AC2(b): unsupported paths and verbs remain 404 + exit 1."""
     stub.expect_status = 1
     with pytest.raises(urllib.error.HTTPError) as excinfo:
-        urllib.request.urlopen(f"{stub.url}/not-an-anthropic-endpoint", timeout=5)
+        urllib.request.urlopen(f"{stub.url}/not-an-anthropic-endpoint?limit=1000", timeout=5)
     assert excinfo.value.code == 404
 
     rows = [row for row in stub.rows() if row.get("kind") == "unknown"]
     assert len(rows) == 1, stub.rows()
-    assert rows[0]["path"] == "/not-an-anthropic-endpoint"
+    assert rows[0]["path"] == "/not-an-anthropic-endpoint?limit=1000"
 
     # A verb outside GET/POST is equally loud — the stdlib default would be a
     # silent 501 that logs nothing and marks nothing.
@@ -267,7 +294,7 @@ def test_unknown_path_is_loud(stub):
 
     rows = [row for row in stub.rows() if row.get("kind") == "unknown"]
     assert [(row["method"], row["path"]) for row in rows] == [
-        ("GET", "/not-an-anthropic-endpoint"),
+        ("GET", "/not-an-anthropic-endpoint?limit=1000"),
         ("PUT", "/v1/messages"),
         ("POST", "/v1/messages"),  # stream-less, not the pinned health-check shape
         ("POST", "/v1/messages"),  # unparseable body

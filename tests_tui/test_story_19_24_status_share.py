@@ -175,7 +175,8 @@ def _exercise(binary, evidence, root, monkeypatch):
                               in "".join(_logical(screen).split()),
                               "policy-attributed agent-composed board")
         (evidence / "03-status-board.screen.txt").write_text(screen)
-        assert not stub.rows(), stub.rows()
+        assert all(row["method"] == "GET" and row["path"] == "/v1/models?limit=1000"
+                   and row["kind"] == "discovery" for row in stub.rows()), stub.rows()
         for alias, (workspace, _) in worlds.items():
             rows = {path.name: path.read_text() for path in (workspace / ".rustain/rooms").glob("*.jsonl")}
             (evidence / (alias + ".journal.json")).write_text(json.dumps(rows, indent=2) + "\n")

@@ -177,7 +177,12 @@ def _exercise(binary, evidence, root, monkeypatch):
             if path == "/api.json":
                 models_dev_release.wait(timeout=60)
             if path == "/or/v1/models":
-                status, payload = 200, {"data": [{"id": model} for model in LIVE_IDS]}
+                status, payload = 200, {"data": [
+                    {"id": model, "supported_parameters": ["tools"]} for model in LIVE_IDS
+                ]}
+                expected_auth = "Bearer " + KEYS["openrouter"]
+            elif path == "/or/v1/auth/key":
+                status, payload = 200, {}
                 expected_auth = "Bearer " + KEYS["openrouter"]
             elif path == "/ds/v1/models":
                 status, payload = 401, {"error": {"message": "credential rejected"}}
@@ -325,8 +330,12 @@ def _exercise(binary, evidence, root, monkeypatch):
                            "open selector rebuilt by the models.dev remerge refresh event")
             _capture(tui, evidence, "04-anthropic-locked", screen)
             tui.send("\r")
-            # Prove Enter was processed, not merely that an old frame remained:
-            # navigation after it must still operate inside the selector.
+            # Locked Enter opens the sign-in chooser; cancelling must restore
+            # the same selector without selecting a model.
+            _wait(tui, lambda value: "Sign in to Anthropic" in value
+                  and "Choose a login method" in value, "locked Enter opens sign-in")
+            tui.send("\x1b")
+            _wait(tui, with_metadata, "cancel sign-in restores locked selector")
             tui.send("\x1b[D")
             _wait(tui, lambda value: _modal_complete(value) and "OpenRouter" in value
                   and all(model in value for model in LIVE_IDS),
@@ -346,8 +355,9 @@ def _exercise(binary, evidence, root, monkeypatch):
                 observed = list(requests)
             (evidence / "requests.json").write_text(json.dumps(observed, indent=2) + "\n")
         assert observed and all(row["expected_credential_received"] for row in observed), observed
-        assert all(urlsplit(row["path"]).path in {"/or/v1/models", "/ds/v1/models", "/api.json"}
-                   for row in observed), observed
+        assert all(urlsplit(row["path"]).path in {
+            "/or/v1/models", "/or/v1/auth/key", "/ds/v1/models", "/api.json"
+        } for row in observed), observed
         pricing = json.loads((data / "models_pricing.json").read_text())
         extra = next(row for row in pricing["catalog"]["anthropic"] if row["modelId"] == "claude-sonnet-9")
         assert extra["contextWindow"] == 900000 and extra["displayName"] == "Claude Sonnet 9", extra
