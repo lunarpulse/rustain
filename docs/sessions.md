@@ -5,6 +5,21 @@ next to the project they belong to (git-repo-local, like `.git`). Cross-
 workspace `session list --all` uses a separate hint registry at
 `~/.rustain/workspaces.json` populated on the first successful save per workspace.
 
+## ACP display-only diagnostics
+
+ACP warnings and errors are saved as display-only notices, separate from provider
+text, reasoning and tool history. They do not become assistant-authored model
+context or invalidate otherwise faithful signed provider-response replay.
+
+`session/load` replays each notice with its original `Warning:` or `Error:`
+prefix, in order among the response's text chunks; consecutive notices retain
+their stored order. `session/resume` restores context without historical updates.
+Notice-only responses survive reload even though they supply no model message.
+
+Legacy sessions without explicit notice metadata are unchanged: rustain does
+not guess whether warning-like prose was model output. Edited notice offsets
+that are invalid replay the full response text once, then notices in stored order.
+
 ## `rustain session list`
 
 List the saved sessions in the current workspace:

@@ -35,23 +35,102 @@ fn line(value: Value) -> String {
     format!("{value}\n")
 }
 
-/// `initialize → session/new → session/prompt` over the real ACP dispatcher;
-/// returns every line the client received.
-pub(crate) async fn acp_turn(
+/// A real provider whose first text chunk is followed by a client-controlled
+/// pause. The ACP client releases it only after observing the in-flight notice.
+struct NoticeGate {
+    inner: Arc<dyn StreamingProvider>,
+    armed: std::sync::atomic::AtomicBool,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProvider for NoticeGate {
+    async fn stream_completion(
+        &self,
+        messages: Vec<rustain::domain::models::Message>,
+        options: rustain::domain::models::CompletionOptions,
+    ) -> Result<
+        futures::stream::BoxStream<'static, rustain::domain::models::StreamChunk>,
+        rustain::domain::errors::ProviderError,
+    > {
+        use futures::StreamExt;
+        let stream = self.inner.stream_completion(messages, options).await?;
+        let arm = self.armed.swap(false, std::sync::atomic::Ordering::SeqCst);
+        let release = self.release.clone();
+        Ok(Box::pin(futures::stream::unfold(
+            (stream, arm, false, release),
+            |(mut stream, armed, pending, release)| async move {
+                if pending {
+                    release.notified().await;
+                }
+                let chunk = stream.next().await?;
+                let gate = armed
+                    && matches!(&chunk, rustain::domain::models::StreamChunk::Text { content, .. } if !content.is_empty());
+                Some((chunk, (stream, armed && !gate, gate, release)))
+            },
+        )))
+    }
+
+    async fn abort(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        self.inner.abort().await
+    }
+    fn provider_id(&self) -> String {
+        self.inner.provider_id()
+    }
+    fn list_models(&self) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+        self.inner.list_models()
+    }
+    async fn health_check(&self) -> Result<(), rustain::domain::errors::ProviderError> {
+        self.inner.health_check().await
+    }
+    async fn connectivity_probe(
+        &self,
+    ) -> Result<rustain::domain::ports::ProbeOutcome, rustain::domain::errors::ProviderError> {
+        self.inner.connectivity_probe().await
+    }
+}
+
+pub(crate) const QUEUED_NOTICE: &str = "signed-wire queued diagnostic";
+pub(crate) const FLIGHT_NOTICE: &str = "signed-wire in-flight diagnostic";
+
+/// Drive one server, optionally loading an existing session. A gated initial
+/// turn sends a real MCP event only after the client has received provider text.
+pub(crate) async fn acp_notice_turns(
     provider: Arc<dyn StreamingProvider>,
     cfg: &AppConfig,
     ws: &Path,
-    prompt: &str,
-) -> Vec<String> {
+    session: Option<&str>,
+    prompts: &[&str],
+    notices: bool,
+) -> (String, Vec<Value>) {
     let (server_incoming, mut client_write) = tokio::io::duplex(64 * 1024);
     let (client_read, server_outgoing) = tokio::io::duplex(64 * 1024);
-    let ws_for_factory = ws.to_path_buf();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let provider: Arc<dyn StreamingProvider> = if notices {
+        Arc::new(NoticeGate {
+            inner: provider,
+            armed: true.into(),
+            release: release.clone(),
+        })
+    } else {
+        provider
+    };
+    let sender = Rc::new(std::cell::RefCell::new(None));
+    let sender_factory = sender.clone();
+    let workspace = ws.to_path_buf();
     let factory: CoreFactory = Rc::new(move |_cwd: &Path, _mcp_servers| {
-        Ok(cli_core(
-            provider.clone(),
-            Tools::port(true),
-            &ws_for_factory,
-        ))
+        let core = cli_core(provider.clone(), Tools::port(true), &workspace);
+        if notices {
+            core.event_tx
+                .send(rustain::domain::events::AppEvent::SystemNotice {
+                    conversation_id: None,
+                    level: rustain::domain::models::NoticeLevel::Warning,
+                    message: QUEUED_NOTICE.into(),
+                })
+                .unwrap();
+        }
+        *sender_factory.borrow_mut() = Some(core.event_tx.clone());
+        Ok(core)
     });
     let server = serve_acp_with_core_factory(
         server_outgoing.compat_write(),
@@ -62,50 +141,79 @@ pub(crate) async fn acp_turn(
         factory,
     );
     let cwd = ws.to_path_buf();
-    let prompt = prompt.to_owned();
+    let existing = session.map(str::to_owned);
     let drive = async move {
         let mut lines = tokio::io::BufReader::new(client_read).lines();
-        for request in [
-            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}}),
-        ] {
-            client_write
-                .write_all(line(request).as_bytes())
-                .await
-                .unwrap();
-        }
+        let mut frames = Vec::new();
+        let mut sent_flight = false;
+        let mut warning_seen = false;
+        let mut session_id = existing.clone().unwrap_or_default();
+        let mut prompt_index = 0usize;
+        client_write.write_all(line(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})).as_bytes()).await.unwrap();
+        let open = if let Some(id) = existing {
+            json!({"jsonrpc":"2.0","id":2,"method":"session/load","params":{"cwd":cwd,"sessionId":id,"mcpServers":[]}})
+        } else {
+            json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":cwd,"mcpServers":[]}})
+        };
+        client_write.write_all(line(open).as_bytes()).await.unwrap();
         client_write.flush().await.unwrap();
-        let mut seen = Vec::new();
         loop {
             let raw = tokio::time::timeout(GUARD, lines.next_line())
                 .await
                 .expect("ACP frame hang guard")
-                .expect("read ACP frame")
-                .expect("ACP stream ended before the prompt result");
+                .unwrap()
+                .expect("ACP stream ended");
             let value: Value = serde_json::from_str(&raw).unwrap();
-            seen.push(raw);
             assert_ne!(value["method"], "session/request_permission");
-            if value["id"] == json!(2) {
-                let session = value["result"]["sessionId"].as_str().unwrap().to_owned();
-                let request = json!({
-                    "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-                    "params": {"sessionId": session, "prompt": [{"type": "text", "text": prompt}]},
-                });
-                client_write
-                    .write_all(line(request).as_bytes())
-                    .await
+            let text = value["params"]["update"]["content"]["text"]
+                .as_str()
+                .unwrap_or("");
+            if notices && !sent_flight && text == "V" {
+                sender
+                    .borrow()
+                    .as_ref()
+                    .unwrap()
+                    .send(rustain::domain::events::AppEvent::SystemNotice {
+                        conversation_id: None,
+                        level: rustain::domain::models::NoticeLevel::Warning,
+                        message: FLIGHT_NOTICE.into(),
+                    })
                     .unwrap();
-                client_write.flush().await.unwrap();
+                sent_flight = true;
             }
-            if value["id"] == json!(3) {
+            if notices && text == format!("Warning: {FLIGHT_NOTICE}") {
+                warning_seen = true;
+                release.notify_one();
+            }
+            let id = value["id"].as_u64();
+            if id == Some(2) {
+                assert!(value.get("error").is_none(), "{value}");
+                if session_id.is_empty() {
+                    session_id = value["result"]["sessionId"].as_str().unwrap().to_owned();
+                }
+            }
+            let completed = id == Some(2) || id == Some(3 + prompt_index as u64);
+            if id != Some(2) && completed {
                 assert_eq!(value["result"]["stopReason"], "end_turn", "{value}");
-                return seen;
+                prompt_index += 1;
+            }
+            frames.push(value);
+            if completed {
+                if prompt_index == prompts.len() {
+                    if notices {
+                        assert!(sent_flight && warning_seen);
+                    }
+                    return (session_id, frames);
+                }
+                let req = json!({"jsonrpc":"2.0","id":3 + prompt_index as u64,"method":"session/prompt","params":{"sessionId":session_id,"prompt":[{"type":"text","text":prompts[prompt_index]}]}});
+                client_write.write_all(line(req).as_bytes()).await.unwrap();
+                client_write.flush().await.unwrap();
             }
         }
     };
     tokio::select! {
-        seen = drive => seen,
-        result = server => panic!("ACP server exited before the prompt result: {result:?}"),
+        output = drive => output,
+        result = server => panic!("ACP server exited before prompt result: {result:?}"),
     }
 }
 

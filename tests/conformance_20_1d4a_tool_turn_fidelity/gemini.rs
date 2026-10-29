@@ -741,12 +741,14 @@ async fn plain_acp_tool_turn_reloads_its_in_turn_history() {
     world.script(script(&["after acp"])).await;
     let ws = world.workspace();
     let cfg = app_config(MODEL);
-    let lines = super::providers::acp_turn(build(), &cfg, &ws, "first").await;
+    let (_, lines) =
+        super::providers::acp_notice_turns(build(), &cfg, &ws, None, &["first"], false).await;
     // Review RF-08 (AC4): the ACP agent's own updates carry no signature and no
     // image bytes, while its store keeps both.
     assert!(!lines.is_empty());
     for line in &lines {
-        assert!(!leaks(line) && !line.contains(IMAGE), "{line}");
+        let line = line.to_string();
+        assert!(!leaks(&line) && !line.contains(IMAGE), "{line}");
     }
     assert!(sessions_contain(&ws, IMAGE) && sessions_contain(&ws, SIG[2]));
     let store = storage(&ws);
@@ -777,4 +779,153 @@ async fn plain_acp_tool_turn_reloads_its_in_turn_history() {
     assert_eq!(posts.len(), 4);
     assert_in_turn(&posts[2]);
     assert_reload(&posts, 3, "next");
+}
+
+/// Signed ACP history must survive both live notices and the real load/mirror
+/// path. The last tool-loop POST is the oracle, not a constructed message.
+#[tokio::test]
+#[serial]
+async fn acp_notice_signed_tool_turn_preserves_wire_history() {
+    use super::providers::{FLIGHT_NOTICE, QUEUED_NOTICE, acp_notice_turns};
+
+    const AUTHORED: &str = "Warning: provider-authored prose";
+    async fn run(notices: bool) -> Vec<Value> {
+        let world = World::start().await;
+        world
+            .script(vec![
+                response_1(),
+                response_2(),
+                sse(&[frame(
+                    json!([{"text": AUTHORED, "thoughtSignature": SIG[4]}]),
+                    Some("STOP"),
+                )]),
+                answer("same answer"),
+                answer("loaded answer"),
+                answer("rebuilt answer"),
+            ])
+            .await;
+        let ws = world.workspace();
+        let cfg = app_config(MODEL);
+        let (session, frames) =
+            acp_notice_turns(build(), &cfg, &ws, None, &["first", "same"], notices).await;
+        let texts: Vec<_> = frames
+            .iter()
+            .filter_map(|v| v["params"]["update"]["content"]["text"].as_str())
+            .collect();
+        assert!(texts.contains(&AUTHORED));
+        for marker in [QUEUED_NOTICE, FLIGHT_NOTICE] {
+            let expected = format!("Warning: {marker}");
+            assert_eq!(
+                texts.iter().filter(|text| **text == expected).count(),
+                usize::from(notices)
+            );
+        }
+
+        let (_, loaded_frames) =
+            acp_notice_turns(build(), &cfg, &ws, Some(&session), &["loaded"], false).await;
+        if notices {
+            for marker in [QUEUED_NOTICE, FLIGHT_NOTICE] {
+                let expected = format!("Warning: {marker}");
+                assert_eq!(
+                    loaded_frames
+                        .iter()
+                        .filter(|v| v["params"]["update"]["content"]["text"] == expected)
+                        .count(),
+                    1
+                );
+            }
+        }
+        let store = storage(&ws);
+        let summaries = store.list_conversations().await.unwrap();
+        assert_eq!(summaries.len(), 1);
+        let id = &summaries[0].id;
+        let before = store.load_conversation(id).await.unwrap().unwrap();
+        let calls = |conversation: &Conversation| {
+            conversation
+                .messages
+                .iter()
+                .flat_map(|row| &row.tool_calls)
+                .map(|call| {
+                    (
+                        call.wire_id().to_owned(),
+                        call.name.clone(),
+                        call.result.as_ref().map(|result| result.content.clone()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let original_calls = calls(&before);
+        assert_eq!(original_calls.len(), 3);
+        assert!(
+            original_calls
+                .iter()
+                .all(|(id, _, result)| !id.is_empty() && result.is_some())
+        );
+        assert_eq!(
+            original_calls
+                .iter()
+                .map(|(_, name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            [IMAGE_TOOL, ECHO_TOOL, ECHO_TOOL]
+        );
+        assert!(before.messages.iter().flat_map(|row| &row.content_blocks).any(|block| matches!(block, ContentBlockType::ResponseSpan(span) if span.reasoning.as_deref() == Some("T"))));
+        for _ in 0..2 {
+            let mut conversation = store.load_conversation(id).await.unwrap().unwrap();
+            conversation.rebuild_messages_mirror();
+            store.save_conversation(&conversation).await.unwrap();
+        }
+        let after = store.load_conversation(id).await.unwrap().unwrap();
+        assert_eq!(calls(&after), original_calls);
+        let (_, rebuilt_frames) =
+            acp_notice_turns(build(), &cfg, &ws, Some(&session), &["rebuilt"], false).await;
+        if notices {
+            for marker in [QUEUED_NOTICE, FLIGHT_NOTICE] {
+                let expected = format!("Warning: {marker}");
+                assert_eq!(
+                    rebuilt_frames
+                        .iter()
+                        .filter(|v| v["params"]["update"]["content"]["text"] == expected)
+                        .count(),
+                    1
+                );
+            }
+        }
+        let posts = world.posts().await;
+        assert_eq!(posts.len(), 6);
+        assert_in_turn(&posts[2]);
+        let oracle = contents(&posts[2]);
+        let final_model =
+            json!({"role":"model","parts":[{"text":AUTHORED,"thoughtSignature":SIG[4]}]});
+        for (index, prompt) in [(3, "same"), (4, "loaded"), (5, "rebuilt")] {
+            let history = contents(&posts[index]);
+            assert_eq!(&history[..oracle.len()], oracle.as_slice());
+            assert_eq!(history[oracle.len()], final_model);
+            assert_eq!(history.last().unwrap(), &user_content(prompt));
+            assert_eq!(
+                signatures(&Value::Array(history)),
+                SIG.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()
+            );
+            assert!(!posts[index].contains(QUEUED_NOTICE));
+            assert!(!posts[index].contains(FLIGHT_NOTICE));
+            assert!(posts[index].contains(AUTHORED));
+        }
+        assert_eq!(
+            assert_prefix(&posts[3], &posts[4], "contents"),
+            vec![
+                json!({"role":"model","parts":[{"text":"same answer"}]}),
+                user_content("loaded")
+            ]
+        );
+        assert_eq!(
+            assert_prefix(&posts[4], &posts[5], "contents"),
+            vec![
+                json!({"role":"model","parts":[{"text":"loaded answer"}]}),
+                user_content("rebuilt")
+            ]
+        );
+        oracle
+    }
+    let clean = run(false).await;
+    let with_notices = run(true).await;
+    assert_eq!(with_notices, clean);
 }

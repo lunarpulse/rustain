@@ -26,6 +26,14 @@ pub enum ContentBlockType {
     /// Persisted for the provider history only; never rendered and never
     /// projected to observers.
     ResponseSpan(ResponseSpan),
+    /// ACP display-only diagnostic, never provider history or public transcript.
+    /// Offsets count provider-text bytes in this row and must be nondecreasing
+    /// UTF-8 boundaries; equal offsets retain block insertion order.
+    #[serde(rename_all = "camelCase")]
+    AcpNotice {
+        text: String,
+        after_text_bytes: usize,
+    },
     PlanCard,
     PlanSummary,
     PlanDeviation,
@@ -107,5 +115,20 @@ impl ResponseSpanBuilder {
         let reasoning = std::mem::take(&mut self.reasoning);
         span.reasoning = (!reasoning.is_empty()).then_some(reasoning);
         span
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContentBlockType;
+
+    #[test]
+    fn acp_notice_serde_round_trip() {
+        let value = serde_json::json!({
+            "acpNotice": {"text": "Warning: diagnostic", "afterTextBytes": 3}
+        });
+        let block: ContentBlockType = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&block).unwrap(), value);
+        assert_eq!(block, block.clone());
     }
 }

@@ -399,6 +399,46 @@ mod tests {
     }
 
     #[test]
+    fn acp_notices_leave_response_spans_and_reasoning_intact() {
+        let mut row = spanned_row();
+        row.content_blocks.push(ContentBlockType::AcpNotice {
+            text: "Warning: display only".into(),
+            after_text_bytes: 1,
+        });
+        let only_notice = ChatMessage {
+            role: MessageRole::Assistant,
+            content_blocks: vec![ContentBlockType::AcpNotice {
+                text: "Error: display only".into(),
+                after_text_bytes: 0,
+            }],
+            ..Default::default()
+        };
+        let api = build_api_messages(&conversation(vec![
+            user("go"),
+            row,
+            only_notice,
+            user("next"),
+        ]));
+        assert_eq!(api.len(), 7);
+        assert_eq!(api[1].content, "V");
+        assert_eq!(api[1].reasoning_content.as_deref(), Some("T"));
+        assert_eq!(api[1].provider_replay, vec![item("r1")]);
+        assert_eq!(
+            api[1]
+                .tool_uses
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(api[3].tool_uses[0].id, "C");
+        assert_eq!(api[3].provider_replay, vec![item("r2")]);
+        assert_eq!(api[5].content, "done");
+        assert_eq!(api[5].provider_replay, vec![item("r3")]);
+        assert_eq!(api[6].content, "next");
+    }
+
+    #[test]
     fn a_call_without_its_result_is_repaired_per_span() {
         let mut row = spanned_row();
         row.tool_calls[1].result = None;

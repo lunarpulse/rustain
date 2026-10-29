@@ -177,6 +177,7 @@ pub(crate) fn public_transcript_message(
                     block,
                     crate::domain::models::ContentBlockType::ProviderReplay(_)
                         | crate::domain::models::ContentBlockType::ResponseSpan(_)
+                        | crate::domain::models::ContentBlockType::AcpNotice { .. }
                 )
             })
             .cloned()
@@ -1094,6 +1095,18 @@ mod tests {
                     text: "SPAN-MARKER".into(),
                     ..Default::default()
                 }),
+                ContentBlockType::AcpNotice {
+                    text: "ACP-NOTICE-MARKER".into(),
+                    after_text_bytes: 0,
+                },
+                ContentBlockType::ProviderReplay(crate::domain::models::ProviderReplayItem {
+                    provider: "provider".into(),
+                    model: "model".into(),
+                    payload: std::sync::Arc::new(
+                        serde_json::json!({"signature": "SIGNATURE-MARKER"}),
+                    ),
+                    scope: None,
+                }),
             ],
             tool_calls: vec![ToolCallInfo {
                 id: "tc_1".into(),
@@ -1113,12 +1126,27 @@ mod tests {
             ..Default::default()
         };
         let projected = serde_json::to_string(&public_transcript_message(&retained)).unwrap();
-        for marker in ["IMAGE-BYTES-MARKER", "PROVIDER-ID-MARKER", "SPAN-MARKER"] {
+        for marker in [
+            "IMAGE-BYTES-MARKER",
+            "PROVIDER-ID-MARKER",
+            "SPAN-MARKER",
+            "ACP-NOTICE-MARKER",
+            "SIGNATURE-MARKER",
+        ] {
             assert!(!projected.contains(marker), "{projected}");
         }
-        assert!(projected.contains("thought") && projected.contains("[image: image/png]"));
+        assert!(
+            projected.contains("visible")
+                && projected.contains("thought")
+                && projected.contains("[image: image/png]")
+        );
         let stored = serde_json::to_string(&retained).unwrap();
-        assert!(stored.contains("IMAGE-BYTES-MARKER") && stored.contains("PROVIDER-ID-MARKER"));
+        assert!(
+            stored.contains("IMAGE-BYTES-MARKER")
+                && stored.contains("PROVIDER-ID-MARKER")
+                && stored.contains("ACP-NOTICE-MARKER")
+                && stored.contains("SIGNATURE-MARKER")
+        );
 
         let chunk = StreamChunk::ToolResult {
             id: "A".into(),

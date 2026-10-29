@@ -4835,3 +4835,552 @@ async fn acp_prompt_image_block_reaches_provider_as_exact_attachment() {
         "second attachment data (base64) must reach the provider unchanged"
     );
 }
+
+/// Story 20.9b: real dispatcher, producer channels and filesystem, not a
+/// hand-built clean assistant row.
+mod acp_notice_carrier {
+    use super::*;
+    use futures::{StreamExt, stream::BoxStream};
+    use rustain::domain::errors::ProviderError;
+    use rustain::domain::models::{
+        CompletionOptions, ContentBlockType, Message, MessageRole, NoticeLevel, StopReason,
+        StreamChunk,
+    };
+    use rustain::domain::ports::StreamingProvider;
+    use serde_json::{Value, json};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::sync::Notify;
+
+    #[derive(Clone, Copy)]
+    enum Ending {
+        Normal,
+        EmptyToolUse,
+        Error(&'static str),
+        Failure,
+        Panic,
+    }
+
+    struct NoticeProvider {
+        ending: Ending,
+        text: &'static str,
+        ordered: bool,
+        calls: AtomicUsize,
+        observed: Mutex<Vec<Vec<Message>>>,
+        proceed: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamingProvider for NoticeProvider {
+        async fn stream_completion(
+            &self,
+            messages: Vec<Message>,
+            options: CompletionOptions,
+        ) -> Result<BoxStream<'static, StreamChunk>, ProviderError> {
+            self.observed.lock().unwrap().push(messages);
+            if self.calls.fetch_add(1, Ordering::SeqCst) != 0 {
+                return scripted::ScriptedProvider::text_turn(GOLDEN_AGENT_TEXT)
+                    .into_provider()
+                    .stream_completion(vec![], options)
+                    .await;
+            }
+            if matches!(self.ending, Ending::Failure) {
+                return Err(ProviderError::Other("turn-event-marker".into()));
+            }
+            let (text, ordered, ending, proceed) =
+                (self.text, self.ordered, self.ending, self.proceed.clone());
+            Ok(futures::stream::unfold(0, move |state| {
+                let proceed = proceed.clone();
+                async move {
+                    let chunk = match state {
+                        0 if !text.is_empty() => StreamChunk::Text {
+                            content: text.into(),
+                            parent_tool_use_id: None,
+                        },
+                        0 => match ending {
+                            Ending::EmptyToolUse => StreamChunk::TurnComplete {
+                                stop_reason: StopReason::ToolUse,
+                            },
+                            Ending::Panic => panic!("notice panic fixture"),
+                            Ending::Error(content) => StreamChunk::Error {
+                                content: content.into(),
+                            },
+                            _ => StreamChunk::TurnComplete {
+                                stop_reason: StopReason::EndTurn,
+                            },
+                        },
+                        1 if ordered => {
+                            proceed.notified().await;
+                            StreamChunk::Text {
+                                content: "中B".into(),
+                                parent_tool_use_id: None,
+                            }
+                        }
+                        1 | 2 => {
+                            if ordered {
+                                proceed.notified().await;
+                            }
+                            match ending {
+                                Ending::Panic => panic!("notice panic fixture"),
+                                Ending::Error(content) => StreamChunk::Error {
+                                    content: content.into(),
+                                },
+                                _ => StreamChunk::TurnComplete {
+                                    stop_reason: StopReason::EndTurn,
+                                },
+                            }
+                        }
+                        3 if matches!(ending, Ending::Error(_)) => StreamChunk::TurnComplete {
+                            stop_reason: StopReason::Cancelled,
+                        },
+                        _ => return None,
+                    };
+                    // Empty text and terminal chunks must not repeat.
+                    let next = if state == 3 {
+                        4
+                    } else if text.is_empty() || (state >= 1 && !(ordered && state == 1)) {
+                        3
+                    } else {
+                        state + 1
+                    };
+                    Some((chunk, next))
+                }
+            })
+            .boxed())
+        }
+        async fn abort(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        fn provider_id(&self) -> String {
+            "scripted".into()
+        }
+        fn list_models(&self) -> Vec<rustain::domain::models::provider::ModelDescriptor> {
+            vec![]
+        }
+        async fn health_check(&self) -> Result<(), ProviderError> {
+            Ok(())
+        }
+        async fn connectivity_probe(
+            &self,
+        ) -> Result<rustain::domain::ports::ProbeOutcome, ProviderError> {
+            Ok(rustain::domain::ports::ProbeOutcome {
+                latency: std::time::Duration::ZERO,
+            })
+        }
+        fn provider_descriptor(&self) -> rustain::domain::models::provider::ProviderDescriptor {
+            scripted::ScriptedProvider::text_turn("")
+                .into_provider()
+                .provider_descriptor()
+        }
+    }
+
+    fn warning(text: &str) -> AppEvent {
+        AppEvent::SystemNotice {
+            conversation_id: None,
+            level: NoticeLevel::Warning,
+            message: text.into(),
+        }
+    }
+
+    fn chunk(frame: &Value) -> Option<&str> {
+        let update = &frame["params"]["update"];
+        (update["sessionUpdate"] == "agent_message_chunk")
+            .then(|| update["content"]["text"].as_str())
+            .flatten()
+    }
+
+    fn diagnostics(conv: &rustain::domain::models::Conversation) -> Vec<(String, usize)> {
+        conv.messages
+            .iter()
+            .flat_map(|m| &m.content_blocks)
+            .filter_map(|block| match block {
+                ContentBlockType::AcpNotice {
+                    text,
+                    after_text_bytes,
+                } => Some((text.clone(), *after_text_bytes)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn run(
+        ws: &Path,
+        provider: Arc<NoticeProvider>,
+        queued: bool,
+        session: Option<&str>,
+    ) -> (String, Vec<String>) {
+        use rustain::adapters::acp::{agent::CoreFactory, run::serve_acp_with_core_factory};
+        use std::{cell::RefCell, rc::Rc};
+        use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+        let (input, write) = tokio::io::duplex(64 * 1024);
+        let (read, output) = tokio::io::duplex(64 * 1024);
+        let sender = Rc::new(RefCell::new(None));
+        let factory_sender = sender.clone();
+        let root = ws.to_path_buf();
+        let p = provider.clone();
+        let factory: CoreFactory = Rc::new(move |_, _| {
+            let mut core = make_core(&root);
+            core.provider = p.clone();
+            if queued {
+                core.event_tx.send(warning("queued-marker")).unwrap();
+            }
+            *factory_sender.borrow_mut() = Some(core.event_tx.clone());
+            Ok(core)
+        });
+        let server = serve_acp_with_core_factory(
+            output.compat_write(),
+            input.compat(),
+            Default::default(),
+            ws.to_path_buf(),
+            None,
+            factory,
+        );
+        let drive = async {
+            use tokio::io::AsyncBufReadExt;
+            let mut client = PermissionClient {
+                write,
+                lines: tokio::io::BufReader::new(read).lines(),
+                early_updates: vec![],
+            };
+            client
+                .send(serde_json::from_str(ACP_INITIALIZE_REQ).unwrap())
+                .await;
+            client.result(1).await;
+            let id = if let Some(id) = session {
+                client
+                    .send(json!({"jsonrpc":"2.0","id":2,"method":"session/load",
+                    "params":{"sessionId":id,"cwd":ws,"mcpServers":[]}}))
+                    .await;
+                let first = client.result(2).await;
+                let first: Vec<_> = first.iter().filter_map(chunk).map(str::to_owned).collect();
+                client
+                    .send(json!({"jsonrpc":"2.0","id":7,"method":"session/load",
+                    "params":{"sessionId":id,"cwd":ws,"mcpServers":[]}}))
+                    .await;
+                let repeated = client.result(7).await;
+                assert_eq!(
+                    first,
+                    repeated
+                        .iter()
+                        .filter_map(chunk)
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                );
+                client
+                    .send(json!({"jsonrpc":"2.0","id":8,"method":"session/resume",
+                    "params":{"sessionId":id,"cwd":ws,"mcpServers":[]}}))
+                    .await;
+                assert!(
+                    client
+                        .result(8)
+                        .await
+                        .iter()
+                        .all(|frame| frame["method"] != "session/update")
+                );
+                return (id.to_owned(), first);
+            } else {
+                client.new_session(2, ws).await
+            };
+            client.prompt(3, &id).await;
+            let mut live = Vec::new();
+            loop {
+                let frame = client.next().await;
+                if frame["id"] == 3 {
+                    let reason = match provider.ending {
+                        Ending::Normal | Ending::EmptyToolUse => "end_turn",
+                        Ending::Error(_) => "cancelled",
+                        _ => "refusal",
+                    };
+                    assert_eq!(frame["result"]["stopReason"], reason, "{frame}");
+                    break;
+                }
+                if let Some(text) = chunk(&frame) {
+                    live.push(text.to_owned());
+                    if provider.ordered {
+                        let tx = sender.borrow().as_ref().unwrap().clone();
+                        match text {
+                            "Aé" => {
+                                tx.send(warning("between-marker")).unwrap();
+                            }
+                            "Warning: between-marker" => provider.proceed.notify_one(),
+                            "中B" => {
+                                tx.send(warning("same-offset-one")).unwrap();
+                                tx.send(warning("same-offset-two")).unwrap();
+                            }
+                            "Warning: same-offset-two" => provider.proceed.notify_one(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let store = make_core(ws).storage;
+            let key = rustain::adapters::acp::conversation_id_from_acp_session_id(&id).unwrap();
+            let mut saved = store.load_conversation(key).await.unwrap().unwrap();
+            assert!(saved.last_response_at.unwrap() > 0);
+            saved.updated_at = 1;
+            saved.last_response_at = Some(1);
+            store.save_conversation(&saved).await.unwrap();
+            client.prompt(4, &id).await;
+            client.result(4).await;
+            (id, live)
+        };
+        let (result, server) = tokio::join!(drive, server);
+        server.unwrap();
+        result
+    }
+
+    fn provider(text: &'static str, ending: Ending, ordered: bool) -> Arc<NoticeProvider> {
+        Arc::new(NoticeProvider {
+            text,
+            ending,
+            ordered,
+            calls: AtomicUsize::new(0),
+            observed: Mutex::new(vec![]),
+            proceed: Arc::new(Notify::new()),
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_diagnostic_producer_is_display_only() {
+        #[cfg(feature = "test-instrumentation")]
+        let _guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+        for (text, ending, queued, expected) in [
+            (
+                "Warning: provider-authored prose",
+                Ending::Error("provider-error-marker"),
+                false,
+                vec!["Error: provider-error-marker"],
+            ),
+            ("", Ending::Error(""), false, vec!["Error: Unknown error"]),
+            ("", Ending::Failure, false, vec!["Error: turn-event-marker"]),
+            (
+                "",
+                Ending::Panic,
+                false,
+                vec!["Error: ACP turn task panicked"],
+            ),
+            ("visible-before-panic", Ending::Panic, false, vec![]),
+            ("", Ending::Panic, true, vec!["Warning: queued-marker"]),
+            ("", Ending::Normal, true, vec!["Warning: queued-marker"]),
+        ] {
+            let ws = tempfile::tempdir().unwrap();
+            let p = provider(text, ending, false);
+            let (id, live) = run(ws.path(), p.clone(), queued, None).await;
+            let store = make_core(ws.path()).storage;
+            let key = rustain::adapters::acp::conversation_id_from_acp_session_id(&id).unwrap();
+            let conv = store.load_conversation(key).await.unwrap().unwrap();
+            let notices = diagnostics(&conv);
+            assert_eq!(
+                notices
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(notices.iter().all(|(_, offset)| *offset == text.len()));
+            assert!(conv.last_response_at.unwrap() > 1 && conv.updated_at > 1);
+            if !text.is_empty() {
+                assert!(live.iter().any(|part| part == text));
+            }
+            for diagnostic in &expected {
+                assert_eq!(
+                    live.iter()
+                        .filter(|part| part.as_str() == *diagnostic)
+                        .count(),
+                    usize::from(*diagnostic != "Error: ACP turn task panicked")
+                );
+            }
+            {
+                let observed = p.observed.lock().unwrap();
+                let history = &observed[1];
+                let encoded = serde_json::to_string(history).unwrap();
+                if matches!(ending, Ending::Panic) {
+                    const PANIC: &str = "Error: ACP turn task panicked";
+                    assert!(live.iter().all(|part| !part.contains(PANIC)));
+                    assert!(!encoded.contains(PANIC));
+                    assert_eq!(
+                        serde_json::to_string(&conv.messages)
+                            .unwrap()
+                            .contains(PANIC),
+                        text.is_empty() && !queued,
+                    );
+                }
+                assert!(
+                    expected
+                        .iter()
+                        .all(|diagnostic| !encoded.contains(diagnostic))
+                );
+                if text.is_empty() {
+                    assert!(history.iter().all(|m| m.role != MessageRole::Assistant));
+                }
+                if !text.is_empty() {
+                    assert!(
+                        history
+                            .iter()
+                            .any(|m| m.role == MessageRole::Assistant && m.content == text)
+                    );
+                }
+            }
+            for _ in 0..2 {
+                let mut round_trip = store.load_conversation(key).await.unwrap().unwrap();
+                round_trip.rebuild_messages_mirror();
+                store.save_conversation(&round_trip).await.unwrap();
+                let saved = store.load_conversation(key).await.unwrap().unwrap();
+                assert_eq!(
+                    serde_json::to_value(&saved.messages).unwrap(),
+                    serde_json::to_value(&conv.messages).unwrap()
+                );
+            }
+            let (_, replay) = run(
+                ws.path(),
+                provider("", Ending::Normal, false),
+                false,
+                Some(&id),
+            )
+            .await;
+            for diagnostic in &expected {
+                assert_eq!(
+                    replay
+                        .iter()
+                        .filter(|part| part.as_str() == *diagnostic)
+                        .count(),
+                    1
+                );
+            }
+            if matches!(ending, Ending::Panic) {
+                assert_eq!(
+                    replay
+                        .iter()
+                        .filter(|part| part.contains("Error: ACP turn task panicked"))
+                        .count(),
+                    usize::from(text.is_empty() && !queued),
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn notice_only_tool_use_does_not_add_empty_provider_history() {
+        #[cfg(feature = "test-instrumentation")]
+        let _guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+        let mut histories = Vec::new();
+        for queued in [false, true] {
+            let ws = tempfile::tempdir().unwrap();
+            let p = provider("", Ending::EmptyToolUse, false);
+            let (id, live) = run(ws.path(), p.clone(), queued, None).await;
+            assert_eq!(
+                live,
+                if queued {
+                    vec!["Warning: queued-marker"]
+                } else {
+                    vec![]
+                }
+            );
+            let history = serde_json::to_value(&p.observed.lock().unwrap()[1]).unwrap();
+            assert_eq!(history.as_array().unwrap().len(), 2, "{history}");
+            assert!(
+                history.as_array().unwrap().iter().all(|message| {
+                    message["role"] == "user" && message["content"] == ACP_PROMPT_TEXT
+                }),
+                "{history}"
+            );
+            histories.push(history);
+            let store = make_core(ws.path()).storage;
+            let key = rustain::adapters::acp::conversation_id_from_acp_session_id(&id).unwrap();
+            let mut conv = store.load_conversation(key).await.unwrap().unwrap();
+            let expected = if queued {
+                vec![("Warning: queued-marker".to_owned(), 0)]
+            } else {
+                vec![]
+            };
+            assert_eq!(diagnostics(&conv), expected);
+            conv.rebuild_messages_mirror();
+            store.save_conversation(&conv).await.unwrap();
+            assert_eq!(
+                diagnostics(&store.load_conversation(key).await.unwrap().unwrap()),
+                expected
+            );
+            let (_, replay) = run(
+                ws.path(),
+                provider("", Ending::Normal, false),
+                false,
+                Some(&id),
+            )
+            .await;
+            assert_eq!(
+                replay,
+                if queued {
+                    vec!["Warning: queued-marker", GOLDEN_AGENT_TEXT]
+                } else {
+                    vec![GOLDEN_AGENT_TEXT]
+                }
+            );
+        }
+        assert_eq!(histories[0], histories[1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unicode_live_order_survives_fresh_load_and_mirror_cycles() {
+        #[cfg(feature = "test-instrumentation")]
+        let _guard = ACP_RUN_TURN_TEST_LOCK.lock().await;
+        let ws = tempfile::tempdir().unwrap();
+        let p = provider("Aé", Ending::Error("trailing-marker"), true);
+        let (id, live) = run(ws.path(), p.clone(), true, None).await;
+        let expected = [
+            "Warning: queued-marker",
+            "Aé",
+            "Warning: between-marker",
+            "中B",
+            "Warning: same-offset-one",
+            "Warning: same-offset-two",
+            "Error: trailing-marker",
+        ];
+        assert_eq!(live, expected);
+        let store = make_core(ws.path()).storage;
+        let key = rustain::adapters::acp::conversation_id_from_acp_session_id(&id).unwrap();
+        let original = store.load_conversation(key).await.unwrap().unwrap();
+        assert_eq!(
+            diagnostics(&original)
+                .iter()
+                .map(|(_, offset)| *offset)
+                .collect::<Vec<_>>(),
+            [0, 3, 7, 7, 7]
+        );
+        {
+            let history = p.observed.lock().unwrap();
+            assert!(
+                history[1]
+                    .iter()
+                    .any(|m| m.role == MessageRole::Assistant && m.content == "Aé中B")
+            );
+            assert!(
+                !serde_json::to_string(&history[1])
+                    .unwrap()
+                    .contains("-marker")
+            );
+        }
+        for _ in 0..2 {
+            let mut conv = store.load_conversation(key).await.unwrap().unwrap();
+            conv.rebuild_messages_mirror();
+            store.save_conversation(&conv).await.unwrap();
+            let saved = store.load_conversation(key).await.unwrap().unwrap();
+            assert_eq!(diagnostics(&saved), diagnostics(&original));
+            assert_eq!(
+                serde_json::to_value(&saved.messages).unwrap(),
+                serde_json::to_value(&original.messages).unwrap()
+            );
+        }
+        let (_, replay) = run(
+            ws.path(),
+            provider("", Ending::Normal, false),
+            false,
+            Some(&id),
+        )
+        .await;
+        let mut expected: Vec<_> = expected.iter().map(|s| s.to_string()).collect();
+        expected.push(GOLDEN_AGENT_TEXT.into());
+        assert_eq!(replay, expected);
+    }
+}

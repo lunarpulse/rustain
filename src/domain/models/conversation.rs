@@ -824,6 +824,106 @@ mod tests {
         assert_eq!(api[1].provider_replay, vec![item]);
     }
 
+    #[test]
+    fn acp_notices_survive_migration_and_repeated_mirror_round_trips() {
+        let replay = crate::domain::models::ProviderReplayItem {
+            provider: "provider".into(),
+            model: "model".into(),
+            payload: std::sync::Arc::new(serde_json::json!({"signature": "sentinel"})),
+            scope: Some("scope".into()),
+        };
+        let span = ContentBlockType::ResponseSpan(crate::domain::models::ResponseSpan {
+            text: "Aé".into(),
+            reasoning: Some("reasoning".into()),
+            tool_calls: 1,
+            replay: 1,
+        });
+        let notices = vec![
+            ContentBlockType::AcpNotice {
+                text: "before".into(),
+                after_text_bytes: 0,
+            },
+            ContentBlockType::AcpNotice {
+                text: "after".into(),
+                after_text_bytes: 3,
+            },
+        ];
+        let only = ContentBlockType::AcpNotice {
+            text: "only".into(),
+            after_text_bytes: 0,
+        };
+        let mut conversation = Conversation {
+            messages: vec![
+                ChatMessage {
+                    id: "answer".into(),
+                    role: MessageRole::Assistant,
+                    content: "Aé".into(),
+                    content_blocks: vec![
+                        notices[0].clone(),
+                        ContentBlockType::ProviderReplay(replay.clone()),
+                        span.clone(),
+                        notices[1].clone(),
+                    ],
+                    tool_calls: vec![crate::domain::models::ToolCallInfo {
+                        id: "provider-call".into(),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "file"}),
+                        result: Some(crate::domain::models::ToolResultInfo {
+                            content: "result".into(),
+                            is_error: false,
+                            images: vec![],
+                            diff: crate::domain::models::WriteDiffState::NotAWrite,
+                        }),
+                        started_at_ms: None,
+                        completed_at_ms: None,
+                        status: None,
+                        provider_id: Some("provider-call".into()),
+                    }],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "notice-only".into(),
+                    role: MessageRole::Assistant,
+                    content_blocks: vec![only.clone()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            let json =
+                serde_json::to_string(&PersistedConversation::from_conversation(&conversation))
+                    .unwrap();
+            conversation = serde_json::from_str::<PersistedConversation>(&json)
+                .unwrap()
+                .to_conversation();
+            conversation.rebuild_messages_mirror();
+            assert_eq!(conversation.messages.len(), 2);
+            let row = &conversation.messages[0];
+            assert_eq!(row.id, "answer");
+            assert_eq!(row.content, "Aé");
+            let actual: Vec<_> = row
+                .content_blocks
+                .iter()
+                .filter(|block| matches!(block, ContentBlockType::AcpNotice { .. }))
+                .cloned()
+                .collect();
+            assert_eq!(actual, notices);
+            assert!(row.content_blocks.contains(&span));
+            assert!(
+                row.content_blocks
+                    .contains(&ContentBlockType::ProviderReplay(replay.clone()))
+            );
+            assert_eq!(row.tool_calls.len(), 1);
+            assert_eq!(row.tool_calls[0].wire_id(), "provider-call");
+            assert_eq!(row.tool_calls[0].input, serde_json::json!({"path": "file"}));
+            assert_eq!(row.tool_calls[0].result.as_ref().unwrap().content, "result");
+            assert_eq!(conversation.messages[1].id, "notice-only");
+            assert!(conversation.messages[1].content.is_empty());
+            assert_eq!(conversation.messages[1].content_blocks, vec![only.clone()]);
+        }
+    }
+
     use super::*;
     use crate::domain::models::MessageRole;
 

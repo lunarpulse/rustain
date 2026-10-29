@@ -5,8 +5,8 @@ use crate::adapters::apply_patch::{PatchHunk, parse_apply_patch, resolve_workspa
 use agent_client_protocol as acp;
 
 use crate::domain::models::{
-    ApprovalOutcome, ChatMessage, McpServerSource, McpServerSpec, McpTransport, MessageRole,
-    StopReason, StreamChunk,
+    ApprovalOutcome, ChatMessage, ContentBlockType, McpServerSource, McpServerSpec, McpTransport,
+    MessageRole, StopReason, StreamChunk,
 };
 use crate::domain::services::approval_presentation;
 use crate::domain::services::approval_runtime::PendingReview;
@@ -332,12 +332,60 @@ pub fn stream_chunk_to_session_update(
 /// skipped (codex `replay_history` shape).
 pub fn message_to_replay_updates(message: &ChatMessage, cwd: &Path) -> Vec<acp::SessionUpdate> {
     let mut updates = Vec::new();
-    if !message.content.is_empty() {
-        let chunk = acp::ContentChunk::new(acp::ContentBlock::from(message.content.clone()));
-        updates.push(match message.role {
-            MessageRole::User => acp::SessionUpdate::UserMessageChunk(chunk),
-            _ => acp::SessionUpdate::AgentMessageChunk(chunk),
-        });
+    let notices = || {
+        message
+            .content_blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlockType::AcpNotice {
+                    text,
+                    after_text_bytes,
+                } => Some((text.as_str(), *after_text_bytes)),
+                _ => None,
+            })
+    };
+    let mut entries = notices().peekable();
+    if entries.peek().is_none() {
+        if !message.content.is_empty() {
+            let chunk = acp::ContentChunk::new(acp::ContentBlock::from(message.content.clone()));
+            updates.push(match message.role {
+                MessageRole::User => acp::SessionUpdate::UserMessageChunk(chunk),
+                _ => acp::SessionUpdate::AgentMessageChunk(chunk),
+            });
+        }
+    } else {
+        let valid = notices()
+            .try_fold(0, |previous, (_, offset)| {
+                (offset >= previous
+                    && offset <= message.content.len()
+                    && message.content.is_char_boundary(offset))
+                .then_some(offset)
+            })
+            .is_some();
+        let mut emit_text = |text: &str, notice: bool| {
+            if !text.is_empty() || notice {
+                let chunk = acp::ContentChunk::new(acp::ContentBlock::from(text.to_owned()));
+                updates.push(if !notice && message.role == MessageRole::User {
+                    acp::SessionUpdate::UserMessageChunk(chunk)
+                } else {
+                    acp::SessionUpdate::AgentMessageChunk(chunk)
+                });
+            }
+        };
+        if valid {
+            let mut previous = 0;
+            for (text, offset) in entries {
+                emit_text(&message.content[previous..offset], false);
+                emit_text(text, true);
+                previous = offset;
+            }
+            emit_text(&message.content[previous..], false);
+        } else {
+            emit_text(&message.content, false);
+            for (text, _) in entries {
+                emit_text(text, true);
+            }
+        }
     }
 
     for tc in &message.tool_calls {
@@ -793,8 +841,80 @@ mod tests {
     // ── ACP "follow" feature: ToolCall carries ToolCallLocation ─────────
 
     use super::{message_to_replay_updates, stream_chunk_to_session_update};
-    use crate::domain::models::{ChatMessage, MessageRole, StreamChunk, ToolCallInfo};
+    use crate::domain::models::{
+        ChatMessage, ContentBlockType, MessageRole, StreamChunk, ToolCallInfo,
+    };
     use std::path::Path;
+
+    fn replay_text(message: &ChatMessage) -> Vec<String> {
+        message_to_replay_updates(message, Path::new("/repo"))
+            .into_iter()
+            .map(|update| {
+                let acp::SessionUpdate::AgentMessageChunk(chunk) = update else {
+                    panic!("expected agent chunk");
+                };
+                let acp::ContentBlock::Text(text) = chunk.content else {
+                    panic!("expected text");
+                };
+                text.text
+            })
+            .collect()
+    }
+
+    fn notice(text: &str, after_text_bytes: usize) -> ContentBlockType {
+        ContentBlockType::AcpNotice {
+            text: text.into(),
+            after_text_bytes,
+        }
+    }
+
+    #[test]
+    fn replay_notices_interleave_at_unicode_boundaries_and_equal_offsets() {
+        let message = ChatMessage {
+            role: MessageRole::Assistant,
+            content: "Aé中B".into(),
+            content_blocks: vec![
+                notice("before", 0),
+                notice("warning", 3),
+                notice("error", 3),
+                notice("trailing", 7),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            replay_text(&message),
+            ["before", "Aé", "warning", "error", "中B", "trailing"]
+        );
+        let notice_only = ChatMessage {
+            role: MessageRole::Assistant,
+            content_blocks: vec![notice("only", 0)],
+            ..Default::default()
+        };
+        assert_eq!(replay_text(&notice_only), ["only"]);
+    }
+
+    #[test]
+    fn replay_invalid_notice_offsets_fall_back_without_losing_text() {
+        for offsets in [[3, 1], [2, 3], [0, 8]] {
+            let message = ChatMessage {
+                role: MessageRole::Assistant,
+                content: "Aé中B".into(),
+                content_blocks: vec![notice("first", offsets[0]), notice("second", offsets[1])],
+                ..Default::default()
+            };
+            assert_eq!(replay_text(&message), ["Aé中B", "first", "second"]);
+        }
+    }
+
+    #[test]
+    fn replay_unmarked_warning_prose_is_unchanged() {
+        let message = ChatMessage {
+            role: MessageRole::Assistant,
+            content: "Warning: provider-authored prose".into(),
+            ..Default::default()
+        };
+        assert_eq!(replay_text(&message), ["Warning: provider-authored prose"]);
+    }
     /// A `read` tool call emits a `ToolCall` whose `locations` point Zed's
     /// "follow" feature at the file, with a relative path resolved against the
     /// session `cwd`. Red-on-mutant: dropping the `.locations(...)` call in

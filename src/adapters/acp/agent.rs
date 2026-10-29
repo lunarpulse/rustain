@@ -496,9 +496,10 @@ impl RustainAcpAgent {
         stop_reason: DomainStopReason,
         provider_replay: Vec<crate::domain::models::ProviderReplayItem>,
         span: crate::domain::models::ResponseSpan,
+        notices: Vec<crate::domain::models::ContentBlockType>,
     ) -> ChatMessage {
         use crate::domain::models::ContentBlockType;
-        let mut content_blocks = Vec::with_capacity(provider_replay.len() + 2);
+        let mut content_blocks = Vec::with_capacity(provider_replay.len() + notices.len() + 2);
         if let Some(reasoning) = &span.reasoning {
             content_blocks.push(ContentBlockType::Thinking(reasoning.clone()));
         }
@@ -508,6 +509,7 @@ impl RustainAcpAgent {
                 .map(ContentBlockType::ProviderReplay),
         );
         content_blocks.push(ContentBlockType::ResponseSpan(span));
+        content_blocks.extend(notices);
         ChatMessage {
             id: crate::domain::models::conversation::generate_message_id(),
             role: MessageRole::Assistant,
@@ -789,8 +791,8 @@ impl RustainAcpAgent {
         let mut assistant_messages: Vec<ChatMessage> = Vec::new();
         // Story 20.1d1b: persisted for replay on the next prompt, never sent as an update.
         let mut assistant_replay = Vec::new();
-        // Story 20.1d4a T2: the response's own text, reasoning, call and replay
-        // counts; `assistant_text` also carries client-visible notices.
+        let mut assistant_notices = Vec::new();
+        // The response's provider-only text, reasoning, call and replay counts.
         let mut assistant_span = crate::domain::models::ResponseSpanBuilder::default();
         let mut assistant_stop_reason = DomainStopReason::EndTurn;
         loop {
@@ -808,10 +810,10 @@ impl RustainAcpAgent {
                         )),
                     )
                     .await?;
-                    if !assistant_text.is_empty() {
-                        assistant_text.push('\n');
-                    }
-                    assistant_text.push_str(&rendered);
+                    assistant_notices.push(crate::domain::models::ContentBlockType::AcpNotice {
+                        text: rendered,
+                        after_text_bytes: assistant_text.len(),
+                    });
                 }
                 Ok(_) => {}
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
@@ -837,10 +839,10 @@ impl RustainAcpAgent {
                                     acp::ContentBlock::from(rendered.clone()),
                                 )),
                             ).await?;
-                            if !assistant_text.is_empty() {
-                                assistant_text.push('\n');
-                            }
-                            assistant_text.push_str(&rendered);
+                            assistant_notices.push(crate::domain::models::ContentBlockType::AcpNotice {
+                                text: rendered,
+                                after_text_bytes: assistant_text.len(),
+                            });
                         }
                         Some(_) => {}
                         None => mcp_events_open = false,
@@ -852,11 +854,12 @@ impl RustainAcpAgent {
                         AppEvent::ProviderChunk { chunk, .. } => match chunk {
                             StreamChunk::TurnComplete { stop_reason: reason } => {
                                 assistant_stop_reason = reason.clone();
+                                let has_provider_payload = !assistant_text.is_empty()
+                                    || !assistant_tool_calls.is_empty()
+                                    || !assistant_span.is_empty()
+                                    || !assistant_replay.is_empty();
                                 if matches!(reason, DomainStopReason::ToolUse)
-                                    && (!assistant_text.is_empty()
-                                        || !assistant_tool_calls.is_empty()
-                                        || !assistant_span.is_empty()
-                                        || !assistant_replay.is_empty())
+                                    && (has_provider_payload || !assistant_notices.is_empty())
                                 {
                                     assistant_messages.push(Self::assistant_message(
                                         std::mem::take(&mut assistant_text),
@@ -864,8 +867,11 @@ impl RustainAcpAgent {
                                         DomainStopReason::ToolUse,
                                         std::mem::take(&mut assistant_replay),
                                         assistant_span.finish(),
+                                        std::mem::take(&mut assistant_notices),
                                     ));
-                                    assistant_messages.push(Self::tool_result_boundary_message());
+                                    if has_provider_payload {
+                                        assistant_messages.push(Self::tool_result_boundary_message());
+                                    }
                                 }
                                 stop_reason = Some(stop_reason_to_acp(&reason));
                             }
@@ -883,10 +889,10 @@ impl RustainAcpAgent {
                                     )),
                                 )
                                 .await?;
-                                if !assistant_text.is_empty() {
-                                    assistant_text.push('\n');
-                                }
-                                assistant_text.push_str(&rendered);
+                                assistant_notices.push(crate::domain::models::ContentBlockType::AcpNotice {
+                                    text: rendered,
+                                    after_text_bytes: assistant_text.len(),
+                                });
                                 assistant_stop_reason = DomainStopReason::Cancelled;
                                 stop_reason = Some(acp::StopReason::Refusal);
                             }
@@ -972,10 +978,10 @@ impl RustainAcpAgent {
                                         acp::ContentBlock::from(rendered.clone()),
                                     )),
                                 ).await?;
-                                if !assistant_text.is_empty() {
-                                    assistant_text.push('\n');
-                                }
-                                assistant_text.push_str(&rendered);
+                                assistant_notices.push(crate::domain::models::ContentBlockType::AcpNotice {
+                                    text: rendered,
+                                    after_text_bytes: assistant_text.len(),
+                                });
                                 assistant_stop_reason = DomainStopReason::Cancelled;
                                 stop_reason = Some(acp::StopReason::Refusal);
                             }
@@ -1036,8 +1042,11 @@ impl RustainAcpAgent {
         }
         if let Err(join_err) = turn_handle.await {
             tracing::error!("ACP run_turn task panicked: {join_err}");
-            if assistant_text.is_empty() {
-                assistant_text.push_str("Error: ACP turn task panicked");
+            if assistant_text.is_empty() && assistant_notices.is_empty() {
+                assistant_notices.push(crate::domain::models::ContentBlockType::AcpNotice {
+                    text: "Error: ACP turn task panicked".into(),
+                    after_text_bytes: 0,
+                });
             }
             assistant_stop_reason = DomainStopReason::Cancelled;
             stop_reason = Some(acp::StopReason::Refusal);
@@ -1054,6 +1063,7 @@ impl RustainAcpAgent {
             || !assistant_tool_calls.is_empty()
             || !assistant_span.is_empty()
             || !assistant_replay.is_empty()
+            || !assistant_notices.is_empty()
         {
             assistant_messages.push(Self::assistant_message(
                 std::mem::take(&mut assistant_text),
@@ -1061,6 +1071,7 @@ impl RustainAcpAgent {
                 assistant_stop_reason.clone(),
                 std::mem::take(&mut assistant_replay),
                 assistant_span.finish(),
+                std::mem::take(&mut assistant_notices),
             ));
         }
         let should_save =
