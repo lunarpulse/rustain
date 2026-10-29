@@ -8235,6 +8235,36 @@ mod tests {
         lines.join("\n")
     }
 
+    // The executor observes terminal status before the child finishes persisting
+    // it. Forward statuses unchanged, but keep draining the original channel
+    // until its senders (owned by the child task) are dropped.
+    struct JoiningRunner {
+        inner: InProcessSubagentRunner,
+        forwarders: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    }
+
+    #[async_trait]
+    impl SubagentRunner for JoiningRunner {
+        async fn launch(
+            &self,
+            spec: AgentLaunchSpec,
+            cancel: CancellationToken,
+            parent: Option<&TaskHandle>,
+            agent_id: AgentId,
+        ) -> Result<TaskHandle, SubagentError> {
+            let mut handle = self.inner.launch(spec, cancel, parent, agent_id).await?;
+            let (tx, rx) = mpsc::channel(512);
+            let mut original = std::mem::replace(&mut handle.status_rx, rx);
+            let forwarder = tokio::spawn(async move {
+                while let Some(status) = original.recv().await {
+                    let _ = tx.send(status).await;
+                }
+            });
+            self.forwarders.lock().await.push(forwarder);
+            Ok(handle)
+        }
+    }
+
     async fn collect_flat_root_trace() -> FlatRootTrace {
         let real = tempfile::tempdir().unwrap();
         let (runner, ledger, root) =
@@ -8243,7 +8273,10 @@ mod tests {
         // MockClock as the executor, so the RC-5 golden genuinely runs "under an
         // injected MockClock" (AC2) and the `with_clock` seam is exercised — not
         // dead code behind an overstated claim.
-        let runner = runner.with_clock(Arc::new(crate::domain::clock::MockClock::at_wall_ms(0)));
+        let runner = Arc::new(JoiningRunner {
+            inner: runner.with_clock(Arc::new(crate::domain::clock::MockClock::at_wall_ms(0))),
+            forwarders: tokio::sync::Mutex::new(Vec::new()),
+        });
         let authority = Arc::new(crate::adapters::authority::InProcessAuthorityProvider::new(
             ledger.clone(),
         )) as Arc<dyn crate::domain::ports::AuthorityProvider>;
@@ -8267,7 +8300,7 @@ mod tests {
             Arc::new(crate::adapters::merge_back::GitPatchApplier),
         ));
         let executor = crate::infrastructure::orchestrator::ForkJoinExecutor::new(
-            Arc::new(runner),
+            runner.clone(),
             authority,
             ledger.clone(),
             event_bus.clone(),
@@ -8319,6 +8352,13 @@ mod tests {
             .run_fork_join_run(request, CancellationToken::new(), None)
             .await
             .expect("flat-root wave");
+        // Terminal delivery precedes the final meta rename. Channel closure
+        // joins each child task, so directory iteration sees a stable set.
+        let forwarders = std::mem::take(&mut *runner.forwarders.lock().await);
+        assert_eq!(forwarders.len(), 2, "both spokes must launch");
+        for forwarder in forwarders {
+            forwarder.await.expect("status forwarder panicked");
+        }
         let conservation_after = ledger.conservation(&root.id).unwrap();
 
         // Journal RoomEvents in append order (lifecycle subset filtered in the
@@ -8413,6 +8453,7 @@ mod tests {
             if path.extension().and_then(|e| e.to_str()) == Some("meta") {
                 let meta: SpoolMeta =
                     serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(meta.status, NodeState::Completed);
                 assert_eq!(
                     meta.started_at, 0,
                     "child started_at must read the injected MockClock, not wall time"
