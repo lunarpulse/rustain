@@ -756,6 +756,19 @@ credential-file path go to stderr; stdout is reserved for the result line or JSO
 
 ## Signing in from the TUI
 
+**Common slash recognition (standalone and attached TUI).** Whitespace before
+`/` is allowed, but a nonempty command name must immediately follow it. The first
+Rust whitespace character ends the name. Routes that consume the parsed argument
+suffix trim its surrounding whitespace while preserving interior spaces, tabs,
+newlines, quotes and backslashes. Names keep their case and colon namespaces.
+Recognition does not guarantee execution on both rails: ` /logout openai` is
+recognized as `logout` with `openai`, runs the standalone logout route, and gets
+the documented local account-change refusal when attached. Other standalone
+commands, such as `/export`, may pass through as text when attached.
+`/ logout openai` is ordinary chat text, **not logout**. Bare `/`, whitespace
+after `/` without an adjacent name, and non-prefix slash text likewise follow
+ordinary literal submission (including the usual read-only restriction).
+
 Every `rustain auth login` method also runs inside the TUI; the CLI and the TUI
 share the same login engines, method list, success lines and discovery line.
 
@@ -805,6 +818,7 @@ share the same login engines, method list, success lines and discovery line.
 `/logout` and `/accounts` manage stored accounts without leaving the TUI; they
 use the same account service and texts as `rustain auth logout --id` and
 `rustain auth use`.
+The [common slash syntax](#signing-in-from-the-tui) applies to both commands.
 
 - **`/logout`** and **`/accounts`** open a provider step listing every provider
   with stored accounts — including disabled ones and providers disabled in

@@ -22,6 +22,9 @@ mod chat_pane;
 #[path = "../command_palette.rs"]
 mod command_palette;
 
+#[path = "../slash_argument_parsing.rs"]
+mod slash_argument_parsing;
+
 #[path = "../conformance_19_1_line_diff.rs"]
 mod conformance_19_1_line_diff;
 

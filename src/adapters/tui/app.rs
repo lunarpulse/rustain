@@ -7,6 +7,7 @@ use crate::domain::models::FocusState;
 use crate::domain::models::StatusState;
 use crate::domain::models::autocomplete::AutocompleteKind;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
+use crate::domain::services::slash_command::parse_slash_command;
 
 /// Action returned by handle_input to tell the event loop what to do.
 /// app.rs is a pure input→action mapper; the event loop owns all side effects.
@@ -1308,7 +1309,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // When autocomplete is active, intercept characters to update filter.
             // Exception: a space in SlashCommand mode terminates the command name
             // and begins arguments (e.g. `/export file.md`). Slash-command names
-            // cannot contain spaces — the parser uses `split_whitespace().next()` —
+            // end at the first whitespace — matching the submission parser —
             // so dismissing here lets ENTER submit `/cmd args` as a whole.
             // Without this, the ENTER handler below (DomainKey::Enter arm) consumes
             // the submit and the command never dispatches.
@@ -3082,188 +3083,162 @@ fn submit_message(state: &mut TuiState) -> InputAction {
     }
     state.input_buffer.clear();
 
-    // Check if this is a slash command
-    if let Some(after_slash) = text.strip_prefix('/') {
-        let cmd_name = after_slash
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
-        if !cmd_name.is_empty() {
-            // Extract optional trailing argument (text after the command name,
-            // trimmed; empty string → None).
-            let raw_args = after_slash[cmd_name.len()..].trim();
-            let args: Option<String> = if raw_args.is_empty() {
-                None
-            } else {
-                Some(raw_args.to_string())
-            };
-
-            // Check if it's a built-in command
-            if cmd_name == "new" || cmd_name == "clear" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args: None,
-                };
-            }
-            // /ml: toggle multi-line mode (AC#3)
-            // Covers: Sprint Change Proposal 2026-04-08
-            if cmd_name == "ml" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args: None,
-                };
-            }
-            // /export [filename]: export conversation to markdown.
-            // Covers: Story 4-4, AC11/AC12
-            if cmd_name == "export" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /login [provider] (sign-in overlay), /models (model picker),
-            // /logout [provider] and /accounts [provider] (account steps).
-            if matches!(
-                cmd_name.as_str(),
-                "login" | "models" | "logout" | "accounts"
-            ) {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /mode plan|normal|autoedit|yolo: switch permission mode (AC9)
-            if cmd_name == "mode" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /plan on|off|toggle: enter/exit plan mode — Story 6-0d AC5
-            if cmd_name == "plan" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /compact: summarize and compact conversation — Story 7.4 AC4
-            if cmd_name == "compact" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
-            if cmd_name == "deactivate" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /context show|off|on: inspect/toggle injected memory context —
-            // Story 11.4 AC6/AC7. Routed as ExecuteCommand (not the user-defined
-            // SubmitWithContext path) so the event-loop `/context` dispatch arm
-            // sees the sub-verb arg.
-            if cmd_name == "context" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /memory consolidate|forget|<adapter>: every `/memory` semantic lives
-            // in the event-loop ExecuteCommand arm — consolidation (11.2a), forget
-            // (11.4a), and the adapter-override (8.5). Route here as ExecuteCommand,
-            // mirroring /context, so they reach those handlers instead of falling
-            // through to the user-defined SubmitWithContext path (which treats it as
-            // a missing custom command and dispatches an EMPTY turn).
-            if cmd_name == "memory" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /fanout <N> <prompt> | /fanout cancel: fan out N spokes (Story
-            // 14.3b/14.3c). Route as ExecuteCommand — mirroring /memory and
-            // /context — so the event-loop `/fanout` dispatch arm sees the args.
-            // Before this, `fanout` fell through to the user-defined
-            // SubmitWithContext path, which treats it as a missing custom command
-            // and dispatches an EMPTY turn (provider 400 "Empty input messages"),
-            // so the wave never launched. Caught by the 14.3c AI-12.3 human smoke.
-            if cmd_name == "fanout" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /team log: render the A2A transparency log in-chat (Story 18.2
-            // AC6). Route as ExecuteCommand — mirroring /context and /fanout —
-            // so the event-loop `/team` dispatch arm sees the sub-verb and
-            // flags. WITHOUT this entry `/team log` falls through to
-            // SubmitWithContext, resolves no command file, and silently never
-            // runs: the exact 14.3c failure `/fanout` shipped with.
-            if cmd_name == "team" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /room: the durable-room viewer and its role subcommands (Story
-            // 18.3a AC1/AC4). Same reason as `team` above — WITHOUT this entry
-            // `/room` falls through to SubmitWithContext, resolves no command
-            // file, and silently never runs.
-            if cmd_name == "room" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /artifacts and /artifact: the durable artifact list, its
-            // drill-down and the patch-review verdict verb (Story 18.3a-c
-            // AC3/AC5). Same reason as `room` above — and BOTH spellings need
-            // an entry: an unlisted `/artifact` silently never runs while
-            // `/artifacts` keeps working, which reads as "the verdict verb is
-            // broken" rather than "the verdict verb was never routed".
-            if cmd_name == "artifacts" || cmd_name == "artifact" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // /peer: the transport admission verbs (Story 18.4b). Same reason as
-            // `artifacts` above — WITHOUT this entry `/peer` falls through to
-            // SubmitWithContext, resolves no command file, and silently never
-            // runs, which is the 14.3c failure `/fanout` shipped with. A
-            // handler-only test stays green while the command is dead, so the
-            // integration keystone enters through `submit_message_for_test`.
-            if cmd_name == "peer" {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // Discovered skill name → activate via ExecuteCommand so the event loop
-            // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
-            // user-defined-command SubmitWithContext if the name is NOT a skill.
-            if state.skill_name_cache.contains(&cmd_name) {
-                return InputAction::ExecuteCommand {
-                    name: cmd_name,
-                    args,
-                };
-            }
-            // User-defined command: submit with command context
-            let command_args = if raw_args.is_empty() {
-                None
-            } else {
-                Some(raw_args.to_string())
-            };
-            state.resolved_mentions.clear();
-            return InputAction::SubmitWithContext {
-                text: String::new(),
-                command: Some(cmd_name),
-                command_args,
+    if let Some((cmd_name, args)) = parse_slash_command(&text) {
+        // Check if it's a built-in command
+        if cmd_name == "new" || cmd_name == "clear" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: None,
             };
         }
+        // /ml: toggle multi-line mode (AC#3)
+        // Covers: Sprint Change Proposal 2026-04-08
+        if cmd_name == "ml" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: None,
+            };
+        }
+        // /export [filename]: export conversation to markdown.
+        // Covers: Story 4-4, AC11/AC12
+        if cmd_name == "export" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /login [provider] (sign-in overlay), /models (model picker),
+        // /logout [provider] and /accounts [provider] (account steps).
+        if matches!(cmd_name, "login" | "models" | "logout" | "accounts") {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /mode plan|normal|autoedit|yolo: switch permission mode (AC9)
+        if cmd_name == "mode" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /plan on|off|toggle: enter/exit plan mode — Story 6-0d AC5
+        if cmd_name == "plan" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /compact: summarize and compact conversation — Story 7.4 AC4
+        if cmd_name == "compact" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
+        if cmd_name == "deactivate" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /context show|off|on: inspect/toggle injected memory context —
+        // Story 11.4 AC6/AC7. Routed as ExecuteCommand (not the user-defined
+        // SubmitWithContext path) so the event-loop `/context` dispatch arm
+        // sees the sub-verb arg.
+        if cmd_name == "context" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /memory consolidate|forget|<adapter>: every `/memory` semantic lives
+        // in the event-loop ExecuteCommand arm — consolidation (11.2a), forget
+        // (11.4a), and the adapter-override (8.5). Route here as ExecuteCommand,
+        // mirroring /context, so they reach those handlers instead of falling
+        // through to the user-defined SubmitWithContext path (which treats it as
+        // a missing custom command and dispatches an EMPTY turn).
+        if cmd_name == "memory" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /fanout <N> <prompt> | /fanout cancel: fan out N spokes (Story
+        // 14.3b/14.3c). Route as ExecuteCommand — mirroring /memory and
+        // /context — so the event-loop `/fanout` dispatch arm sees the args.
+        // Before this, `fanout` fell through to the user-defined
+        // SubmitWithContext path, which treats it as a missing custom command
+        // and dispatches an EMPTY turn (provider 400 "Empty input messages"),
+        // so the wave never launched. Caught by the 14.3c AI-12.3 human smoke.
+        if cmd_name == "fanout" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /team log: render the A2A transparency log in-chat (Story 18.2
+        // AC6). Route as ExecuteCommand — mirroring /context and /fanout —
+        // so the event-loop `/team` dispatch arm sees the sub-verb and
+        // flags. WITHOUT this entry `/team log` falls through to
+        // SubmitWithContext, resolves no command file, and silently never
+        // runs: the exact 14.3c failure `/fanout` shipped with.
+        if cmd_name == "team" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /room: the durable-room viewer and its role subcommands (Story
+        // 18.3a AC1/AC4). Same reason as `team` above — WITHOUT this entry
+        // `/room` falls through to SubmitWithContext, resolves no command
+        // file, and silently never runs.
+        if cmd_name == "room" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /artifacts and /artifact: the durable artifact list, its
+        // drill-down and the patch-review verdict verb (Story 18.3a-c
+        // AC3/AC5). Same reason as `room` above — and BOTH spellings need
+        // an entry: an unlisted `/artifact` silently never runs while
+        // `/artifacts` keeps working, which reads as "the verdict verb is
+        // broken" rather than "the verdict verb was never routed".
+        if cmd_name == "artifacts" || cmd_name == "artifact" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // /peer: the transport admission verbs (Story 18.4b). Same reason as
+        // `artifacts` above — WITHOUT this entry `/peer` falls through to
+        // SubmitWithContext, resolves no command file, and silently never
+        // runs, which is the 14.3c failure `/fanout` shipped with. A
+        // handler-only test stays green while the command is dead, so the
+        // integration keystone enters through `submit_message_for_test`.
+        if cmd_name == "peer" {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        // Discovered skill name → activate via ExecuteCommand so the event loop
+        // routes through `AskActivateSkill` (Story 5-2 AC8). Fall through to
+        // user-defined-command SubmitWithContext if the name is NOT a skill.
+        if state.skill_name_cache.contains(cmd_name) {
+            return InputAction::ExecuteCommand {
+                name: cmd_name.to_owned(),
+                args: args.map(str::to_owned),
+            };
+        }
+        state.resolved_mentions.clear();
+        return InputAction::SubmitWithContext {
+            text: String::new(),
+            command: Some(cmd_name.to_owned()),
+            command_args: args.map(str::to_owned),
+        };
     }
 
     // If there are resolved file mentions, use SubmitWithContext so the event loop

@@ -1897,21 +1897,19 @@ fn attached_composer_key(
 const ATTACHED_SIGN_IN: &str = "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.";
 
 fn attached_sign_in_command(input: &str) -> bool {
-    let name = input
-        .trim()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next());
-    matches!(name, Some("login" | "models"))
+    matches!(
+        crate::domain::services::slash_command::parse_slash_command(input),
+        Some(("login" | "models", _))
+    )
 }
 
 const ATTACHED_ACCOUNT_CHANGE: &str = "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.";
 
 fn attached_account_command(input: &str) -> bool {
-    let name = input
-        .trim()
-        .strip_prefix('/')
-        .and_then(|rest| rest.split_whitespace().next());
-    matches!(name, Some("logout" | "accounts"))
+    matches!(
+        crate::domain::services::slash_command::parse_slash_command(input),
+        Some(("logout" | "accounts", _))
+    )
 }
 
 fn attached_composer_key_with_team_requests(
@@ -9545,60 +9543,111 @@ mod tests {
         );
     }
 
-    /// Sign-in needs a local provider layer: an attached `/login` or `/models`
-    /// is answered locally and never becomes a model turn (zero frames).
-    #[test]
-    fn attached_sign_in_commands_are_answered_locally() {
+    fn assert_attached_auth_commands(names: &[&str], feedback_id: &str, message: &str) {
+        use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
         use crossterm::event::KeyCode;
-        for line in ["/login", "/login anthropic", " /models "] {
-            let mut state = TuiState::new(100, 30);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let mut input = line.to_owned();
-            let outcome = attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx);
-            assert!(matches!(outcome, ComposerOutcome::Handled), "{line}");
-            assert!(input.is_empty(), "{line}");
-            assert!(rx.try_recv().is_err(), "{line}: zero frames");
-            assert_eq!(
-                state.feedback_blocks["attached-sign-in"].message,
-                ATTACHED_SIGN_IN
-            );
+
+        for read_only in [false, true] {
+            for name in names {
+                let valid = [
+                    format!("/{name}"),
+                    format!(" /{name} openai "),
+                    format!("/{name}\topenai"),
+                    format!("/{name}\u{2003}openai"),
+                    format!("/{name} openai"),
+                    format!("/{name} anthropic"),
+                    format!(" /{name} "),
+                ];
+                let invalid = [
+                    format!("/ {name} openai"),
+                    format!("/\t{name} openai"),
+                    format!("/\n{name} openai"),
+                    format!("/\u{2003}{name} openai"),
+                    format!("/{name}x"),
+                    format!("/{name}-extra"),
+                    "/Logout".into(),
+                    "say /logout".into(),
+                ];
+                for (lines, accepted) in [(&valid[..], true), (&invalid[..], false)] {
+                    for line in lines {
+                        let context = format!("input: {line:?}, read_only: {read_only}");
+                        let mut state = TuiState::new(80, 24);
+                        state.needs_redraw = false;
+                        state.pinned_peer_compose = Some(PinnedPeerCompose::new(
+                            "node-a".into(),
+                            PeerComposeAction::Respond,
+                        ));
+                        let (tx, mut rx) = mpsc::unbounded_channel();
+                        let mut input = line.clone();
+                        let outcome = attached_composer_key(
+                            KeyCode::Enter,
+                            read_only,
+                            &mut input,
+                            &mut state,
+                            &tx,
+                        );
+                        assert!(
+                            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                            "{context}: zero frames"
+                        );
+                        if accepted {
+                            assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
+                            assert!(input.is_empty(), "{context}");
+                            assert!(state.pinned_peer_compose.is_none(), "{context}");
+                            assert_eq!(state.feedback_blocks.len(), 1, "{context}");
+                            let block = &state.feedback_blocks[feedback_id];
+                            assert_eq!(block.id, feedback_id, "{context}");
+                            assert_eq!(block.message, message, "{context}");
+                            assert_eq!(
+                                block.level,
+                                crate::domain::models::FeedbackLevel::Info,
+                                "{context}"
+                            );
+                            assert!(block.actions.is_empty(), "{context}");
+                            assert!(state.needs_redraw, "{context}");
+                        } else {
+                            assert!(state.feedback_blocks.is_empty(), "{context}");
+                            assert!(state.pinned_peer_compose.is_some(), "{context}");
+                            if read_only {
+                                assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
+                                assert_eq!(input, *line, "{context}");
+                                assert!(
+                                    matches!(&state.status, StatusState::Flash { message, .. } if message == "read-only — can't send here"),
+                                    "{context}"
+                                );
+                                assert!(state.needs_redraw, "{context}");
+                            } else {
+                                assert!(
+                                    matches!(outcome, ComposerOutcome::Submit(text) if text == *line),
+                                    "{context}"
+                                );
+                                assert!(input.is_empty(), "{context}");
+                            }
+                        }
+                    }
+                }
+            }
         }
-        // Anything else still reaches the model path.
-        let mut state = TuiState::new(100, 30);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut input = "/loginx".to_owned();
-        assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
-            ComposerOutcome::Submit(_)
-        ));
     }
 
-    /// An attached `/logout` or `/accounts` is answered locally with the CLI
-    /// pointer and never becomes a model turn (zero frames).
+    /// Attached sign-in commands answer locally; malformed names follow the literal rail.
+    #[test]
+    fn attached_sign_in_commands_are_answered_locally() {
+        assert_attached_auth_commands(
+            &["login", "models"],
+            "attached-sign-in",
+            "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.",
+        );
+    }
+
+    /// Account commands use the same grammar for writable and read-only composers.
     #[test]
     fn attached_account_commands_are_answered_locally() {
-        use crossterm::event::KeyCode;
-        for line in ["/logout", " /accounts openai ", "/logout openai"] {
-            let mut state = TuiState::new(100, 30);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let mut input = line.to_owned();
-            let outcome = attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx);
-            assert!(matches!(outcome, ComposerOutcome::Handled), "{line}");
-            assert!(input.is_empty(), "{line}");
-            assert!(rx.try_recv().is_err(), "{line}: zero frames");
-            assert_eq!(
-                state.feedback_blocks["attached-account-change"].message,
-                "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal."
-            );
-            assert!(!state.feedback_blocks.contains_key("attached-sign-in"));
-        }
-        let mut state = TuiState::new(100, 30);
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut input = "/logoutx".to_owned();
-        assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
-            ComposerOutcome::Submit(_)
-        ));
+        assert_attached_auth_commands(
+            &["logout", "accounts"],
+            "attached-account-change",
+            "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.",
+        );
     }
 
     /// Story 19.16g K08 / M08 — the attached `/team log` is a LOCAL read
