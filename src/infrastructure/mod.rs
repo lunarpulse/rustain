@@ -6,6 +6,7 @@ pub mod composition;
 pub mod config;
 pub mod context;
 pub mod key_resolver;
+pub mod live_providers;
 pub mod logging;
 pub mod model_discovery;
 pub mod orchestrator;

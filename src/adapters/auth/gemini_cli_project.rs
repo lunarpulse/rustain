@@ -220,14 +220,15 @@ impl Session<'_> {
             return Failure::Validation(url);
         }
         let value: Value = serde_json::from_str(&reply.body).unwrap_or(Value::Null);
-        let message = match value
+        // Redacted first, then control-free and length-capped for stderr/TUI.
+        let message = super::bounded_provider_text(&match value
             .pointer("/error/message")
             .and_then(Value::as_str)
             .filter(|message| !message.is_empty())
         {
             Some(message) => self.redact(message),
-            None => self.redact(&reply.body).chars().take(500).collect(),
-        };
+            None => self.redact(&reply.body),
+        });
         Failure::Message(format!(
             "{step} failed: {} {}: {message}",
             reply.status.as_u16(),
@@ -591,5 +592,46 @@ mod timeout_tests {
         );
         assert_eq!(start.elapsed(), Duration::from_millis(REQUEST_TIMEOUT_MS));
         hold.abort();
+    }
+
+    /// Onboarding error text shown on stderr / in the TUI is control-free,
+    /// capped and bearer-redacted.
+    #[test]
+    fn onboarding_error_text_is_sanitized_and_capped() {
+        let http = reqwest::Client::new();
+        let ctx = FlowCtx::new(Arc::new(Silent), Arc::new(|| 0));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            reqwest::header::HeaderValue::from_static("Bearer TOKEN-CANARY"),
+        );
+        let session = Session {
+            http: &http,
+            ctx: &ctx,
+            headers,
+        };
+        let body = format!(
+            "{{\"error\":{{\"message\":\"x\\u001b]0;title\\u0007 TOKEN-CANARY \\u009b{}\"}}}}",
+            "z".repeat(3000)
+        );
+        let reply = Reply {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body,
+        };
+        let Failure::Message(text) = session.failure("loadCodeAssist", &reply) else {
+            panic!("a plain 400 is a message failure");
+        };
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(
+            !text.contains("TOKEN-CANARY") && !text.contains("title"),
+            "{text:?}"
+        );
+        let message = text
+            .strip_prefix("loadCodeAssist failed: 400 Bad Request: ")
+            .unwrap();
+        assert_eq!(
+            message.chars().count(),
+            crate::adapters::auth::PROVIDER_TEXT_CAP
+        );
     }
 }

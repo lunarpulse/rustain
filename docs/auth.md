@@ -739,6 +739,51 @@ report `"method":"oauth"`. Identity contains only fields actually
 learned; `id` is the stored account the login wrote. Guidance and the
 credential-file path go to stderr; stdout is reserved for the result line or JSON.
 
+## Signing in from the TUI
+
+Every `rustain auth login` method also runs inside the TUI; the CLI and the TUI
+share the same login engines, method list, success lines and discovery line.
+
+- **`/login`** (or **Ctrl+X, I**) opens the provider picker: every provider that
+  needs a credential, with what serves it now — `not signed in`, or a check
+  (`checking…`, then `● logged in` / `✘ invalid`) and the source (`oauth`,
+  `login`, `stored`, `env: <VAR>`, `runtime`; `· N accounts` when several are
+  stored). Type to search by name, id, source or environment variable; Enter
+  signs in, Esc clears the search or closes. Opening the picker resolves each
+  served credential the way a request would, so a due OAuth grant is refreshed
+  (and disabled if the provider rejects the refresh).
+- **`/login <provider>`** skips the picker. A provider with several methods
+  shows the same method list as `rustain auth login` (Esc goes back).
+- **`/models`** (or Ctrl+X, M) opens the model picker. On a locked provider that
+  a sign-in can unlock, the footer reads `Enter sign in`: Enter starts that
+  login, and the picker reopens at the provider afterwards.
+- **While signing in** the overlay shows the sign-in link (a clickable OSC 8
+  link in terminals that support it), the `/launch` shortcut that works on this
+  machine only, the provider's instructions and progress. A device login shows
+  the code to enter and the sign-in page. Copy keys: `c` copies the link (device:
+  the code), `l` the local shortcut, `u` the device sign-in page; while a field
+  is focused use Alt+C / Alt+L / Alt+U so the letters type normally. Text a
+  provider supplies is shown with terminal controls removed; a link that is not
+  a plain `http(s)` URL is shown but never linked, opened or copied.
+- **Fields.** API keys and pasted authorization codes or redirect URLs are
+  masked (`•`); the GitHub Enterprise domain prompt is visible. Bracketed paste
+  goes into the field, never into the chat input, with control characters
+  removed. Typed secrets are never shown, logged or copied, and the field is
+  cleared when it closes.
+- **Esc** (or Ctrl+C) cancels a running login: `Login cancelled`, nothing is
+  stored and the local callback listener closes. Ctrl+Q quits the TUI and also
+  cancels it. A failure shows `Login failed: <reason>`.
+- **After success** the TUI shows the CLI's success line and the credential path,
+  opens the model picker at the provider — already unlocked — and shows
+  `↻ Discovering models for <provider>...` until the live roster arrives, then
+  `Discovered N models for <provider>.` No restart is needed: the provider is
+  routable at once, joins the periodic model refresh and stays unlocked across
+  models.dev updates.
+- **Attached sessions** (`rustain attach`) have no local provider layer:
+  `/login` and `/models` answer ``Sign-in is not available in an attached
+  session. Run `rustain auth login <provider>` in a terminal; restart the daemon
+  to unlock newly signed-in providers.``
+
 ## `rustain auth logout <provider>`
 
 ```bash

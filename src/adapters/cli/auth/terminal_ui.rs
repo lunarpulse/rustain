@@ -56,16 +56,7 @@ impl TerminalUi {
     }
     fn open(&self, url: &str) {
         if self.interactive {
-            #[cfg(target_os = "macos")]
-            let program = "open";
-            #[cfg(not(target_os = "macos"))]
-            let program = "xdg-open";
-            let _ = std::process::Command::new(program)
-                .arg(url)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
+            crate::adapters::auth::opener::open_url(url);
         }
     }
 }

@@ -1894,6 +1894,16 @@ fn attached_composer_key(
     )
 }
 
+const ATTACHED_SIGN_IN: &str = "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.";
+
+fn attached_sign_in_command(input: &str) -> bool {
+    let name = input
+        .trim()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next());
+    matches!(name, Some("login" | "models"))
+}
+
 fn attached_composer_key_with_team_requests(
     code: crossterm::event::KeyCode,
     read_only: bool,
@@ -1926,6 +1936,20 @@ fn attached_composer_key_with_team_requests(
                 // AC6 #3 — inert, never silent.
                 flash(state, "read-only — can't send here".into());
             }
+        }
+        // An attached client has no local provider layer or picker: answer
+        // `/login` and `/models` here, never as a model turn.
+        KeyCode::Enter if attached_sign_in_command(input) => {
+            input.clear();
+            state.pinned_peer_compose = None;
+            let block = crate::domain::models::FeedbackBlock {
+                id: "attached-sign-in".into(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message: ATTACHED_SIGN_IN.into(),
+                actions: Vec::new(),
+            };
+            state.feedback_blocks.insert(block.id.clone(), block);
+            state.needs_redraw = true;
         }
         KeyCode::Enter => {
             let request = team_requests.mint();
@@ -9495,6 +9519,34 @@ mod tests {
                 .any(|m| m.content.contains("5 facts removed from MEMORY.md")),
             "purge-notice SystemNotice should render inline"
         );
+    }
+
+    /// Sign-in needs a local provider layer: an attached `/login` or `/models`
+    /// is answered locally and never becomes a model turn (zero frames).
+    #[test]
+    fn attached_sign_in_commands_are_answered_locally() {
+        use crossterm::event::KeyCode;
+        for line in ["/login", "/login anthropic", " /models "] {
+            let mut state = TuiState::new(100, 30);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut input = line.to_owned();
+            let outcome = attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx);
+            assert!(matches!(outcome, ComposerOutcome::Handled), "{line}");
+            assert!(input.is_empty(), "{line}");
+            assert!(rx.try_recv().is_err(), "{line}: zero frames");
+            assert_eq!(
+                state.feedback_blocks["attached-sign-in"].message,
+                ATTACHED_SIGN_IN
+            );
+        }
+        // Anything else still reaches the model path.
+        let mut state = TuiState::new(100, 30);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut input = "/loginx".to_owned();
+        assert!(matches!(
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            ComposerOutcome::Submit(_)
+        ));
     }
 
     /// Story 19.16g K08 / M08 — the attached `/team log` is a LOCAL read

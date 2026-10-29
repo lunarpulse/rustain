@@ -106,6 +106,23 @@ impl ProviderRouter {
         self.locked.store(Arc::new(locked));
     }
 
+    /// Drops a route; the active id is kept, so a request to it reports the
+    /// locked hint registered next.
+    pub fn unregister(&self, id: &str) {
+        let mut routes = HashMap::clone(&self.routes.load());
+        if routes.remove(id).is_some() {
+            self.routes.store(Arc::new(routes));
+        }
+    }
+
+    /// Drops a locked hint (the provider is about to be registered).
+    pub fn unlock(&self, id: &str) {
+        let mut locked = HashMap::clone(&self.locked.load());
+        if locked.remove(id).is_some() {
+            self.locked.store(Arc::new(locked));
+        }
+    }
+
     fn missing_provider(&self, id: &str) -> ProviderError {
         let suffix = self
             .locked

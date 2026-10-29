@@ -91,6 +91,36 @@ impl ProviderRegistry {
             .collect()
     }
 
+    /// Removes an available provider with its health, discovery status and
+    /// sign-in hint (a provider whose last credential went away).
+    pub fn unregister(&self, id: &str) {
+        self.providers
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .remove(id);
+        self.health_status
+            .write()
+            .expect("ProviderRegistry health lock poisoned")
+            .remove(id);
+        self.discovery
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .remove(id);
+        self.sign_in_hints
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .remove(id);
+    }
+
+    /// Drops a locked record (a provider that just became available), so a
+    /// later models.dev remerge cannot re-register it as locked.
+    pub fn unlock(&self, id: &str) {
+        self.locked
+            .write()
+            .expect("ProviderRegistry lock poisoned")
+            .remove(id);
+    }
+
     pub fn set_discovery_status(
         &self,
         id: &str,

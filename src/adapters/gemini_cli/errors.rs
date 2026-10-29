@@ -68,15 +68,15 @@ pub(super) fn http_error(
         };
     }
     let value: Value = serde_json::from_str(body).unwrap_or(Value::Null);
-    let message = match value
+    // Redact before the cut: no prefix of a credential straddling it may survive.
+    let message = crate::adapters::auth::bounded_provider_text(&match value
         .pointer("/error/message")
         .and_then(Value::as_str)
         .filter(|message| !message.is_empty())
     {
         Some(message) => redact(message, request),
-        // Redact before the cut: no prefix of a credential straddling it may survive.
-        None => redact(body, request).chars().take(500).collect(),
-    };
+        None => redact(body, request),
+    });
     let text = format!("Cloud Code Assist API error ({status}): {message}");
     if status >= 500 {
         ProviderError::ConnectionFailed(text)
@@ -108,6 +108,30 @@ mod tests {
         )
     }
 
+    /// Provider error text reaching stderr or the TUI is control-free, capped
+    /// and still bearer-redacted (redaction runs before the cut).
+    #[test]
+    fn provider_error_text_is_sanitized_and_capped() {
+        let hostile = format!(
+            "{{\"error\":{{\"message\":\"evil\\u001b]52;c;ZXZpbA==\\u0007 BEARER-CANARY \\u009b31m{}\"}}}}",
+            "y".repeat(4000)
+        );
+        let ProviderError::Other(text) = map(400, &hostile) else {
+            panic!("a 400 maps to Other");
+        };
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+        assert!(
+            !text.contains("ZXZpbA") && !text.contains("BEARER-CANARY"),
+            "{text:?}"
+        );
+        let message = text
+            .strip_prefix("Cloud Code Assist API error (400): ")
+            .unwrap();
+        assert_eq!(
+            message.chars().count(),
+            crate::adapters::auth::PROVIDER_TEXT_CAP
+        );
+    }
     #[test]
     fn statuses_map_to_the_provider_contract() {
         assert!(matches!(map(401, ""), ProviderError::AuthenticationFailed));

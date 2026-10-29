@@ -165,7 +165,7 @@ fn build_status_rows(
                             return None;
                         };
                         Some(OAuthGrant {
-                            who: super::login::oauth_who(&oauth.identity)
+                            who: crate::adapters::auth::host::oauth_who(&oauth.identity)
                                 .unwrap_or_else(|| display.to_owned()),
                             grant_expires_at: DateTime::from_timestamp_millis(
                                 oauth

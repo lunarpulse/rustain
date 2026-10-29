@@ -167,19 +167,13 @@ async fn xai(http: &reqwest::Client, access: &str, identity: &mut CredentialIden
         identity.account_id = Some(sub);
     }
     // Bearer only; the shared credential client never follows a redirect.
-    let response = http
-        .get(crate::adapters::auth::policies::endpoint(USERINFO))
-        .timeout(std::time::Duration::from_secs(15))
-        .bearer_auth(access)
-        .send()
-        .await;
-    let Ok(response) = response else {
-        return;
-    };
-    if !response.status().is_success() {
-        return;
-    }
-    let Ok(body) = response.json::<serde_json::Value>().await else {
+    let Some(body) = userinfo(
+        http,
+        &crate::adapters::auth::policies::endpoint(USERINFO),
+        access,
+    )
+    .await
+    else {
         return;
     };
     if let Some(email) = scalar_string(body.get("email")) {
@@ -194,19 +188,13 @@ async fn xai(http: &reqwest::Client, access: &str, identity: &mut CredentialIden
 /// no body is logged. The 15 s bound is rustain's (omp has only cancellation).
 async fn google(http: &reqwest::Client, access: &str, identity: &mut CredentialIdentity) {
     const USERINFO: &str = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json";
-    let response = http
-        .get(crate::adapters::auth::policies::endpoint(USERINFO))
-        .timeout(std::time::Duration::from_secs(15))
-        .bearer_auth(access)
-        .send()
-        .await;
-    let Ok(response) = response else {
-        return;
-    };
-    if !response.status().is_success() {
-        return;
-    }
-    let Ok(body) = response.json::<serde_json::Value>().await else {
+    let Some(body) = userinfo(
+        http,
+        &crate::adapters::auth::policies::endpoint(USERINFO),
+        access,
+    )
+    .await
+    else {
         return;
     };
     if let Some(email) = body
@@ -216,6 +204,25 @@ async fn google(http: &reqwest::Client, access: &str, identity: &mut CredentialI
     {
         identity.email = Some(email.to_owned());
     }
+}
+
+/// Every userinfo request's bound (rustain's; omp has only cancellation).
+const USERINFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// A best-effort bearer GET of a userinfo document; any failure (including the
+/// `USERINFO_TIMEOUT` bound) is `None` and no body is logged.
+async fn userinfo(http: &reqwest::Client, url: &str, access: &str) -> Option<serde_json::Value> {
+    let response = http
+        .get(url)
+        .timeout(USERINFO_TIMEOUT)
+        .bearer_auth(access)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<serde_json::Value>().await.ok()
 }
 
 /// JavaScript `scalarString`: a non-empty string as-is, or a finite number as `String(n)`.
@@ -244,8 +251,29 @@ fn js_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::scalar_string;
+    use super::{USERINFO_TIMEOUT, scalar_string, userinfo};
     use serde_json::json;
+
+    /// Paused time against a userinfo endpoint that accepts and never answers:
+    /// the request ends at exactly the 15 s bound (identity stays unset).
+    #[tokio::test(start_paused = true)]
+    async fn userinfo_is_bounded_to_15_seconds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/oauth2/userinfo", listener.local_addr().unwrap());
+        let hold = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let start = tokio::time::Instant::now();
+        assert_eq!(
+            userinfo(&reqwest::Client::new(), &url, "access").await,
+            None
+        );
+        assert_eq!(start.elapsed(), USERINFO_TIMEOUT);
+        assert_eq!(USERINFO_TIMEOUT, std::time::Duration::from_secs(15));
+        hold.abort();
+    }
 
     #[test]
     fn scalar_string_follows_javascript_rules() {

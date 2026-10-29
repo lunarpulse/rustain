@@ -130,10 +130,14 @@ impl Loopback {
     ) {
         let mut connections = JoinSet::new();
         loop {
-            let accepted = tokio::select! {
-                result = self.v4.accept() => result,
-                result = async { match &self.v6 { Some(v6) => v6.accept().await, None => std::future::pending().await } } => result,
-                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            let accepted = if take_injected_accept_failure() {
+                Err(io::Error::other("injected accept failure"))
+            } else {
+                tokio::select! {
+                    result = self.v4.accept() => result,
+                    result = async { match &self.v6 { Some(v6) => v6.accept().await, None => std::future::pending().await } } => result,
+                    Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                }
             };
             // A failed accept (aborted handshake, descriptor pressure) never ends the
             // listener; it lives until the login future that owns it finishes (the
@@ -156,6 +160,25 @@ impl Loopback {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Accept failures `serve` reports before its next real accept (tests only).
+    static INJECTED_ACCEPT_FAILURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn take_injected_accept_failure() -> bool {
+    INJECTED_ACCEPT_FAILURES.with(|left| {
+        let n = left.get();
+        left.set(n.saturating_sub(1));
+        n > 0
+    })
+}
+
+#[cfg(not(test))]
+fn take_injected_accept_failure() -> bool {
+    false
+}
 fn ipv6_unavailable(error: &io::Error) -> bool {
     if matches!(
         error.kind(),
@@ -281,4 +304,52 @@ async fn respond(stream: &mut TcpStream, status: &str, body: &str, location: Opt
     );
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::SecretString;
+    use futures::future::BoxFuture;
+
+    struct Silent;
+    impl LoginUi for Silent {
+        fn on_auth_url(&self, _: &str, _: &str, _: &str) {}
+        fn on_device_code(&self, _: &str, _: &str, _: &str) {}
+        fn on_progress(&self, _: &str) {}
+        fn prompt_secret(&self, _: &str) -> BoxFuture<'_, Option<SecretString>> {
+            Box::pin(async { None })
+        }
+        fn manual_input(&self, _: &str) -> Option<BoxFuture<'static, Option<String>>> {
+            None
+        }
+        fn prompt_line(&self, _: &str) -> BoxFuture<'_, Option<String>> {
+            Box::pin(async { None })
+        }
+        fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+            tokio_util::sync::CancellationToken::new()
+        }
+    }
+
+    /// Failed accepts never end the listener: after three injected accept
+    /// errors the callback is still served.
+    #[tokio::test]
+    async fn serve_continues_after_accept_errors() {
+        let listener = Loopback::bind(0, false, CallbackHost::Ipv4Loopback, "/callback", &Silent)
+            .await
+            .unwrap();
+        INJECTED_ACCEPT_FAILURES.with(|left| left.set(3));
+        let (tx, mut rx) = mpsc::channel(1);
+        let callback = format!("{}?code=the-code&state=the-state", listener.redirect);
+        let client = async {
+            let _ = reqwest::get(&callback).await;
+            rx.recv().await
+        };
+        let received = tokio::select! {
+            () = listener.serve("/callback", "the-state", tx) => unreachable!("serve never returns"),
+            received = client => received,
+        };
+        assert!(matches!(received, Some(Ok(_))), "{received:?}");
+        assert_eq!(INJECTED_ACCEPT_FAILURES.with(std::cell::Cell::get), 0);
+    }
 }

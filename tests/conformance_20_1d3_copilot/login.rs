@@ -21,9 +21,7 @@ use rustain::domain::models::{CredentialIdentity, CredentialOrigin, CredentialRo
 use serde_json::{Value, json};
 use serial_test::serial;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use wiremock::{
     Mock, MockServer, Request, Respond, ResponseTemplate,
     matchers::{method, path, path_regex},
@@ -123,34 +121,20 @@ async fn login_with_policy(
     recorder
 }
 
-/// Stub-side latency of every policy reply in K01.
-const POLICY_LATENCY: Duration = Duration::from_millis(100);
-
-/// K01's policy responder: records the arrival order of model ids and a
-/// concurrency gauge.
-///
-/// A wiremock `Respond` cannot hold a request open until the test releases
-/// it, so "never more than 5 in flight" is proven two ways, neither of which
-/// waits on time in the test itself:
-/// - structurally: the 55 arrivals come in 11 consecutive groups whose members
-///   are exactly the consecutive 5-id seed chunks, in chunk order;
-/// - by a gauge: each reply is delayed `POLICY_LATENCY` after it is recorded,
-///   so a reply cannot complete before `recorded + POLICY_LATENCY`; a request
-///   arriving earlier than that overlaps it. When batches are awaited in
-///   sequence, every request of the next batch arrives after the previous
-///   batch completed, so the gauge never over-counts (no false RED); an
-///   unbounded fan-out lands all 55 within the latency window and reads > 5.
+/// K01's policy responder: records the arrival order of model ids. The
+/// "exactly 5 in flight" bound is proven structurally (held requests released
+/// by the test, quiescence on a paused clock) by
+/// `conformance_20_1e_tui_login::inherited::policy_enablement_holds_exactly_five_in_flight`;
+/// here the arrivals must come in the consecutive 5-id seed chunks, in order.
 #[derive(Clone)]
 struct PolicyGauge {
-    arrivals: Arc<Mutex<Vec<(String, Instant)>>>,
-    peak: Arc<AtomicUsize>,
+    arrivals: Arc<Mutex<Vec<String>>>,
 }
 
 impl PolicyGauge {
     async fn mount(server: &MockServer) -> Self {
         let gauge = Self {
             arrivals: Arc::new(Mutex::new(Vec::new())),
-            peak: Arc::new(AtomicUsize::new(0)),
         };
         Mock::given(method("POST"))
             .and(path_regex(POLICY_PATH))
@@ -160,29 +144,14 @@ impl PolicyGauge {
         gauge
     }
     fn ids(&self) -> Vec<String> {
-        self.arrivals
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-    fn peak(&self) -> usize {
-        self.peak.load(Ordering::SeqCst)
+        self.arrivals.lock().unwrap().clone()
     }
 }
 
 impl Respond for PolicyGauge {
     fn respond(&self, request: &Request) -> ResponseTemplate {
-        let now = Instant::now();
-        let mut arrivals = self.arrivals.lock().unwrap();
-        let in_flight = 1 + arrivals
-            .iter()
-            .filter(|(_, at)| *at + POLICY_LATENCY > now)
-            .count();
-        self.peak.fetch_max(in_flight, Ordering::SeqCst);
-        arrivals.push((policy_id(request), now));
-        json_reply(200, json!({})).set_delay(POLICY_LATENCY)
+        self.arrivals.lock().unwrap().push(policy_id(request));
+        json_reply(200, json!({}))
     }
 }
 
@@ -346,7 +315,7 @@ async fn k01_public_login_paces_polls_probes_enables_models_in_batches_and_store
     assert_eq!(seen, expected);
 
     // Batching: 11 consecutive arrival groups, each exactly one 5-id seed chunk,
-    // in chunk order; and the latency gauge never saw more than 5 overlapping.
+    // in chunk order.
     let arrived = gauge.ids();
     assert_eq!(arrived.len(), SEED_IDS);
     let seeds = seed_ids();
@@ -358,11 +327,6 @@ async fn k01_public_login_paces_polls_probes_enables_models_in_batches_and_store
         let chunk: BTreeSet<&str> = chunk.iter().copied().collect();
         assert_eq!(group, chunk, "arrival group {index}");
     }
-    assert!(
-        (1..=5).contains(&gauge.peak()),
-        "at most 5 policy requests in flight, saw {}",
-        gauge.peak()
-    );
 
     // The stored row.
     let stored = rows(PROVIDER).await;

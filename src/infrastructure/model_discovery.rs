@@ -460,19 +460,25 @@ pub async fn refresh_and_announce(
     force: bool,
     events: &Arc<EventBus>,
     tracker: &Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>,
-) {
-    let _guard = tracker.insert(target.provider_id.clone());
-    let report = refresh_target(target, cache, Some(registry), force).await;
-    if let Some(message) = report.notice {
+) -> RefreshReport {
+    // The in-flight mark ends with the fetch, before the announcement: a
+    // listener never sees a finished refresh as running, and needs no
+    // explicit removal that could clear a newer refresh of the same provider.
+    let report = {
+        let _guard = tracker.insert(target.provider_id.clone());
+        refresh_target(target, cache, Some(registry), force).await
+    };
+    if let Some(message) = &report.notice {
         let _ = events.emit_domain(AppEvent::SystemNotice {
             conversation_id: None,
             level: NoticeLevel::Warning,
-            message,
+            message: message.clone(),
         });
     }
     let _ = events.emit_domain(AppEvent::ProviderCatalogRefreshed {
         provider_id: target.provider_id.clone(),
     });
+    report
 }
 
 pub async fn remerge_all(
@@ -537,26 +543,34 @@ pub fn spawn_headless(targets: Vec<DiscoveryTarget>, registry: Arc<ProviderRegis
     }
 }
 
+/// What an auth change of `provider_id` is compared by: the row versions and
+/// the active row. A selection-only change counts; a no-op change does not.
+pub(crate) fn auth_change_key(
+    snapshot: &AuthSnapshot,
+    provider_id: &str,
+) -> (
+    std::collections::BTreeSet<crate::domain::models::CredentialStamp>,
+    Option<crate::domain::models::CredentialId>,
+) {
+    (
+        snapshot
+            .rows(provider_id)
+            .iter()
+            .map(crate::domain::models::StoredCredential::stamp)
+            .collect(),
+        snapshot.selected(provider_id),
+    )
+}
+
 /// Refreshes the provider's live roster after any credential change: a login, a
-/// new active row (`auth use`) or a removed row. A selection-only change counts;
-/// a no-op change (same row versions, same active row) does not.
+/// new active row (`auth use`) or a removed row (see `auth_change_key`).
 pub async fn rediscover_after_auth_change(
     provider_id: &str,
     app_config: &AppConfig,
     before: &AuthSnapshot,
 ) -> Option<RefreshReport> {
     let after = crate::adapters::auth_store::FileAuthStore::try_snapshot_sync().ok()?;
-    let credentials = |snapshot: &AuthSnapshot| {
-        (
-            snapshot
-                .rows(provider_id)
-                .iter()
-                .map(crate::domain::models::StoredCredential::stamp)
-                .collect::<std::collections::BTreeSet<_>>(),
-            snapshot.selected(provider_id),
-        )
-    };
-    if credentials(&after) == credentials(before) {
+    if auth_change_key(&after, provider_id) == auth_change_key(before, provider_id) {
         return None;
     }
     let entries: Vec<_> = super::provider_availability::effective_providers(app_config)

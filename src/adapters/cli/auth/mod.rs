@@ -35,12 +35,9 @@ pub async fn rediscover(
         return;
     };
     let display = providers::lookup(provider).map_or(provider, |meta| meta.display_name);
-    if let Some(notice) = report.notice {
-        eprintln!("{notice}");
-    } else if report.status == crate::domain::models::provider::DiscoveryStatus::Unavailable {
-        eprintln!("Provider {display} unavailable — showing bundled models.");
-    } else {
-        eprintln!("Discovered {} models for {display}.", report.model_count);
+    match crate::adapters::auth::host::discovery_line(display, &report) {
+        Some(line) => eprintln!("{line}"),
+        None => eprintln!("{}", report.notice.unwrap_or_default()),
     }
 }
 

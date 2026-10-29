@@ -26,14 +26,16 @@
 
 use crate::{
     adapters::{
-        auth::flows::{self, FlowCtx, LoginResult, LoginUi},
-        cli::{
-            auth::{providers, terminal_ui::TerminalUi},
-            commands::AuthLoginMethod,
+        auth::{
+            flows::{self, FlowCtx, LoginResult, LoginUi},
+            host::{
+                LoginPlan, active_line, credentials_saved_line, keyless_line, plan, success_line,
+            },
         },
+        cli::{auth::terminal_ui::TerminalUi, commands::AuthLoginMethod},
     },
     domain::{
-        models::{AppConfig, AuthMethod, CredentialIdentity, ProviderConfig},
+        models::{AppConfig, AuthMethod},
         ports::AuthStorePort,
     },
 };
@@ -63,20 +65,24 @@ async fn run(
     store: &Arc<dyn AuthStorePort>,
     app_config: &AppConfig,
 ) -> Result<()> {
-    let (display, requires_key, config) = resolve_provider(provider_id, app_config)?;
-    if !requires_key {
+    let LoginPlan {
+        display,
+        keyless,
+        methods,
+        validation_config: config,
+        ..
+    } = plan(provider_id, app_config)?;
+    if keyless {
         if json {
             println!(
                 "{}",
-                serde_json::json!({"provider":provider_id,"status":"keyless","message":format!("{display} does not require an API key — no credentials to store.")})
+                serde_json::json!({"provider":provider_id,"status":"keyless","message":keyless_line(&display)})
             );
         } else {
-            println!("{display} does not require an API key — no credentials to store.");
+            println!("{}", keyless_line(&display));
         }
         return Ok(());
     }
-    let fallback = [AuthMethod::ApiKey];
-    let methods = providers::lookup(provider_id).map_or(&fallback[..], |m| m.auth_methods);
     let method = select_method(methods, requested, std::io::stdin().is_terminal())?;
     if matches!(method, AuthMethod::ApiKey) && !std::io::stdin().is_terminal() {
         bail!(
@@ -100,12 +106,7 @@ async fn run(
     } else {
         println!("{}", success_line(method, &result, &display));
     }
-    eprintln!(
-        "Credentials saved to {}",
-        crate::infrastructure::paths::data_dir()?
-            .join("auth.json")
-            .display()
-    );
+    eprintln!("{}", credentials_saved_line()?);
     // Several accounts: name the one this login made active and how to change
     // it. The credential is already stored, so an unreadable store only skips
     // this hint and never fails the login.
@@ -121,10 +122,7 @@ async fn run(
         .count()
         > 1
     {
-        eprintln!(
-            "{}",
-            super::accounts::active_line(&accounts, result.credential_id)
-        );
+        eprintln!("{}", active_line(&accounts, result.credential_id));
         eprintln!(
             "Switch with `rustain auth use {provider_id} --id <N>`; remove one with `rustain auth logout {provider_id} --id <N>`."
         );
@@ -217,75 +215,12 @@ fn result_json(result: &LoginResult) -> serde_json::Value {
     }
     serde_json::json!({"provider":result.provider,"status":"authenticated","method":result.method,"validated":result.validated,"identity":identity,"id":result.credential_id.0})
 }
-pub(super) fn oauth_who(identity: &CredentialIdentity) -> Option<String> {
-    let base = identity.email.as_ref().or(identity.account_id.as_ref());
-    let org = identity.org_name.as_ref().or(identity.org_id.as_ref());
-    let who = match (base, org) {
-        (Some(base), Some(org)) => format!("{base} ({org})"),
-        (Some(base), None) => base.clone(),
-        (None, Some(org)) => org.clone(),
-        _ => return None,
-    };
-    // Provider-supplied identity reaches the terminal; strip controls as other CLI labels do.
-    Some(crate::adapters::cli::session::list::sanitize_title(&who))
-}
-fn oauth_success(login_name: &str, identity: &CredentialIdentity) -> String {
-    let prefix = format!("Logged in to {login_name}");
-    oauth_who(identity).map_or_else(|| prefix.clone(), |who| format!("{prefix} as {who}"))
-}
-/// The human result line: a minted or pasted browser key names the product (no
-/// identity), a subscription names its account, an API key its validation.
-fn success_line(method: &AuthMethod, result: &LoginResult, display: &str) -> String {
-    if result.method == "browser_key" {
-        format!("✓ Logged in to {}.", method.login_name().unwrap_or(display))
-    } else if let Some(login_name) = method.login_name() {
-        oauth_success(login_name, &result.identity)
-    } else if result.validated {
-        format!("✓ {display} credentials stored successfully.")
-    } else {
-        format!("⚠  Could not confirm key — {display} credentials stored unvalidated.")
-    }
-}
-fn resolve_provider(provider: &str, app: &AppConfig) -> Result<(String, bool, ProviderConfig)> {
-    if let Some(meta) = providers::lookup(provider) {
-        // A configured built-in still keeps its custom origin and header policy.
-        let config = app
-            .provider
-            .get(provider)
-            .cloned()
-            .unwrap_or_else(|| ProviderConfig {
-                provider_id: provider.into(),
-                model_id: String::new(),
-                api_key_env: meta.api_key_env.into(),
-                enabled: true,
-                kind: Some(provider.into()),
-                base_url: None,
-                auth_header: None,
-                context_window: None,
-                supports_tools: None,
-                discover_models: false,
-                model_filter: vec![],
-                cache_ttl_seconds: 0,
-            });
-        return Ok((meta.display_name.into(), meta.requires_key, config));
-    }
-    if let Some(config) = app.provider.get(provider) {
-        return Ok((provider.into(), true, config.clone()));
-    }
-    let mut valid: Vec<_> = providers::all_provider_ids().map(str::to_owned).collect();
-    for id in app.provider.keys() {
-        if !valid.contains(id) {
-            valid.push(id.clone());
-        }
-    }
-    bail!(
-        "unknown provider '{provider}'. Valid providers: {}",
-        valid.join(", ")
-    )
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::auth::host::{oauth_success, resolve_provider};
+    use crate::adapters::cli::auth::providers;
+    use crate::domain::models::CredentialIdentity;
     use crate::domain::models::auth_policy::{DeviceFlow, DevicePolicy};
     static DEVICE: DevicePolicy = DevicePolicy {
         label: "Subscription (device code)",

@@ -222,6 +222,9 @@ pub enum AppEvent {
         provider_id: String,
     },
 
+    /// An in-process sign-in (TUI login overlay) or its picker data.
+    Login(LoginEvent),
+
     /// Plan mode exit requested — present the plan approval card to the user.
     PlanApprovalRequested {
         conversation_id: ConversationId,
@@ -571,6 +574,11 @@ pub enum DomainKey {
     AltM,
     /// Alt+V: paste image (or text) from the system clipboard.
     AltV,
+    /// Alt+C / Alt+L / Alt+U: copy keys of the login overlay while a field has
+    /// focus; every other focus treats them as the plain letter.
+    AltC,
+    AltL,
+    AltU,
     Esc,
     Backspace,
     Delete,
@@ -601,6 +609,95 @@ pub enum DomainKey {
     CtrlX,
 }
 
+/// A reply channel whose `Debug` never shows what crosses it (a typed key or code).
+pub struct LoginReply<T>(pub tokio::sync::oneshot::Sender<T>);
+impl<T> std::fmt::Debug for LoginReply<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<reply>")
+    }
+}
+
+/// Sign-in events. No variant carries a secret: a typed key or code travels
+/// only through a `LoginReply`.
+#[derive(Debug)]
+pub enum LoginEvent {
+    AuthUrl {
+        login_id: u64,
+        url: String,
+        launch_url: String,
+        instructions: String,
+    },
+    DeviceCode {
+        login_id: u64,
+        verification_url: String,
+        user_code: String,
+        instructions: String,
+    },
+    Progress {
+        login_id: u64,
+        message: String,
+    },
+    PromptSecret {
+        login_id: u64,
+        label: String,
+        reply: LoginReply<Option<crate::domain::models::SecretString>>,
+    },
+    ManualInput {
+        login_id: u64,
+        prompt: String,
+        reply: LoginReply<Option<String>>,
+    },
+    PromptLine {
+        login_id: u64,
+        prompt: String,
+        reply: LoginReply<Option<String>>,
+    },
+    Finished {
+        login_id: u64,
+        provider: String,
+        outcome: Result<LoginSummary, LoginFailure>,
+    },
+    /// The discovery line for a provider column after a sign-in.
+    Discovered {
+        provider: String,
+        line: String,
+    },
+    /// The provider picker's rows, read off the event loop.
+    Targets {
+        generation: u64,
+        rows: Vec<LoginTargetRow>,
+    },
+    /// One row's served credential resolved (`valid`) or failed.
+    Validated {
+        generation: u64,
+        provider: String,
+        valid: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginSummary {
+    /// The CLI's success line(s) and the credential path.
+    pub lines: Vec<String>,
+    pub credential_id: crate::domain::models::CredentialId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginFailure {
+    Cancelled,
+    Failed(String),
+}
+
+/// One provider-picker row; `source` is `None` when nothing serves the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginTargetRow {
+    pub id: String,
+    pub display: String,
+    pub source: Option<String>,
+    pub accounts: usize,
+    /// Searchable text besides the display name: id, source and env variable.
+    pub search: String,
+}
 /// Purpose of a compaction operation.
 #[derive(Debug, Clone)]
 pub enum CompactionPurpose {

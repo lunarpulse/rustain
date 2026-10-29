@@ -24,6 +24,9 @@ use crate::domain::services::search::SearchMatch;
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
 
+mod login_overlay;
+pub use login_overlay::*;
+
 /// Attach-mode view descriptor for the status bar (Story 12.2c AC1/AC6).
 ///
 /// Present only when the TUI is an attached client (`run_attached`); the local
@@ -1048,6 +1051,8 @@ pub enum ChordAction {
     ShowHelp,
     /// Open the model/provider selector overlay (Story 7.2 AC1).
     OpenModelSelector,
+    /// Open the sign-in provider picker (`/login`).
+    OpenLogin,
     /// Open the profile switcher overlay (Story 8.4 AC-1).
     OpenProfileSwitcher,
     /// Open the usage/cost panel overlay (Story 7.5 AC3).
@@ -1148,6 +1153,10 @@ pub struct ModelSelectorState {
     pub search_active: bool,
     pub search_query: String,
     pub filtered_indices: Vec<usize>,
+    /// Locked columns a sign-in can unlock: column id → store key to log in.
+    pub sign_in: HashMap<String, String>,
+    /// The discovery line under a column after its sign-in: (column id, line).
+    pub bloom: Option<(String, String)>,
 }
 
 impl ModelSelectorState {
@@ -1164,6 +1173,8 @@ impl ModelSelectorState {
             search_active: false,
             search_query: String::new(),
             filtered_indices: Vec::new(),
+            sign_in: HashMap::new(),
+            bloom: None,
         }
     }
 
@@ -1182,6 +1193,10 @@ impl ModelSelectorState {
         self.search_active = false;
         self.search_query.clear();
         self.filtered_indices.clear();
+        self.bloom = None;
+        // Only `handlers::model_switch::open_selector` knows which locked columns
+        // a sign-in can unlock; any other opener offers none (never a stale map).
+        self.sign_in.clear();
         self.columns = columns;
 
         self.selected_provider = self
@@ -1249,6 +1264,8 @@ impl ModelSelectorState {
         if self.columns.len() <= 1 {
             return;
         }
+        // The sign-in discovery line belongs to the column it was shown under.
+        self.bloom = None;
         match direction {
             Direction::Left => {
                 if self.selected_provider == 0 {
@@ -2417,6 +2434,7 @@ impl WhichKeyState {
         let mut chord_map = HashMap::new();
         chord_map.insert('p', ChordAction::OpenProfileSwitcher);
         chord_map.insert('m', ChordAction::OpenModelSelector);
+        chord_map.insert('i', ChordAction::OpenLogin);
         chord_map.insert(
             'a',
             ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Adapters),
@@ -2756,6 +2774,8 @@ pub struct TuiState {
     pub help_overlay: HelpOverlayState,
     /// Model/provider selector state (Ctrl+X, M) (Story 7.2).
     pub model_selector: ModelSelectorState,
+    /// Sign-in overlay (`/login`, Ctrl+X I, locked provider → sign in).
+    pub login: LoginOverlayState,
     /// Profile switcher state (Ctrl+X, P) (Story 8.4 AC-1).
     pub profile_switcher: ProfileSwitcherState,
     /// Active-profile snapshot — identity color + name for status bar.
@@ -3241,6 +3261,7 @@ impl TuiState {
             which_key: WhichKeyState::new(),
             help_overlay: HelpOverlayState::new(),
             model_selector: ModelSelectorState::new(),
+            login: LoginOverlayState::default(),
             profile_switcher: ProfileSwitcherState::new(),
             active_profile: None,
             usage_panel: UsagePanelState::new(),

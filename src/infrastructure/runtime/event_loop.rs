@@ -385,6 +385,7 @@ pub async fn run(
     progress_tx: Option<mpsc::UnboundedSender<crate::domain::events::ToolProgressEvent>>,
     progress_rx: Option<mpsc::UnboundedReceiver<crate::domain::events::ToolProgressEvent>>,
     refresh_tracker: Option<Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>>,
+    live: Arc<crate::infrastructure::live_providers::LiveProviders>,
 ) -> Result<()> {
     let domain_tx = app_state.event_bus.domain_tx.clone();
     let mut config_arc = app_state.app_config.load_full(); // Story 8.1 AC-7 — live ArcSwap snapshot
@@ -395,6 +396,8 @@ pub async fn run(
     if let Some(tracker) = refresh_tracker {
         state.model_selector.refreshing = tracker;
     }
+    let login_ctx =
+        crate::adapters::tui::login_runtime::LoginCtx::new(app_state.event_bus.clone(), live);
     state.skill_registry = skill_activator.registry_arc();
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
     // Story 8.4b AC-9: seed initial density mode from config
@@ -2044,7 +2047,11 @@ pub async fn run(
                                 InputAction::ExecuteCommand { name: cmd_name, args: cmd_args } => {
                                     let cmd_arg: Option<&str> = cmd_args.as_deref();
                                     let cmd_name: &str = cmd_name.as_str();
-                                    if cmd_name == "ml" {
+                                    if cmd_name == "login" {
+                                        handlers::login::command(&mut state, &login_ctx, config, cmd_arg);
+                                    } else if cmd_name == "models" {
+                                        handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
+                                    } else if cmd_name == "ml" {
                                         // /ml command: toggle multi-line mode (AC#3)
                                         // Covers: Sprint Change Proposal 2026-04-08
                                         state.multiline_mode = !state.multiline_mode;
@@ -2363,44 +2370,14 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::CopyToClipboard(mut content) => {
-                                    use crate::adapters::tui::clipboard;
-
                                     // Resolve content if empty (Chat focus copy)
                                     // Covers: FR116 (AC6, AC8, AC9)
                                     if content.is_empty() {
                                         content = state.resolve_copy_content(&conversation);
                                     }
-                                    if content.is_empty() {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: "Nothing to copy".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
-                                        state.needs_redraw = true;
-                                    } else {
-
-                                    let result = clipboard::copy_to_clipboard(&content);
-                                    let flash_msg = match result {
-                                        clipboard::ClipboardResult::Osc52Success => {
-                                            "Copied to clipboard".to_string()
-                                        }
-                                        clipboard::ClipboardResult::FallbackSuccess(ref path) => {
-                                            format!("Copied to {}", path.display())
-                                        }
-                                        clipboard::ClipboardResult::Failed(ref err) => {
-                                            format!("Copy failed: {}", err)
-                                        }
-                                    };
-                                    state.status_before_flash = Some(state.status.clone());
-                                    state.status = StatusState::Flash {
-                                        message: flash_msg,
-                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                    };
-                                    state.needs_redraw = true;
-                                    } // end else (content not empty)
+                                    handlers::clipboard::flash_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 InputAction::CopyTaskResult { plan_id, task_number } => {
-                                    use crate::adapters::tui::clipboard;
                                     let content = plan_id.as_deref()
                                         .and_then(|id| conversation.plans.get(id))
                                         .and_then(|plan| plan.tasks.get((task_number - 1) as usize))
@@ -2416,32 +2393,7 @@ pub async fn run(
                                             }
                                         })
                                         .unwrap_or_default();
-                                    if content.is_empty() {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: "Nothing to copy".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
-                                    } else {
-                                        let result = clipboard::copy_to_clipboard(&content);
-                                        let flash_msg = match result {
-                                            clipboard::ClipboardResult::Osc52Success => {
-                                                "Copied to clipboard".to_string()
-                                            }
-                                            clipboard::ClipboardResult::FallbackSuccess(ref path) => {
-                                                format!("Copied to {}", path.display())
-                                            }
-                                            clipboard::ClipboardResult::Failed(ref err) => {
-                                                format!("Copy failed: {}", err)
-                                            }
-                                        };
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: flash_msg,
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
-                                    }
-                                    state.needs_redraw = true;
+                                    handlers::clipboard::flash_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 // ─── Story 6.4: Task Control & Plan Deviation ───
 
@@ -5002,32 +4954,10 @@ pub async fn run(
 
                                 InputAction::Consumed | InputAction::Ignored => {}
                                 InputAction::OpenModelSelector => {
-                                    let active_pid = router.active_delegate_id();
-                                    let effective_mid = effective_model(&state, config).to_string();
-                                    let columns = crate::adapters::tui::state::model_selector_columns(
-                                        &AppContext::new(&app_state, &router),
-                                    );
-                                    if columns.is_empty() {
-                                        let fb = crate::domain::models::FeedbackBlock {
-                                            id: "model-selector-empty".to_string(),
-                                            level: crate::domain::models::FeedbackLevel::Info,
-                                            message: "No models available".to_string(),
-                                            actions: Vec::new(),
-                                        };
-                                        state.feedback_blocks.insert(fb.id.clone(), fb);
-                                        state.needs_redraw = true;
-                                    } else {
-                                        state.model_selector.open(
-                                            state.focus.clone(),
-                                            columns,
-                                            &active_pid,
-                                            &effective_mid,
-                                        );
-                                        state.focus = crate::domain::models::FocusState::Overlay(
-                                            crate::domain::models::visual::OverlayType::ModelSelector,
-                                        );
-                                        state.needs_redraw = true;
-                                    }
+                                    handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
+                                }
+                                InputAction::Login(action) => {
+                                    handlers::login::on_action(&mut state, &login_ctx, config, &AppContext::new(&app_state, &router), action);
                                 }
                                 InputAction::SwitchModelProvider { provider_id, model_id } => {
                                     let app_context = AppContext::new(&app_state, &router);
@@ -5090,23 +5020,7 @@ pub async fn run(
                                 InputAction::FeedbackBudgetSwitchCheaper => {
                                     // Story 7.5 AC5/AC7: reuse the model-selector overlay.
                                     handlers::budget::handle_clear_daily_budget_warning(&mut state);
-                                    let active_pid = router.active_delegate_id();
-                                    let effective_mid = effective_model(&state, config).to_string();
-                                    let columns = crate::adapters::tui::state::model_selector_columns(
-                                        &AppContext::new(&app_state, &router),
-                                    );
-                                    if !columns.is_empty() {
-                                        state.model_selector.open(
-                                            state.focus.clone(),
-                                            columns,
-                                            &active_pid,
-                                            &effective_mid,
-                                        );
-                                        state.focus = crate::domain::models::FocusState::Overlay(
-                                            crate::domain::models::visual::OverlayType::ModelSelector,
-                                        );
-                                    }
-                                    state.needs_redraw = true;
+                                    handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
                                 }
                                 InputAction::FeedbackBudgetPause => {
                                     // Story 7.5 AC5/AC7: persist dismissed_until_unix
@@ -7532,16 +7446,11 @@ pub async fn run(
                         }
                         state.needs_redraw = true;
                     }
-                    AppEvent::ProviderCatalogRefreshed { provider_id } => {
-                        state.model_selector.refreshing.remove(&provider_id);
-                        if state.model_selector.active {
-                            state.model_selector.refresh_columns(
-                                crate::adapters::tui::state::model_selector_columns(
-                                    &AppContext::new(&app_state, &router),
-                                ),
-                            );
-                        }
-                        state.needs_redraw = true;
+                    AppEvent::ProviderCatalogRefreshed { .. } => {
+                        handlers::model_switch::on_catalog_refreshed(&mut state, &AppContext::new(&app_state, &router), config);
+                    }
+                    AppEvent::Login(event) => {
+                        handlers::login::on_event(&mut state, config, &AppContext::new(&app_state, &router), event);
                     }
                     // Story 8.1 AC-10, Story 8.2 AC-15.2 — Config reload via handler.
                     AppEvent::ConfigReload => {
@@ -8067,6 +7976,9 @@ pub async fn run(
             break;
         }
     }
+    // Every quit path (Ctrl+Q, shutdown) cancels a running sign-in: the flow
+    // ends with `Login cancelled` and its loopback listener closes.
+    state.login.cancel_running();
 
     // Await any in-flight save before shutdown persist
     if let Some(prev) = _pending_save.take() {
@@ -8725,6 +8637,7 @@ fn render(
         ref which_key,
         ref help_overlay,
         ref model_selector,
+        ref login,
         ref profile_switcher,
         active_profile: ref _active_profile,
         ref usage_panel,
@@ -8741,6 +8654,7 @@ fn render(
 
     let display_model = selected_model.as_deref().unwrap_or(config_model);
 
+    let mut login_links = Vec::new();
     terminal.draw(|frame| {
         let area = frame.area();
 
@@ -9773,6 +9687,7 @@ fn render(
                 if model_selector.active {
                     model_selector::render(frame, area, model_selector, theme);
                 }
+                login_links = crate::adapters::tui::widgets::login_dialog::render(frame, area, login, theme);
 
                 // Render usage/cost panel overlay (Story 7.5 AC3)
                 if usage_panel.active {
@@ -9794,6 +9709,7 @@ fn render(
             }
         }
     })?;
+    crate::adapters::tui::widgets::hyperlink::write_links(terminal.backend_mut(), &login_links)?;
 
     state.total_content_height = content_height;
     state.block_boundaries = block_bounds;

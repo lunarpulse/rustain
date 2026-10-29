@@ -1496,27 +1496,36 @@ pub async fn run() -> Result<()> {
         });
     }
 
-    let cache = crate::adapters::model_catalog_cache::ModelCatalogCache::new();
-    for target in &discovery_targets {
+    // The live layer owns the target sets from here on: an in-process sign-in
+    // replaces entries the startup refresh, the timer and remerges all read.
+    let live = crate::infrastructure::live_providers::LiveProviders::new(
+        router.clone(),
+        provider_registry.clone(),
+        discovery_targets,
+        catalogue_targets,
+        event_bus.clone(),
+        refresh_tracker.clone(),
+        app_config.clone(),
+    );
+    for target in live.discovery_targets().iter() {
         let target = target.clone();
-        let cache = cache.clone();
+        let live = live.clone();
         let tracker = refresh_tracker.clone();
         let registry = provider_registry.clone();
         let events = event_bus.clone();
         tokio::spawn(async move {
             crate::infrastructure::model_discovery::refresh_and_announce(
-                &target, &cache, &registry, false, &events, &tracker,
+                &target,
+                live.cache(),
+                &registry,
+                false,
+                &events,
+                &tracker,
             )
             .await;
         });
     }
-    spawn_periodic_catalog_refresh(
-        cache,
-        discovery_targets.clone(),
-        refresh_tracker.clone(),
-        event_bus.clone(),
-        provider_registry.clone(),
-    );
+    spawn_periodic_catalog_refresh(live.clone());
 
     let security_adapter = SecurityAdapter::new(workspace_path.clone());
     security_adapter.set_mode(initial_mode);
@@ -2626,10 +2635,7 @@ pub async fn run() -> Result<()> {
     // Mirrors opencode's spaced-refresh posture.
     #[cfg(feature = "models-dev")]
     {
-        let registry = provider_registry.clone();
-        let targets = catalogue_targets.clone();
-        let events = app_state.event_bus.clone();
-        let config = app_config.clone();
+        let live = live.clone();
         tokio::spawn(async move {
             use crate::adapters::models_dev::{CACHE_TTL, load_cache, refresh};
             loop {
@@ -2640,12 +2646,7 @@ pub async fn run() -> Result<()> {
                     .unwrap_or(false);
                 if !fresh {
                     match refresh().await {
-                        Ok(_) => {
-                            crate::infrastructure::model_discovery::remerge_all(
-                                &registry, &targets, &events, &config,
-                            )
-                            .await
-                        }
+                        Ok(_) => live.remerge().await,
                         Err(error) => {
                             tracing::warn!(%error, "models.dev refresh failed; will retry")
                         }
@@ -2677,6 +2678,7 @@ pub async fn run() -> Result<()> {
         progress_tx,
         progress_rx,
         Some(refresh_tracker),
+        live,
     )
     .await;
 
@@ -2705,7 +2707,7 @@ pub struct ProviderLayer {
 }
 
 pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> ProviderLayer {
-    use crate::domain::models::provider::LockedProvider;
+    use crate::infrastructure::live_providers::{Gated, apply_gated, discovers, gate_entry};
     use crate::infrastructure::provider_availability::{
         Availability, ProviderOrigin, availability, effective_providers,
     };
@@ -2742,92 +2744,23 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
     let mut first_config = None;
     let mut anthropic_routed = false;
     for entry in entries.into_iter().filter(|entry| entry.cfg.enabled) {
-        let id = &entry.id;
-        let cfg = &entry.cfg;
-        if let Availability::Locked { hint } = availability(
-            &entry,
-            &snapshot,
-            &crate::infrastructure::utils::env_var_trimmed,
-        ) {
-            let display_name = entry.display_name();
-            let message = format!("{display_name} has no credentials configured. {hint}");
-            router.register_locked(id.clone(), message);
-            let mut models = crate::infrastructure::model_discovery::public_catalog(
-                id,
-                entry.kind(),
-                &cfg.model_filter,
-            );
-            crate::infrastructure::provider_factory::restrict_tools(
-                &mut models,
-                cfg.supports_tools == Some(false),
-            );
-            provider_registry.register_locked(LockedProvider {
-                provider_id: id.clone(),
-                display_name,
-                sign_in_hint: hint,
-                models,
-            });
-            continue;
-        }
-        let built = if entry.origin == ProviderOrigin::Bundled && entry.kind() == "anthropic" {
-            build_anthropic_provider_from_env(app_config)
-                .map_err(|error| ProviderError::Other(error.to_string()))
-        } else {
-            crate::infrastructure::provider_factory::build_provider_for_config(id, cfg)
-        };
-        match built {
-            Ok(provider) => {
+        let gated = gate_entry(&entry, &snapshot, app_config);
+        apply_gated(&provider_registry, &router, &entry.id, &gated);
+        match gated {
+            Gated::Locked { .. } => {}
+            Gated::Built { provider, target } => {
                 if entry.origin == ProviderOrigin::Config && first_config.is_none() {
                     first_config = Some(provider.provider_id());
                 }
-                let target = crate::adapters::model_catalog_cache::DiscoveryTarget {
-                    provider_id: provider.provider_id(),
-                    kind: entry.kind().into(),
-                    bundled: provider.list_models(),
-                    credential_fingerprint:
-                        crate::infrastructure::provider_factory::discovery_fingerprint(
-                            entry.rows_key(),
-                            &entry.env_vars(),
-                            cfg,
-                            provider.as_ref(),
-                        ),
-                    scope_context: crate::infrastructure::provider_factory::discovery_scope_context(
-                        entry.rows_key(),
-                        cfg,
-                        provider.as_ref(),
-                    ),
-                    last_live: Default::default(),
-                    refresh_order: Default::default(),
-                    provider: provider.clone(),
-                    cache_ttl_seconds: cfg.cache_ttl_seconds,
-                    model_filter: cfg.model_filter.clone(),
-                    display_name: entry.display_name(),
-                    sign_in_hint: entry.sign_in_hint(),
-                };
-                crate::infrastructure::model_discovery::seed_target(
-                    &target,
-                    &crate::adapters::model_catalog_cache::ModelCatalogCache::new(),
-                );
-                provider_registry.set_discovery_status(
-                    &target.provider_id,
-                    crate::domain::models::provider::DiscoveryStatus::Idle,
-                );
-                // The rejected-credential pane offers the same actionable hint.
-                provider_registry
-                    .set_sign_in_hint(&target.provider_id, target.sign_in_hint.clone());
                 anthropic_routed |= provider.provider_id() == "anthropic";
-                router.register(provider.clone());
-                provider_registry.register_arc(provider);
                 catalogue_targets.push(target.clone());
-                if cfg.discover_models {
-                    if entry.kind() == "ollama" {
-                        unsupported_discovery.push((id.clone(), entry.kind().to_owned()));
-                    } else {
-                        discovery_targets.push(target);
-                    }
+                if discovers(&entry) {
+                    discovery_targets.push(target);
+                } else if entry.cfg.discover_models {
+                    unsupported_discovery.push((entry.id.clone(), entry.kind().to_owned()));
                 }
             }
-            Err(error) => deferred_notices.push((id.clone(), error)),
+            Gated::Failed(error) => deferred_notices.push((entry.id.clone(), error)),
         }
     }
     // A routable default keeps serving; a locked configured entry names the
@@ -2859,7 +2792,7 @@ pub fn init_provider_layer(app_config: &crate::domain::models::AppConfig) -> Pro
 /// Auth precedence (CC-compatible): `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`.
 /// - `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer {token}` (gateways/proxies)
 /// - `ANTHROPIC_API_KEY` → `X-Api-Key: {key}` (direct Anthropic)
-fn build_anthropic_provider_from_env(
+pub(crate) fn build_anthropic_provider_from_env(
     config: &crate::domain::models::AppConfig,
 ) -> Result<Arc<dyn StreamingProvider>> {
     #[cfg(feature = "anthropic")]
@@ -2931,19 +2864,12 @@ fn build_anthropic_provider_from_env(
 /// Spawn a background periodic catalog refresh timer (Story 7.7 AC3).
 ///
 /// Fires every 4 hours aligned to UTC hour boundaries (00:00, 04:00, 08:00, ...).
-/// On each tick, re-fetches `/v1/models` for every provider with `discover_models = true`.
-/// Emits `ProviderCatalogRefreshed` on success, `SystemNotice` on failure.
-fn spawn_periodic_catalog_refresh(
-    cache: crate::adapters::model_catalog_cache::ModelCatalogCache,
-    discovery_targets: Vec<crate::adapters::model_catalog_cache::DiscoveryTarget>,
-    refresh_tracker: std::sync::Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>,
-    events: Arc<crate::infrastructure::runtime::event_bus::EventBus>,
-    registry: Arc<crate::adapters::provider::ProviderRegistry>,
-) {
-    if discovery_targets.is_empty() {
-        return;
-    }
-
+/// Each tick re-fetches the roster of every *current* live discovery target, so
+/// a provider unlocked by an in-process sign-in is refreshed too, including when
+/// the TUI started with none.
+pub fn spawn_periodic_catalog_refresh(
+    live: Arc<crate::infrastructure::live_providers::LiveProviders>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use chrono::Timelike;
 
@@ -2982,22 +2908,9 @@ fn spawn_periodic_catalog_refresh(
         loop {
             interval.tick().await;
             tracing::info!("Periodic catalog refresh tick");
-
-            for target in &discovery_targets {
-                let target = target.clone();
-                let cache = cache.clone();
-                let events = events.clone();
-                let registry = registry.clone();
-                let tracker = refresh_tracker.clone();
-                tokio::spawn(async move {
-                    crate::infrastructure::model_discovery::refresh_and_announce(
-                        &target, &cache, &registry, true, &events, &tracker,
-                    )
-                    .await;
-                });
-            }
+            live.periodic_tick().await;
         }
-    });
+    })
 }
 
 /// Story 9.6 — validate the `skill_exposure.kind` config value at startup.

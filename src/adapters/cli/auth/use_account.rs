@@ -32,7 +32,7 @@ pub async fn run_auth_use(
             })
         );
     } else {
-        println!("{}", super::accounts::active_line(&after, id));
+        println!("{}", crate::adapters::auth::host::active_line(&after, id));
     }
     // A selected stored key never outranks the environment, for example.
     if after.served != Some(ServedSource::Row(id)) {

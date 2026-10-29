@@ -1,3 +1,4 @@
+use crate::adapters::tui::handlers::login::LoginAction;
 use crate::adapters::tui::state::{ChordAction, Direction, TuiState};
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::adapters::tui::widgets::input_box;
@@ -400,6 +401,8 @@ pub enum InputAction {
     },
     /// Open the model/provider selector overlay (Story 7.2 AC1).
     OpenModelSelector,
+    /// Sign-in overlay request the event loop's login handler performs.
+    Login(LoginAction),
     /// Open the profile switcher overlay (Story 8.4 AC-1).
     OpenProfileSwitcher,
     /// Profile switch requested via palette or CLI — bypasses the modal list, goes
@@ -647,6 +650,31 @@ pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
 /// Handle a domain input event by updating TUI state.
 /// Returns an InputAction telling the event loop what to do.
 pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
+    // The login overlay owns every key while it has focus (Ctrl+Q still quits).
+    if state.focus == FocusState::Overlay(OverlayType::Login)
+        && !matches!(
+            event,
+            DomainInputEvent::Resize(..)
+                | DomainInputEvent::FocusGained
+                | DomainInputEvent::FocusLost
+        )
+    {
+        return crate::adapters::tui::handlers::login::on_key(state, event);
+    }
+    let plain;
+    let event = match event {
+        DomainInputEvent::SpecialKey(
+            key @ (DomainKey::AltC | DomainKey::AltL | DomainKey::AltU),
+        ) => {
+            plain = DomainInputEvent::KeyPress(match key {
+                DomainKey::AltC => 'c',
+                DomainKey::AltL => 'l',
+                _ => 'u',
+            });
+            &plain
+        }
+        other => other,
+    };
     let modal_owned_focus = permission_modal_owns_focus(state);
     let action = dispatch_input(state, event);
     if modal_owned_focus && !permission_modal_owns_focus(state) {
@@ -927,6 +955,13 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 ChordAction::OpenModelSelector => {
                     state.which_key.dismiss();
                     return InputAction::OpenModelSelector;
+                }
+                ChordAction::OpenLogin => {
+                    state.which_key.dismiss();
+                    return InputAction::Login(LoginAction::Open {
+                        provider: None,
+                        origin: crate::adapters::tui::state::LoginOrigin::Chord,
+                    });
                 }
                 ChordAction::OpenProfileSwitcher => {
                     state.which_key.dismiss();
@@ -3087,6 +3122,13 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
+            // /login [provider] (sign-in overlay) and /models (model picker).
+            if cmd_name == "login" || cmd_name == "models" {
+                return InputAction::ExecuteCommand {
+                    name: cmd_name,
+                    args,
+                };
+            }
             // /mode plan|normal|autoedit|yolo: switch permission mode (AC9)
             if cmd_name == "mode" {
                 return InputAction::ExecuteCommand {
@@ -3645,7 +3687,23 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
                     model_id: model.model_id.clone(),
                 };
             }
-            // Locked catalogues stay open; a later sign-in flow can consume this seam.
+            // A locked column that a sign-in can unlock starts that login; a
+            // hint-only column (env/config) stays open.
+            let column = state
+                .model_selector
+                .columns
+                .get(state.model_selector.selected_provider)
+                .filter(|column| column.locked_hint.is_some());
+            if let Some(column) = column
+                && let Some(provider) = state.model_selector.sign_in.get(&column.provider_id)
+            {
+                return InputAction::Login(LoginAction::Open {
+                    provider: Some(provider.clone()),
+                    origin: crate::adapters::tui::state::LoginOrigin::Picker {
+                        column: column.provider_id.clone(),
+                    },
+                });
+            }
             InputAction::Consumed
         }
         DomainKey::Esc => {
@@ -4055,6 +4113,22 @@ pub fn convert_crossterm_event(
             // Ctrl+V / Ctrl+Shift+V themselves for their own paste operation.
             if *modifiers == KeyModifiers::ALT && *code == KeyCode::Char('v') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::AltV));
+            }
+            // Alt+C / Alt+L / Alt+U → login-overlay copy keys; `handle_input`
+            // turns them back into the plain letter for every other focus.
+            if *modifiers == KeyModifiers::ALT {
+                match code {
+                    KeyCode::Char('c') => {
+                        return Some(DomainInputEvent::SpecialKey(DomainKey::AltC));
+                    }
+                    KeyCode::Char('l') => {
+                        return Some(DomainInputEvent::SpecialKey(DomainKey::AltL));
+                    }
+                    KeyCode::Char('u') => {
+                        return Some(DomainInputEvent::SpecialKey(DomainKey::AltU));
+                    }
+                    _ => {}
+                }
             }
             // Ctrl+P → command palette
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('p') {
@@ -4916,6 +4990,11 @@ mod tests {
                 expect: CtrlQRowExpectation::Skip(
                     "ModelSelector: consumes all special keys; Esc closes first",
                 ),
+            },
+            Row {
+                label: "Overlay(Login) (owns every key but Ctrl+Q; quitting cancels the login)",
+                setup: overlay(OverlayType::Login),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(ProfileSwitcher)",

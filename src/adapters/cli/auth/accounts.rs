@@ -141,17 +141,6 @@ fn provider_json(accounts: &ProviderAccounts) -> serde_json::Value {
     })
 }
 
-/// `Active <display> account: <label> (#N).`
-pub(super) fn active_line(
-    accounts: &ProviderAccounts,
-    id: crate::domain::models::CredentialId,
-) -> String {
-    let label = accounts
-        .row(id)
-        .map_or_else(|| format!("#{}", id.0), labelled);
-    format!("Active {} account: {label}.", accounts.display_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

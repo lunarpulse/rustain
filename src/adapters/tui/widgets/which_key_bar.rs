@@ -9,6 +9,7 @@ use crate::adapters::tui::theme::Theme;
 const CHORD_LABELS: &[(char, &str)] = &[
     ('P', "rofile"),
     ('M', "odel"),
+    ('I', " sign in"),
     ('A', "dapter"),
     ('S', "ubagent"),
     ('L', "og"),

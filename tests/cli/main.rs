@@ -63,6 +63,9 @@ mod conformance_20_1d4a_tool_turn_fidelity;
 #[path = "../conformance_20_1d5_openrouter_accounts.rs"]
 mod conformance_20_1d5_openrouter_accounts;
 
+#[path = "../conformance_20_1e_tui_login.rs"]
+mod conformance_20_1e_tui_login;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

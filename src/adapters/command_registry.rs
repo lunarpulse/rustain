@@ -192,6 +192,18 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "login".to_string(),
+                description: "Sign in to a model provider (optional provider id)".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "models".to_string(),
+                description: "Open the model picker".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,

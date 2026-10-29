@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::UnicodeWidthStr;
 
+use super::modal::{ModalPart, fit_modal, modal_area, wrapped};
 use crate::adapters::tui::state::ModelSelectorState;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::provider::{DiscoveryStatus, ModelCapability};
@@ -26,11 +26,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
         .fg(theme.colors.accent)
         .add_modifier(Modifier::BOLD);
     let width = inner.width as usize;
-    let mut top = Vec::new();
-    let mut bottom = Vec::new();
-    let mut rows = Vec::new();
-    let mut selected_row = 0;
-    let mut selected_end = 0;
+    let mut parts = Vec::new();
+    let mut footer = Vec::new();
 
     if let Some(col) = state.columns.get(state.selected_provider) {
         let status = if col.locked_hint.is_some() {
@@ -42,7 +39,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
         } else {
             "✗ unavailable"
         };
-        top.extend(wrapped(
+        let mut header = wrapped(
             &format!(
                 "◄ {} {} · {}/{} ►",
                 col.display_name,
@@ -52,39 +49,54 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
             ),
             accent,
             width,
-        ));
-        top.push(Line::from(Span::styled("─".repeat(width), muted)));
+        );
+        header.push(Line::from(Span::styled("─".repeat(width), muted)));
 
         if let Some(hint) = &col.locked_hint {
-            top.extend(wrapped(
+            parts.push(ModalPart::Header(header));
+            parts.push(ModalPart::Notice(wrapped(
                 &format!("{} has no credentials configured", col.display_name),
                 muted,
                 width,
-            ));
-            top.extend(wrapped(hint, muted, width));
-            top.extend(wrapped(
+            )));
+            parts.push(ModalPart::Notice(wrapped(hint, muted, width)));
+            parts.push(ModalPart::Notice(wrapped(
                 &format!("{} models in catalog:", col.models.len()),
                 muted,
                 width,
-            ));
+            )));
+            let mut rows = Vec::new();
+            let mut selected = (0, 0);
             for (i, model) in col.models.iter().enumerate() {
                 if i == state.selected_model {
-                    selected_row = rows.len();
+                    selected.0 = rows.len();
                 }
                 rows.extend(wrapped(&model.model_id, muted, width));
                 if i == state.selected_model {
-                    selected_end = rows.len();
+                    selected.1 = rows.len();
                 }
             }
-            bottom.extend(wrapped("←→ provider · Esc close", muted, width));
+            parts.push(ModalPart::Rows {
+                lines: rows,
+                selected,
+            });
+            let keys = if state.sign_in.contains_key(&col.provider_id) {
+                "Enter sign in · ←→ provider · Esc close"
+            } else {
+                "←→ provider · Esc close"
+            };
+            footer = wrapped(keys, muted, width);
         } else {
             if state.search_active && col.models.len() > 10 {
-                top.extend(wrapped(
+                header.extend(wrapped(
                     &format!("/{} ▏", state.search_query),
                     accent,
                     width,
                 ));
             }
+            parts.push(ModalPart::Header(header));
+            let mut rows = Vec::new();
+            let mut selected = (0, 0);
             let filtered = state.search_active && !state.search_query.is_empty();
             if filtered && state.filtered_indices.is_empty() {
                 rows.extend(wrapped(
@@ -124,11 +136,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                     let Some(model) = col.models.get(index) else {
                         continue;
                     };
-                    let selected = position == state.selected_model;
-                    if selected {
-                        selected_row = rows.len();
+                    let chosen = position == state.selected_model;
+                    if chosen {
+                        selected.0 = rows.len();
                     }
-                    let mut style = if selected {
+                    let mut style = if chosen {
                         accent
                     } else {
                         Style::default().fg(Color::Cyan)
@@ -152,7 +164,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                     rows.extend(wrapped(
                         &format!(
                             "{}{} · {} ctx{}",
-                            if selected { "▸ " } else { "  " },
+                            if chosen { "▸ " } else { "  " },
                             model.display_name,
                             humanize_ctx(model.context_window),
                             badges
@@ -160,11 +172,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                         style,
                         width,
                     ));
-                    if selected {
-                        selected_end = rows.len();
+                    if chosen {
+                        selected.1 = rows.len();
                     }
                 }
             }
+            parts.push(ModalPart::Rows {
+                lines: rows,
+                selected,
+            });
 
             let discovery = match col.discovery {
                 Some(DiscoveryStatus::Unauthenticated) => Some(format!(
@@ -185,16 +201,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                 _ => None,
             };
             if let Some(status) = discovery {
-                bottom.extend(wrapped(&status, muted, width));
+                parts.push(ModalPart::Notice(wrapped(&status, muted, width)));
             }
             if state.selected().is_some_and(|(_, model)| model.stale) {
-                bottom.extend(wrapped(
+                parts.push(ModalPart::Notice(wrapped(
                     "Credential rejected — requests will fail until you sign in again.",
                     muted,
                     width,
-                ));
+                )));
             }
-            let mut footer = if filtered {
+            if let Some((_, line)) = state
+                .bloom
+                .as_ref()
+                .filter(|(column, _)| *column == col.provider_id)
+            {
+                parts.push(ModalPart::Notice(wrapped(line, muted, width)));
+            }
+            let mut keys = if filtered {
                 "Esc clear · Esc Esc close".to_string()
             } else if col.models.is_empty() {
                 "←→ provider · Esc close".to_string()
@@ -202,27 +225,29 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                 "↑↓ navigate · Enter select · Esc close".to_string()
             };
             if !filtered && col.models.len() > 10 {
-                footer.push_str(" · / search");
+                keys.push_str(" · / search");
             }
-            bottom.extend(wrapped(&footer, muted, width));
+            footer = wrapped(&keys, muted, width);
         }
         if state.refreshing.contains(&col.provider_id) {
-            bottom.extend(wrapped(
+            parts.push(ModalPart::Notice(wrapped(
                 &format!("↻ Discovering models for {}...", col.display_name),
                 muted,
                 width,
-            ));
+            )));
         }
     }
     if let Some(provider) = &state.connecting {
-        bottom.extend(wrapped(
+        parts.push(ModalPart::Notice(wrapped(
             &format!("● Connecting to {}...", provider),
             Style::default().fg(theme.colors.warning),
             width,
-        ));
+        )));
     }
     if let Some(warning) = &state.pending_context_warning {
-        bottom.extend(wrapped(
+        // A pending y/n question belongs to the footer: no height may shrink
+        // or drop it while the picker waits for the answer.
+        let mut prompt = wrapped(
             &format!(
                 "⚠ Current context ({} tokens) exceeds {} limit ({}). Compact context? [y/n]",
                 humanize_ctx(warning.current_tokens),
@@ -231,16 +256,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
             ),
             Style::default().fg(theme.colors.warning),
             width,
-        ));
+        );
+        prompt.append(&mut footer);
+        footer = prompt;
     }
+    parts.push(ModalPart::Footer(footer));
 
-    // Reserve chrome and wrapped notices before sizing the scrolling catalogue.
-    let row_count = (inner.height as usize).saturating_sub(top.len() + bottom.len());
-    // Show the selected entry's last wrapped line, but never scroll past its first.
-    let start = selected_end.saturating_sub(row_count).min(selected_row);
-    let mut lines = top;
-    lines.extend(rows.into_iter().skip(start).take(row_count));
-    lines.extend(bottom);
+    // Chrome, notices and the footer are fitted to the inner height; the
+    // catalogue keeps at least min(3, rows) lines and scrolls to the selection.
+    let lines = fit_modal(parts, inner.height as usize, width);
     frame.render_widget(
         Paragraph::new(lines).style(
             Style::default()
@@ -251,48 +275,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
     );
 }
 
-/// Word-wrap metadata by terminal cells; oversized IDs use grapheme-safe wrapping.
-fn wrapped(text: &str, style: Style, width: usize) -> Vec<Line<'static>> {
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    for logical in text.split('\n') {
-        let mut line = String::new();
-        let mut cells = 0;
-        for word in logical.split_whitespace() {
-            let word_cells = word.width();
-            if cells > 0 && cells + 1 + word_cells > width {
-                lines.push(Line::from(Span::styled(std::mem::take(&mut line), style)));
-                cells = 0;
-            }
-            if word_cells > width {
-                let (parts, _) = super::delimited_body::wrap_text(word, width, usize::MAX);
-                lines.extend(
-                    parts
-                        .into_iter()
-                        .map(|part| Line::from(Span::styled(part, style))),
-                );
-            } else {
-                if cells > 0 {
-                    line.push(' ');
-                    cells += 1;
-                }
-                line.push_str(word);
-                cells += word_cells;
-            }
-        }
-        if !line.is_empty() || logical.is_empty() {
-            lines.push(Line::from(Span::styled(line, style)));
-        }
-    }
-    lines
-}
-
 fn calculate_centered_area(area: Rect) -> Rect {
-    let width = (area.width * 60 / 100).clamp(40, 80).min(area.width);
-    let height = area.height.saturating_sub(4).clamp(8, 20).min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
+    modal_area(
+        area,
+        (area.width * 60 / 100).clamp(40, 80),
+        area.height.saturating_sub(4).clamp(8, 20),
+    )
 }
 
 pub(crate) fn humanize_ctx(tokens: u32) -> String {
@@ -624,5 +612,29 @@ mod tests {
                 assert!(plain.contains("▸ Catalog Model 11"), "{text}");
             }
         }
+    }
+
+    /// The compact-context y/n question is part of the footer, so even the
+    /// smallest picker with competing notices never hides it.
+    #[test]
+    fn a_pending_context_question_survives_the_smallest_picker() {
+        let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        let mut state = ModelSelectorState::new();
+        state.active = true;
+        state.columns = vec![catalog_column("anthropic", "Anthropic", 30)];
+        state.columns[0].discovery = Some(DiscoveryStatus::Unauthenticated);
+        state.connecting = Some("anthropic".into());
+        state.pending_context_warning = Some(crate::adapters::tui::state::ContextWarning {
+            provider_id: "anthropic".into(),
+            model_id: "catalog-model-0".into(),
+            model_display_name: "Catalog Model Zero With A Long Name".into(),
+            context_window: 8_000,
+            current_tokens: 120_000,
+        });
+        term.draw(|frame| render(frame, frame.area(), &state, &theme()))
+            .unwrap();
+        let text = buffer_text(&term);
+        assert!(text.contains("[y/n]"), "{text}");
+        assert!(text.contains("Esc close"), "{text}");
     }
 }

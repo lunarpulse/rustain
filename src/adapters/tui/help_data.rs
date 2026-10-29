@@ -404,6 +404,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "Ctrl+X, I",
+                    description: "Sign in to a model provider (/login)",
+                    available: true,
+                },
+                HelpBinding {
                     key: "Ctrl+X, A",
                     description: "Adapter Status panel (sidebar)",
                     available: true,

@@ -214,6 +214,9 @@ pub enum OverlayType {
     /// expanding the wave strip; intercepts j/k/↵/r/d/s/Esc before the
     /// chat/drill-down handlers.
     WaveOverlay,
+    /// Sign-in overlay (`/login`, Ctrl+X I, or Enter on a locked provider):
+    /// provider and method pickers and the running login.
+    Login,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

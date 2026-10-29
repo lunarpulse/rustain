@@ -36,6 +36,75 @@ use crate::domain::ports::ProviderInfoPort;
 
 use super::{HandlerOutcome, SpawnRequest};
 
+/// Locked columns a sign-in can unlock: column id → store key `/login` takes.
+fn sign_in_map(
+    app: &crate::domain::models::AppConfig,
+) -> std::collections::HashMap<String, String> {
+    crate::adapters::auth::host::login_targets(app)
+        .into_iter()
+        .flat_map(|target| {
+            let id = target.id;
+            target
+                .entries
+                .into_iter()
+                .chain(std::iter::once(id.clone()))
+                .map(move |entry| (entry, id.clone()))
+        })
+        .collect()
+}
+
+/// Opens the model picker (Ctrl+X M, `/models`, and after a sign-in) at
+/// `column` when given, else at the active provider and model.
+pub fn open_selector(
+    state: &mut TuiState,
+    info: &dyn ProviderInfoPort,
+    app: &crate::domain::models::AppConfig,
+    column: Option<&str>,
+) {
+    let columns = crate::adapters::tui::state::model_selector_columns(info);
+    if columns.is_empty() {
+        let fb = crate::domain::models::FeedbackBlock {
+            id: "model-selector-empty".to_string(),
+            level: crate::domain::models::FeedbackLevel::Info,
+            message: "No models available".to_string(),
+            actions: Vec::new(),
+        };
+        state.feedback_blocks.insert(fb.id.clone(), fb);
+    } else {
+        let active = column.map_or_else(|| info.active_delegate_id(), str::to_owned);
+        let model = state
+            .selected_model
+            .clone()
+            .unwrap_or_else(|| app.model.clone());
+        state
+            .model_selector
+            .open(state.focus.clone(), columns, &active, &model);
+        state.model_selector.sign_in = sign_in_map(app);
+        state.focus = crate::domain::models::FocusState::Overlay(
+            crate::domain::models::visual::OverlayType::ModelSelector,
+        );
+    }
+    state.needs_redraw = true;
+}
+
+/// A provider's catalogue changed: an open picker rebuilds its columns (and
+/// which locked columns can be signed into) in place. The in-flight marker is
+/// owned by the refresh itself (it ends before this event is sent), so an
+/// earlier event never clears a refresh that is still running.
+pub fn on_catalog_refreshed(
+    state: &mut TuiState,
+    info: &dyn ProviderInfoPort,
+    app: &crate::domain::models::AppConfig,
+) {
+    if state.model_selector.active {
+        state
+            .model_selector
+            .refresh_columns(crate::adapters::tui::state::model_selector_columns(info));
+        state.model_selector.sign_in = sign_in_map(app);
+    }
+    state.needs_redraw = true;
+}
+
 /// Guards + provider-health resolution for model switching. Multi-path outcome:
 ///
 /// - `HandlerOutcome::Quiet` when:
@@ -315,7 +384,7 @@ pub async fn handle_apply_startup_provider_fallback(
             message: if info.list_locked_providers().is_empty() {
                 "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M."
             } else {
-                "No provider is reachable. Sign in with `rustain auth login <provider>`, or open the model selector (Ctrl+X, M) to see locked providers."
+                "No provider is reachable. Sign in with /login or `rustain auth login <provider>`, or open the model selector (Ctrl+X, M) to see locked providers."
             }.to_string(),
         })
     }
