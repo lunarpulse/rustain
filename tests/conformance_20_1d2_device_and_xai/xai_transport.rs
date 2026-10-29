@@ -353,6 +353,161 @@ fn tool_literal(name: &str, description: &str, parameters: Value) -> String {
     ])
 }
 
+/// K2: capture, reducer/session persistence, real resolver refresh and another
+/// request on the same provider. The opaque login cannot supply a JWT identity.
+#[tokio::test]
+#[serial]
+async fn login_generation_replay_survives_identity_enrichment_and_routine_refresh() {
+    use crate::conformance_20_1d1b_codex_replay_discovery::replay::{fold, user as chat_user};
+    use rustain::domain::models::Conversation;
+    use rustain::domain::services::message_builder::build_api_messages;
+
+    for identified in [false, true] {
+        for expired in [false, true] {
+            let server = MockServer::start().await;
+            let scene = scene(&server);
+            let initial = "OPAQUE-XAI-LOGIN";
+            login_xai_oauth(
+                &server,
+                initial,
+                REFRESH,
+                if identified {
+                    json_reply(
+                        200,
+                        json!({"sub":"refreshed-sub","email":"refreshed@example.test"}),
+                    )
+                } else {
+                    json_reply(503, json!({}))
+                },
+            )
+            .await;
+            let before = rows(PROVIDER).await.remove(0);
+            assert_eq!(oauth(&before).identity.account_id.is_some(), identified);
+            let expected = rustain::domain::models::secret::scope_digest(&[
+                PROVIDER.as_bytes(),
+                b"login",
+                &before.generation.0,
+            ]);
+            let provider = build(PROVIDER, None);
+            mount_bearer_gate(
+                &server,
+                "POST",
+                RESPONSES,
+                initial,
+                sse(&[reasoning("before-refresh"), text("ok"), completed()]),
+            )
+            .await;
+            let chunks = turn(&provider, hi(), opts()).await.unwrap();
+            assert_ok_turn(&chunks);
+            let original = replays(&chunks)[0].payload.clone();
+            assert_eq!(
+                replays(&chunks)[0].scope.as_deref(),
+                Some(expected.as_str())
+            );
+            let mut conversation = Conversation::default();
+            conversation.messages.push(chat_user("hi"));
+            fold(&mut conversation, chunks);
+            let saved = serde_json::to_string(&conversation).unwrap();
+            conversation = serde_json::from_str(&saved).unwrap();
+            conversation.messages.push(chat_user("before refresh"));
+            assert_ok_turn(
+                &turn(&provider, build_api_messages(&conversation), opts())
+                    .await
+                    .unwrap(),
+            );
+            let sent: Value =
+                serde_json::from_str(posted_bodies(&server).await.last().unwrap()).unwrap();
+            assert!(
+                sent["input"]
+                    .as_array()
+                    .unwrap()
+                    .contains(original.as_ref())
+            );
+
+            // Explicit checkpoint removes the initial bearer gate, not history.
+            server.reset().await;
+            mount_refresh(
+                &server,
+                super::device::TOKEN_ENDPOINT,
+                "OPAQUE-XAI-REFRESHED",
+            )
+            .await;
+            mount_bearer_gate(
+                &server,
+                "POST",
+                RESPONSES,
+                "OPAQUE-XAI-REFRESHED",
+                sse(&[reasoning("after-refresh"), text("ok"), completed()]),
+            )
+            .await;
+            if expired {
+                scene
+                    .world
+                    .set("RUSTAIN_TEST_NOW_MS", &(NOW + 10_000_000).to_string());
+            }
+            let chunks = turn(&provider, build_api_messages(&conversation), opts())
+                .await
+                .unwrap();
+            assert_ok_turn(&chunks);
+            let refreshed = replays(&chunks)[0].payload.clone();
+            assert_eq!(
+                replays(&chunks)[0].scope.as_deref(),
+                Some(expected.as_str())
+            );
+            let after = rows(PROVIDER).await.remove(0);
+            assert_eq!(before.id, after.id);
+            assert_eq!(before.generation, after.generation);
+            assert_eq!(after.rev, before.rev + 1);
+            assert_eq!(
+                oauth(&after).identity.account_id.as_deref(),
+                Some("refreshed-sub")
+            );
+            let sends = received(&server, RESPONSES).await;
+            assert_eq!(sends.len(), if expired { 1 } else { 2 });
+            assert_eq!(
+                header(sends.last().unwrap(), "authorization").as_deref(),
+                Some("Bearer OPAQUE-XAI-REFRESHED")
+            );
+            for request in &sends {
+                let sent: Value = serde_json::from_slice(&request.body).unwrap();
+                assert!(
+                    sent["input"]
+                        .as_array()
+                        .unwrap()
+                        .contains(original.as_ref())
+                );
+            }
+            if !expired {
+                assert_eq!(
+                    header(&sends[0], "authorization").as_deref(),
+                    Some("Bearer OPAQUE-XAI-LOGIN")
+                );
+                assert_eq!(sends[0].body, sends[1].body);
+            }
+            assert_eq!(received(&server, TOKEN_PATH).await.len(), 1);
+
+            fold(&mut conversation, chunks);
+            let saved = serde_json::to_string(&conversation).unwrap();
+            conversation = serde_json::from_str(&saved).unwrap();
+            conversation.messages.push(chat_user("after refresh"));
+            assert_ok_turn(
+                &turn(&provider, build_api_messages(&conversation), opts())
+                    .await
+                    .unwrap(),
+            );
+            let sends = received(&server, RESPONSES).await;
+            let last = sends.last().unwrap();
+            assert_eq!(
+                header(last, "authorization").as_deref(),
+                Some("Bearer OPAQUE-XAI-REFRESHED")
+            );
+            let sent: Value = serde_json::from_slice(&last.body).unwrap();
+            let input = sent["input"].as_array().unwrap();
+            assert!(input.contains(original.as_ref()) && input.contains(refreshed.as_ref()));
+            assert_eq!(received(&server, TOKEN_PATH).await.len(), 1);
+        }
+    }
+}
 // ── K06: refresh and recovery ───────────────────────────────────────────────
 
 #[tokio::test]
@@ -618,12 +773,36 @@ async fn k07_generic_bodies_per_model_class_and_codex_unchanged_in_process() {
     let _scene = scene(&server);
     login(&server, &xai_access("login-sub")).await;
     let provider = build("xai-oauth", None);
+    mount_attempts(
+        &server,
+        vec![sse(&[reasoning("producer"), text("ok"), completed()])],
+    )
+    .await;
+    let produced = turn(&provider, hi(), opts()).await.unwrap();
+    assert_ok_turn(&produced);
+    let scope = replays(&produced)[0].scope.clone().unwrap();
+    // Deliberate K07 repair: identified OAuth replay follows login generation,
+    // not discovery identity. Preserve discovery's independently checked policy.
+    let row = rows(PROVIDER).await.remove(0);
+    let identity = oauth(&row).identity.key(false).unwrap();
+    assert_eq!(
+        provider.discovery_scope(PROVIDER).await,
+        Some(rustain::adapters::model_catalog_cache::credential_scope(
+            PROVIDER,
+            rustain::adapters::model_catalog_cache::ScopeCredential::OAuthIdentity(&identity),
+        )),
+    );
+    assert_ne!(
+        provider.discovery_scope(PROVIDER).await.as_deref(),
+        Some(scope.as_str())
+    );
+    // Explicit request checkpoint: the setup producer is not a literal-body case.
+    server.reset().await;
     mount_attempts(&server, vec![ok_sse()]).await;
 
     // Reasoning, vision model: every optional field, `include` last. Only the
     // item this account produced (its replay scope) for this kind and model replays.
-    let scope = provider.discovery_scope("xai-oauth").await;
-    let scope = scope.as_deref();
+    let scope = Some(scope.as_str());
     let mut assistant = message(MessageRole::Assistant, "hi");
     assistant.provider_replay = vec![
         replay("xai-oauth", MODEL, "same", scope),

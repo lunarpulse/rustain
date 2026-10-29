@@ -3,8 +3,9 @@
 //! model) and Gemini CLI (two Google identities): a turn under account A is
 //! folded by the production reducer, `auth_accounts::select_account(B)` makes
 //! the next request of the same session and model carry none of A's items,
-//! and switching back to A replays them. Every row comes from `flows::login`
-//! against the loopback stub; every scoped item comes from the adapter stream.
+//! and switching back to A replays them, until A signs in again. Every row comes
+//! from `flows::login` against the loopback stub; current-login items come from
+//! adapter streams. Only upgrade-compatibility fixtures are synthetic.
 
 use crate::conformance_20_1d1b_codex_replay_discovery::common::{
     MODEL as CODEX_MODEL, World, app_config as codex_app, assert_replays, codex, completed, enc,
@@ -26,8 +27,8 @@ use crate::conformance_20_1d4_gemini_cli::replay::{
 use futures::StreamExt;
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::domain::models::{
-    AppConfig, Conversation, CredentialId, Message, ModelCapability, ModelDescriptor,
-    ProviderConfig, ProviderReplayItem, StreamChunk,
+    AppConfig, ChatMessage, ContentBlockType, Conversation, CredentialId, Message, MessageRole,
+    ModelCapability, ModelDescriptor, ProviderConfig, ProviderReplayItem, StreamChunk,
 };
 use rustain::domain::ports::{AuthStorePort, StreamingProvider};
 use rustain::domain::services::message_builder::build_api_messages;
@@ -62,6 +63,79 @@ async fn select(app: &AppConfig, provider: &str, id: CredentialId) {
         .expect("the stored row is selectable");
 }
 
+/// Independent provenance assertion, not a call back into replay_scope.
+async fn login_scope(provider: &str) -> String {
+    let snapshot = store().snapshot().await.unwrap();
+    let id = snapshot.selected(provider).unwrap();
+    let row = snapshot
+        .rows(provider)
+        .iter()
+        .find(|row| row.id == id)
+        .unwrap();
+    rustain::domain::models::secret::scope_digest(&[
+        provider.as_bytes(),
+        b"login",
+        &row.generation.0,
+    ])
+}
+
+/// Compatibility-only fixtures in actual session JSON; never retag live items.
+fn compatibility_history(
+    mut conversation: Conversation,
+    provider: &str,
+    model: &str,
+    identity_scope: &str,
+) -> Vec<Message> {
+    for (marker, scope) in [
+        ("legacy-private", None),
+        ("identity-private", Some(identity_scope)),
+    ] {
+        let mut item = legacy(provider, model);
+        item.scope = scope.map(str::to_owned);
+        if provider == GEMINI {
+            item.payload = Arc::new(json!({"gemini_parts":[
+                {"thought":true,"text":marker,"thoughtSignature":"U0lHOLD="},
+                {"text":"compat visible"}
+            ]}));
+        } else {
+            item.payload = Arc::new(json!({"type":"reasoning","summary":[],
+                "encrypted_content":marker}));
+        }
+        conversation.messages.push(ChatMessage {
+            role: MessageRole::Assistant,
+            content: "compat visible".into(),
+            content_blocks: vec![ContentBlockType::ProviderReplay(item)],
+            ..Default::default()
+        });
+    }
+    use rustain::domain::models::{ToolCallInfo, ToolResultInfo, WriteDiffState};
+    conversation.messages.push(ChatMessage {
+        role: MessageRole::Assistant,
+        content: "ordinary tool history".into(),
+        tool_calls: vec![ToolCallInfo {
+            id: "compat-call".into(),
+            name: "lookup".into(),
+            input: json!({"q":1}),
+            result: Some(ToolResultInfo {
+                content: "compat-tool-result".into(),
+                is_error: false,
+                images: vec![],
+                diff: WriteDiffState::NotAWrite,
+            }),
+            started_at_ms: None,
+            completed_at_ms: None,
+            status: None,
+            provider_id: None,
+        }],
+        ..Default::default()
+    });
+    conversation.messages.push(chat_user("compat next"));
+    let saved = serde_json::to_string(&conversation).unwrap();
+    assert!(saved.contains("legacy-private") && saved.contains("identity-private"));
+    let reloaded: Conversation = serde_json::from_str(&saved).unwrap();
+    build_api_messages(&reloaded)
+}
+
 /// The scope stamped on the stream's replay items (all items of one response
 /// share it).
 fn stamped(chunks: &[StreamChunk]) -> Option<String> {
@@ -77,10 +151,10 @@ fn stamped(chunks: &[StreamChunk]) -> Option<String> {
     scopes[0].clone()
 }
 
-/// The only hand-written item of this keystone, disclosed here (AC14): an
-/// item read from a session file written before replay was scoped, i.e. the
+/// An item read from a session file written before replay was scoped, i.e. the
 /// pre-scope JSON shape with no `scope` key. Its provenance is unknown, so it
-/// must never be replayed.
+/// must never be replayed. Other synthetic upgrade fixtures are disclosed in
+/// `compatibility_history`; live producers are never retagged.
 fn legacy(provider: &str, model: &str) -> ProviderReplayItem {
     serde_json::from_value(json!({
         "provider": provider,
@@ -169,35 +243,107 @@ async fn k13_codex_replay_follows_only_the_producing_account() {
 
     // Turn 1 under A: the item is stamped with A's scope.
     select(&app, "openai-codex", a).await;
-    let (conversation, first) = first_turn();
+    let (mut conversation, first) = first_turn();
     let chunks = collect(&provider, first, options(CODEX_MODEL, SESSION)).await;
     assert_eq!(replay_chunks(&chunks), 1);
     assert_eq!(codex_account(&server).await, "acct-A");
-    let scope_a = provider.discovery_scope("openai-codex").await;
-    assert!(scope_a.is_some());
-    assert_eq!(stamped(&chunks), scope_a, "stamped with A's scope");
-    let history = follow_up(conversation, chunks, "openai-codex");
+    let discovery_a = provider.discovery_scope("openai-codex").await.unwrap();
+    let scope_a = login_scope("openai-codex").await;
+    // Deliberate K13 policy update: discovery follows account identity; replay
+    // follows this login generation even for an identified stored OAuth row.
+    assert_eq!(stamped(&chunks).as_deref(), Some(scope_a.as_str()));
+    assert_ne!(scope_a, discovery_a);
+    fold(&mut conversation, chunks);
+    conversation.messages.push(chat_user("next"));
+    let history = compatibility_history(
+        conversation.clone(),
+        "openai-codex",
+        CODEX_MODEL,
+        &discovery_a,
+    );
 
     // B, same session and model: none of A's items, and never the legacy one.
     select(&app, "openai-codex", b).await;
-    assert_ne!(provider.discovery_scope("openai-codex").await, scope_a);
+    assert_ne!(
+        provider.discovery_scope("openai-codex").await.as_deref(),
+        Some(discovery_a.as_str())
+    );
     collect(&provider, history.clone(), options(CODEX_MODEL, SESSION)).await;
     assert_eq!(codex_account(&server).await, "acct-B");
     let sent = posts(&server).await.pop().unwrap();
     assert!(replayed(&sent).is_empty(), "{sent}");
+    let sent = sent.to_string();
     assert!(
-        !mentions(&sent, "acct-a") && !mentions(&sent, "legacy"),
+        sent.contains("compat visible") && sent.contains("compat-tool-result"),
+        "{sent}"
+    );
+    assert!(
+        !mentions(&sent, "acct-a")
+            && !sent.contains("legacy-private")
+            && !sent.contains("identity-private"),
         "{sent}"
     );
 
     // Back to A: A's item is replayed; the unscoped legacy item still is not.
     select(&app, "openai-codex", a).await;
-    collect(&provider, history, options(CODEX_MODEL, SESSION)).await;
+    collect(&provider, history.clone(), options(CODEX_MODEL, SESSION)).await;
     assert_eq!(codex_account(&server).await, "acct-A");
     let sent = posts(&server).await.pop().unwrap();
     assert_replays(&sent, "acct-a");
     assert_eq!(replayed(&sent).len(), 1, "{sent}");
-    assert!(!mentions(&sent, "legacy"), "{sent}");
+    let sent = sent.to_string();
+    assert!(
+        sent.contains("compat visible") && sent.contains("compat-tool-result"),
+        "{sent}"
+    );
+    assert!(
+        !sent.contains("legacy-private") && !sent.contains("identity-private"),
+        "{sent}"
+    );
+
+    // Same account and row, but a real new login invalidates the old generation.
+    server.reset().await;
+    codex_login(&server, "acct-A").await;
+    assert_eq!(selected("openai-codex").await, a);
+    assert_eq!(
+        provider.discovery_scope("openai-codex").await.as_deref(),
+        Some(discovery_a.as_str())
+    );
+    let replacement = login_scope("openai-codex").await;
+    assert_ne!(replacement, scope_a);
+    server.reset().await;
+    mount_script(
+        &server,
+        vec![
+            sse(&[reasoning("new-login"), text("replacement"), completed()]),
+            sse(&[text("ok"), completed()]),
+        ],
+    )
+    .await;
+    let chunks = collect(&provider, history, options(CODEX_MODEL, SESSION)).await;
+    assert_eq!(codex_account(&server).await, "acct-A");
+    let sent = posts(&server).await.pop().unwrap();
+    assert!(replayed(&sent).is_empty(), "{sent}");
+    let sent = sent.to_string();
+    assert!(
+        sent.contains("compat visible") && sent.contains("compat-tool-result"),
+        "{sent}"
+    );
+    assert!(
+        !mentions(&sent, "acct-a") && !sent.contains("identity-private"),
+        "{sent}"
+    );
+    assert_eq!(stamped(&chunks).as_deref(), Some(replacement.as_str()));
+    let history = follow_up(conversation, chunks, "openai-codex");
+    collect(&provider, history, options(CODEX_MODEL, SESSION)).await;
+    assert_eq!(codex_account(&server).await, "acct-A");
+    let sent = posts(&server).await.pop().unwrap();
+    assert_replays(&sent, "new-login");
+    assert_eq!(replayed(&sent).len(), 1, "{sent}");
+    assert!(
+        !mentions(&sent, "acct-a") && !mentions(&sent, "legacy"),
+        "{sent}"
+    );
 }
 
 // ── OpenRouter ──────────────────────────────────────────────────────────────
@@ -363,7 +509,7 @@ async fn gemini_turn(
 /// removed, on the item's own model and on another Gemini model.
 #[tokio::test]
 #[serial]
-async fn k13_gemini_signatures_follow_only_the_producing_identity() {
+async fn k13_gemini_signatures_follow_only_the_producing_login() {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().to_str().unwrap().to_owned();
@@ -401,9 +547,11 @@ async fn k13_gemini_signatures_follow_only_the_producing_identity() {
         .unwrap()
         .collect()
         .await;
-    let scope_a = provider.discovery_scope(GEMINI).await;
-    assert!(scope_a.is_some());
-    assert_eq!(stamped(&chunks), scope_a, "stamped with A's scope");
+    let discovery_a = provider.discovery_scope(GEMINI).await.unwrap();
+    let scope_a = login_scope(GEMINI).await;
+    // Replay now follows login generation; discovery remains identity-scoped.
+    assert_eq!(stamped(&chunks).as_deref(), Some(scope_a.as_str()));
+    assert_ne!(scope_a, discovery_a);
     let mut conversation = Conversation {
         id: SESSION.into(),
         ..Default::default()
@@ -411,7 +559,7 @@ async fn k13_gemini_signatures_follow_only_the_producing_identity() {
     conversation.messages.push(gemini_chat_user("hello"));
     gemini_fold(&mut conversation, chunks);
     conversation.messages.push(gemini_chat_user("next"));
-    let history = build_api_messages(&conversation);
+    let history = compatibility_history(conversation.clone(), GEMINI, GEMINI_MODEL, &discovery_a);
     assert!(history.iter().any(|m| !m.provider_replay.is_empty()));
     let mut stripped = history.clone();
     for message in &mut stripped {
@@ -428,16 +576,21 @@ async fn k13_gemini_signatures_follow_only_the_producing_identity() {
         );
         let (without, _) = gemini_turn(&server, &provider, stripped.clone(), model).await;
         assert!(!with_items.contains(MARK), "{with_items}");
+        // Ordinary unsigned tool history may generate the model's sentinel;
+        // it is not a captured private signature. No other signature is allowed.
         assert!(
-            signatures(&gemini_body(&with_items)).is_empty(),
+            signatures(&gemini_body(&with_items))
+                .iter()
+                .all(|s| s == "skip_thought_signature_validator"),
             "{with_items}"
         );
         assert_eq!(gemini_body(&with_items), gemini_body(&without), "{model}");
+        assert!(with_items.contains("compat visible") && with_items.contains("compat-tool-result"));
     }
 
     // Back to A: A's signed parts are replayed.
     select(&app, GEMINI, a).await;
-    let (sent, bearer) = gemini_turn(&server, &provider, history, GEMINI_MODEL).await;
+    let (sent, bearer) = gemini_turn(&server, &provider, history.clone(), GEMINI_MODEL).await;
     assert_eq!(
         bearer.as_deref(),
         Some(format!("Bearer {ACCESS_A}").as_str())
@@ -447,4 +600,96 @@ async fn k13_gemini_signatures_follow_only_the_producing_identity() {
         signed.iter().any(|s| s == "U0lHMA==") && signed.iter().any(|s| s == "U0lHMQ=="),
         "{sent}"
     );
+    assert!(
+        !sent.contains("legacy-private") && !sent.contains("identity-private"),
+        "{sent}"
+    );
+
+    // Isolate upgrade fixtures so a matching live item cannot mask a scope
+    // guard failure by winning selection first. Both tiers, A -> B -> A.
+    let mut compatibility = history.clone();
+    for message in &mut compatibility {
+        message
+            .provider_replay
+            .retain(|item| item.scope.as_deref() != Some(scope_a.as_str()));
+    }
+    for (account, access) in [(a, ACCESS_A), (b, ACCESS_B), (a, ACCESS_A)] {
+        select(&app, GEMINI, account).await;
+        for model in [GEMINI_MODEL, OTHER_MODEL] {
+            let (with_items, bearer) =
+                gemini_turn(&server, &provider, compatibility.clone(), model).await;
+            let (without, _) = gemini_turn(&server, &provider, stripped.clone(), model).await;
+            assert_eq!(bearer.as_deref(), Some(format!("Bearer {access}").as_str()));
+            assert_eq!(gemini_body(&with_items), gemini_body(&without), "{model}");
+            assert!(
+                with_items.contains("compat visible") && with_items.contains("compat-tool-result")
+            );
+            assert!(
+                !with_items.contains("legacy-private") && !with_items.contains("identity-private")
+            );
+        }
+    }
+
+    server.reset().await;
+    let replacement_login =
+        gemini_login(&server, ACCESS_A, PROJECT, "account-a@example.test").await;
+    assert_eq!(replacement_login.credential_id, a);
+    assert_eq!(
+        provider.discovery_scope(GEMINI).await.as_deref(),
+        Some(discovery_a.as_str())
+    );
+    let replacement = login_scope(GEMINI).await;
+    assert_ne!(replacement, scope_a);
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path(STREAM))
+        .respond_with(gemini_sse(&[
+            frame(
+                json!([{"thought":true,"text":"new-login-private","thoughtSignature":"U0lHTkVX"}]),
+                None,
+            ),
+            frame(json!([{"text":"new visible"}]), None),
+            frame(json!([]), Some("STOP")),
+        ]))
+        .mount(&server)
+        .await;
+    // Old-generation items serve neither tier after a same-account re-login.
+    for model in [GEMINI_MODEL, OTHER_MODEL] {
+        let (with_items, bearer) = gemini_turn(&server, &provider, history.clone(), model).await;
+        let (without, _) = gemini_turn(&server, &provider, stripped.clone(), model).await;
+        assert_eq!(
+            bearer.as_deref(),
+            Some(format!("Bearer {ACCESS_A}").as_str())
+        );
+        assert_eq!(gemini_body(&with_items), gemini_body(&without), "{model}");
+        assert!(with_items.contains("compat visible") && with_items.contains("compat-tool-result"));
+        assert!(!with_items.contains(MARK), "{with_items}");
+        assert!(
+            signatures(&gemini_body(&with_items))
+                .iter()
+                .all(|s| s == "skip_thought_signature_validator"),
+            "{with_items}"
+        );
+    }
+    let chunks = collect(&provider, history, gemini_options(GEMINI_MODEL)).await;
+    assert_eq!(stamped(&chunks).as_deref(), Some(replacement.as_str()));
+    gemini_fold(&mut conversation, chunks);
+    let saved = serde_json::to_string(&conversation).unwrap();
+    let mut conversation: Conversation = serde_json::from_str(&saved).unwrap();
+    conversation
+        .messages
+        .push(gemini_chat_user("after relogin"));
+    let (sent, bearer) = gemini_turn(
+        &server,
+        &provider,
+        build_api_messages(&conversation),
+        GEMINI_MODEL,
+    )
+    .await;
+    assert_eq!(
+        bearer.as_deref(),
+        Some(format!("Bearer {ACCESS_A}").as_str())
+    );
+    assert_eq!(signatures(&gemini_body(&sent)), ["U0lHTkVX"]);
+    assert!(sent.contains("new-login-private"), "{sent}");
 }

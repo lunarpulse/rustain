@@ -154,7 +154,10 @@ Configured aliases may use another map key with `kind = "openai-codex"` and
 models and models.dev currently has no Codex source (OpenAI API-only models are
 not promoted). With `discover_models = true` a signed Codex entry discovers its
 live roster (`/codex/models`, then `/models`) and encrypted reasoning items are
-replayed privately to the same provider, model and account; see `docs/auth.md`.
+replayed privately to the same provider, model and login generation. Refresh
+preserves replay even when it first learns identity; same-account re-login
+invalidates old-login items. Unscoped/old identity-scoped items load without
+replay, preserving ordinary history; see `docs/auth.md`.
 Upstream's 128,000-token maximum-output metadata has no rustain descriptor
 consumer and is not a transmitted limit.
 

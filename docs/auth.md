@@ -240,11 +240,16 @@ inspect only the models endpoint's status.
 Encrypted reasoning items are captured privately from each response that reaches
 its terminal completion event, persisted with the session (local sessions,
 `rustain --session <id> ask` resume and the daemon), and replayed only to the same
-provider kind, model and account. Unlike omp, an item is bound to the account that
-produced it: a stored login's account identity (or, for a login without one, that
-login across its token refreshes) or the API key itself. After `auth use` another
-account sends none of them; switching back replays them; items saved before
-account binding are not replayed. They are
+provider kind, model and login. Unlike omp, stored OAuth replay is bound to the
+login's generation, whether or not its account identity is known. Token refresh,
+including the first discovery of identity, preserves replay; signing in again
+to the same account starts a new generation and makes old-login items ineligible.
+API-key replay remains bound to the key itself. After `auth use` another account
+sends none of the previous login's items; switching back without re-login
+restores them. On upgrade, unscoped and old identity-scoped OAuth items load
+normally but fail closed: they are never retagged or replayed. Existing matching
+generation-scoped items remain eligible, and ordinary session text/tools remain
+usable without rewriting history. The private items are
 never shown in transcripts, observers, ACP, `ask` output or logs. A failed or
 cancelled attempt discards its items, so it replays nothing.
 Upstream lists a 128,000-token maximum output, but rustain has no descriptor field
@@ -461,9 +466,12 @@ Requests use Cloud Code Assist's native
 with the Gemini CLI headers above and omp's envelope, roles, images, tool schemas,
 retries (4 attempts; server retry hints up to 5 minutes) and error texts. Gemini
 thought signatures are kept privately per response and replayed only to the same
-provider, model and account (never another account's, not even as a demoted
-other-model rebuild) within a tool round and across text turns; they never appear in
-transcripts, observers, ACP, `ask` output or logs.
+provider, model and stored OAuth login generation (never another login's, not
+even as a demoted other-model rebuild) within a tool round and across text turns.
+Refresh preserves that generation, including newly learned identity; same-account
+re-login does not. Unscoped or old identity-scoped items load but never replay;
+ordinary history remains usable. Signatures never appear in transcripts,
+observers, ACP, `ask` output or logs.
 
 **Model discovery.** A signed Gemini CLI entry discovers its models live, as
 oh-my-pi does. It first asks Antigravity (`POST /v1internal:fetchAvailableModels`

@@ -76,16 +76,16 @@ pub fn request_scope(
 
 /// Replay scope of the credential a request resolved: stamped on the native
 /// items a response produces and required of every item a request replays.
-/// [`request_scope`], except that a stored OAuth row without an account
-/// identity is scoped by its login epoch (the row `generation`, minted per
-/// login and kept across refresh) instead of its rotating access token, so a
-/// routine refresh never drops that same account's items mid-session.
+/// Stored OAuth rows use their login generation, minted on each login and
+/// preserved across refresh, even when refresh first learns account identity.
+/// A same-account re-login deliberately excludes the previous login's items.
+/// Keys and nonstored grants retain [`request_scope`]; discovery is unchanged.
 pub fn replay_scope(
     context: &str,
     resolved: &crate::infrastructure::key_resolver::Resolved,
 ) -> String {
-    match (&resolved.source, resolved.identity.as_deref(), resolved.row) {
-        (crate::domain::models::AuthSource::StoredOAuth, None, Some(row)) => {
+    match (&resolved.source, resolved.row) {
+        (crate::domain::models::AuthSource::StoredOAuth, Some(row)) => {
             crate::domain::models::secret::scope_digest(&[
                 context.as_bytes(),
                 b"login".as_slice(),
@@ -413,11 +413,9 @@ mod tests {
         dir
     }
 
-    /// A refresh rotates an identity-less login's access token and bumps its
-    /// revision; its replay scope stays the login's, while another login (a new
-    /// generation) is another scope. Identified rows and keys keep the request scope.
+    /// Replay follows the login generation, not discovery identity or bearer.
     #[test]
-    fn replay_scope_keeps_an_identityless_login_across_access_rotation() {
+    fn replay_scope_keeps_login_generation_across_identity_and_access_rotation() {
         use crate::domain::models::{
             AuthSource, CredentialGeneration, CredentialId, CredentialStamp, ResolvedAuth,
         };
@@ -438,23 +436,48 @@ mod tests {
             identity: identity.map(str::to_owned),
         };
         let before = oauth("access-1", 1, 7, None);
-        let after = oauth("access-2", 2, 7, None);
+        let expected =
+            crate::domain::models::secret::scope_digest(&[b"xai-oauth", b"login", &[7; 16]]);
+        for after in [
+            oauth("access-2", 2, 7, None),
+            oauth("access-2", 2, 7, Some("account:a")),
+            oauth("access-3", 3, 7, Some("account:a")),
+        ] {
+            assert_eq!(replay_scope("xai-oauth", &after), expected);
+        }
+        assert_eq!(replay_scope("xai-oauth", &before), expected);
+        let identified = oauth("access-1", 1, 7, Some("account:a"));
+        let refreshed = oauth("access-2", 2, 7, Some("account:a"));
+        assert_eq!(
+            request_scope("xai-oauth", &identified),
+            request_scope("xai-oauth", &refreshed)
+        );
         assert_ne!(
             request_scope("xai-oauth", &before),
-            request_scope("xai-oauth", &after)
-        );
-        assert_eq!(
-            replay_scope("xai-oauth", &before),
-            replay_scope("xai-oauth", &after)
+            request_scope("xai-oauth", &identified)
         );
         assert_ne!(
-            replay_scope("xai-oauth", &before),
-            replay_scope("xai-oauth", &oauth("access-1", 1, 8, None))
+            request_scope("xai-oauth", &before),
+            request_scope("xai-oauth", &oauth("access-2", 2, 7, None))
         );
-        let identified = oauth("access-1", 1, 7, Some("account:a"));
+        assert_ne!(
+            replay_scope("xai-oauth", &identified),
+            replay_scope("xai-oauth", &oauth("access-1", 1, 8, Some("account:a")))
+        );
+        assert_ne!(
+            replay_scope("xai-oauth", &identified),
+            replay_scope("openai-codex", &identified)
+        );
+        let bearer = Resolved {
+            source: AuthSource::Env {
+                var: "TOKEN".into(),
+            },
+            row: None,
+            ..identified
+        };
         assert_eq!(
-            replay_scope("openai-codex", &identified),
-            request_scope("openai-codex", &identified)
+            replay_scope("xai-oauth", &bearer),
+            request_scope("xai-oauth", &bearer)
         );
         let key = Resolved {
             source: AuthSource::StoredKey,
