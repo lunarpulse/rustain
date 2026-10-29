@@ -61,6 +61,9 @@ one listing output.
 
 Delete a session by its stable `id`. The positional argument is always an id
 (exact full id or unique prefix), never the 1-based `index` shown by `list`.
+IDs beginning with `-` are accepted as values, including `rustain --session -ID`
+and `rustain --session=-ID`. For deletion, put the ID before other options,
+as in `rustain session delete -ID --force`.
 
 ```sh
 rustain session delete sess-id

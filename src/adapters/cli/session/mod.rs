@@ -33,6 +33,7 @@ pub enum SessionAction {
     /// before deleting.
     Delete {
         /// Session id or unique prefix to delete.
+        #[arg(allow_hyphen_values = true)]
         id: Option<String>,
         /// Delete all sessions in the current workspace only.
         #[arg(long, conflicts_with_all = ["all_workspaces", "id"])]
@@ -56,4 +57,57 @@ pub enum SessionAction {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionAction;
+    use crate::adapters::cli::commands::{Cli, Command};
+    use clap::{Parser, error::ErrorKind};
+
+    #[test]
+    fn hyphen_session_ids_parse_without_losing_flags() {
+        for args in [
+            vec!["rustain", "--session", "-b123", "ask", "hello"],
+            vec!["rustain", "--session=-b123", "ask", "hello"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.session.as_deref(), Some("-b123"));
+            assert!(matches!(cli.command, Some(Command::Ask { .. })));
+        }
+        for args in [
+            vec!["rustain", "session", "delete", "-b123", "--force"],
+            vec!["rustain", "session", "delete", "--force", "-b123"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Command::Session {
+                    action: SessionAction::Delete { id: Some(id), force: true, .. }
+                }) if id == "-b123"
+            ));
+        }
+        let cli =
+            Cli::try_parse_from(["rustain", "session", "delete", "--all", "--force"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Session {
+                action: SessionAction::Delete {
+                    id: None,
+                    all: true,
+                    force: true,
+                    ..
+                }
+            })
+        ));
+        for args in [
+            vec!["rustain", "--session", "-b123", "--unrelated"],
+            vec!["rustain", "session", "delete", "-b123", "--unrelated"],
+        ] {
+            assert_eq!(
+                Cli::try_parse_from(args).unwrap_err().kind(),
+                ErrorKind::UnknownArgument
+            );
+        }
+    }
 }

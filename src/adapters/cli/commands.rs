@@ -22,7 +22,7 @@ pub struct Cli {
     pub new: bool,
 
     /// Resume a specific session by ID
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     pub session: Option<String>,
 
     /// Override snapshot retention count (default: 100, from config)
