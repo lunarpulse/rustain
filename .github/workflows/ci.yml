@@ -261,7 +261,10 @@ jobs:
   macos-unit:
     name: macOS Unit Tests (daemon/ProcInspector)
     runs-on: macos-latest
-    timeout-minutes: 15
+    # The lib test binary compiled for the two daemon filters doubled with the
+    # epic-20 auth series (5:09 -> 10:47 warm, over 15 min cold), so 15 minutes
+    # cancelled the job on cold or busy runners.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
