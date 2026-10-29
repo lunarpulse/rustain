@@ -794,9 +794,17 @@ share the same login engines, method list, success lines and discovery line.
 - **`/models`** (or Ctrl+X, M) opens the model picker. On a locked provider that
   a sign-in can unlock, the footer reads `Enter sign in`: Enter starts that
   login, and the picker reopens at the provider afterwards.
-- **While signing in** the overlay shows the sign-in link (a clickable OSC 8
-  link in terminals that support it), the `/launch` shortcut that works on this
-  machine only, the provider's instructions and progress. A device login shows
+- **While signing in** the overlay shows the sign-in link, the `/launch` shortcut
+  that works on this machine only, the provider's instructions and progress.
+  Links are clickable via OSC 8 only when stdout is a terminal and the terminal
+  hints identify WezTerm, kitty, iTerm, or foot. Specifically, `TERM_PROGRAM`
+  may be `wezterm`, `kitty`, `iTerm.app`, `iTerm2`, or `foot` (case-insensitive),
+  or `TERM` may be exactly `xterm-kitty`, `foot`, or `foot-extra`.
+  Missing, empty or `dumb` `TERM`, screen/tmux terminal families, and nonempty `TMUX` or `STY`
+  always disable links. Unknown terminals, including generic `xterm-256color`
+  alone, also get styled, readable plain text instead. This is a conservative
+  heuristic, not terminal capability negotiation; SSH alone does not change it.
+  Copy and opening controls work the same in either case. A device login shows
   the code to enter and the sign-in page. Copy keys: `c` copies the link (device:
   the code), `l` the local shortcut, `u` the device sign-in page; while a field
   is focused use Alt+C / Alt+L / Alt+U so the letters type normally. Text a

@@ -187,7 +187,7 @@ pub(crate) fn assert_no_keys(tui: &Tui, keys: &[&str]) {
 /// A 60×16 frame keeps the modal's four corners, `header`, at least one row
 /// and `footer`.
 pub(crate) fn assert_fitted(tui: &mut Tui, header: &str, row: &str, footer: &str) {
-    let (frame, _) = tui.frame_at(60, 16);
+    let frame = tui.frame_at(60, 16);
     for corner in ['┌', '┐', '└', '┘'] {
         assert!(frame.contains(corner), "corner {corner}\n{frame}");
     }

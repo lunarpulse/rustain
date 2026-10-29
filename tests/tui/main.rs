@@ -37,6 +37,9 @@ mod conformance_tui_orchestration;
 #[path = "../conformance_20_9a_tui_ephemeral_rows.rs"]
 mod conformance_20_9a_tui_ephemeral_rows;
 
+#[path = "../conformance_20_9e_styled_osc8.rs"]
+mod conformance_20_9e_styled_osc8;
+
 #[path = "../conformance_vim_keymap_conflicts.rs"]
 mod conformance_vim_keymap_conflicts;
 

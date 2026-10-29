@@ -1,0 +1,20 @@
+---
+source: tests/conformance_20_9e_styled_osc8.rs
+expression: device
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+  ┌ Sign in to Example ──────────────────────────────────────────────────────┐  
+  │Enter this code on the sign-in page to connect your account.              │  
+  │ABCD-EFGH                                                                 │  
+  │Sign-in page: https://device.example/verify?user_code=ABCD                │  
+  │                                                                          │  
+  │c copy code · u copy link · Esc cancel                                    │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘

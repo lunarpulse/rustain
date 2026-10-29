@@ -185,7 +185,7 @@ agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_res
 globset = "0.4"
 
 # ── TUI framework ────────────────────────────────────────────────
-ratatui = "0.30"
+ratatui = "0.30.2"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 clap = { version = "4.5", features = ["derive"] }

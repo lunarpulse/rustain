@@ -19,7 +19,7 @@ use rustain::adapters::tui::handlers::{
 use rustain::adapters::tui::refresh_tracker::RefreshTracker;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::{hyperlink::LinkSpan, login_dialog, model_selector};
+use rustain::adapters::tui::widgets::{login_dialog, model_selector};
 use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, ProviderConfig};
 use rustain::infrastructure::live_providers::LiveProviders;
@@ -294,24 +294,38 @@ impl Tui {
             .is_some_and(|running| running.field.is_some())
     }
 
-    /// Renders both overlays at `width`×`height`; returns the text and the
-    /// links the event loop would write over the frame.
-    pub(crate) fn frame_at(&mut self, width: u16, height: u16) -> (String, Vec<LinkSpan>) {
+    /// Renders both overlays with deterministic plain-link capability.
+    pub(crate) fn frame_at(&mut self, width: u16, height: u16) -> String {
+        let buffer = self.login_buffer_at(width, height, false);
+        let text = buffer_text(&buffer);
+        self.frames.push(text.clone());
+        text
+    }
+
+    pub(crate) fn login_buffer_at(
+        &self,
+        width: u16,
+        height: u16,
+        supports_osc8: bool,
+    ) -> ratatui::buffer::Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let theme = Theme::dark();
-        let mut links = Vec::new();
         terminal
             .draw(|frame| {
                 model_selector::render(frame, frame.area(), &self.state.model_selector, &theme);
-                links = login_dialog::render(frame, frame.area(), &self.state.login, &theme);
+                login_dialog::render(
+                    frame,
+                    frame.area(),
+                    &self.state.login,
+                    &theme,
+                    supports_osc8,
+                );
             })
             .unwrap();
-        let text = buffer_text(terminal.backend().buffer());
-        self.frames.push(text.clone());
-        (text, links)
+        terminal.backend().buffer().clone()
     }
     pub(crate) fn frame(&mut self) -> String {
-        self.frame_at(80, 24).0
+        self.frame_at(80, 24)
     }
 
     pub(crate) fn feedback(&self) -> String {
@@ -341,6 +355,63 @@ pub(crate) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Inspect the actual supported cells against the readable fallback at the
+/// same coordinates; only this exact balanced per-glyph envelope is accepted.
+pub(crate) fn assert_link_cells(tui: &Tui, width: u16, height: u16, targets: &[(&str, &str)]) {
+    use ratatui::buffer::CellDiffOption;
+    use ratatui::style::Modifier;
+    let plain = tui.login_buffer_at(width, height, false);
+    let linked = tui.login_buffer_at(width, height, true);
+    let theme = Theme::dark();
+    let text = buffer_text(&plain);
+    let rectangles: Vec<_> = targets
+        .iter()
+        .map(|(label, target)| {
+            let matches: Vec<_> = text
+                .lines()
+                .enumerate()
+                .filter(|(_, row)| row.contains(label))
+                .collect();
+            assert_eq!(matches.len(), 1, "one visible row for {label:?}");
+            let (y, row) = matches[0];
+            let start = row[..row.find(label).unwrap()].chars().count() + label.chars().count();
+            let end = row[..row.rfind('│').expect("modal right border")]
+                .trim_end()
+                .chars()
+                .count();
+            assert!(end > start, "visible URL after {label:?}");
+            (y as u16, start as u16, end as u16, *target)
+        })
+        .collect();
+    for y in 0..height {
+        for x in 0..width {
+            let cell = &linked[(x, y)];
+            let fallback = &plain[(x, y)];
+            assert_eq!(cell.style(), fallback.style());
+            if let Some((_, _, _, target)) = rectangles
+                .iter()
+                .find(|(row, start, end, _)| y == *row && x >= *start && x < *end)
+            {
+                assert_eq!(
+                    cell.symbol(),
+                    format!("\x1b]8;;{target}\x07{}\x1b]8;;\x07", fallback.symbol()),
+                    "complete URL rectangle at {x},{y}"
+                );
+                assert_eq!(cell.fg, theme.colors.accent);
+                assert_eq!(cell.bg, theme.colors.bg_surface);
+                assert!(cell.modifier.contains(Modifier::BOLD));
+                assert_eq!(
+                    cell.diff_option,
+                    CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap())
+                );
+            } else {
+                assert_eq!(cell.symbol(), fallback.symbol());
+                assert!(!cell.symbol().chars().any(char::is_control));
+            }
+        }
+    }
 }
 
 /// The `[provider.stubai]` entry of the 20-1c smoke form: a full

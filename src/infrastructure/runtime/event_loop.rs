@@ -8483,7 +8483,6 @@ fn render(
 
     let display_model = selected_model.as_deref().unwrap_or(config_model);
 
-    let mut login_links = Vec::new();
     terminal.draw(|frame| {
         let area = frame.area();
 
@@ -9516,7 +9515,13 @@ fn render(
                 if model_selector.active {
                     model_selector::render(frame, area, model_selector, theme);
                 }
-                login_links = crate::adapters::tui::widgets::login_dialog::render(frame, area, login, theme);
+                crate::adapters::tui::widgets::login_dialog::render(
+                    frame,
+                    area,
+                    login,
+                    theme,
+                    crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8(),
+                );
 
                 // Render usage/cost panel overlay (Story 7.5 AC3)
                 if usage_panel.active {
@@ -9538,7 +9543,6 @@ fn render(
             }
         }
     })?;
-    crate::adapters::tui::widgets::hyperlink::write_links(terminal.backend_mut(), &login_links)?;
 
     state.total_content_height = content_height;
     state.block_boundaries = block_bounds;

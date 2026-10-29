@@ -31,8 +31,7 @@ pub(crate) fn modal_area(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// One line ending in `…`, at most `width` cells.
-fn ellipsize(lines: &[Line<'static>], width: usize) -> Line<'static> {
-    let first = lines.first().cloned().unwrap_or_default();
+fn ellipsize(first: &Line<'static>, width: usize) -> Line<'static> {
     let style = first
         .spans
         .first()
@@ -60,29 +59,51 @@ fn ellipsize(lines: &[Line<'static>], width: usize) -> Line<'static> {
 /// selected entry stays visible. With no rows at all, notices still give way
 /// (oldest first) until everything fits.
 pub(crate) fn fit_modal(parts: Vec<ModalPart>, height: usize, width: usize) -> Vec<Line<'static>> {
+    fit_modal_indexed(parts, height, width)
+        .into_iter()
+        .map(|(_, _, line)| line)
+        .collect()
+}
+
+/// Fits the body while retaining each source part/row identity.
+pub(crate) fn fit_modal_indexed(
+    parts: Vec<ModalPart>,
+    height: usize,
+    width: usize,
+) -> Vec<(usize, usize, Line<'static>)> {
+    type Row = (usize, usize, Line<'static>);
     enum Slot {
-        Fixed(Vec<Line<'static>>),
-        Notice(Vec<Line<'static>>),
+        Fixed(Vec<Row>),
+        Notice(Vec<Row>),
         Rows,
     }
     let mut slots = Vec::new();
     let mut footer = Vec::new();
     let mut rows = Vec::new();
     let mut selected = (0, 0);
-    for part in parts {
+    for (part_index, part) in parts.into_iter().enumerate() {
+        let indexed = |lines: Vec<Line<'static>>| {
+            lines
+                .into_iter()
+                .enumerate()
+                .map(|(row, line)| (part_index, row, line))
+                .collect::<Vec<Row>>()
+        };
         match part {
-            ModalPart::Header(lines) => slots.push(Slot::Fixed(lines)),
-            ModalPart::Notice(lines) if !lines.is_empty() => slots.push(Slot::Notice(lines)),
+            ModalPart::Header(lines) => slots.push(Slot::Fixed(indexed(lines))),
+            ModalPart::Notice(lines) if !lines.is_empty() => {
+                slots.push(Slot::Notice(indexed(lines)));
+            }
             ModalPart::Notice(_) => {}
             ModalPart::Rows {
                 lines,
                 selected: range,
             } => {
-                rows = lines;
+                rows = indexed(lines);
                 selected = range;
                 slots.push(Slot::Rows);
             }
-            ModalPart::Footer(lines) => footer.extend(lines),
+            ModalPart::Footer(lines) => footer.extend(indexed(lines)),
         }
     }
     let used = |slots: &[Slot]| -> usize {
@@ -104,7 +125,8 @@ pub(crate) fn fit_modal(parts: Vec<ModalPart>, height: usize, width: usize) -> V
         if let Slot::Notice(lines) = &mut slots[index]
             && lines.len() > 1
         {
-            *lines = vec![ellipsize(lines, width)];
+            let (part, row, first) = &lines[0];
+            *lines = vec![(*part, *row, ellipsize(first, width))];
         }
     }
     // 2. Drop notices, oldest first.

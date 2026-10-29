@@ -45,7 +45,7 @@ async fn k12_login_and_models_commands_route_and_open_their_overlays() {
     assert!(frame.contains(" Sign in "), "{frame}");
     assert!(frame.contains("Anthropic · not signed in"), "{frame}");
     // K10: the provider picker fits the smallest rendered terminal.
-    let (small, _) = tui.frame_at(60, 16);
+    let small = tui.frame_at(60, 16);
     super::small_terminal::assert_fitted(
         &small,
         &["Type to search", "Anthropic · not signed in"],
@@ -64,7 +64,7 @@ async fn k12_login_and_models_commands_route_and_open_their_overlays() {
         .expect("browser method listed");
     let key = frame.find("API key").expect("API key method listed");
     assert!(browser < key, "CLI method order\n{frame}");
-    let (small, _) = tui.frame_at(60, 16);
+    let small = tui.frame_at(60, 16);
     super::small_terminal::assert_fitted(&small, &["Choose a login method:"], "Esc close");
     tui.key(DomainKey::Esc);
 

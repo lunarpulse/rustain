@@ -2,7 +2,7 @@
 //! production `XAI_DEVICE` rebased); K04 (AC4) Esc during a device poll;
 //! K06 (AC3) the Copilot Enterprise `prompt_line` in a visible field.
 
-use super::common::{Tui, World};
+use super::common::{Tui, World, assert_link_cells};
 use crate::conformance_20_1d2_device_and_xai::device::xai_access;
 use crate::conformance_20_1d3_copilot::common::{
     DEVICE_PATH as COPILOT_DEVICE_PATH, ENDPOINT_A, ENTERPRISE_CLIENT, PROMPT, PUBLIC_CLIENT,
@@ -112,7 +112,7 @@ async fn k05_device_code_view_renders_links_and_copies() {
         matches!(event, LoginEvent::DeviceCode { .. })
     })
     .await;
-    let (frame, links) = tui.frame_at(80, 24);
+    let frame = tui.frame_at(80, 24);
     for text in [
         "Enter this code on the sign-in page to connect your account.",
         USER_CODE,
@@ -121,8 +121,7 @@ async fn k05_device_code_view_renders_links_and_copies() {
     ] {
         assert!(frame.contains(text), "{text}\n{frame}");
     }
-    assert_eq!(links.len(), 1);
-    assert_eq!(links[0].url, VERIFY_COMPLETE);
+    assert_link_cells(&tui, 80, 24, &[("Sign-in page: ", VERIFY_COMPLETE)]);
     assert_eq!(tui.opened.lock().unwrap().as_slice(), [VERIFY_COMPLETE]);
     tui.input(DomainInputEvent::KeyPress('c'));
     tui.input(DomainInputEvent::KeyPress('u'));
@@ -163,7 +162,7 @@ async fn k05_k04_hostile_device_text_is_inert_and_esc_cancels_the_poll() {
         matches!(event, LoginEvent::DeviceCode { .. })
     })
     .await;
-    let (frame, links) = tui.frame_at(80, 24);
+    let frame = tui.frame_at(80, 24);
     assert!(
         !frame.contains(['\u{1b}', '\u{7}', '\u{9b}']),
         "no terminal control reaches the buffer\n{frame:?}"
@@ -177,7 +176,7 @@ async fn k05_k04_hostile_device_text_is_inert_and_esc_cancels_the_poll() {
     );
     assert!(frame.contains("AB CD"), "{frame}");
     assert!(frame.contains("Sign-in page: "), "{frame}");
-    assert!(links.is_empty(), "an unsafe URL is never linked");
+    assert_link_cells(&tui, 80, 24, &[]);
     assert!(tui.opened.lock().unwrap().is_empty(), "nor opened");
     tui.input(DomainInputEvent::KeyPress('u'));
     assert_eq!(tui.flash(), "Nothing to copy");

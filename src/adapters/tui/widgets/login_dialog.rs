@@ -29,8 +29,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::hyperlink::LinkSpan;
-use super::modal::{ModalPart, fit_modal, modal_area, wrapped};
+use super::hyperlink;
+use super::modal::{ModalPart, fit_modal_indexed, modal_area, wrapped};
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::state::{
     FieldKind, LOGIN_PICKER_ROWS, LoginOverlayState, LoginSection, LoginView, OverlayMode,
@@ -67,13 +67,22 @@ struct Styles {
     text: Style,
 }
 
+struct Link {
+    source: (usize, usize),
+    prefix: usize,
+    width: usize,
+    url: String,
+    visible: Option<Rect>,
+}
+
 /// A `<label><url>` line; a safe URL becomes a link over its visible part.
 fn link_line(
     label: &str,
     raw: &str,
     width: usize,
     styles: &Styles,
-    links: &mut Vec<(Line<'static>, usize, String, String)>,
+    links: &mut Vec<Link>,
+    source: (usize, usize),
 ) -> Line<'static> {
     let Some(url) = safe_url(raw) else {
         return Line::from(vec![
@@ -83,23 +92,29 @@ fn link_line(
     };
     let prefix = label.width();
     let visible = middle_truncate(&url, width.saturating_sub(prefix));
-    let line = Line::from(vec![
+    links.push(Link {
+        source,
+        prefix,
+        width: visible.chars().count(),
+        url,
+        visible: None,
+    });
+    Line::from(vec![
         Span::styled(label.to_owned(), styles.muted),
-        Span::styled(visible.clone(), styles.accent),
-    ]);
-    links.push((line.clone(), prefix, visible, url));
-    line
+        Span::styled(visible, styles.accent),
+    ])
 }
 
-/// Draws the overlay; returns the links to write over the drawn frame.
+/// Draw the modal and decorate only retained URL cells inside this frame.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &LoginOverlayState,
     theme: &Theme,
-) -> Vec<LinkSpan> {
+    supports_osc8: bool,
+) {
     if !state.active {
-        return Vec::new();
+        return;
     }
     let styles = Styles {
         muted: Style::default().fg(theme.colors.fg_muted),
@@ -160,17 +175,25 @@ pub fn render(
         .title(Span::styled(title, theme.typography.heading));
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
-    let lines = fit_modal(parts, inner.height as usize, inner.width as usize);
-    let spans = links
+    let fitted = fit_modal_indexed(parts, inner.height as usize, inner.width as usize);
+    let lines: Vec<_> = fitted
         .into_iter()
-        .filter_map(|(line, prefix, text, url)| {
-            let row = lines.iter().position(|drawn| *drawn == line)?;
-            Some(LinkSpan {
-                x: inner.x + prefix as u16,
-                y: inner.y + row as u16,
-                text,
-                url,
-            })
+        .enumerate()
+        .map(|(row, (part, source_row, line))| {
+            if supports_osc8
+                && let Some(link) = links
+                    .iter_mut()
+                    .find(|link| link.source == (part, source_row))
+                && link.prefix < inner.width as usize
+            {
+                link.visible = Some(Rect::new(
+                    inner.x + link.prefix as u16,
+                    inner.y + row as u16,
+                    link.width.min(inner.width as usize - link.prefix) as u16,
+                    1,
+                ));
+            }
+            line
         })
         .collect();
     frame.render_widget(
@@ -181,7 +204,11 @@ pub fn render(
         ),
         inner,
     );
-    spans
+    for link in links {
+        if let Some(visible) = link.visible {
+            hyperlink::encode(frame.buffer_mut(), visible, &link.url);
+        }
+    }
 }
 
 fn picker(state: &LoginOverlayState, width: usize, styles: &Styles) -> Vec<ModalPart> {
@@ -417,7 +444,7 @@ fn running(
     state: &LoginOverlayState,
     width: usize,
     styles: &Styles,
-    links: &mut Vec<(Line<'static>, usize, String, String)>,
+    links: &mut Vec<Link>,
 ) -> Vec<ModalPart> {
     let Some(running) = &state.running else {
         return Vec::new();
@@ -438,14 +465,16 @@ fn running(
                     styles.text,
                     width,
                 )));
+                let part = parts.len();
                 parts.push(ModalPart::Header(vec![
-                    link_line("Sign-in link: ", url, width, styles, links),
+                    link_line("Sign-in link: ", url, width, styles, links, (part, 0)),
                     link_line(
                         "Local shortcut (this machine only): ",
                         launch_url,
                         width,
                         styles,
                         links,
+                        (part, 1),
                     ),
                 ]));
                 parts.push(ModalPart::Notice(wrapped(
@@ -466,12 +495,14 @@ fn running(
                     width,
                 )));
                 let mut code = wrapped(&clean(user_code), styles.accent, width);
+                let source = (parts.len(), code.len());
                 code.push(link_line(
                     "Sign-in page: ",
                     verification_url,
                     width,
                     styles,
                     links,
+                    source,
                 ));
                 parts.push(ModalPart::Header(code));
                 parts.push(ModalPart::Notice(wrapped(

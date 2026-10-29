@@ -4,15 +4,12 @@
 //! a masked key field and a device poll; K10's login waiting view at 60×16.
 
 use super::bloom::stub;
-use super::common::{Tui, World, clipboard_file, config_with, stubai};
+use super::common::{Tui, World, assert_link_cells, clipboard_file, config_with, stubai};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::adapters::tui::state::{LoginSection, LoginView};
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::{
-    hyperlink::{LinkSpan, write_links},
-    login_dialog,
-};
+use rustain::adapters::tui::widgets::login_dialog;
 use rustain::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, Credential, CredentialOrigin, FocusState};
 use rustain::domain::ports::AuthStorePort;
@@ -82,24 +79,6 @@ async fn open_browser_login(tui: &mut Tui) -> (String, String) {
     (url.clone(), launch_url.clone())
 }
 
-/// Every OSC 8 link sits exactly over the text the frame drew there, so the
-/// bytes written after the frame never land on other content.
-fn assert_links_over_text(frame: &str, links: &[LinkSpan]) {
-    let rows: Vec<&str> = frame.lines().collect();
-    for link in links {
-        let drawn: String = rows[link.y as usize]
-            .chars()
-            .skip(link.x as usize)
-            .take(link.text.chars().count())
-            .collect();
-        assert_eq!(
-            drawn, link.text,
-            "link at ({}, {})\n{frame}",
-            link.x, link.y
-        );
-    }
-}
-
 /// K03 (M03) + K02: the waiting view, its link bytes, opener and copy keys,
 /// then a masked paste of the redirect completes the exchange; a `TRACE`
 /// capture of the whole login never carries the authorization code.
@@ -140,7 +119,7 @@ async fn k03_body() {
         tui.opened.lock().unwrap().as_slice(),
         std::slice::from_ref(&launch)
     );
-    let (frame, links) = tui.frame_at(80, 24);
+    let frame = tui.frame_at(80, 24);
     for text in [
         " Sign in to Anthropic ",
         "Continue in your browser. If it didn't open, open or copy the link below.",
@@ -151,10 +130,17 @@ async fn k03_body() {
     ] {
         assert!(frame.contains(text), "{text}\n{frame}");
     }
-    assert_eq!(links.len(), 2, "the sign-in link and the local shortcut");
-    assert_links_over_text(&frame, &links);
+    assert_link_cells(
+        &tui,
+        80,
+        24,
+        &[
+            ("Sign-in link: ", &authorize),
+            ("Local shortcut (this machine only): ", &launch),
+        ],
+    );
 
-    // The link is written over the drawn text as OSC 8 to the full URL.
+    // Crossterm emits balanced in-buffer cells targeting the full URL.
     let full = url::Url::parse(&authorize).unwrap().to_string();
     let bytes = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let mut terminal = Terminal::with_options(
@@ -164,22 +150,27 @@ async fn k03_body() {
         },
     )
     .unwrap();
-    let mut links = Vec::new();
     terminal
         .draw(|frame| {
-            links = login_dialog::render(frame, frame.area(), &tui.state.login, &Theme::dark());
+            login_dialog::render(frame, frame.area(), &tui.state.login, &Theme::dark(), true);
         })
         .unwrap();
-    write_links(terminal.backend_mut(), &links).unwrap();
     let bytes = String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
     assert!(bytes.contains(&format!("\x1b]8;;{full}\x07")), "{bytes:?}");
-    assert!(bytes.contains(&format!("\x1b]8;;{launch}\x07{launch}\x1b]8;;\x07")));
+    assert!(bytes.contains(&format!("\x1b]8;;{launch}\x07h\x1b]8;;\x07")));
 
     // K10: the same waiting view at 60×16 keeps borders, link, field and footer.
-    let (small, small_links) = tui.frame_at(60, 16);
+    let small = tui.frame_at(60, 16);
     super::small_terminal::assert_fitted(&small, &["Sign-in link:", "> "], "Esc cancel");
-    assert!(!small_links.is_empty(), "the sign-in link is still linked");
-    assert_links_over_text(&small, &small_links);
+    assert_link_cells(
+        &tui,
+        60,
+        16,
+        &[
+            ("Sign-in link: ", &authorize),
+            ("Local shortcut (this machine only): ", &launch),
+        ],
+    );
 
     // Plain letters type into the focused field; Alt+L/Alt+C copy.
     tui.input(DomainInputEvent::KeyPress('l'));
@@ -290,7 +281,7 @@ async fn k04_esc_in_a_masked_key_field_cancels_before_any_request() {
     tui.until("masked key field", Tui::field_pending).await;
     tui.paste("sk-never-sent");
     // K10: the masked key view fits the smallest rendered terminal too.
-    let (small, _) = tui.frame_at(60, 16);
+    let small = tui.frame_at(60, 16);
     super::small_terminal::assert_fitted(&small, &["> •"], "Esc cancel");
     tui.key(DomainKey::CtrlC);
     tui.until_login("cancelled", |event| {

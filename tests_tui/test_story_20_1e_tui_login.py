@@ -10,6 +10,7 @@ copies it with Alt+L (OSC 52), and Esc cancels it with the callback port closed.
 from base64 import b64encode
 from contextlib import ExitStack
 from datetime import datetime, timezone
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -51,6 +52,45 @@ def _modal(screen, title):
                for y in range(top + 1, bottom))
 
 
+def _assert_link_cells(tui, screen, label, target, raw_text):
+    """Compare every visible link glyph with its balanced on-wire OSC 8 cell."""
+    rows = screen.split("\n")
+    matches = [(y, row.index(label) + len(label)) for y, row in enumerate(rows) if label in row]
+    assert len(matches) == 1, (label, matches)
+    y, start = matches[0]
+    end = rows[y].rfind("│")
+    visible = rows[y][start:end].rstrip()
+    assert visible, (label, rows[y])
+    for x, glyph in enumerate(visible, start):
+        cell = tui._screen.buffer[y][x]
+        assert cell.data == glyph
+        assert (cell.fg, cell.bg, cell.bold) == ("00c8c8", "282828", True), (label, x, cell)
+
+    # One fully balanced wrapper per glyph; neither a whole-row wrapper nor
+    # a target shortened to the visible ellipsis can satisfy this comparison.
+    symbol = re.compile(re.escape("\x1b]8;;" + target + "\x07")
+                        + r"([^\x00-\x1f\x7f])"
+                        + re.escape("\x1b]8;;\x07"))
+    symbols = list(symbol.finditer(raw_text))
+    assert len(symbols) == raw_text.count("\x1b]8;;" + target + "\x07"), label
+    glyphs = "".join(match.group(1) for match in symbols)
+    assert visible in glyphs, (label, visible, glyphs)
+
+
+def _launch_target(port):
+    """Read the real loopback redirect without following it onto the network."""
+    connection = HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", "/launch")
+        response = connection.getresponse()
+        assert response.status == 302, response.status
+        target = response.getheader("Location")
+        response.read()
+        assert target and target.startswith("https://claude.ai/oauth/authorize?"), target
+        return target
+    finally:
+        connection.close()
+
 def _exercise(binary, evidence, root, monkeypatch):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
@@ -68,6 +108,7 @@ def _exercise(binary, evidence, root, monkeypatch):
     opener.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{opener_log}"\n')
     opener.chmod(opener.stat().st_mode | stat.S_IXUSR)
     requests = []
+    handler_errors = []
     lock = threading.Lock()
     model_gets = []
     discovery_release = threading.Event()
@@ -127,8 +168,15 @@ def _exercise(binary, evidence, root, monkeypatch):
             self._record(404)
             self._reply(404, b'{"error":"unexpected route"}')
 
+    class CheckedServer(ThreadingHTTPServer):
+        daemon_threads = False
+
+        def handle_error(self, request, client_address):
+            with lock:
+                handler_errors.append(traceback.format_exc())
+
     with ExitStack() as stack:
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        server = CheckedServer(("127.0.0.1", 0), Stub)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
 
@@ -136,6 +184,8 @@ def _exercise(binary, evidence, root, monkeypatch):
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+            assert not thread.is_alive(), "HTTP server did not stop"
+            assert not handler_errors, "\n".join(handler_errors)
 
         stack.callback(stop_server)
         stack.callback(discovery_release.set)
@@ -154,17 +204,21 @@ def _exercise(binary, evidence, root, monkeypatch):
                    XDG_DATA_HOME=str(home / "xdg-data"), RUSTAIN_CONFIG_DIR=str(config),
                    RUSTAIN_DATA_DIR=str(data), RUSTAIN_LOG_PATH=str(runtime_log),
                    RUSTAIN_MODELS_DEV_URL=origin, TERM="xterm-256color",
+                   TERM_PROGRAM="wezterm", TMUX="", STY="", COLORTERM="truecolor", NO_COLOR="",
                    NO_PROXY="127.0.0.1,localhost",
                    PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
         original_spawn = harness.pexpect.spawn
 
         def safe_spawn(command, *args, **kwargs):
             actual = kwargs["env"]
+            actual.pop("NO_COLOR", None)
             assert Path(command).resolve() == binary and "debug" in binary.parts and "release" not in binary.parts
             assert kwargs["dimensions"] == (24, 80)
             assert all(actual.get(name) == "" for name in cleared)
             assert actual["RUSTAIN_DATA_DIR"] == str(data)
             assert actual["PATH"].split(os.pathsep)[0] == str(bin_dir)
+            assert (actual["TERM"], actual["TERM_PROGRAM"], actual["TMUX"], actual["STY"],
+                    actual["COLORTERM"]) == ("xterm-256color", "wezterm", "", "", "truecolor")
             return original_spawn(command, *args, **kwargs)
 
         monkeypatch.setattr(harness.pexpect, "spawn", safe_spawn)
@@ -221,15 +275,23 @@ def _exercise(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: "Claude Pro/Max subscription (browser)" in s, "method picker")
         tui.send("\r")
         screen = _wait(tui, lambda s: _modal(s, "Sign in to Anthropic")
-                       and "Local shortcut (this machine only): http://localhost:" in s,
-                       "browser waiting view")
+                       and "Local shortcut (this machine only): http://localhost:" in s
+                       and "Paste the authorization code (or full redirect URL):" in _plain(s)
+                       and any(re.search(r"│> ", row) for row in s.split("\n"))
+                       and "Alt+L copy local link" in _plain(s),
+                       "complete browser waiting view with pending field")
         _capture(tui, evidence, "c1-waiting", screen)
         launch = re.search(r"http://localhost:(\d+)/launch", screen)
         assert launch, screen
         port = int(launch.group(1))
+        target = _launch_target(port)
         raw.flush()
-        _wait(tui, lambda s: "\x1b]8;;https://claude.ai/oauth/authorize?" in
-              (evidence / "native.raw.bin").read_text(encoding="utf-8"), "OSC 8 sign-in link bytes")
+        wire = (evidence / "native.raw.bin").read_text(encoding="utf-8")
+        _assert_link_cells(tui, screen, "Sign-in link: ", target, wire)
+        _assert_link_cells(tui, screen, "Local shortcut (this machine only): ", launch.group(0), wire)
+        assert wire.count("\x1b]8;;\x07") == (
+            wire.count("\x1b]8;;" + target + "\x07")
+            + wire.count("\x1b]8;;" + launch.group(0) + "\x07"))
         _wait(tui, lambda s: opener_log.exists() and launch.group(0) in opener_log.read_text(),
               "opener got the launch URL")
         tui.send("\x1bl")
@@ -237,7 +299,9 @@ def _exercise(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: (raw.flush() or True) and osc52 in
               (evidence / "native.raw.bin").read_text(encoding="utf-8"), "OSC 52 copy of the launch URL")
         tui.send("\x1b")
-        screen = _wait(tui, lambda s: "Login cancelled" in s, "Login cancelled")
+        screen = _wait(tui, lambda s: "Login cancelled" in s
+                       and "Sign in to Anthropic" not in s and "Local shortcut" not in s,
+                       "Login cancelled with the modal removed")
         _capture(tui, evidence, "c2-cancelled", screen)
         with socket.socket() as probe:
             probe.settimeout(5)
@@ -254,7 +318,8 @@ def _exercise(binary, evidence, root, monkeypatch):
     # The appender writes a dated file and flushes on exit: check every runtime
     # log once the TUI has stopped, and require that one was written.
     logs = sorted(evidence.glob("native.runtime.log*"))
-    assert logs, "runtime log missing"
+    assert any(re.fullmatch(r"native\.runtime\.log\.\d{4}-\d{2}-\d{2}", log.name)
+               and log.is_file() for log in logs), "dated runtime log missing"
     for log in logs:
         assert KEY not in log.read_text(encoding="utf-8", errors="replace"), log.name
 
