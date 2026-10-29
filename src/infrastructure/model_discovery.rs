@@ -1,6 +1,8 @@
 //! One catalogue fold and refresh path for interactive and headless consumers.
+#[cfg(any(test, feature = "test-instrumentation"))]
+use crate::adapters::model_catalog_cache::RefreshCheckpoint;
 use crate::adapters::model_catalog_cache::{
-    CachedDiscoveryEntry, DiscoveryTarget, ModelCatalogCache,
+    CachedDiscoveryEntry, DiscoveryTarget, ModelCatalogCache, PublicationLease,
 };
 use crate::adapters::model_filter::{compile_filter_patterns, matches_any};
 use crate::adapters::provider::ProviderRegistry;
@@ -39,6 +41,54 @@ pub struct RefreshReport {
     pub status: DiscoveryStatus,
     pub model_count: usize,
     pub notice: Option<String>,
+    /// False for work that never obtained publication authority.
+    pub published: bool,
+    ticket: Option<u64>,
+}
+
+impl RefreshReport {
+    /// Later consumers must check and emit under the original attempt's gate,
+    /// not trust a disposition sampled before waiting for other discoveries.
+    pub async fn with_current<T>(
+        &self,
+        target: &DiscoveryTarget,
+        emit: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let _lease = target.refresh_order.publish(self.ticket?).await?;
+        Some(emit())
+    }
+}
+
+type Announcement<'a> = (
+    &'a Arc<EventBus>,
+    crate::adapters::tui::refresh_tracker::RefreshGuard,
+);
+
+/// Own the publication lease through warning emission, including the
+/// instrumented handoff. Dropping this refresh's tracker guard cannot clear
+/// another attempt's running mark.
+async fn announce(
+    report: RefreshReport,
+    announcement: Option<Announcement<'_>>,
+    _slot: PublicationLease,
+    _target: &DiscoveryTarget,
+) -> RefreshReport {
+    if let Some((events, guard)) = announcement {
+        drop(guard);
+        if let Some(message) = &report.notice {
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            _target
+                .refresh_order
+                .checkpoint(RefreshCheckpoint::BeforeAnnouncement)
+                .await;
+            let _ = events.emit_domain(AppEvent::SystemNotice {
+                conversation_id: None,
+                level: NoticeLevel::Warning,
+                message: message.clone(),
+            });
+        }
+    }
+    report
 }
 
 fn fold_record(earlier: &mut ModelRecord, later: &ModelRecord) {
@@ -295,9 +345,19 @@ pub async fn refresh_target(
     registry: Option<&ProviderRegistry>,
     force: bool,
 ) -> RefreshReport {
-    // A refresh started later always wins publication, so a delayed response
-    // for a replaced account never overwrites the newer roster or status.
-    let ticket = target.refresh_order.ticket();
+    refresh_core(target, cache, registry, force, None).await
+}
+
+async fn refresh_core(
+    target: &DiscoveryTarget,
+    cache: &ModelCatalogCache,
+    registry: Option<&ProviderRegistry>,
+    force: bool,
+    announcement: Option<Announcement<'_>>,
+) -> RefreshReport {
+    let Some(ticket) = target.refresh_order.ticket().await else {
+        return superseded(target, registry);
+    };
     // Re-read the scope now through the adapter's own request path, so a
     // credential changed or removed since startup never reuses another roster.
     let scope = target.provider.discovery_scope(&target.scope_context).await;
@@ -321,9 +381,19 @@ pub async fn refresh_target(
             DiscoveryStatus::Unauthenticated => LiveOutcome::Failed(true),
             _ => LiveOutcome::NotAttempted,
         };
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        target
+            .refresh_order
+            .checkpoint(RefreshCheckpoint::BeforePublication)
+            .await;
         let Some(_slot) = target.refresh_order.publish(ticket).await else {
             return superseded(target, registry);
         };
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        target
+            .refresh_order
+            .checkpoint(RefreshCheckpoint::PublicationAdmitted)
+            .await;
         let publish = || {
             let merged = merge_catalog(layers(target, entry), outcome);
             let count = merged.served.len();
@@ -338,11 +408,19 @@ pub async fn refresh_target(
         } else {
             publish()
         };
-        return RefreshReport {
-            status,
-            model_count,
-            notice: None,
-        };
+        return announce(
+            RefreshReport {
+                status,
+                model_count,
+                notice: None,
+                published: true,
+                ticket: Some(ticket),
+            },
+            announcement,
+            _slot,
+            target,
+        )
+        .await;
     }
     // Cache the unfiltered roster: `model_filter` applies to every merged layer,
     // so a later filter change never hides models behind a fresh cache entry.
@@ -398,9 +476,19 @@ pub async fn refresh_target(
             )),
         ),
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    target
+        .refresh_order
+        .checkpoint(RefreshCheckpoint::BeforePublication)
+        .await;
     let Some(_slot) = target.refresh_order.publish(ticket).await else {
         return superseded(target, registry);
     };
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    target
+        .refresh_order
+        .checkpoint(RefreshCheckpoint::PublicationAdmitted)
+        .await;
     // Persist before publishing: a concurrent models.dev remerge must never
     // replace a new authoritative roster with an older disk snapshot.
     if let LiveOutcome::Success(models) = &outcome
@@ -416,7 +504,10 @@ pub async fn refresh_target(
         // Kept in memory first, so a failed write cannot let a later remerge
         // fall back to an older disk roster or the public catalogue.
         target.last_live.store(Some(Arc::new(cached.clone())));
-        if let Err(error) = cache.upsert_provider(&target.provider_id, cached).await {
+        if let Err(error) = cache
+            .upsert_provider(&target.provider_id, cached, Some(_slot.clone()))
+            .await
+        {
             tracing::warn!(%error, "models_cache.json save failed; live roster kept in memory");
         }
     }
@@ -434,15 +525,22 @@ pub async fn refresh_target(
     } else {
         publish()
     };
-    RefreshReport {
-        status,
-        model_count,
-        notice: notice.filter(|_| previous != Some(status)),
-    }
+    announce(
+        RefreshReport {
+            status,
+            model_count,
+            notice: notice.filter(|_| previous != Some(status)),
+            published: true,
+            ticket: Some(ticket),
+        },
+        announcement,
+        _slot,
+        target,
+    )
+    .await
 }
 
-/// A later-started refresh of this target already published: its catalogue,
-/// cache entries and status stand.
+/// Retired or superseded work has no publication truth and no completion line.
 fn superseded(target: &DiscoveryTarget, registry: Option<&ProviderRegistry>) -> RefreshReport {
     RefreshReport {
         status: registry
@@ -450,6 +548,8 @@ fn superseded(target: &DiscoveryTarget, registry: Option<&ProviderRegistry>) -> 
             .unwrap_or(DiscoveryStatus::Idle),
         model_count: target.provider.list_models().len(),
         notice: None,
+        published: false,
+        ticket: None,
     }
 }
 
@@ -461,20 +561,8 @@ pub async fn refresh_and_announce(
     events: &Arc<EventBus>,
     tracker: &Arc<crate::adapters::tui::refresh_tracker::RefreshTracker>,
 ) -> RefreshReport {
-    // The in-flight mark ends with the fetch, before the announcement: a
-    // listener never sees a finished refresh as running, and needs no
-    // explicit removal that could clear a newer refresh of the same provider.
-    let report = {
-        let _guard = tracker.insert(target.provider_id.clone());
-        refresh_target(target, cache, Some(registry), force).await
-    };
-    if let Some(message) = &report.notice {
-        let _ = events.emit_domain(AppEvent::SystemNotice {
-            conversation_id: None,
-            level: NoticeLevel::Warning,
-            message: message.clone(),
-        });
-    }
+    let guard = tracker.insert(target.provider_id.clone());
+    let report = refresh_core(target, cache, Some(registry), force, Some((events, guard))).await;
     let _ = events.emit_domain(AppEvent::ProviderCatalogRefreshed {
         provider_id: target.provider_id.clone(),
     });

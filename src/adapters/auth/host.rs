@@ -193,7 +193,7 @@ pub(crate) fn resolve_provider(
 /// The line a sign-in host shows after rediscovery; `None` when the report
 /// carries its own notice (which the host shows verbatim instead).
 pub fn discovery_line(display: &str, report: &RefreshReport) -> Option<String> {
-    if report.notice.is_some() {
+    if !report.published || report.notice.is_some() {
         None
     } else if report.status == crate::domain::models::provider::DiscoveryStatus::Unavailable {
         Some(format!(

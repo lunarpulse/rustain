@@ -69,6 +69,9 @@ mod conformance_20_1e_tui_login;
 #[path = "../conformance_20_1e2_tui_accounts.rs"]
 mod conformance_20_1e2_tui_accounts;
 
+#[path = "../conformance_20_9g_relock_refresh_order.rs"]
+mod conformance_20_9g_relock_refresh_order;
+
 #[path = "../conformance_auth_cli.rs"]
 mod conformance_auth_cli;
 

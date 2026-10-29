@@ -293,6 +293,7 @@ impl ModelCatalogCache {
         &self,
         provider_id: &str,
         entry: CachedDiscoveryEntry,
+        publication: Option<PublicationLease>,
     ) -> anyhow::Result<()> {
         let path = paths::models_cache_path()?;
         let provider_id = provider_id.to_string();
@@ -310,12 +311,26 @@ impl ModelCatalogCache {
         tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let _guard = guard;
             let _file_lock = file_lock;
+            let _publication = publication;
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            if let Some(lease) = &_publication {
+                tokio::runtime::Handle::current()
+                    .block_on(lease.order.checkpoint(RefreshCheckpoint::BlockingCommit));
+            }
             let mut catalog = load_discovery_file(&path);
             #[cfg(all(test, unix))]
             tests::pause_writer_after_read()?;
             catalog.providers.insert(provider_id, entry);
             let json = serde_json::to_vec_pretty(&catalog)?;
             write_discovery_file(&path, &json)?;
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            if let Some(lease) = &_publication {
+                tokio::runtime::Handle::current().block_on(
+                    lease
+                        .order
+                        .checkpoint(RefreshCheckpoint::BlockingCommitFinished),
+                );
+            }
             Ok(())
         })
         .await?
@@ -351,32 +366,149 @@ pub struct DiscoveryTarget {
     pub display_name: String,
 }
 
-/// Orders overlapping refreshes of one target (Story 20.1d1b): a refresh that
-/// started earlier never publishes, persists or sets status over one that
-/// started later, e.g. a delayed response for an account that was replaced.
+/// One target incarnation's publication boundary. Admission, publication and
+/// terminal retirement linearize under the same gate, in lock-acquisition order.
+/// Network work never owns the gate. A newer admitted attempt invalidates older
+/// tickets even if it fails or is cancelled before publishing.
 #[derive(Default)]
 pub struct RefreshOrder {
-    started: std::sync::atomic::AtomicU64,
-    published: Mutex<u64>,
+    state: Arc<Mutex<RefreshState>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pauses: Mutex<HashMap<RefreshCheckpoint, Arc<PauseState>>>,
+}
+
+#[derive(Default)]
+struct RefreshState {
+    latest: u64,
+    retired: bool,
+}
+
+/// A blocking cache writer retains a clone of this owned publication gate, so
+/// cancelling its awaiter cannot let retirement overtake an admitted commit.
+#[derive(Clone)]
+pub struct PublicationLease {
+    _guard: Arc<tokio::sync::OwnedMutexGuard<RefreshState>>,
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    order: Arc<RefreshOrder>,
 }
 
 impl RefreshOrder {
-    /// Ticket taken when a refresh starts; later starts get larger tickets.
-    pub fn ticket(&self) -> u64 {
-        self.started
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
-    }
-
-    /// The publication slot for `ticket`, held across persist and publish, or
-    /// `None` once a later-started refresh has published.
-    pub async fn publish(&self, ticket: u64) -> Option<tokio::sync::MutexGuard<'_, u64>> {
-        let mut published = self.published.lock().await;
-        if *published > ticket {
+    pub async fn ticket(self: &Arc<Self>) -> Option<u64> {
+        let mut state = self.state.lock().await;
+        if state.retired {
             return None;
         }
-        *published = ticket;
-        Some(published)
+        state.latest += 1;
+        Some(state.latest)
+    }
+
+    pub async fn publish(self: &Arc<Self>, ticket: u64) -> Option<PublicationLease> {
+        let state = self.state.clone().lock_owned().await;
+        if state.retired || state.latest != ticket {
+            return None;
+        }
+        Some(PublicationLease {
+            _guard: Arc::new(state),
+            #[cfg(any(test, feature = "test-instrumentation"))]
+            order: self.clone(),
+        })
+    }
+
+    pub async fn retire(self: &Arc<Self>) {
+        let mut state = match self.state.clone().try_lock_owned() {
+            Ok(state) => state,
+            Err(_) => {
+                #[cfg(any(test, feature = "test-instrumentation"))]
+                self.checkpoint(RefreshCheckpoint::RetirementWaiting).await;
+                self.state.clone().lock_owned().await
+            }
+        };
+        state.retired = true;
+    }
+
+    /// One-shot, per-instance test checkpoint; it never replaces gate admission.
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub async fn pause_at(&self, point: RefreshCheckpoint) -> Arc<RefreshPause> {
+        let shared = Arc::new(PauseState {
+            reached: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+            observed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let pause = Arc::new(RefreshPause {
+            shared: shared.clone(),
+        });
+        self.pauses.lock().await.insert(point, shared);
+        pause
+    }
+
+    #[cfg(any(test, feature = "test-instrumentation"))]
+    pub async fn checkpoint(&self, point: RefreshCheckpoint) {
+        // Release the hook registry before waiting for the controller.
+        let pause = self.pauses.lock().await.remove(&point);
+        if let Some(pause) = pause {
+            pause
+                .observed
+                .store(true, std::sync::atomic::Ordering::Release);
+            pause.reached.add_permits(1);
+            pause.release.acquire().await.unwrap().forget();
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefreshCheckpoint {
+    BeforePublication,
+    PublicationAdmitted,
+    BeforeAnnouncement,
+    BlockingCommit,
+    BlockingCommitFinished,
+    BeforeCompletion,
+    CompletionFinished,
+    RetirementWaiting,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+pub struct RefreshPause {
+    shared: Arc<PauseState>,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+struct PauseState {
+    reached: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+    observed: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl RefreshPause {
+    pub async fn reached(&self) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            self.shared.reached.acquire(),
+        )
+        .await
+        .expect("refresh checkpoint was not reached")
+        .unwrap()
+        .forget();
+    }
+
+    pub fn was_reached(&self) -> bool {
+        self.shared
+            .observed
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub fn release(&self) {
+        self.shared.release.add_permits(1);
+    }
+}
+
+#[cfg(any(test, feature = "test-instrumentation"))]
+impl Drop for RefreshPause {
+    fn drop(&mut self) {
+        // A failed assertion/cancelled test cannot strand a blocking writer.
+        self.release();
     }
 }
 
@@ -404,6 +536,61 @@ mod tests {
     use super::*;
     use crate::domain::models::provider::ModelCapability;
     use serial_test::serial;
+
+    #[tokio::test]
+    async fn newest_admission_supersedes_uncommitted_ticket() {
+        let order = Arc::new(RefreshOrder::default());
+        let a = order.ticket().await.unwrap();
+        let b = order.ticket().await.unwrap();
+        assert!(order.publish(a).await.is_none());
+        assert!(order.publish(b).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn retirement_is_terminal_across_clones_and_independent() {
+        let order = Arc::new(RefreshOrder::default());
+        let clone = order.clone();
+        let other = Arc::new(RefreshOrder::default());
+        let old = order.ticket().await.unwrap();
+        order.retire().await;
+        clone.retire().await;
+        assert!(clone.ticket().await.is_none());
+        assert!(clone.publish(old).await.is_none());
+        let current = other.ticket().await.unwrap();
+        assert!(other.publish(current).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn admitted_publication_excludes_retirement_until_all_owners_finish() {
+        let order = Arc::new(RefreshOrder::default());
+        let ticket = order.ticket().await.unwrap();
+        let lease = order.publish(ticket).await.unwrap();
+        let commit_owner = lease.clone();
+        drop(lease);
+        let waiting = order.pause_at(RefreshCheckpoint::RetirementWaiting).await;
+        let retiring = {
+            let order = order.clone();
+            tokio::spawn(async move { order.retire().await })
+        };
+        waiting.reached().await;
+        // The probe is acknowledged only after the actual gate refused entry.
+        waiting.release();
+        drop(commit_owner);
+        retiring.await.unwrap();
+        assert!(order.publish(ticket).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_checkpoint_controller_releases_waiter() {
+        let order = Arc::new(RefreshOrder::default());
+        let pause = order.pause_at(RefreshCheckpoint::BeforePublication).await;
+        let waiter = tokio::spawn(async move {
+            order.checkpoint(RefreshCheckpoint::BeforePublication).await;
+        });
+        pause.reached().await;
+        drop(pause);
+        waiter.await.unwrap();
+    }
 
     fn temp_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -674,17 +861,20 @@ mod tests {
         let second = ModelCatalogCache::new();
         assert!(second.load().await.providers.is_empty());
         first
-            .upsert_provider("openai", discovery_entry())
+            .upsert_provider("openai", discovery_entry(), None)
             .await
             .unwrap();
         second
-            .upsert_provider("openrouter", discovery_entry())
+            .upsert_provider("openrouter", discovery_entry(), None)
             .await
             .unwrap();
         let mut replacement = discovery_entry();
         replacement.credential_fingerprint = "fedcba9876543210".to_string();
         replacement.models.truncate(1);
-        first.upsert_provider("openai", replacement).await.unwrap();
+        first
+            .upsert_provider("openai", replacement, None)
+            .await
+            .unwrap();
 
         let loaded = second.load_sync();
         assert_eq!(loaded.providers.len(), 2);
@@ -766,7 +956,7 @@ mod tests {
             .build()
             .unwrap();
         runtime
-            .block_on(cache.upsert_provider(&provider, discovery_entry()))
+            .block_on(cache.upsert_provider(&provider, discovery_entry(), None))
             .unwrap();
     }
 

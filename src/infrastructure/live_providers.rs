@@ -223,6 +223,35 @@ impl LiveProviders {
                 (entry, gated)
             })
             .collect();
+        // Lock order: apply -> each outgoing publication gate -> catalogue.
+        // Retirement waits only for admitted publication (including detached
+        // cache writers), never for credential resolution or a held request.
+        let old_catalogue = self.catalogue.load_full();
+        let old_discovery = self.discovery.load_full();
+        let mut retired = Vec::new();
+        for (entry, replacement) in &mut gated {
+            if matches!(replacement, Gated::Failed(_)) {
+                continue; // Construction failure leaves the serving target alive.
+            }
+            for old in old_catalogue
+                .iter()
+                .chain(old_discovery.iter())
+                .filter(|old| old.provider_id == entry.id)
+            {
+                if let Gated::Built { target, .. } = replacement {
+                    // Scope filtering remains the responsibility of usable_entry.
+                    // Ordering identity, unlike fallback memory, is never reused.
+                    target.last_live = old.last_live.clone();
+                }
+                if !retired
+                    .iter()
+                    .any(|order| Arc::ptr_eq(order, &old.refresh_order))
+                {
+                    old.refresh_order.retire().await;
+                    retired.push(old.refresh_order.clone());
+                }
+            }
+        }
         let active = self.router.active_delegate_id();
         let mut refresh = Vec::new();
         let mut notices = Vec::new();
@@ -232,18 +261,6 @@ impl LiveProviders {
             let mut discovery = Vec::clone(&self.discovery.load());
             let mut catalogue = Vec::clone(&self.catalogue.load());
             for (entry, gated) in &mut gated {
-                // A replaced target keeps its publication order and newest live
-                // roster: a refresh of the old target still in flight can then
-                // never publish over a refresh of the replacement.
-                if let Gated::Built { target, .. } = gated
-                    && let Some(old) = catalogue
-                        .iter()
-                        .chain(discovery.iter())
-                        .find(|old| old.provider_id == target.provider_id)
-                {
-                    target.refresh_order = old.refresh_order.clone();
-                    target.last_live = old.last_live.clone();
-                }
                 apply_gated(&self.registry, &self.router, &entry.id, gated);
                 let (entry, gated) = (&*entry, &*gated);
                 match gated {

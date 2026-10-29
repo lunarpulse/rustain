@@ -125,12 +125,26 @@ pub async fn run_login(
         }),
     });
     for (target, report) in ctx.live.refresh_changed(targets).await {
-        if let Some(line) = host::discovery_line(&target.display_name, &report) {
-            ctx.emit(LoginEvent::Discovered {
-                provider: target.provider_id,
-                line,
-            });
-        }
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        target
+            .refresh_order
+            .checkpoint(crate::adapters::model_catalog_cache::RefreshCheckpoint::BeforeCompletion)
+            .await;
+        report
+            .with_current(&target, || {
+                if let Some(line) = host::discovery_line(&target.display_name, &report) {
+                    ctx.emit(LoginEvent::Discovered {
+                        provider: target.provider_id.clone(),
+                        line,
+                    });
+                }
+            })
+            .await;
+        #[cfg(any(test, feature = "test-instrumentation"))]
+        target
+            .refresh_order
+            .checkpoint(crate::adapters::model_catalog_cache::RefreshCheckpoint::CompletionFinished)
+            .await;
     }
 }
 

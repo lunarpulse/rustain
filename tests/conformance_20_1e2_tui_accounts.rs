@@ -10,7 +10,7 @@
 #[path = "conformance_20_1e2_tui_accounts/commands.rs"]
 mod commands;
 #[path = "conformance_20_1e2_tui_accounts/common.rs"]
-mod common;
+pub(crate) mod common;
 #[path = "conformance_20_1e2_tui_accounts/disabled.rs"]
 mod disabled;
 #[path = "conformance_20_1e2_tui_accounts/logout.rs"]

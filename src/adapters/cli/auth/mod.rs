@@ -36,9 +36,10 @@ pub async fn rediscover(
         return;
     };
     let display = providers::lookup(provider).map_or(provider, |meta| meta.display_name);
-    match crate::adapters::auth::host::discovery_line(display, &report) {
-        Some(line) => eprintln!("{line}"),
-        None => eprintln!("{}", report.notice.unwrap_or_default()),
+    if let Some(line) = crate::adapters::auth::host::discovery_line(display, &report) {
+        eprintln!("{line}");
+    } else if let Some(notice) = report.notice {
+        eprintln!("{notice}");
     }
 }
 

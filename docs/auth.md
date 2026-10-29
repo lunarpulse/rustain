@@ -858,6 +858,12 @@ The [common slash syntax](#signing-in-from-the-tui) applies to both commands.
   silently, and removing the last credential locks the provider again (posting
   `OpenAI is now locked — choose another model (Ctrl+X, M).` when it was the
   active one).
+  Discovery from the replaced account or a pre-logout target cannot publish
+  models, cached rosters, status, credential-rejection warnings or a delayed
+  sign-in discovery line after that target is retired. Within a current target,
+  admitting a newer refresh supersedes older attempts immediately, even if the
+  newer request fails or is cancelled. A publication already admitted finishes
+  before the account change completes; held network requests never delay it.
 - **Errors.** An account removed meanwhile by another process keeps the step
   open with fresh rows and `Credential #<id> for <Provider> no longer exists.`; a
   disabled account answers `Credential #<id> for <Provider> is disabled
