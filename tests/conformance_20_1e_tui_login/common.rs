@@ -13,7 +13,7 @@ pub(crate) use crate::conformance_20_1d1b_codex_replay_discovery::common::{
 use ratatui::{Terminal, backend::TestBackend};
 use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
 use rustain::adapters::tui::clipboard::ClipboardResult;
-use rustain::adapters::tui::handlers::{login, model_switch};
+use rustain::adapters::tui::handlers::{accounts, login, model_switch};
 use rustain::adapters::tui::refresh_tracker::RefreshTracker;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
@@ -98,6 +98,18 @@ impl Tui {
             }
             InputAction::ExecuteCommand { name, args } if name == "login" => {
                 login::command(&mut self.state, &self.ctx, &self.app, args.as_deref());
+                None
+            }
+            InputAction::ExecuteCommand { name, args }
+                if name == "logout" || name == "accounts" =>
+            {
+                accounts::command(
+                    &mut self.state,
+                    &self.ctx,
+                    &self.app,
+                    &name,
+                    args.as_deref(),
+                );
                 None
             }
             InputAction::ExecuteCommand { name, .. } if name == "models" => {

@@ -33,7 +33,8 @@ use super::hyperlink::LinkSpan;
 use super::modal::{ModalPart, fit_modal, modal_area, wrapped};
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::state::{
-    FieldKind, LOGIN_PICKER_ROWS, LoginOverlayState, LoginSection, LoginView, Validation,
+    FieldKind, LOGIN_PICKER_ROWS, LoginOverlayState, LoginSection, LoginView, OverlayMode,
+    Validation,
 };
 use crate::adapters::tui::theme::Theme;
 
@@ -111,7 +112,16 @@ pub fn render(
     let inner_width = width.saturating_sub(2) as usize;
     let mut links = Vec::new();
     let (title, parts) = match state.view {
-        LoginView::ProviderPicker => (" Sign in ".to_string(), picker(state, inner_width, &styles)),
+        LoginView::ProviderPicker => (
+            match state.mode {
+                OverlayMode::Login => " Sign in ",
+                OverlayMode::Logout => " Log out ",
+                OverlayMode::Accounts => " Accounts ",
+            }
+            .to_string(),
+            picker(state, inner_width, &styles),
+        ),
+        LoginView::AccountPicker => account_step(state, inner_width, &styles),
         LoginView::MethodPicker => {
             let display = state.target.as_ref().map_or("", |(_, display)| display);
             (
@@ -207,20 +217,17 @@ fn picker(state: &LoginOverlayState, width: usize, styles: &Styles) -> Vec<Modal
             let Some(row) = state.rows.get(*index) else {
                 continue;
             };
-            let status = match &row.row.source {
-                None => "not signed in".to_string(),
-                Some(source) => {
+            // Logout and accounts rows carry no validation marker (no check runs).
+            let status = match (&row.row.source, state.mode) {
+                (Some(_), OverlayMode::Login) => {
                     let validation = match row.validation {
                         Validation::Checking => "checking…",
                         Validation::Valid => "● logged in",
                         Validation::Invalid => "✘ invalid",
                     };
-                    let mut status = format!("{validation} · {source}");
-                    if row.row.accounts > 1 {
-                        status.push_str(&format!(" · {} accounts", row.row.accounts));
-                    }
-                    status
+                    format!("{validation} · {}", row.row.status)
                 }
+                _ => row.row.status.clone(),
             };
             let chosen = position == state.selected;
             if chosen {
@@ -240,19 +247,138 @@ fn picker(state: &LoginOverlayState, width: usize, styles: &Styles) -> Vec<Modal
             }
         }
     }
-    let footer = if state.query.is_empty() {
-        "↑↓ navigate · Enter sign in · Esc close"
-    } else {
-        "↑↓ navigate · Enter sign in · Esc clear"
+    let action = match state.mode {
+        OverlayMode::Login => "sign in",
+        OverlayMode::Logout | OverlayMode::Accounts => "choose",
     };
+    let escape = if state.query.is_empty() {
+        "close"
+    } else {
+        "clear"
+    };
+    let footer = format!("↑↓ navigate · Enter {action} · Esc {escape}");
     vec![
         ModalPart::Header(header),
         ModalPart::Rows {
             lines: rows,
             selected,
         },
-        ModalPart::Footer(wrapped(footer, styles.muted, width)),
+        ModalPart::Footer(wrapped(&footer, styles.muted, width)),
     ]
+}
+
+/// One unwrapped line that keeps its column spacing, cut to `width` cells
+/// with `…`.
+fn single_line(text: &str, style: Style, width: usize) -> Line<'static> {
+    if text.width() <= width {
+        return Line::from(Span::styled(text.to_owned(), style));
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells + 1 > width {
+            break;
+        }
+        out.push(ch);
+        used += cells;
+    }
+    out.push('…');
+    Line::from(Span::styled(out, style))
+}
+
+/// The `/logout` / `/accounts` account step: the `auth accounts` header, at
+/// most ten rows around the cursor, an optional notice and the footer.
+fn account_step(
+    state: &LoginOverlayState,
+    width: usize,
+    styles: &Styles,
+) -> (String, Vec<ModalPart>) {
+    let Some(step) = &state.account else {
+        return (String::new(), Vec::new());
+    };
+    let logout = state.mode == OverlayMode::Logout;
+    let Some(listing) = &step.listing else {
+        let title = if logout { " Log out " } else { " Accounts " };
+        // Esc goes back to the provider step when the step came from it.
+        let footer = if step.from_picker {
+            "Esc back"
+        } else {
+            "Esc close"
+        };
+        return (
+            title.to_string(),
+            vec![
+                ModalPart::Rows {
+                    lines: wrapped("Loading accounts…", styles.muted, width),
+                    selected: (0, 0),
+                },
+                ModalPart::Footer(wrapped(footer, styles.muted, width)),
+            ],
+        );
+    };
+    let display = clean(&listing.display);
+    let title = if logout {
+        format!(" Log out of {display} ")
+    } else {
+        format!(" {display} accounts ")
+    };
+    let mut rows = Vec::new();
+    let mut selected = (0, 0);
+    if listing.rows.is_empty() {
+        rows.extend(wrapped("No stored accounts", styles.muted, width));
+    }
+    let len = listing.rows.len();
+    let start = step
+        .selected
+        .saturating_sub(LOGIN_PICKER_ROWS / 2)
+        .min(len.saturating_sub(LOGIN_PICKER_ROWS));
+    for (position, row) in listing
+        .rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(LOGIN_PICKER_ROWS)
+    {
+        let chosen = position == step.selected;
+        if chosen {
+            selected.0 = rows.len();
+        }
+        rows.push(single_line(
+            &format!("{}{}", if chosen { "▸ " } else { "  " }, row.text),
+            if chosen { styles.accent } else { styles.text },
+            width,
+        ));
+        if chosen {
+            selected.1 = rows.len();
+        }
+    }
+    let footer = if step.busy {
+        "Working…".to_string()
+    } else {
+        format!(
+            "↑↓ navigate · Enter {} · Esc {}",
+            if logout { "log out" } else { "make active" },
+            if step.from_picker { "back" } else { "close" }
+        )
+    };
+    let notice = step
+        .notice
+        .as_deref()
+        .map(|notice| wrapped(notice, styles.accent, width))
+        .unwrap_or_default();
+    (
+        title,
+        vec![
+            ModalPart::Header(wrapped(&listing.header, styles.text, width)),
+            ModalPart::Notice(notice),
+            ModalPart::Rows {
+                lines: rows,
+                selected,
+            },
+            ModalPart::Footer(wrapped(&footer, styles.muted, width)),
+        ],
+    )
 }
 
 fn methods(state: &LoginOverlayState, width: usize, styles: &Styles) -> Vec<ModalPart> {

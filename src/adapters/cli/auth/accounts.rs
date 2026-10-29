@@ -3,11 +3,10 @@
 
 use std::sync::Arc;
 
+use crate::adapters::auth::host;
 use crate::domain::models::{AppConfig, CredentialOrigin};
 use crate::domain::ports::AuthStorePort;
-use crate::infrastructure::auth_accounts::{
-    AccountKind, ProviderAccounts, ServedSource, describe, labelled,
-};
+use crate::infrastructure::auth_accounts::{AccountKind, ProviderAccounts, ServedSource, describe};
 
 pub const ACCOUNTS_SCHEMA_VERSION: &str = "1.0";
 
@@ -67,19 +66,13 @@ fn render_human(listed: &[ProviderAccounts]) -> String {
         }
         out.push_str(&header(accounts));
         for row in &accounts.rows {
-            let state = match (&row.disabled_cause, row.selected, row.served) {
-                (Some(cause), _, _) => format!("disabled: {cause}"),
-                (None, true, true) => "active".into(),
-                (None, true, false) => "selected".into(),
-                (None, false, true) => "serving".into(),
-                (None, false, false) => String::new(),
-            };
             let line = format!(
-                "  #{}  {}  {}  {}  {state}",
+                "  #{}  {}  {}  {}  {}",
                 row.id.0,
                 row.label,
                 row.kind.token(),
                 origin_token(row.origin),
+                host::row_state(row),
             );
             out.push_str(line.trim_end());
             out.push('\n');
@@ -89,14 +82,7 @@ fn render_human(listed: &[ProviderAccounts]) -> String {
 }
 
 fn header(accounts: &ProviderAccounts) -> String {
-    let serving = accounts.served_phrase().map_or_else(
-        || "no usable credential".to_owned(),
-        |phrase| format!("serving {phrase}"),
-    );
-    format!(
-        "{} ({}): {serving}\n",
-        accounts.display_name, accounts.provider
-    )
+    format!("{}\n", host::account_header(accounts))
 }
 
 pub(super) fn origin_token(origin: CredentialOrigin) -> &'static str {
@@ -168,6 +154,7 @@ mod tests {
                 provider: "openai".into(),
                 display_name: "OpenAI".into(),
                 served: Some(ServedSource::Row(CredentialId(2))),
+                unread: None,
                 rows: vec![
                     row(1, "API key #1", true, false),
                     row(2, "API key #2", false, true),
@@ -179,12 +166,14 @@ mod tests {
                 provider: "openrouter".into(),
                 display_name: "OpenRouter".into(),
                 served: Some(ServedSource::Env("OPENROUTER_API_KEY".into())),
+                unread: None,
                 rows: vec![],
             },
             ProviderAccounts {
                 provider: "xai".into(),
                 display_name: "xAI".into(),
                 served: None,
+                unread: None,
                 rows: vec![row(9, "API key #9", true, false)],
             },
         ];
@@ -199,6 +188,109 @@ mod tests {
              OpenRouter (openrouter): serving OPENROUTER_API_KEY\n\
              xAI (xai): no usable credential\n\
              \x20 #9  API key #9  api_key  login  selected\n"
+        );
+    }
+
+    fn accounts(
+        served: Option<ServedSource>,
+        unread: Option<crate::infrastructure::auth_accounts::Unread>,
+        rows: Vec<AccountRow>,
+    ) -> ProviderAccounts {
+        ProviderAccounts {
+            provider: "openai".into(),
+            display_name: "OpenAI".into(),
+            served,
+            unread,
+            rows,
+        }
+    }
+
+    /// The texts `auth logout --id`, `auth use` and the TUI share: today's CLI
+    /// bytes for an enabled reader, the disabled-entry sentence otherwise.
+    #[test]
+    fn shared_account_texts_keep_the_cli_bytes() {
+        use crate::infrastructure::auth_accounts::Unread;
+        let id = CredentialId(2);
+        let served = accounts(
+            Some(ServedSource::Row(CredentialId(1))),
+            None,
+            vec![row(1, "API key #1", true, true)],
+        );
+        assert_eq!(
+            host::logout_lines(&served, id, Some("API key #2".into())),
+            [
+                "Logged out of OpenAI account API key #2.",
+                "OpenAI now uses API key #1."
+            ]
+        );
+        assert_eq!(
+            host::logout_lines(&accounts(None, None, vec![]), id, None),
+            [
+                "Logged out of OpenAI account #2.",
+                "No OpenAI credentials remain."
+            ]
+        );
+        let mut revoked = row(1, "API key #1", false, false);
+        revoked.disabled_cause = Some("revoked".into());
+        assert_eq!(
+            host::logout_lines(&accounts(None, None, vec![revoked.clone()]), id, None)[1],
+            "OpenAI has no usable credential."
+        );
+        assert_eq!(
+            host::logout_lines(
+                &accounts(None, Some(Unread::NoReader), vec![revoked]),
+                id,
+                None
+            )[1],
+            "No enabled provider reads OpenAI credentials."
+        );
+
+        let env = accounts(
+            Some(ServedSource::Env("OPENAI_API_KEY".into())),
+            None,
+            vec![row(2, "API key #2", true, false)],
+        );
+        assert_eq!(
+            host::select_lines(&env, id),
+            [
+                "Active OpenAI account: API key #2.",
+                "Note: OpenAI is currently served by OPENAI_API_KEY."
+            ]
+        );
+        let row_served = accounts(
+            Some(ServedSource::Row(id)),
+            None,
+            vec![row(2, "API key #2", true, true)],
+        );
+        assert_eq!(
+            host::select_lines(&row_served, id),
+            ["Active OpenAI account: API key #2."]
+        );
+        let disabled = accounts(
+            None,
+            Some(Unread::Disabled),
+            vec![row(2, "API key #2", true, false)],
+        );
+        assert_eq!(
+            host::select_lines(&disabled, id)[1],
+            "Note: OpenAI is disabled in configuration."
+        );
+        assert_eq!(
+            host::select_lines(
+                &accounts(None, None, vec![row(2, "API key #2", true, false)]),
+                id
+            )[1],
+            "Note: OpenAI has no usable credential."
+        );
+        assert_eq!(
+            header(&disabled),
+            "OpenAI (openai): disabled in configuration\n"
+        );
+        assert_eq!(host::status_text(&disabled), "disabled in configuration");
+        assert_eq!(host::status_text(&served), "login");
+        assert_eq!(
+            host::status_text(&accounts(None, None, vec![])),
+            "not signed in"
         );
     }
 }

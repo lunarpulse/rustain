@@ -215,7 +215,7 @@ impl LiveProviders {
         if auth_change_key(&after, rows_key) == auth_change_key(before, rows_key) {
             return Vec::new();
         }
-        let gated: Vec<_> = effective_providers(app_config)
+        let mut gated: Vec<_> = effective_providers(app_config)
             .into_iter()
             .filter(|entry| entry.cfg.enabled && entry.rows_key() == rows_key)
             .map(|entry| {
@@ -231,8 +231,21 @@ impl LiveProviders {
         self.registry.with_catalog_update(|| {
             let mut discovery = Vec::clone(&self.discovery.load());
             let mut catalogue = Vec::clone(&self.catalogue.load());
-            for (entry, gated) in &gated {
+            for (entry, gated) in &mut gated {
+                // A replaced target keeps its publication order and newest live
+                // roster: a refresh of the old target still in flight can then
+                // never publish over a refresh of the replacement.
+                if let Gated::Built { target, .. } = gated
+                    && let Some(old) = catalogue
+                        .iter()
+                        .chain(discovery.iter())
+                        .find(|old| old.provider_id == target.provider_id)
+                {
+                    target.refresh_order = old.refresh_order.clone();
+                    target.last_live = old.last_live.clone();
+                }
                 apply_gated(&self.registry, &self.router, &entry.id, gated);
+                let (entry, gated) = (&*entry, &*gated);
                 match gated {
                     Gated::Built { target, .. } => {
                         discovery.retain(|t| t.provider_id != target.provider_id);

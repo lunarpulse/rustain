@@ -1,23 +1,30 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::future::BoxFuture;
 
 use crate::domain::models::AppConfig;
+use crate::domain::ports::AuthStorePort;
 use crate::infrastructure::paths;
 
 /// Entry point for the `rustain init` wizard.
 ///
 /// Runs in standard terminal mode (NOT ratatui). Uses println!/print! for output
-/// and std::io::stdin() for input. Must NOT trigger provider construction or terminal setup.
-pub async fn run_init() -> Result<()> {
-    run_init_with_paths(None, None).await
+/// and std::io::stdin() for input. The wizard itself never constructs a
+/// provider or sets up the terminal; its last, opt-in step is the CLI sign-in
+/// (`rustain auth login`), whose offline behaviour is that command's. `reload`
+/// is the startup configuration loader.
+pub async fn run_init(reload: &dyn Fn() -> AppConfig) -> Result<()> {
+    run_init_with_paths(None, None, reload).await
 }
 
 /// Testable init implementation that accepts optional path overrides.
 pub async fn run_init_with_paths(
     config_dir_override: Option<PathBuf>,
     workspace_override: Option<PathBuf>,
+    reload: &dyn Fn() -> AppConfig,
 ) -> Result<()> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
@@ -25,17 +32,166 @@ pub async fn run_init_with_paths(
             "rustain init requires an interactive terminal. Use `rustain init --non-interactive` for CI environments (available in a future release)."
         );
     }
-    let stdout = std::io::stdout();
-    let mut input = stdin.lock();
-    let mut output = stdout.lock();
-    run_init_with_io(
-        config_dir_override,
-        workspace_override,
-        true,
-        find_api_key_var(),
-        &mut input,
-        &mut output,
+    {
+        // Released before the sign-in step: its reads go through the CLI's
+        // one terminal-input owner, which shares this buffered stdin.
+        let stdout = std::io::stdout();
+        let mut input = stdin.lock();
+        let mut output = stdout.lock();
+        run_init_with_io(
+            config_dir_override,
+            workspace_override,
+            true,
+            find_api_key_var(),
+            &mut input,
+            &mut output,
+        )?;
+    }
+    let tty = TtyFlags {
+        stdin: true,
+        stdout: std::io::stdout().is_terminal(),
+        stderr: std::io::stderr().is_terminal(),
+    };
+    let store: Arc<dyn AuthStorePort> = Arc::new(crate::adapters::auth_store::FileAuthStore::new());
+    run_sign_in_step(
+        tty,
+        reload,
+        &store,
+        &mut PumpLines,
+        &mut std::io::stdout(),
+        &CliSignIn {
+            store: store.clone(),
+        },
     )
+    .await
+}
+
+/// Which standard streams are terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtyFlags {
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
+}
+
+/// The sign-in step's answers; `None` is end of input or Ctrl+C.
+pub trait LineSource {
+    fn next_line(&mut self) -> BoxFuture<'_, Option<String>>;
+}
+
+/// Production answers: the CLI's terminal-input owner, raced with Ctrl+C.
+struct PumpLines;
+
+impl LineSource for PumpLines {
+    fn next_line(&mut self) -> BoxFuture<'_, Option<String>> {
+        Box::pin(async {
+            tokio::select! {
+                line = crate::adapters::cli::auth::stdin_lines::line() => line,
+                _ = tokio::signal::ctrl_c() => None,
+            }
+        })
+    }
+}
+
+/// One sign-in of the step, with this pass's configuration.
+pub trait InitSignIn {
+    fn login<'a>(&'a self, provider: &'a str, app: &'a AppConfig) -> BoxFuture<'a, Result<()>>;
+}
+
+/// Production sign-in: exactly `rustain auth login <provider>`.
+struct CliSignIn {
+    store: Arc<dyn AuthStorePort>,
+}
+
+impl InitSignIn for CliSignIn {
+    fn login<'a>(&'a self, provider: &'a str, app: &'a AppConfig) -> BoxFuture<'a, Result<()>> {
+        Box::pin(crate::adapters::cli::auth::login::login_and_rediscover(
+            provider,
+            None,
+            false,
+            &self.store,
+            app,
+        ))
+    }
+}
+
+const SIGN_IN_SKIPPED: &str = "Skipping provider sign-in (not an interactive terminal). Run `rustain auth login <provider>` to sign in later.";
+
+/// The opt-in last step of `rustain init`: list the sign-in targets the
+/// startup configuration offers, sign in to the chosen one through the CLI
+/// login, and list again until Enter, end of input or Ctrl+C. Needs stdin,
+/// stdout and stderr on a terminal (the login prompts on stderr).
+pub async fn run_sign_in_step(
+    tty: TtyFlags,
+    reload: &dyn Fn() -> AppConfig,
+    store: &Arc<dyn AuthStorePort>,
+    lines: &mut dyn LineSource,
+    out: &mut dyn Write,
+    sign_in: &dyn InitSignIn,
+) -> Result<()> {
+    if !(tty.stdin && tty.stdout && tty.stderr) {
+        writeln!(out, "{SIGN_IN_SKIPPED}")?;
+        return Ok(());
+    }
+    writeln!(out)?;
+    write!(out, "Sign in to a model provider now? [y/n] ")?;
+    out.flush()?;
+    let answer = lines.next_line().await.unwrap_or_default();
+    if !answer.trim().starts_with(['y', 'Y']) {
+        return Ok(());
+    }
+    loop {
+        let app = reload();
+        let targets = crate::adapters::auth::host::login_targets(&app);
+        if targets.is_empty() {
+            writeln!(out, "No provider to sign in to is enabled.")?;
+            return Ok(());
+        }
+        let (snapshot, store_error) = crate::adapters::cli::auth::snapshot_or_warn(store).await;
+        if let Some(error) = &store_error {
+            eprintln!("warning: auth.json unreadable; stored credentials ignored: {error}");
+        }
+        writeln!(out)?;
+        for (index, target) in targets.iter().enumerate() {
+            let accounts = crate::infrastructure::auth_accounts::describe(
+                &snapshot,
+                &app,
+                &target.id,
+                &crate::infrastructure::utils::env_var_trimmed,
+            );
+            writeln!(
+                out,
+                "  {}. {} — {}",
+                index + 1,
+                target.display,
+                crate::adapters::auth::host::status_text(&accounts)
+            )?;
+        }
+        let provider = loop {
+            write!(out, "Provider [1-{}, Enter to finish]: ", targets.len())?;
+            out.flush()?;
+            let Some(line) = lines.next_line().await else {
+                return Ok(());
+            };
+            let line = line.trim();
+            if line.is_empty() {
+                return Ok(());
+            }
+            match line
+                .parse::<usize>()
+                .ok()
+                .and_then(|n| n.checked_sub(1))
+                .and_then(|index| targets.get(index))
+            {
+                Some(target) => break target.id.clone(),
+                None => writeln!(out, "Choose 1-{}, or press Enter to finish.", targets.len())?,
+            }
+        };
+        // A failed login already printed its error once.
+        if sign_in.login(&provider, &app).await.is_err() {
+            writeln!(out, "Choose another provider or press Enter to finish.")?;
+        }
+    }
 }
 
 fn run_init_with_io<R: BufRead, W: Write>(
@@ -126,8 +282,11 @@ pub fn find_api_key_var() -> Option<&'static str> {
     None
 }
 
-// AC4 guard: `run_init` does no network I/O today (detect_api_key reads env only).
-// If a live key-validation step is ever added, it MUST skip on transport error with:
+// AC4 guard: the wizard (`run_init_with_io`) does no network I/O (detect_api_key
+// reads env only). The opt-in sign-in step after it is `rustain auth login`,
+// whose offline result is that command's: `⚠  Could not confirm key — …
+// stored unvalidated.` Any other live key-validation step MUST skip on
+// transport error with:
 // "⚠ Skipped API key validation (offline). Verify later with 'rustain doctor'."
 /// Detect API key presence from environment variables.
 /// Returns true if a key was found and user confirmed, false otherwise.
@@ -513,9 +672,10 @@ mod tests {
 
     /// AC4 guard: `find_api_key_var` reads only environment variables — no network I/O.
     /// `detect_api_key` delegates to `find_api_key_var` + `prompt_yes_no` (stdin only).
-    /// `run_init_with_paths` calls `detect_api_key`, `create_directories`, `write_config_toml`,
+    /// `run_init_with_io` calls `detect_api_key`, `create_directories`, `write_config_toml`,
     /// `write_settings_json`, and `display_summary` — all pure file/env/stdio operations.
-    /// Therefore `run_init` completes with no network by construction.
+    /// Therefore the wizard completes with no network by construction; only the
+    /// opt-in sign-in step (`rustain auth login`) may reach a provider.
     /// This test exercises `find_api_key_var` with no API keys set, confirming it returns
     /// `None` without any network call, satisfying AC4's offline guard.
     #[test]
@@ -727,5 +887,165 @@ mod tests {
         assert!(!config_dir.exists());
         assert!(!workspace.exists());
         assert!(output.is_empty());
+    }
+
+    /// Scripted answers; counts every read.
+    struct Answers {
+        lines: std::collections::VecDeque<Option<String>>,
+        reads: usize,
+    }
+    impl Answers {
+        fn new(lines: &[Option<&str>]) -> Self {
+            Self {
+                lines: lines.iter().map(|l| l.map(str::to_owned)).collect(),
+                reads: 0,
+            }
+        }
+    }
+    impl LineSource for Answers {
+        fn next_line(&mut self) -> BoxFuture<'_, Option<String>> {
+            self.reads += 1;
+            let line = self.lines.pop_front().flatten();
+            Box::pin(async move { line })
+        }
+    }
+
+    /// Records each sign-in (provider and the configuration it was given).
+    struct Recorder {
+        calls: std::sync::mpsc::Sender<(String, String)>,
+        fail: bool,
+    }
+    impl InitSignIn for Recorder {
+        fn login<'a>(&'a self, provider: &'a str, app: &'a AppConfig) -> BoxFuture<'a, Result<()>> {
+            let _ = self.calls.send((provider.to_owned(), app.model.clone()));
+            let fail = self.fail;
+            Box::pin(async move {
+                if fail {
+                    anyhow::bail!("scripted failure")
+                }
+                Ok(())
+            })
+        }
+    }
+
+    struct Step {
+        output: String,
+        calls: Vec<(String, String)>,
+        reads: usize,
+    }
+
+    async fn step(tty: TtyFlags, answers: &[Option<&str>], fail: bool) -> Step {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store: Arc<dyn AuthStorePort> = Arc::new(
+            crate::adapters::auth_store::FileAuthStore::at(tmp.path().join("auth.json")),
+        );
+        let reload = || AppConfig {
+            model: "reload-marker".into(),
+            ..AppConfig::default()
+        };
+        let (calls, recorded) = std::sync::mpsc::channel();
+        let mut lines = Answers::new(answers);
+        let mut output = Vec::new();
+        run_sign_in_step(
+            tty,
+            &reload,
+            &store,
+            &mut lines,
+            &mut output,
+            &Recorder { calls, fail },
+        )
+        .await
+        .unwrap();
+        Step {
+            output: String::from_utf8(output).unwrap(),
+            calls: recorded.try_iter().collect(),
+            reads: lines.reads,
+        }
+    }
+
+    const TTY: TtyFlags = TtyFlags {
+        stdin: true,
+        stdout: true,
+        stderr: true,
+    };
+
+    /// K7: yes → the startup loader's list → the chosen target signs in with
+    /// that pass's configuration → the list again → end of input finishes.
+    #[tokio::test]
+    async fn sign_in_step_lists_logs_in_and_lists_again() {
+        let targets = crate::adapters::auth::host::login_targets(&AppConfig::default());
+        let second = format!("  2. {} — ", targets[1].display);
+        let run = step(TTY, &[Some("y\n"), Some("2\n"), None], false).await;
+        assert_eq!(
+            run.calls,
+            [(targets[1].id.clone(), "reload-marker".to_owned())]
+        );
+        assert_eq!(run.output.matches(&second).count(), 2, "{}", run.output);
+        assert!(
+            run.output
+                .contains("Sign in to a model provider now? [y/n] ")
+        );
+        assert!(run.output.contains(&format!(
+            "Provider [1-{}, Enter to finish]: ",
+            targets.len()
+        )));
+        assert!(!run.output.contains("Choose another provider"));
+
+        // A failed login: only the continue line separates the lists; an
+        // invalid choice asks again; Enter finishes.
+        let failed = step(
+            TTY,
+            &[Some("Y\n"), Some("x\n"), Some("1\n"), Some("\n")],
+            true,
+        )
+        .await;
+        assert_eq!(failed.calls.len(), 1);
+        let after_prompt = failed
+            .output
+            .split(&format!(
+                "Provider [1-{}, Enter to finish]: ",
+                targets.len()
+            ))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_prompt[1],
+            format!("Choose 1-{}, or press Enter to finish.\n", targets.len())
+        );
+        assert!(
+            after_prompt[2]
+                .starts_with("Choose another provider or press Enter to finish.\n\n  1. "),
+            "{:?}",
+            after_prompt[2]
+        );
+
+        // Anything but yes skips the step.
+        let no = step(TTY, &[Some("n\n")], false).await;
+        assert!(no.calls.is_empty());
+        assert!(!no.output.contains("  1. "));
+        assert_eq!(no.reads, 1);
+    }
+
+    /// K7 gate: stdout or stderr off a terminal skips the step without a read.
+    #[tokio::test]
+    async fn sign_in_step_needs_every_stream_on_a_terminal() {
+        for tty in [
+            TtyFlags {
+                stdout: false,
+                ..TTY
+            },
+            TtyFlags {
+                stderr: false,
+                ..TTY
+            },
+        ] {
+            let run = step(tty, &[Some("y\n"), Some("1\n")], false).await;
+            assert_eq!(run.output, format!("{SIGN_IN_SKIPPED}\n"), "{tty:?}");
+            assert_eq!(
+                SIGN_IN_SKIPPED,
+                "Skipping provider sign-in (not an interactive terminal). Run `rustain auth login <provider>` to sign in later."
+            );
+            assert!(run.calls.is_empty(), "{tty:?}");
+            assert_eq!(run.reads, 0, "{tty:?}");
+        }
     }
 }

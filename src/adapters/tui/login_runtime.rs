@@ -11,7 +11,6 @@ use crate::adapters::tui::login_ui::{Opener, TuiLoginUi};
 use crate::domain::events::{AppEvent, LoginEvent, LoginFailure, LoginSummary, LoginTargetRow};
 use crate::domain::models::{AppConfig, AuthMethod};
 use crate::domain::ports::AuthStorePort;
-use crate::infrastructure::auth_accounts::{AccountKind, ProviderAccounts, ServedSource};
 use crate::infrastructure::live_providers::LiveProviders;
 use crate::infrastructure::runtime::event_bus::EventBus;
 use std::sync::Arc;
@@ -160,25 +159,6 @@ async fn run_login(
     }
 }
 
-/// The `auth status` source vocabulary for what serves a provider, plus omp's
-/// `env: <VAR>`.
-fn source_label(accounts: &ProviderAccounts) -> Option<String> {
-    Some(match accounts.served.as_ref()? {
-        ServedSource::Row(id) => {
-            let row = accounts.rows.iter().find(|row| row.id == *id)?;
-            if row.kind == AccountKind::OAuth {
-                "oauth".into()
-            } else if row.origin == crate::domain::models::CredentialOrigin::Login {
-                "login".into()
-            } else {
-                "stored".into()
-            }
-        }
-        ServedSource::Env(var) => format!("env: {var}"),
-        ServedSource::Runtime => "runtime".into(),
-    })
-}
-
 /// Reads the store once, emits the picker rows, then validates every served
 /// credential through the handle its adapter would use.
 pub(crate) fn spawn_targets(ctx: LoginCtx, app: AppConfig, generation: u64) {
@@ -191,7 +171,7 @@ pub(crate) fn spawn_targets(ctx: LoginCtx, app: AppConfig, generation: u64) {
         for target in host::login_targets(&app) {
             let accounts =
                 crate::infrastructure::auth_accounts::describe(&snapshot, &app, &target.id, &env);
-            let source = source_label(&accounts);
+            let source = host::source_label(&accounts);
             let entry = entries
                 .iter()
                 .find(|entry| entry.cfg.enabled && entry.rows_key() == target.id);
@@ -215,7 +195,7 @@ pub(crate) fn spawn_targets(ctx: LoginCtx, app: AppConfig, generation: u64) {
                 id: target.id,
                 display: display_text(&target.display),
                 source,
-                accounts: accounts.rows.len(),
+                status: host::status_text(&accounts),
             });
         }
         ctx.emit(LoginEvent::Targets { generation, rows });
@@ -347,9 +327,11 @@ mod tests {
         use crate::domain::models::FocusState;
         use crate::domain::models::visual::{ConfirmationType, OverlayType};
         let mut state = TuiState::new(80, 24);
-        state
-            .login
-            .open_picker(FocusState::Input, LoginOrigin::Slash);
+        state.login.open_picker(
+            FocusState::Input,
+            LoginOrigin::Slash,
+            crate::adapters::tui::state::OverlayMode::Login,
+        );
         state.focus = LOGIN;
         state
             .permission_queue

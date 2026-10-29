@@ -673,8 +673,22 @@ pub enum LoginEvent {
         provider: String,
         valid: bool,
     },
+    /// The account step's rows for one provider (`/logout <id>`, `/accounts <id>`
+    /// or a provider chosen in their provider step).
+    Accounts {
+        generation: u64,
+        listing: AccountListing,
+    },
+    /// An account listing that cannot open, or the result of a logout or
+    /// selection: `listing` keeps the account step open with refreshed rows
+    /// and `lines` as its notice; `None` closes the overlay and shows `lines`.
+    AccountsChanged {
+        generation: u64,
+        level: crate::domain::models::FeedbackLevel,
+        lines: Vec<String>,
+        listing: Option<AccountListing>,
+    },
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginSummary {
     /// The CLI's success line(s) and the credential path.
@@ -688,15 +702,39 @@ pub enum LoginFailure {
     Failed(String),
 }
 
-/// One provider-picker row; `source` is `None` when nothing serves the provider.
+/// One provider row of the sign-in, logout or accounts picker; `source` is
+/// `None` when nothing serves the provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginTargetRow {
     pub id: String,
     pub display: String,
     pub source: Option<String>,
-    pub accounts: usize,
+    /// The row's status text: the source, why nothing reads the provider's
+    /// rows, or `not signed in`, with ` · N accounts` for several rows.
+    pub status: String,
     /// Searchable text besides the display name: id, source and env variable.
     pub search: String,
+}
+
+/// One provider's stored accounts as the TUI account step shows them. Labels
+/// are already sanitized and never carry key bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountListing {
+    /// The store key.
+    pub provider: String,
+    pub display: String,
+    /// `<Display> (<id>): <state>`, the `auth accounts` header.
+    pub header: String,
+    /// Served first, then by label, then by id.
+    pub rows: Vec<AccountListRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountListRow {
+    pub id: u64,
+    /// `#<id>  <label>  <oauth|api key>  <state>`.
+    pub text: String,
+    pub served: bool,
 }
 /// Purpose of a compaction operation.
 #[derive(Debug, Clone)]

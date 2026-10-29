@@ -58,6 +58,24 @@ pub async fn run_auth_login(
     }
     result
 }
+/// `rustain auth login` end to end, shared by its startup arm and the
+/// `rustain init` sign-in step: the login (which prints its own error once),
+/// then, on success, the provider's rediscovery and its discovery line.
+pub async fn login_and_rediscover(
+    provider: &str,
+    method: Option<AuthLoginMethod>,
+    json: bool,
+    store: &Arc<dyn AuthStorePort>,
+    app_config: &AppConfig,
+) -> Result<()> {
+    let before =
+        crate::adapters::auth_store::FileAuthStore::try_snapshot_sync().unwrap_or_default();
+    let result = run_auth_login(provider.to_owned(), method, json, store, app_config).await;
+    if result.is_ok() {
+        super::rediscover(provider, app_config, &before).await;
+    }
+    result
+}
 async fn run(
     provider_id: &str,
     requested: Option<AuthLoginMethod>,
@@ -83,7 +101,7 @@ async fn run(
         }
         return Ok(());
     }
-    let method = select_method(methods, requested, std::io::stdin().is_terminal())?;
+    let method = select_method(methods, requested, std::io::stdin().is_terminal()).await?;
     if matches!(method, AuthMethod::ApiKey) && !std::io::stdin().is_terminal() {
         bail!(
             "auth login requires an interactive terminal (stdin is not a TTY). Set {} instead, or pipe through a TTY.",
@@ -129,23 +147,13 @@ async fn run(
     }
     Ok(())
 }
-fn select_method(
+/// The method a `--method` flag or a single method decides; `None` when the
+/// menu must ask.
+fn decided_method(
     methods: &[AuthMethod],
     requested: Option<AuthLoginMethod>,
     tty: bool,
-) -> Result<&AuthMethod> {
-    select_method_with_input(methods, requested, tty, || {
-        let mut value = String::new();
-        std::io::stdin().read_line(&mut value)?;
-        Ok(value)
-    })
-}
-fn select_method_with_input(
-    methods: &[AuthMethod],
-    requested: Option<AuthLoginMethod>,
-    tty: bool,
-    read: impl FnOnce() -> std::io::Result<String>,
-) -> Result<&AuthMethod> {
+) -> Result<Option<&AuthMethod>> {
     if let Some(requested) = requested {
         return methods
             .iter()
@@ -160,12 +168,13 @@ fn select_method_with_input(
                         | (AuthLoginMethod::Device, AuthMethod::Device(_))
                 )
             })
+            .map(Some)
             .ok_or_else(|| {
                 anyhow::anyhow!("Requested --method is not available for this provider")
             });
     }
     if methods.len() == 1 {
-        return Ok(&methods[0]);
+        return Ok(Some(&methods[0]));
     }
     if !tty {
         bail!(
@@ -173,13 +182,34 @@ fn select_method_with_input(
             method_choices(methods)
         );
     }
+    Ok(None)
+}
+/// The flag's or the only method, else the menu's choice read through the
+/// process's one terminal-input owner.
+async fn select_method(
+    methods: &[AuthMethod],
+    requested: Option<AuthLoginMethod>,
+    tty: bool,
+) -> Result<&AuthMethod> {
+    if let Some(method) = decided_method(methods, requested, tty)? {
+        return Ok(method);
+    }
+    print_method_menu(methods)?;
+    let value = super::stdin_lines::line().await.unwrap_or_default();
+    parse_method_choice(&value, methods)
+}
+fn print_method_menu(methods: &[AuthMethod]) -> Result<()> {
     eprintln!("Choose a login method:");
     for (index, method) in methods.iter().enumerate() {
         eprintln!("  {}. {}", index + 1, method.label());
     }
     eprint!("Method [1-{}]: ", methods.len());
     std::io::stderr().flush()?;
-    let value = read()?;
+    Ok(())
+}
+/// A menu answer: `1`..`N`; anything else (empty or end of input included)
+/// is `Invalid login method selection`.
+fn parse_method_choice<'a>(value: &str, methods: &'a [AuthMethod]) -> Result<&'a AuthMethod> {
     let index = value
         .trim()
         .parse::<usize>()
@@ -227,31 +257,44 @@ mod tests {
         login_name: "Device Product",
         flow: DeviceFlow::OpenAiCodex,
     };
+    /// The decision without a menu read (the menu path is `parse_method_choice`).
+    fn select(
+        methods: &[AuthMethod],
+        requested: Option<AuthLoginMethod>,
+        tty: bool,
+    ) -> Result<&AuthMethod> {
+        decided_method(methods, requested, tty)?.ok_or_else(|| anyhow::anyhow!("menu"))
+    }
     #[test]
     fn method_override_and_non_tty_picker_boundary() {
         let methods = providers::lookup("anthropic").unwrap().auth_methods;
         assert_eq!(
-            select_method(methods, None, false).unwrap_err().to_string(),
+            select(methods, None, false).unwrap_err().to_string(),
             "Multiple login methods are available; choose --method oauth or --method api-key."
         );
-        assert!(select_method(methods, Some(AuthLoginMethod::Device), false).is_err());
+        assert!(select(methods, Some(AuthLoginMethod::Device), false).is_err());
         assert!(matches!(
-            select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
+            select(methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
             AuthMethod::OAuthCode(_)
         ));
         assert!(matches!(
-            select_method(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
+            select(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
             AuthMethod::ApiKey
         ));
+        assert!(decided_method(methods, None, true).unwrap().is_none());
         assert!(matches!(
-            select_method_with_input(methods, None, true, || Ok("1\n".into())).unwrap(),
+            parse_method_choice("1\n", methods).unwrap(),
             AuthMethod::OAuthCode(_)
         ));
         assert!(matches!(
-            select_method_with_input(methods, None, true, || Ok("2\n".into())).unwrap(),
+            parse_method_choice("2\n", methods).unwrap(),
             AuthMethod::ApiKey
         ));
-        assert!(select_method_with_input(methods, None, true, || Ok("0\n".into())).is_err());
+        assert!(parse_method_choice("0\n", methods).is_err());
+        assert_eq!(
+            parse_method_choice("", methods).unwrap_err().to_string(),
+            "Invalid login method selection"
+        );
     }
     #[test]
     fn success_identity_and_json_never_contain_credentials() {
@@ -281,7 +324,7 @@ mod tests {
     #[test]
     fn codex_success_uses_product_name_and_single_method_needs_no_picker() {
         let methods = providers::lookup("openai-codex").unwrap().auth_methods;
-        let method = select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
+        let method = select(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
         assert!(matches!(method, AuthMethod::OAuthCode(_)));
         let login_name = method.login_name().unwrap();
         let identity = CredentialIdentity {
@@ -297,10 +340,10 @@ mod tests {
             oauth_success(login_name, &CredentialIdentity::default()),
             "Logged in to ChatGPT Plus/Pro (Codex Subscription)"
         );
-        assert!(select_method(methods, Some(AuthLoginMethod::ApiKey), false).is_err());
+        assert!(select(methods, Some(AuthLoginMethod::ApiKey), false).is_err());
         let single = [AuthMethod::Device(&DEVICE)];
         assert!(matches!(
-            select_method_with_input(&single, None, false, || panic!("no picker")).unwrap(),
+            select(&single, None, false).unwrap(),
             AuthMethod::Device(_)
         ));
         assert_eq!(AuthMethod::ApiKey.login_name(), None);
@@ -312,20 +355,18 @@ mod tests {
             AuthMethod::Device(&DEVICE),
         ];
         assert!(matches!(
-            select_method(&methods, Some(AuthLoginMethod::Device), false).unwrap(),
+            select(&methods, Some(AuthLoginMethod::Device), false).unwrap(),
             AuthMethod::Device(_)
         ));
         assert!(matches!(
-            select_method(&methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
+            select(&methods, Some(AuthLoginMethod::Oauth), false).unwrap(),
             AuthMethod::OAuthCode(_)
         ));
         assert_eq!(
-            select_method(&methods, None, false)
-                .unwrap_err()
-                .to_string(),
+            select(&methods, None, false).unwrap_err().to_string(),
             "Multiple login methods are available; choose --method oauth or --method device."
         );
-        let picked = select_method_with_input(&methods, None, true, || Ok("2\n".into())).unwrap();
+        let picked = parse_method_choice("2\n", &methods).unwrap();
         assert_eq!(picked.label(), "Subscription (device code)");
         assert_eq!(
             oauth_success(picked.login_name().unwrap(), &CredentialIdentity::default()),
@@ -336,17 +377,17 @@ mod tests {
     fn openrouter_offers_browser_minting_under_oauth_and_names_the_product_on_success() {
         let methods = providers::lookup("openrouter").unwrap().auth_methods;
         assert_eq!(
-            select_method(methods, None, false).unwrap_err().to_string(),
+            select(methods, None, false).unwrap_err().to_string(),
             "Multiple login methods are available; choose --method oauth or --method api-key."
         );
-        let minted = select_method(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
+        let minted = select(methods, Some(AuthLoginMethod::Oauth), false).unwrap();
         assert!(matches!(minted, AuthMethod::PkceKey(_)));
         assert_eq!(minted.label(), "OpenRouter account (browser sign-in)");
         assert!(matches!(
-            select_method(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
+            select(methods, Some(AuthLoginMethod::ApiKey), false).unwrap(),
             AuthMethod::ApiKey
         ));
-        assert!(select_method(methods, Some(AuthLoginMethod::Device), false).is_err());
+        assert!(select(methods, Some(AuthLoginMethod::Device), false).is_err());
         // Callback and pasted-key outcomes alike, validated or not.
         for validated in [true, false] {
             let result = LoginResult {

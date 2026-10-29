@@ -4,6 +4,7 @@ pub mod login;
 pub mod logout;
 pub mod providers;
 pub mod status;
+pub mod stdin_lines;
 pub mod terminal_ui;
 pub mod use_account;
 

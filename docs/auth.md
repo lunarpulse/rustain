@@ -540,6 +540,21 @@ organization appended when it differs; key bytes are never shown. `--json` print
 where `served` is `{"source":"oauth"|"login_key"|"stored_key","id":N}`,
 `{"source":"env","var":…}` or `null`.
 
+Only an **enabled** configuration entry that reads a provider's stored rows can
+serve them. When none does — `[provider.openai] enabled = false`, or an enabled
+entry of another id with `kind = "openai"` and its own rows shadows the built-in —
+nothing in the process would build that provider, so nothing is reported as
+serving it, whatever the environment holds. The `auth accounts` header then reads
+`OpenAI (openai): disabled in configuration` or
+`OpenAI (openai): not read by any enabled provider` (`served` is `null` in
+`--json`), and `auth use` / `auth logout --id` end with
+`OpenAI is disabled in configuration.` / `No enabled provider reads OpenAI
+credentials.` (`auth use` prefixes `Note: `). Such rows stay listed, removable
+and selectable: the choice applies when the entry is enabled again. `auth status`
+is unchanged — it answers which credential the configured entry would use. The
+sign-in pickers (`/login` and `rustain init`) leave such providers out, while
+`rustain auth login openai` and `/login openai` still sign them in.
+
 The choice is durable: it is stored in `auth.json`, survives restarts, and a
 running TUI or daemon serves it on its next request. Account ids are never reused
 within one `auth.json` (a deleted or recreated store starts again at `#1`), so a
@@ -745,13 +760,14 @@ Every `rustain auth login` method also runs inside the TUI; the CLI and the TUI
 share the same login engines, method list, success lines and discovery line.
 
 - **`/login`** (or **Ctrl+X, I**) opens the provider picker: every provider that
-  needs a credential, with what serves it now — `not signed in`, or a check
-  (`checking…`, then `● logged in` / `✘ invalid`) and the source (`oauth`,
-  `login`, `stored`, `env: <VAR>`, `runtime`; `· N accounts` when several are
-  stored). Type to search by name, id, source or environment variable; Enter
-  signs in, Esc clears the search or closes. Opening the picker resolves each
-  served credential the way a request would, so a due OAuth grant is refreshed
-  (and disabled if the provider rejects the refresh).
+  needs a credential and that an enabled configuration entry reads, with what
+  serves it now — `not signed in`, or a check (`checking…`, then `● logged in` /
+  `✘ invalid`) and the source (`oauth`, `login`, `stored`, `env: <VAR>`,
+  `runtime`; `· N accounts` when several are stored). Type to search by name,
+  id, source or environment variable; Enter signs in, Esc clears the search or
+  closes. Opening the picker resolves each served credential the way a request
+  would, so a due OAuth grant is refreshed (and disabled if the provider rejects
+  the refresh).
 - **`/login <provider>`** skips the picker. A provider with several methods
   shows the same method list as `rustain auth login` (Esc goes back).
 - **`/models`** (or Ctrl+X, M) opens the model picker. On a locked provider that
@@ -783,6 +799,80 @@ share the same login engines, method list, success lines and discovery line.
   `/login` and `/models` answer ``Sign-in is not available in an attached
   session. Run `rustain auth login <provider>` in a terminal; restart the daemon
   to unlock newly signed-in providers.``
+
+## Signing out and switching accounts in the TUI
+
+`/logout` and `/accounts` manage stored accounts without leaving the TUI; they
+use the same account service and texts as `rustain auth logout --id` and
+`rustain auth use`.
+
+- **`/logout`** and **`/accounts`** open a provider step listing every provider
+  with stored accounts — including disabled ones and providers disabled in
+  configuration (`OpenAI · disabled in configuration`), whose credentials are
+  still worth removing — as `<Provider> · <status>` (`OpenAI · login · 2 accounts`).
+  Search and keys are the login picker's; Enter opens the provider's account
+  step. With nothing stored they answer `No stored provider credentials to log
+  out. Remove env or config auth at its source.` / `No stored provider
+  credentials. Sign in with /login.`
+- **`/logout <provider>`** and **`/accounts <provider>`** open the account step
+  directly (Esc then closes instead of going back). An unknown id answers
+  `Unknown provider: <id>`; a provider without stored accounts answers
+  `No stored credentials for <Provider>. Remove env or config auth at its
+  source.` / `… Sign in with /login <id>.`
+- **The account step** (` Log out of OpenAI ` / ` OpenAI accounts `) starts with
+  the `auth accounts` header (`OpenAI (openai): serving API key #2`) and lists
+  `#<id>  <label>  <oauth|api key>  <state>`, the serving account first and the
+  cursor on it. Enter logs out of, or makes active, the account under the cursor
+  **without a confirmation** (as oh-my-pi's logout selector); the footer reads
+  `Working…` until the result arrives. The result block holds the CLI lines:
+  `Logged out of OpenAI account API key #2.` / `OpenAI now uses API key #1.`, or
+  `Active OpenAI account: API key #1.` with a `Note: …` when something else still
+  serves the provider.
+- **Live effect.** The change applies in the running TUI at once: the next
+  request uses the account that now serves, its model list is rediscovered
+  silently, and removing the last credential locks the provider again (posting
+  `OpenAI is now locked — choose another model (Ctrl+X, M).` when it was the
+  active one).
+- **Errors.** An account removed meanwhile by another process keeps the step
+  open with fresh rows and `Credential #<id> for <Provider> no longer exists.`; a
+  disabled account answers `Credential #<id> for <Provider> is disabled
+  (<cause>); log in again.`; a store failure closes the overlay with
+  `Account update failed: <reason>`.
+- **Attached sessions** answer ``Account changes are not available in an
+  attached session. Run `rustain auth accounts`, `rustain auth use <provider>
+  --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.`` A CLI
+  account change reaches the daemon's built providers on their next request;
+  removing a provider's last credential locks it there only after a restart.
+
+## `rustain init` sign-in
+
+After the wizard's summary, `rustain init` offers to sign in when stdin, stdout
+and stderr are all terminals (the login prompts on stderr); otherwise it prints
+``Skipping provider sign-in (not an interactive terminal). Run `rustain auth
+login <provider>` to sign in later.``
+
+- `Sign in to a model provider now? [y/n] ` — only an answer starting with `y`
+  continues.
+- The list is the `/login` picker's, read from the same configuration `rustain
+  auth login` and the TUI use (`  2. OpenAI — not signed in`), then
+  `Provider [1-N, Enter to finish]: `.
+- The chosen provider signs in exactly as `rustain auth login <provider>` does
+  (method menu, masked key, success line, discovery line); its offline result is
+  that command's (`⚠  Could not confirm key — … stored unvalidated.`). After a
+  success the list shows again; after a failure the error is followed by
+  `Choose another provider or press Enter to finish.`
+- Enter, end of input or Ctrl+C at the provider prompt finishes; init exits 0.
+  Ctrl+C at the masked key prompt fails that login and returns to the list.
+  At the method menu Ctrl+C is ignored until Enter (an empty answer fails that
+  login with `Invalid login method selection`), so `rustain auth login` keeps its
+  exact behaviour.
+- Every login prompt in one process — lines, masked keys, the method menu and
+  this list — reads through one terminal-input owner, one read at a time and
+  never ahead of a prompt, so a masked key can never be split between two
+  readers or handed to another prompt. A line typed after a prompt was
+  abandoned (a browser sign-in that finished first) goes to the next line
+  prompt. End of input is final: every later line prompt (the method menu and
+  this list included) answers as end of input.
 
 ## `rustain auth logout <provider>`
 

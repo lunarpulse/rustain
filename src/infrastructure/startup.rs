@@ -423,7 +423,15 @@ pub async fn run() -> Result<()> {
 
     // 4a. Intercept init/doctor/migrate subcommands BEFORE provider construction and terminal setup
     if let Some(Command::Init) = cli.command {
-        return crate::adapters::cli::init::run_init().await;
+        // The sign-in step lists what `auth login` and the TUI then use.
+        let reload = || {
+            config::load_with_config_overrides(
+                &cli,
+                &*profile_resolver_arc,
+                cli_config_overrides.as_ref(),
+            )
+        };
+        return crate::adapters::cli::init::run_init(&reload).await;
     }
     // Story 13.3b — Completions subcommand intercept. Sync (no .await), no provider needed.
     if let Some(Command::Completions { shell, bin_name }) = cli.command {
@@ -446,19 +454,14 @@ pub async fn run() -> Result<()> {
             } => {
                 let store: Arc<dyn crate::domain::ports::AuthStorePort> =
                     Arc::new(crate::adapters::auth_store::FileAuthStore::new());
-                let before = crate::adapters::auth_store::FileAuthStore::try_snapshot_sync()
-                    .unwrap_or_default();
-                let result = crate::adapters::cli::auth::login::run_auth_login(
-                    provider.clone(),
+                let result = crate::adapters::cli::auth::login::login_and_rediscover(
+                    provider,
                     *method,
                     *json,
                     &store,
                     &app_config,
                 )
                 .await;
-                if result.is_ok() {
-                    crate::adapters::cli::auth::rediscover(provider, &app_config, &before).await;
-                }
                 return result.map_err(|error| {
                     tracing::error!("Auth login subcommand failed: {error}");
                     SubcommandExit(SubcommandExit::GENERIC).into()

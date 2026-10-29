@@ -430,7 +430,8 @@ fn test_skipped_variant_equality() {
 // P0-9: `init` offline guard (AC4)
 // ──────────────────────────────────────────────────
 // AC4 is a guard comment in init.rs — no runtime test needed.
-// The existing `run_init` has no network I/O, verified by code inspection.
+// The wizard (`run_init_with_io`) has no network I/O, verified by code inspection;
+// only the opt-in sign-in step after it (`rustain auth login`) may reach a provider.
 // The guard comment documents that any future network step must skip offline.
 
 // ──────────────────────────────────────────────────

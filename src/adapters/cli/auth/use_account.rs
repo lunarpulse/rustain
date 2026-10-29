@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::domain::models::{AppConfig, CredentialId};
 use crate::domain::ports::AuthStorePort;
-use crate::infrastructure::auth_accounts::{ServedSource, select_account};
+use crate::infrastructure::auth_accounts::select_account;
 
 pub async fn run_auth_use(
     provider: &str,
@@ -21,6 +21,7 @@ pub async fn run_auth_use(
             return Err(error.into());
         }
     };
+    let lines = crate::adapters::auth::host::select_lines(&after, id);
     if json {
         println!(
             "{}",
@@ -32,17 +33,10 @@ pub async fn run_auth_use(
             })
         );
     } else {
-        println!("{}", crate::adapters::auth::host::active_line(&after, id));
+        println!("{}", lines[0]);
     }
-    // A selected stored key never outranks the environment, for example.
-    if after.served != Some(ServedSource::Row(id)) {
-        match after.served_phrase() {
-            Some(phrase) => eprintln!(
-                "Note: {} is currently served by {phrase}.",
-                after.display_name
-            ),
-            None => eprintln!("Note: {} has no usable credential.", after.display_name),
-        }
+    for line in &lines[1..] {
+        eprintln!("{line}");
     }
     Ok(())
 }

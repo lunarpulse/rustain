@@ -25,7 +25,10 @@
 //! SOFTWARE.
 
 use crate::{
-    adapters::{auth::flows::LoginUi, cli::session::list::sanitize_title},
+    adapters::{
+        auth::flows::LoginUi,
+        cli::{auth::stdin_lines::Pump, session::list::sanitize_title},
+    },
     domain::models::SecretString,
 };
 use futures::future::BoxFuture;
@@ -35,9 +38,11 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Every read goes through the process's one terminal-input owner.
 pub struct TerminalUi {
     cancel: CancellationToken,
     interactive: bool,
+    pump: Pump,
 }
 impl Default for TerminalUi {
     fn default() -> Self {
@@ -46,9 +51,17 @@ impl Default for TerminalUi {
 }
 impl TerminalUi {
     pub fn new() -> Self {
+        Self::with_pump(
+            super::stdin_lines::pump().clone(),
+            std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        )
+    }
+    /// A terminal host reading through `pump` (tests script its input).
+    pub fn with_pump(pump: Pump, interactive: bool) -> Self {
         Self {
             cancel: CancellationToken::new(),
-            interactive: std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+            interactive,
+            pump,
         }
     }
     pub fn shared() -> Arc<Self> {
@@ -84,49 +97,23 @@ impl LoginUi for TerminalUi {
     }
     fn prompt_secret(&self, label: &str) -> BoxFuture<'_, Option<SecretString>> {
         let label = label.to_owned();
-        Box::pin(async move {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            std::thread::spawn(move || {
-                let value = rpassword::prompt_password(label).ok();
-                let _ = tx.send(value.map(SecretString::new));
-            });
-            rx.await.ok().flatten()
-        })
+        Box::pin(async move { self.pump.secret(&label).await })
     }
     fn manual_input(&self, prompt: &str) -> Option<BoxFuture<'static, Option<String>>> {
         if !self.interactive {
             return None;
         }
         eprintln!("{prompt}");
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        // A detached OS thread, unlike spawn_blocking, cannot hold runtime shutdown
-        // hostage when the callback wins while stdin is still waiting for a line.
-        std::thread::spawn(move || {
-            let mut value = String::new();
-            let value = match std::io::stdin().read_line(&mut value) {
-                Ok(0) | Err(_) => None,
-                Ok(_) => Some(value),
-            };
-            let _ = tx.send(value);
-        });
-        Some(Box::pin(async move { rx.await.ok().flatten() }))
+        // A dropped future leaves its line to the next line request.
+        let pump = self.pump.clone();
+        Some(Box::pin(async move { pump.line().await }))
     }
     fn prompt_line(&self, prompt: &str) -> BoxFuture<'_, Option<String>> {
         let prompt = prompt.to_owned();
         Box::pin(async move {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            // Detached like `manual_input`: a cancelled login never waits on stdin.
-            std::thread::spawn(move || {
-                eprint!("{prompt}");
-                let _ = std::io::stderr().flush();
-                let mut value = String::new();
-                let value = match std::io::stdin().read_line(&mut value) {
-                    Ok(0) | Err(_) => None,
-                    Ok(_) => Some(value),
-                };
-                let _ = tx.send(value);
-            });
-            rx.await.ok().flatten()
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
+            self.pump.line().await
         })
     }
     fn cancel_token(&self) -> CancellationToken {

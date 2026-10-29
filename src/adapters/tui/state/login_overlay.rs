@@ -1,7 +1,8 @@
 //! State of the sign-in overlay: provider picker, method picker and the
-//! running login (browser link, device code, progress, one pending field).
+//! running login (browser link, device code, progress, one pending field), and
+//! the same overlay's `/logout` and `/accounts` provider and account steps.
 
-use crate::domain::events::{LoginReply, LoginTargetRow};
+use crate::domain::events::{AccountListing, LoginReply, LoginTargetRow};
 use crate::domain::models::{AuthMethod, FocusState, SecretString};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -71,6 +72,32 @@ pub enum LoginView {
     ProviderPicker,
     MethodPicker,
     Running,
+    /// One provider's stored accounts (`/logout`, `/accounts`).
+    AccountPicker,
+}
+
+/// What the overlay's provider picker leads to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OverlayMode {
+    #[default]
+    Login,
+    Logout,
+    Accounts,
+}
+
+/// The account step: one provider's stored accounts, a pending change and its notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountStep {
+    /// The store key.
+    pub provider: String,
+    /// `None` until the listing task answers.
+    pub listing: Option<AccountListing>,
+    pub selected: usize,
+    /// Esc returns to the provider step (query and selection kept).
+    pub from_picker: bool,
+    /// A logout or selection is running; every key but Ctrl+Q is ignored.
+    pub busy: bool,
+    pub notice: Option<String>,
 }
 
 /// A link or code section of the running view, in arrival order.
@@ -175,6 +202,10 @@ pub struct LoginOverlayState {
     /// Esc in the method picker returns to the provider picker.
     pub method_from_picker: bool,
     pub running: Option<RunningLogin>,
+    /// What the provider picker leads to (`Login` while signing in).
+    pub mode: OverlayMode,
+    /// The account step of `/logout` and `/accounts`.
+    pub account: Option<AccountStep>,
     last_login_id: u64,
 }
 
@@ -196,6 +227,8 @@ impl Default for LoginOverlayState {
             method_selected: 0,
             method_from_picker: false,
             running: None,
+            mode: OverlayMode::Login,
+            account: None,
             last_login_id: 0,
         }
     }
@@ -212,10 +245,17 @@ impl LoginOverlayState {
 
     /// Opens the provider picker in its loading state; returns the generation
     /// its data and validation results must carry.
-    pub fn open_picker(&mut self, previous: FocusState, origin: LoginOrigin) -> u64 {
+    pub fn open_picker(
+        &mut self,
+        previous: FocusState,
+        origin: LoginOrigin,
+        mode: OverlayMode,
+    ) -> u64 {
         self.generation += 1;
         self.active = true;
         self.view = LoginView::ProviderPicker;
+        self.mode = mode;
+        self.account = None;
         self.previous_focus.get_or_insert(previous);
         self.origin = origin;
         self.rows.clear();
@@ -224,6 +264,62 @@ impl LoginOverlayState {
         self.filtered.clear();
         self.selected = 0;
         self.generation
+    }
+
+    /// Opens the account step of `provider` in its loading state; the provider
+    /// picker's rows, query and selection stay for Esc. Returns the generation
+    /// the listing must carry.
+    pub fn open_accounts(
+        &mut self,
+        previous: FocusState,
+        mode: OverlayMode,
+        provider: String,
+        from_picker: bool,
+    ) -> u64 {
+        self.generation += 1;
+        self.active = true;
+        self.view = LoginView::AccountPicker;
+        self.mode = mode;
+        // Account steps open only from `/logout` and `/accounts`: an earlier
+        // login's model-picker origin must not reopen the picker on Esc.
+        self.origin = LoginOrigin::Slash;
+        self.previous_focus.get_or_insert(previous);
+        self.account = Some(AccountStep {
+            provider,
+            listing: None,
+            selected: 0,
+            from_picker,
+            busy: false,
+            notice: None,
+        });
+        self.generation
+    }
+
+    /// Fills (or refreshes) the account step: the cursor goes to the served
+    /// row, else the first; `notice` replaces the previous one.
+    pub fn set_accounts(
+        &mut self,
+        generation: u64,
+        listing: AccountListing,
+        notice: Option<String>,
+    ) {
+        if generation != self.generation || !self.active {
+            return;
+        }
+        let Some(step) = self.account.as_mut() else {
+            return;
+        };
+        step.selected = listing.rows.iter().position(|row| row.served).unwrap_or(0);
+        step.listing = Some(listing);
+        step.busy = false;
+        step.notice = notice;
+    }
+
+    /// Esc in an account step opened from the provider step.
+    pub fn back_to_picker(&mut self) {
+        self.generation += 1;
+        self.view = LoginView::ProviderPicker;
+        self.account = None;
     }
 
     pub fn set_rows(&mut self, generation: u64, rows: Vec<LoginTargetRow>) {
@@ -298,6 +394,7 @@ impl LoginOverlayState {
         self.previous_focus.get_or_insert(previous);
         self.origin = origin;
         self.view = LoginView::MethodPicker;
+        self.mode = OverlayMode::Login;
         self.target = Some(target);
         self.methods = methods;
         self.method_selected = 0;
@@ -307,6 +404,7 @@ impl LoginOverlayState {
     pub fn start_running(&mut self, running: RunningLogin) {
         self.active = true;
         self.view = LoginView::Running;
+        self.mode = OverlayMode::Login;
         self.running = Some(running);
     }
 
@@ -336,6 +434,8 @@ impl LoginOverlayState {
         self.query.clear();
         self.filtered.clear();
         self.target = None;
+        self.mode = OverlayMode::Login;
+        self.account = None;
         self.previous_focus.take()
     }
 }

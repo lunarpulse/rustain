@@ -77,6 +77,7 @@ pub async fn run_auth_logout_row(
             return Err(error.into());
         }
     };
+    let lines = crate::adapters::auth::host::logout_lines(&after, id, label);
     if json {
         println!(
             "{}",
@@ -90,18 +91,10 @@ pub async fn run_auth_logout_row(
             })
         );
     } else {
-        println!(
-            "Logged out of {} account {}.",
-            after.display_name,
-            label.unwrap_or_else(|| format!("#{}", id.0))
-        );
+        println!("{}", lines[0]);
     }
-    let display = &after.display_name;
-    match after.served_phrase() {
-        Some(phrase) => eprintln!("{display} now uses {phrase}."),
-        None if after.rows.is_empty() => eprintln!("No {display} credentials remain."),
-        // Disabled rows, or rows this endpoint may not receive, still remain.
-        None => eprintln!("{display} has no usable credential."),
+    for line in &lines[1..] {
+        eprintln!("{line}");
     }
     Ok(())
 }

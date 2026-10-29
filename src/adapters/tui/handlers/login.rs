@@ -33,8 +33,8 @@ use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::login_runtime::{LoginCtx, spawn_targets};
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::state::{
-    FieldKind, LOGIN_PICKER_ROWS, LoginOrigin, LoginSection, LoginView, PendingField, RunningLogin,
-    TuiState,
+    FieldKind, LOGIN_PICKER_ROWS, LoginOrigin, LoginSection, LoginView, OverlayMode, PendingField,
+    RunningLogin, TuiState,
 };
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent, LoginFailure, LoginSummary};
 use crate::domain::models::visual::OverlayType;
@@ -59,6 +59,8 @@ pub enum LoginAction {
     Copy(String),
     /// The overlay closed without a login; a picker origin reopens the picker.
     Closed { origin: LoginOrigin },
+    /// `/logout` and `/accounts` account steps.
+    Accounts(super::accounts::AccountAction),
 }
 
 /// Provider text shown in the overlay: terminal controls stripped, length capped.
@@ -109,12 +111,13 @@ pub fn on_action(
                 super::model_switch::open_selector(state, info, app, Some(&column));
             }
         }
+        LoginAction::Accounts(action) => super::accounts::on_action(state, ctx, app, action),
     }
 }
 
 /// The focus a login overlay returns to: the model picker is closed first when
 /// the sign-in started there.
-fn take_focus(state: &mut TuiState) -> FocusState {
+pub(super) fn take_focus(state: &mut TuiState) -> FocusState {
     if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
         state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
     }
@@ -138,7 +141,9 @@ fn open(
         Some(provider) => begin(state, ctx, app, &provider, origin, false),
         None => {
             let previous = take_focus(state);
-            let generation = state.login.open_picker(previous, origin);
+            let generation = state
+                .login
+                .open_picker(previous, origin, OverlayMode::Login);
             state.focus = LOGIN;
             state.needs_redraw = true;
             spawn_targets(ctx.clone(), app.clone(), generation);
@@ -192,7 +197,7 @@ fn failed_to_start(state: &mut TuiState, error: &str) {
     );
 }
 
-fn close(state: &mut TuiState) {
+pub(super) fn close(state: &mut TuiState) {
     if state.login.active {
         let previous = state.login.close();
         if state.focus == LOGIN {
@@ -250,6 +255,12 @@ pub fn on_event(
 ) {
     state.needs_redraw = true;
     match event {
+        event @ LoginEvent::Targets { .. } if state.login.mode != OverlayMode::Login => {
+            super::accounts::on_event(state, event)
+        }
+        event @ (LoginEvent::Accounts { .. } | LoginEvent::AccountsChanged { .. }) => {
+            super::accounts::on_event(state, event)
+        }
         LoginEvent::Targets { generation, rows } => state.login.set_rows(generation, rows),
         LoginEvent::Validated {
             generation,
@@ -428,17 +439,18 @@ pub fn on_key(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
         LoginView::ProviderPicker => picker_key(state, event),
         LoginView::MethodPicker => method_key(state, event),
         LoginView::Running => running_key(state, event),
+        LoginView::AccountPicker => super::accounts::on_key(state, event),
     }
 }
 
-fn is_cancel(event: &DomainInputEvent) -> bool {
+pub(super) fn is_cancel(event: &DomainInputEvent) -> bool {
     matches!(
         event,
         DomainInputEvent::SpecialKey(DomainKey::Esc | DomainKey::CtrlC)
     )
 }
 
-fn move_cursor(selected: usize, len: usize, event: &DomainInputEvent) -> usize {
+pub(super) fn move_cursor(selected: usize, len: usize, event: &DomainInputEvent) -> usize {
     if len == 0 {
         return 0;
     }
@@ -455,7 +467,7 @@ fn move_cursor(selected: usize, len: usize, event: &DomainInputEvent) -> usize {
     }
 }
 
-fn closed(state: &mut TuiState) -> InputAction {
+pub(super) fn closed(state: &mut TuiState) -> InputAction {
     let origin = state.login.origin.clone();
     close(state);
     InputAction::Login(LoginAction::Closed { origin })
@@ -485,8 +497,12 @@ fn picker_key(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
         }
         DomainInputEvent::SpecialKey(DomainKey::Enter) => {
             if let Some(row) = login.selected_row() {
-                return InputAction::Login(LoginAction::Choose {
-                    provider: row.row.id.clone(),
+                let provider = row.row.id.clone();
+                return InputAction::Login(match login.mode {
+                    OverlayMode::Login => LoginAction::Choose { provider },
+                    OverlayMode::Logout | OverlayMode::Accounts => {
+                        LoginAction::Accounts(super::accounts::AccountAction::List { provider })
+                    }
                 });
             }
         }

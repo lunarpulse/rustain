@@ -73,12 +73,24 @@ pub struct AccountRow {
     pub disabled_cause: Option<String>,
 }
 
+/// Why no source serves a provider's rows: nothing enabled in this process reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unread {
+    /// The entry that reads these rows is disabled in configuration.
+    Disabled,
+    /// No configured or bundled entry reads these rows (for example an enabled
+    /// kind alias with its own rows shadows the built-in).
+    NoReader,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccounts {
     /// The store key `auth login` and `auth logout` take.
     pub provider: String,
     pub display_name: String,
     pub served: Option<ServedSource>,
+    /// Set only when no enabled entry reads these rows (`served` is then `None`).
+    pub unread: Option<Unread>,
     /// File order.
     pub rows: Vec<AccountRow>,
 }
@@ -95,6 +107,27 @@ impl ProviderAccounts {
             ServedSource::Env(var) => var.clone(),
             ServedSource::Runtime => "runtime key".to_owned(),
         })
+    }
+
+    /// The header state: `serving <phrase>`, why nothing reads the rows, or
+    /// `no usable credential`.
+    pub fn state_phrase(&self) -> String {
+        match (self.served_phrase(), self.unread) {
+            (Some(phrase), _) => format!("serving {phrase}"),
+            (None, Some(Unread::Disabled)) => "disabled in configuration".to_owned(),
+            (None, Some(Unread::NoReader)) => "not read by any enabled provider".to_owned(),
+            (None, None) => "no usable credential".to_owned(),
+        }
+    }
+
+    /// The sentence for a provider nothing serves.
+    pub fn unserved_sentence(&self) -> String {
+        let display = &self.display_name;
+        match self.unread {
+            Some(Unread::Disabled) => format!("{display} is disabled in configuration."),
+            Some(Unread::NoReader) => format!("No enabled provider reads {display} credentials."),
+            None => format!("{display} has no usable credential."),
+        }
     }
 }
 
@@ -149,32 +182,36 @@ pub fn label(row: &StoredCredential) -> String {
 
 /// The provider's accounts as `snapshot` and the configuration serve them: the
 /// served source is the first enabled entry reading these rows, through the
-/// same cascade, environment list and stored-row rule as availability.
+/// same cascade, environment list and stored-row rule as availability. With no
+/// enabled reader nothing serves them (`unread` says why): nothing in the
+/// process would build that provider.
 pub fn describe(
     snapshot: &AuthSnapshot,
     app: &AppConfig,
     provider: &str,
     env_lookup: &dyn Fn(&str) -> Option<String>,
 ) -> ProviderAccounts {
-    let entry = super::provider_availability::effective_providers(app)
-        .into_iter()
-        .find(|entry| entry.cfg.enabled && entry.rows_key() == provider);
+    let entries = super::provider_availability::effective_providers(app);
+    let reading = |enabled: bool| {
+        entries
+            .iter()
+            .find(|entry| entry.cfg.enabled == enabled && entry.rows_key() == provider)
+    };
+    let (entry, disabled) = (reading(true), reading(false));
     let meta = crate::adapters::cli::auth::providers::lookup(provider);
-    let selection = match &entry {
-        Some(entry) => crate::adapters::cli::auth::source_for(
+    let selection = entry.and_then(|entry| {
+        crate::adapters::cli::auth::source_for(
             provider,
             &entry.env_vars(),
             snapshot,
             env_lookup,
             entry.row_policy(env_lookup),
-        ),
-        None => crate::adapters::cli::auth::source_for_configured(
-            provider,
-            meta.map_or("", |meta| meta.api_key_env),
-            &Default::default(),
-            snapshot,
-            env_lookup,
-        ),
+        )
+    });
+    let unread = match (entry, disabled) {
+        (Some(_), _) => None,
+        (None, Some(_)) => Some(Unread::Disabled),
+        (None, None) => Some(Unread::NoReader),
     };
     let served = selection.map(|selection| match (selection.source, selection.row) {
         (AuthSource::Runtime, _) => ServedSource::Runtime,
@@ -204,11 +241,12 @@ pub fn describe(
         .collect();
     ProviderAccounts {
         provider: provider.to_owned(),
-        display_name: entry.map_or_else(
+        display_name: entry.or(disabled).map_or_else(
             || meta.map_or(provider, |meta| meta.display_name).to_owned(),
             |entry| entry.display_name(),
         ),
         served,
+        unread,
         rows,
     }
 }
@@ -354,5 +392,79 @@ mod tests {
         assert_eq!(labelled(&row("API key #4")), "API key #4");
         assert_eq!(labelled(&row("me@x.io")), "me@x.io (#4)");
         assert_eq!(labelled(&row("API key #14")), "API key #14 (#4)");
+    }
+
+    fn entry(kind: &str, enabled: bool) -> crate::domain::models::ProviderConfig {
+        crate::domain::models::ProviderConfig {
+            provider_id: kind.into(),
+            model_id: "m".into(),
+            api_key_env: "OPENAI_API_KEY".into(),
+            enabled,
+            kind: Some(kind.into()),
+            base_url: None,
+            auth_header: None,
+            context_window: None,
+            supports_tools: None,
+            discover_models: false,
+            model_filter: vec![],
+            cache_ttl_seconds: 0,
+        }
+    }
+
+    /// Only an enabled entry reading the rows serves them; otherwise `unread`
+    /// names why, and the rows stay listed.
+    #[test]
+    fn only_an_enabled_reader_serves_stored_rows() {
+        let mut snapshot = AuthSnapshot::default();
+        let key = StoredCredential {
+            credential: Credential::new_api_key("sk-ROW-CANARY".into()),
+            ..oauth(1, CredentialIdentity::default())
+        };
+        snapshot.providers.insert("openai".into(), vec![key]);
+        let env = |name: &str| (name == "OPENAI_API_KEY").then(|| "sk-ENV-CANARY".to_owned());
+        let with = |entries: &[(&str, crate::domain::models::ProviderConfig)]| {
+            let mut app = AppConfig::default();
+            for (id, cfg) in entries {
+                app.provider.insert((*id).into(), cfg.clone());
+            }
+            describe(&snapshot, &app, "openai", &env)
+        };
+
+        let enabled = with(&[("openai", entry("openai", true))]);
+        assert_eq!(enabled.served, Some(ServedSource::Row(CredentialId(1))));
+        assert_eq!(enabled.unread, None);
+        assert_eq!(enabled.state_phrase(), "serving API key #1");
+
+        let disabled = with(&[("openai", entry("openai", false))]);
+        assert_eq!(
+            (disabled.served.clone(), disabled.unread),
+            (None, Some(Unread::Disabled))
+        );
+        assert_eq!(disabled.display_name, "OpenAI");
+        assert_eq!(disabled.rows.len(), 1);
+        assert_eq!(disabled.state_phrase(), "disabled in configuration");
+        assert_eq!(
+            disabled.unserved_sentence(),
+            "OpenAI is disabled in configuration."
+        );
+
+        // An enabled kind alias with its own rows shadows the built-in.
+        let alias = with(&[("work", entry("openai", true))]);
+        assert_eq!(
+            (alias.served.clone(), alias.unread),
+            (None, Some(Unread::NoReader))
+        );
+        assert_eq!(alias.state_phrase(), "not read by any enabled provider");
+        assert_eq!(
+            alias.unserved_sentence(),
+            "No enabled provider reads OpenAI credentials."
+        );
+
+        // An enabled reader with nothing usable keeps the old wording.
+        snapshot.providers.get_mut("openai").unwrap()[0].disabled_cause = Some("revoked".into());
+        let none = describe(&snapshot, &AppConfig::default(), "openai", &|_| None);
+        assert_eq!((none.served.clone(), none.unread), (None, None));
+        assert_eq!(none.state_phrase(), "no usable credential");
+        assert_eq!(none.unserved_sentence(), "OpenAI has no usable credential.");
     }
 }

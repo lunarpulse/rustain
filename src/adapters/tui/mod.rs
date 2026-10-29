@@ -1,3 +1,4 @@
+pub mod accounts_runtime;
 pub mod app;
 pub mod clipboard;
 #[allow(dead_code)]

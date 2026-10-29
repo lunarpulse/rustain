@@ -1904,6 +1904,16 @@ fn attached_sign_in_command(input: &str) -> bool {
     matches!(name, Some("login" | "models"))
 }
 
+const ATTACHED_ACCOUNT_CHANGE: &str = "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.";
+
+fn attached_account_command(input: &str) -> bool {
+    let name = input
+        .trim()
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next());
+    matches!(name, Some("logout" | "accounts"))
+}
+
 fn attached_composer_key_with_team_requests(
     code: crossterm::event::KeyCode,
     read_only: bool,
@@ -1946,6 +1956,20 @@ fn attached_composer_key_with_team_requests(
                 id: "attached-sign-in".into(),
                 level: crate::domain::models::FeedbackLevel::Info,
                 message: ATTACHED_SIGN_IN.into(),
+                actions: Vec::new(),
+            };
+            state.feedback_blocks.insert(block.id.clone(), block);
+            state.needs_redraw = true;
+        }
+        // `/logout` and `/accounts` likewise; a CLI account change reaches the
+        // daemon's built providers on their next request.
+        KeyCode::Enter if attached_account_command(input) => {
+            input.clear();
+            state.pinned_peer_compose = None;
+            let block = crate::domain::models::FeedbackBlock {
+                id: "attached-account-change".into(),
+                level: crate::domain::models::FeedbackLevel::Info,
+                message: ATTACHED_ACCOUNT_CHANGE.into(),
                 actions: Vec::new(),
             };
             state.feedback_blocks.insert(block.id.clone(), block);
@@ -9543,6 +9567,34 @@ mod tests {
         let mut state = TuiState::new(100, 30);
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut input = "/loginx".to_owned();
+        assert!(matches!(
+            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            ComposerOutcome::Submit(_)
+        ));
+    }
+
+    /// An attached `/logout` or `/accounts` is answered locally with the CLI
+    /// pointer and never becomes a model turn (zero frames).
+    #[test]
+    fn attached_account_commands_are_answered_locally() {
+        use crossterm::event::KeyCode;
+        for line in ["/logout", " /accounts openai ", "/logout openai"] {
+            let mut state = TuiState::new(100, 30);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut input = line.to_owned();
+            let outcome = attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx);
+            assert!(matches!(outcome, ComposerOutcome::Handled), "{line}");
+            assert!(input.is_empty(), "{line}");
+            assert!(rx.try_recv().is_err(), "{line}: zero frames");
+            assert_eq!(
+                state.feedback_blocks["attached-account-change"].message,
+                "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal."
+            );
+            assert!(!state.feedback_blocks.contains_key("attached-sign-in"));
+        }
+        let mut state = TuiState::new(100, 30);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut input = "/logoutx".to_owned();
         assert!(matches!(
             attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
             ComposerOutcome::Submit(_)

@@ -27,8 +27,12 @@
 
 use crate::adapters::auth::flows::LoginResult;
 use crate::adapters::cli::auth::providers;
-use crate::domain::models::{AppConfig, AuthMethod, CredentialIdentity, ProviderConfig};
-use crate::infrastructure::auth_accounts::ProviderAccounts;
+use crate::domain::models::{
+    AppConfig, AuthMethod, AuthSnapshot, CredentialId, CredentialIdentity, ProviderConfig,
+};
+use crate::infrastructure::auth_accounts::{
+    AccountKind, AccountRow, ProviderAccounts, ServedSource,
+};
 use crate::infrastructure::model_discovery::RefreshReport;
 use anyhow::{Result, bail};
 
@@ -63,8 +67,9 @@ pub fn credentials_saved_line() -> Result<String> {
             .display()
     ))
 }
-/// One sign-in target: a key-requiring built-in, or a configured provider
-/// whose rows no built-in owns and that names an API-key variable.
+/// One sign-in target: a key-requiring built-in some enabled entry reads, or a
+/// configured provider whose rows no built-in owns and that names an API-key
+/// variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginTarget {
     /// The store key `auth login` takes.
@@ -74,7 +79,10 @@ pub struct LoginTarget {
     pub entries: Vec<String>,
 }
 /// Sign-in targets in picker order: built-ins in table order, then configured
-/// providers by display name. Keyless providers are not listed.
+/// providers by display name. Keyless providers are not listed, nor is a
+/// built-in no enabled entry reads (disabled in configuration, or shadowed by
+/// an enabled kind alias with its own rows): nothing would use its login. An
+/// explicit `auth login <id>` / `/login <id>` still signs it in.
 pub fn login_targets(app: &AppConfig) -> Vec<LoginTarget> {
     let entries = crate::infrastructure::provider_availability::effective_providers(app);
     let readers = |id: &str| {
@@ -92,6 +100,7 @@ pub fn login_targets(app: &AppConfig) -> Vec<LoginTarget> {
             display: meta.display_name.into(),
             entries: readers(meta.id),
         })
+        .filter(|target| !target.entries.is_empty())
         .collect();
     let mut configured: Vec<_> = entries
         .iter()
@@ -205,4 +214,146 @@ pub fn active_line(accounts: &ProviderAccounts, id: crate::domain::models::Crede
         crate::infrastructure::auth_accounts::labelled,
     );
     format!("Active {} account: {label}.", accounts.display_name)
+}
+
+/// The `auth status` source vocabulary for what serves a provider, plus omp's
+/// `env: <VAR>`.
+pub fn source_label(accounts: &ProviderAccounts) -> Option<String> {
+    Some(match accounts.served.as_ref()? {
+        ServedSource::Row(id) => {
+            let row = accounts.row(*id)?;
+            if row.kind == AccountKind::OAuth {
+                "oauth".into()
+            } else if row.origin == crate::domain::models::CredentialOrigin::Login {
+                "login".into()
+            } else {
+                "stored".into()
+            }
+        }
+        ServedSource::Env(var) => format!("env: {var}"),
+        ServedSource::Runtime => "runtime".into(),
+    })
+}
+
+/// A provider row's status in the sign-in, logout and accounts pickers and the
+/// `rustain init` list: the serving source, else why nothing reads the rows,
+/// else `not signed in`; ` · N accounts` with several stored rows.
+pub fn status_text(accounts: &ProviderAccounts) -> String {
+    let mut status = match (source_label(accounts), accounts.unread) {
+        (Some(source), _) => source,
+        (None, Some(_)) => accounts.state_phrase(),
+        (None, None) => "not signed in".to_owned(),
+    };
+    if accounts.rows.len() > 1 {
+        status.push_str(&format!(" · {} accounts", accounts.rows.len()));
+    }
+    status
+}
+
+/// `<Display> (<id>): <state>`: the `auth accounts` header and the TUI account
+/// step's first line.
+pub fn account_header(accounts: &ProviderAccounts) -> String {
+    format!(
+        "{} ({}): {}",
+        accounts.display_name,
+        accounts.provider,
+        accounts.state_phrase()
+    )
+}
+
+/// A row's state column: `disabled: <cause>`, `active` (selected and served),
+/// `selected`, `serving`, or empty.
+pub fn row_state(row: &AccountRow) -> String {
+    match (&row.disabled_cause, row.selected, row.served) {
+        (Some(cause), _, _) => format!("disabled: {cause}"),
+        (None, true, true) => "active".into(),
+        (None, true, false) => "selected".into(),
+        (None, false, true) => "serving".into(),
+        (None, false, false) => String::new(),
+    }
+}
+
+/// `auth logout --id` and TUI `/logout`: `Logged out of <Display> account
+/// <label>.`, then what serves the provider now.
+pub fn logout_lines(
+    after: &ProviderAccounts,
+    id: CredentialId,
+    label: Option<String>,
+) -> Vec<String> {
+    let display = &after.display_name;
+    let now = match after.served_phrase() {
+        Some(phrase) => format!("{display} now uses {phrase}."),
+        None if after.rows.is_empty() => format!("No {display} credentials remain."),
+        // Disabled rows, rows this endpoint may not receive, or rows nothing reads.
+        None => after.unserved_sentence(),
+    };
+    vec![
+        format!(
+            "Logged out of {display} account {}.",
+            label.unwrap_or_else(|| format!("#{}", id.0))
+        ),
+        now,
+    ]
+}
+
+/// `auth use` and TUI `/accounts`: the active line, plus a note when the
+/// chosen row is not what a request would send.
+pub fn select_lines(after: &ProviderAccounts, id: CredentialId) -> Vec<String> {
+    let mut lines = vec![active_line(after, id)];
+    // A selected stored key never outranks the environment, for example.
+    if after.served != Some(ServedSource::Row(id)) {
+        lines.push(match after.served_phrase() {
+            Some(phrase) => format!(
+                "Note: {} is currently served by {phrase}.",
+                after.display_name
+            ),
+            None => format!("Note: {}", after.unserved_sentence()),
+        });
+    }
+    lines
+}
+
+/// Every store key with at least one stored row, as `describe` sees it
+/// (disabled rows and disabled configuration included: such credentials are
+/// still worth removing): built-ins in table order, then other keys by
+/// display name, then id.
+pub fn stored_accounts(
+    snapshot: &AuthSnapshot,
+    app: &AppConfig,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<ProviderAccounts> {
+    let position = |id: &str| {
+        providers::all_providers()
+            .iter()
+            .position(|meta| meta.id == id)
+    };
+    let mut listed: Vec<_> = snapshot
+        .providers
+        .iter()
+        .filter(|(_, rows)| !rows.is_empty())
+        .map(|(id, _)| {
+            crate::infrastructure::auth_accounts::describe(snapshot, app, id, env_lookup)
+        })
+        .collect();
+    listed.sort_by(
+        |a, b| match (position(&a.provider), position(&b.provider)) {
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a
+                .display_name
+                .cmp(&b.display_name)
+                .then_with(|| a.provider.cmp(&b.provider)),
+        },
+    );
+    listed
+}
+
+/// Whether `id` names a provider: a built-in, or the store key of a configured
+/// or bundled entry.
+pub fn known_provider(app: &AppConfig, id: &str) -> bool {
+    providers::lookup(id).is_some()
+        || crate::infrastructure::provider_availability::effective_providers(app)
+            .iter()
+            .any(|entry| entry.rows_key() == id)
 }

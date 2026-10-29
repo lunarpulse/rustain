@@ -3122,8 +3122,12 @@ fn submit_message(state: &mut TuiState) -> InputAction {
                     args,
                 };
             }
-            // /login [provider] (sign-in overlay) and /models (model picker).
-            if cmd_name == "login" || cmd_name == "models" {
+            // /login [provider] (sign-in overlay), /models (model picker),
+            // /logout [provider] and /accounts [provider] (account steps).
+            if matches!(
+                cmd_name.as_str(),
+                "login" | "models" | "logout" | "accounts"
+            ) {
                 return InputAction::ExecuteCommand {
                     name: cmd_name,
                     args,

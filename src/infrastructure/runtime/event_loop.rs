@@ -2049,6 +2049,8 @@ pub async fn run(
                                     let cmd_name: &str = cmd_name.as_str();
                                     if cmd_name == "login" {
                                         handlers::login::command(&mut state, &login_ctx, config, cmd_arg);
+                                    } else if cmd_name == "logout" || cmd_name == "accounts" {
+                                        handlers::accounts::command(&mut state, &login_ctx, config, cmd_name, cmd_arg);
                                     } else if cmd_name == "models" {
                                         handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
                                     } else if cmd_name == "ml" {
