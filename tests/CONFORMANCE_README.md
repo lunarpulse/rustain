@@ -14,6 +14,12 @@ Scans source files to enforce:
 - Hexagonal directory structure is present.
 - No adapter-to-adapter cross-imports.
 - No raw `env::var()` calls outside the approved utility.
+- Authentication login/accounts planning returns data-only outcomes; each production
+  command/action dispatch interprets its outcome and spawns the authentication
+  workers, including independent validation children. The sealed tree-sitter
+  boundary checks the live sources and runs the same checker against positive
+  and adversarial controls (indirection, aliases, payloads, and discarded outcomes).
+  Non-spawning workers return results through the existing event bus.
 
 These tests run as part of `cargo test` and enforce the Dependency Rule (Clean Architecture) at CI time.
 
@@ -68,7 +74,7 @@ Guidelines:
 
 ```bash
 # Architecture conformance (tests/conformance.rs is a module of the `core` area binary):
-cargo test --test core conformance::
+PATH=/tmp/rustain-metrics-venv/bin:$PATH cargo test --test core conformance::
 
 # A specific behavioral file, including any skeletons it still carries
 # (roots are modules of their area binary — see TESTING.md "Integration-test layout"):

@@ -1,8 +1,7 @@
 //! Sign-in from the TUI: `/login [provider]`, Ctrl+X I and Enter on a locked
-//! model-picker column. The event loop calls `command`, `on_action` and
-//! `on_event` in one statement each; `handle_input` routes overlay keys to
-//! `on_key`. The flow, store reads, validation and the live-layer update run
-//! in spawned tasks and report back as `LoginEvent`s.
+//! model-picker column. Command/action handlers return data-only work requests;
+//! dispatch constructs tasks and binds cancellation before running the workers.
+//! `handle_input` routes overlay keys to `on_key`; results remain `LoginEvent`s.
 //!
 //! MIT License
 //!
@@ -28,13 +27,14 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
+use super::{AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::auth::host::{self, LoginPlan};
 use crate::adapters::tui::app::InputAction;
-use crate::adapters::tui::login_runtime::{LoginCtx, spawn_targets};
+use crate::adapters::tui::login_runtime::Copier;
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::state::{
     FieldKind, LOGIN_PICKER_ROWS, LoginOrigin, LoginSection, LoginView, OverlayMode, PendingField,
-    RunningLogin, TuiState,
+    TuiState,
 };
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent, LoginFailure, LoginSummary};
 use crate::domain::models::visual::OverlayType;
@@ -71,47 +71,55 @@ pub(crate) fn display_text(text: &str) -> String {
 pub(crate) const LOGIN: FocusState = FocusState::Overlay(OverlayType::Login);
 
 /// `/login [provider]` (`ExecuteCommand "login"`).
-pub fn command(state: &mut TuiState, ctx: &LoginCtx, app: &AppConfig, args: Option<&str>) {
+pub fn command(state: &mut TuiState, app: &AppConfig, args: Option<&str>) -> HandlerOutcome {
     let provider = args
         .map(str::trim)
         .filter(|arg| !arg.is_empty())
         .map(str::to_owned);
-    open(state, ctx, app, provider, LoginOrigin::Slash);
+    open(state, app, provider, LoginOrigin::Slash)
 }
 
 /// The event loop's `InputAction::Login` arm.
 pub fn on_action(
     state: &mut TuiState,
-    ctx: &LoginCtx,
+    copier: &Copier,
     app: &AppConfig,
     info: &dyn ProviderInfoPort,
     action: LoginAction,
-) {
+) -> HandlerOutcome {
     match action {
-        LoginAction::Open { provider, origin } => open(state, ctx, app, provider, origin),
+        LoginAction::Open { provider, origin } => open(state, app, provider, origin),
         LoginAction::Choose { provider } => {
             let origin = state.login.origin.clone();
-            begin(state, ctx, app, &provider, origin, true);
+            begin(state, app, &provider, origin, true)
         }
         LoginAction::Start { provider, method } => {
             let origin = state.login.origin.clone();
             match host::plan(&provider, app) {
                 Ok(plan) => match plan.methods.get(method) {
-                    Some(method) => start(state, ctx, app, &plan, method, origin),
-                    None => close(state),
+                    Some(method) => start(state, plan, method, origin),
+                    None => {
+                        close(state);
+                        HandlerOutcome::Quiet
+                    }
                 },
-                Err(error) => failed_to_start(state, &error.to_string()),
+                Err(error) => {
+                    failed_to_start(state, &error.to_string());
+                    HandlerOutcome::Quiet
+                }
             }
         }
         LoginAction::Copy(text) => {
-            super::clipboard::flash_copy(state, &text, &*ctx.copier);
+            super::clipboard::flash_copy(state, &text, &**copier);
+            HandlerOutcome::Quiet
         }
         LoginAction::Closed { origin } => {
             if let LoginOrigin::Picker { column } = origin {
                 super::model_switch::open_selector(state, info, app, Some(&column));
             }
+            HandlerOutcome::Quiet
         }
-        LoginAction::Accounts(action) => super::accounts::on_action(state, ctx, app, action),
+        LoginAction::Accounts(action) => super::accounts::on_action(state, action),
     }
 }
 
@@ -126,19 +134,18 @@ pub(super) fn take_focus(state: &mut TuiState) -> FocusState {
 
 fn open(
     state: &mut TuiState,
-    ctx: &LoginCtx,
     app: &AppConfig,
     provider: Option<String>,
     origin: LoginOrigin,
-) {
+) -> HandlerOutcome {
     if state.login.running.is_some() {
         // One login at a time: the running view keeps (or regains) focus.
         state.focus = LOGIN;
         state.needs_redraw = true;
-        return;
+        return HandlerOutcome::Quiet;
     }
     match provider {
-        Some(provider) => begin(state, ctx, app, &provider, origin, false),
+        Some(provider) => begin(state, app, &provider, origin, false),
         None => {
             let previous = take_focus(state);
             let generation = state
@@ -146,22 +153,26 @@ fn open(
                 .open_picker(previous, origin, OverlayMode::Login);
             state.focus = LOGIN;
             state.needs_redraw = true;
-            spawn_targets(ctx.clone(), app.clone(), generation);
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Targets {
+                generation,
+            }))
         }
     }
 }
 
 fn begin(
     state: &mut TuiState,
-    ctx: &LoginCtx,
     app: &AppConfig,
     provider: &str,
     origin: LoginOrigin,
     from_picker: bool,
-) {
+) -> HandlerOutcome {
     let plan = match host::plan(provider, app) {
         Ok(plan) => plan,
-        Err(error) => return failed_to_start(state, &error.to_string()),
+        Err(error) => {
+            failed_to_start(state, &error.to_string());
+            return HandlerOutcome::Quiet;
+        }
     };
     if plan.keyless {
         close(state);
@@ -170,12 +181,12 @@ fn begin(
             FeedbackLevel::Info,
             host::keyless_line(&plan.display),
         );
-        return;
+        return HandlerOutcome::Quiet;
     }
     let previous = take_focus(state);
     if let [method] = plan.methods {
         state.login.previous_focus.get_or_insert(previous);
-        return start(state, ctx, app, &plan, method, origin);
+        return start(state, plan, method, origin);
     }
     state.login.open_methods(
         previous,
@@ -186,6 +197,7 @@ fn begin(
     );
     state.focus = LOGIN;
     state.needs_redraw = true;
+    HandlerOutcome::Quiet
 }
 
 fn failed_to_start(state: &mut TuiState, error: &str) {
@@ -223,27 +235,17 @@ fn feedback(state: &mut TuiState, level: FeedbackLevel, message: String) {
 
 fn start(
     state: &mut TuiState,
-    ctx: &LoginCtx,
-    app: &AppConfig,
-    plan: &LoginPlan,
+    plan: LoginPlan,
     method: &'static AuthMethod,
     origin: LoginOrigin,
-) {
+) -> HandlerOutcome {
     let login_id = state.login.next_login_id();
-    let cancel = crate::adapters::tui::login_runtime::spawn_login(ctx, app, login_id, plan, method);
-    state.login.origin = origin.clone();
-    state.login.start_running(RunningLogin {
+    HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Login {
         login_id,
-        provider_id: plan.provider_id.clone(),
-        display: display_text(&plan.display),
+        plan,
+        method,
         origin,
-        cancel: cancel.clone(),
-        sections: Vec::new(),
-        progress: Vec::new(),
-        field: None,
-    });
-    state.focus = LOGIN;
-    state.needs_redraw = true;
+    }))
 }
 
 /// The event loop's `AppEvent::Login` arm.

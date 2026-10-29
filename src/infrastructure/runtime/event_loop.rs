@@ -36,15 +36,16 @@ use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
-use crate::adapters::tui::handlers::{self, HandlerOutcome, SpawnRequest};
+use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
-use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
     input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar,
     team_proposal_card, usage_panel, which_key_bar,
 };
+use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
 use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
 #[cfg(feature = "a2a")]
@@ -2047,10 +2048,52 @@ pub async fn run(
                                 InputAction::ExecuteCommand { name: cmd_name, args: cmd_args } => {
                                     let cmd_arg: Option<&str> = cmd_args.as_deref();
                                     let cmd_name: &str = cmd_name.as_str();
-                                    if cmd_name == "login" {
-                                        handlers::login::command(&mut state, &login_ctx, config, cmd_arg);
-                                    } else if cmd_name == "logout" || cmd_name == "accounts" {
-                                        handlers::accounts::command(&mut state, &login_ctx, config, cmd_name, cmd_arg);
+                                    if cmd_name == "login" || cmd_name == "logout" || cmd_name == "accounts" {
+                                        let outcome = if cmd_name == "login" {
+                                            handlers::login::command(&mut state, config, cmd_arg)
+                                        } else {
+                                            handlers::accounts::command(&mut state, cmd_name, cmd_arg)
+                                        };
+                                        if let HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(work)) = outcome {
+                                            let ctx = login_ctx.clone();
+                                            let app = config.clone();
+                                            match work {
+                                                AuthWork::Login { login_id, plan, method, origin } => {
+                                                    let cancel = CancellationToken::new();
+                                                    let ui = Arc::new(TuiLoginUi::new(ctx.events.clone(), login_id, cancel.clone(), ctx.opener.clone()));
+                                                    state.login.origin = origin.clone();
+                                                    state.login.start_running(RunningLogin {
+                                                        login_id,
+                                                        provider_id: plan.provider_id.clone(),
+                                                        display: handlers::login::display_text(&plan.display),
+                                                        origin,
+                                                        cancel,
+                                                        sections: Vec::new(),
+                                                        progress: Vec::new(),
+                                                        field: None,
+                                                    });
+                                                    state.focus = handlers::login::LOGIN;
+                                                    state.needs_redraw = true;
+                                                    tokio::spawn(login_runtime::run_login(ctx, app, login_id, plan, method, ui));
+                                                }
+                                                AuthWork::Targets { generation } => {
+                                                    tokio::spawn(async move {
+                                                        for check in login_runtime::prepare_targets(ctx.clone(), app, generation).await {
+                                                            tokio::spawn(login_runtime::validate_target(ctx.clone(), generation, check));
+                                                        }
+                                                    });
+                                                }
+                                                AuthWork::Providers { generation } => {
+                                                    tokio::spawn(accounts_runtime::run_providers(ctx, app, generation));
+                                                }
+                                                AuthWork::Listing { generation, mode, provider } => {
+                                                    tokio::spawn(accounts_runtime::run_listing(ctx, app, generation, mode, provider));
+                                                }
+                                                AuthWork::Change { generation, change, provider, id } => {
+                                                    tokio::spawn(accounts_runtime::run_change(ctx, app, generation, change, provider, id));
+                                                }
+                                            }
+                                        }
                                     } else if cmd_name == "models" {
                                         handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
                                     } else if cmd_name == "ml" {
@@ -4959,7 +5002,47 @@ pub async fn run(
                                     handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
                                 }
                                 InputAction::Login(action) => {
-                                    handlers::login::on_action(&mut state, &login_ctx, config, &AppContext::new(&app_state, &router), action);
+                                    let outcome = handlers::login::on_action(&mut state, &login_ctx.copier, config, &AppContext::new(&app_state, &router), action);
+                                    if let HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(work)) = outcome {
+                                        let ctx = login_ctx.clone();
+                                        let app = config.clone();
+                                        match work {
+                                            AuthWork::Login { login_id, plan, method, origin } => {
+                                                let cancel = CancellationToken::new();
+                                                let ui = Arc::new(TuiLoginUi::new(ctx.events.clone(), login_id, cancel.clone(), ctx.opener.clone()));
+                                                state.login.origin = origin.clone();
+                                                state.login.start_running(RunningLogin {
+                                                    login_id,
+                                                    provider_id: plan.provider_id.clone(),
+                                                    display: handlers::login::display_text(&plan.display),
+                                                    origin,
+                                                    cancel,
+                                                    sections: Vec::new(),
+                                                    progress: Vec::new(),
+                                                    field: None,
+                                                });
+                                                state.focus = handlers::login::LOGIN;
+                                                state.needs_redraw = true;
+                                                tokio::spawn(login_runtime::run_login(ctx, app, login_id, plan, method, ui));
+                                            }
+                                            AuthWork::Targets { generation } => {
+                                                tokio::spawn(async move {
+                                                    for check in login_runtime::prepare_targets(ctx.clone(), app, generation).await {
+                                                        tokio::spawn(login_runtime::validate_target(ctx.clone(), generation, check));
+                                                    }
+                                                });
+                                            }
+                                            AuthWork::Providers { generation } => {
+                                                tokio::spawn(accounts_runtime::run_providers(ctx, app, generation));
+                                            }
+                                            AuthWork::Listing { generation, mode, provider } => {
+                                                tokio::spawn(accounts_runtime::run_listing(ctx, app, generation, mode, provider));
+                                            }
+                                            AuthWork::Change { generation, change, provider, id } => {
+                                                tokio::spawn(accounts_runtime::run_change(ctx, app, generation, change, provider, id));
+                                            }
+                                        }
+                                    }
                                 }
                                 InputAction::SwitchModelProvider { provider_id, model_id } => {
                                     let app_context = AppContext::new(&app_state, &router);

@@ -91,6 +91,9 @@ pub enum HandlerOutcome {
 /// pattern documentation comment.
 #[allow(dead_code)]
 pub enum SpawnRequest {
+    /// Authentication work is planned synchronously; dispatch binds context and
+    /// constructs the futures, including independent picker validation children.
+    Authentication(AuthWork),
     /// Health-check pattern from `apply_model_switch` (formerly `event_loop.rs:9842`).
     ///
     /// **Dispatch-arm pattern:**
@@ -142,6 +145,34 @@ pub enum SpawnRequest {
         app_config: std::sync::Arc<arc_swap::ArcSwap<crate::domain::models::AppConfig>>,
         guard: Option<crate::adapters::tui::handlers::profile_switch::SwitchGuard>,
         new_resolver: std::sync::Arc<dyn crate::domain::ports::ProfileResolver>,
+    },
+}
+
+/// Authentication launch plans. Only data crosses the handler boundary:
+/// collaborators, cancellation tokens, UI handles and futures belong to dispatch.
+pub enum AuthWork {
+    Login {
+        login_id: u64,
+        plan: crate::adapters::auth::host::LoginPlan,
+        method: &'static crate::domain::models::AuthMethod,
+        origin: crate::adapters::tui::state::LoginOrigin,
+    },
+    Targets {
+        generation: u64,
+    },
+    Providers {
+        generation: u64,
+    },
+    Listing {
+        generation: u64,
+        mode: crate::adapters::tui::state::OverlayMode,
+        provider: String,
+    },
+    Change {
+        generation: u64,
+        change: crate::adapters::tui::accounts_runtime::Change,
+        provider: String,
+        id: u64,
     },
 }
 

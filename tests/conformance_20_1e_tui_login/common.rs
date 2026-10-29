@@ -13,7 +13,9 @@ pub(crate) use crate::conformance_20_1d1b_codex_replay_discovery::common::{
 use ratatui::{Terminal, backend::TestBackend};
 use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
 use rustain::adapters::tui::clipboard::ClipboardResult;
-use rustain::adapters::tui::handlers::{accounts, login, model_switch};
+use rustain::adapters::tui::handlers::{
+    AuthWork, HandlerOutcome, SpawnRequest, accounts, login, model_switch,
+};
 use rustain::adapters::tui::refresh_tracker::RefreshTracker;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
@@ -89,7 +91,14 @@ impl Tui {
     pub(crate) fn dispatch(&mut self, action: InputAction) -> Option<InputAction> {
         match action {
             InputAction::Login(action) => {
-                login::on_action(&mut self.state, &self.ctx, &self.app, &*self.live, action);
+                let outcome = login::on_action(
+                    &mut self.state,
+                    &self.ctx.copier,
+                    &self.app,
+                    &*self.live,
+                    action,
+                );
+                self.consume(outcome);
                 None
             }
             InputAction::OpenModelSelector => {
@@ -97,19 +106,15 @@ impl Tui {
                 None
             }
             InputAction::ExecuteCommand { name, args } if name == "login" => {
-                login::command(&mut self.state, &self.ctx, &self.app, args.as_deref());
+                let outcome = login::command(&mut self.state, &self.app, args.as_deref());
+                self.consume(outcome);
                 None
             }
             InputAction::ExecuteCommand { name, args }
                 if name == "logout" || name == "accounts" =>
             {
-                accounts::command(
-                    &mut self.state,
-                    &self.ctx,
-                    &self.app,
-                    &name,
-                    args.as_deref(),
-                );
+                let outcome = accounts::command(&mut self.state, &name, args.as_deref());
+                self.consume(outcome);
                 None
             }
             InputAction::ExecuteCommand { name, .. } if name == "models" => {
@@ -117,6 +122,87 @@ impl Tui {
                 None
             }
             other => Some(other),
+        }
+    }
+
+    /// Mirror dispatch ownership: bind login state before launching, and fan out
+    /// picker validation only after the coordinator has published its rows.
+    fn consume(&mut self, outcome: HandlerOutcome) {
+        use rustain::adapters::tui::state::RunningLogin;
+        use rustain::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
+        use rustain::domain::models::{FocusState, visual::OverlayType};
+        use tokio_util::sync::CancellationToken;
+
+        let HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(work)) = outcome else {
+            return;
+        };
+        let ctx = self.ctx.clone();
+        let app = self.app.clone();
+        match work {
+            AuthWork::Login {
+                login_id,
+                plan,
+                method,
+                origin,
+            } => {
+                let cancel = CancellationToken::new();
+                let ui = Arc::new(TuiLoginUi::new(
+                    ctx.events.clone(),
+                    login_id,
+                    cancel.clone(),
+                    ctx.opener.clone(),
+                ));
+                self.state.login.origin = origin.clone();
+                self.state.login.start_running(RunningLogin {
+                    login_id,
+                    provider_id: plan.provider_id.clone(),
+                    display: rustain::adapters::auth::bounded_provider_text(&plan.display),
+                    origin,
+                    cancel,
+                    sections: Vec::new(),
+                    progress: Vec::new(),
+                    field: None,
+                });
+                self.state.focus = FocusState::Overlay(OverlayType::Login);
+                self.state.needs_redraw = true;
+                tokio::spawn(login_runtime::run_login(
+                    ctx, app, login_id, plan, method, ui,
+                ));
+            }
+            AuthWork::Targets { generation } => {
+                tokio::spawn(async move {
+                    let checks = login_runtime::prepare_targets(ctx.clone(), app, generation).await;
+                    for check in checks {
+                        tokio::spawn(login_runtime::validate_target(
+                            ctx.clone(),
+                            generation,
+                            check,
+                        ));
+                    }
+                });
+            }
+            AuthWork::Providers { generation } => {
+                tokio::spawn(accounts_runtime::run_providers(ctx, app, generation));
+            }
+            AuthWork::Listing {
+                generation,
+                mode,
+                provider,
+            } => {
+                tokio::spawn(accounts_runtime::run_listing(
+                    ctx, app, generation, mode, provider,
+                ));
+            }
+            AuthWork::Change {
+                generation,
+                change,
+                provider,
+                id,
+            } => {
+                tokio::spawn(accounts_runtime::run_change(
+                    ctx, app, generation, change, provider, id,
+                ));
+            }
         }
     }
 

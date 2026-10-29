@@ -186,3 +186,82 @@ async fn k07_provider_picker_provenance_validation_search_and_generation() {
         .await;
     assert!(!tui.state.login.rows.is_empty());
 }
+
+/// The picker dispatches independent validation children after publishing rows.
+#[tokio::test]
+#[serial]
+async fn k3_picker_validations_run_independently_after_targets() {
+    let server = MockServer::start().await;
+    let world = World::new(&server);
+    Mock::given(method("POST"))
+        .and(path("/v1/oauth/token"))
+        .and(body_partial_json(
+            json!({"grant_type": "authorization_code"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "K3-ACCESS", "refresh_token": "K3-REFRESH", "expires_in": 3600,
+            "account": {"uuid": "acct-k3", "email_address": "k3@example.test"},
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    let mut tui = Tui::new(AppConfig::default());
+    due_anthropic_login(&mut tui).await;
+    world.set(
+        "RUSTAIN_TEST_NOW_MS",
+        &(super::common::NOW + 7_200_000).to_string(),
+    );
+    world.set("OPENAI_API_KEY", "sk-k3-openai");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    world.set(
+        "RUSTAIN_TEST_AUTH_ORIGIN",
+        &format!("http://{}", listener.local_addr().unwrap()),
+    );
+    tui.event_log.clear();
+    tui.submit("/login");
+    let held = super::common::accept(&listener).await;
+    assert_eq!(held.path(), "/v1/oauth/token");
+    tui.until_login(
+        "openai validation while anthropic is held",
+        |event| matches!(event, LoginEvent::Validated { provider, .. } if provider == "openai"),
+    )
+    .await;
+    assert!(
+        tui.event_log
+            .iter()
+            .any(|event| event.contains("Targets {"))
+    );
+    assert!(
+        !tui.event_log
+            .iter()
+            .any(|event| event.contains("Validated {") && event.contains("anthropic"))
+    );
+    held.json(
+        &json!({"access_token": "K3-NEW", "refresh_token": "K3-NEW-REFRESH", "expires_in": 3600}),
+    )
+    .await;
+    tui.until_login(
+        "anthropic validation after release",
+        |event| matches!(event, LoginEvent::Validated { provider, .. } if provider == "anthropic"),
+    )
+    .await;
+    let targets = tui
+        .event_log
+        .iter()
+        .position(|event| event.contains("Targets {"))
+        .unwrap();
+    let openai = tui
+        .event_log
+        .iter()
+        .position(|event| event.contains("Validated {") && event.contains("openai"))
+        .unwrap();
+    let anthropic = tui
+        .event_log
+        .iter()
+        .position(|event| event.contains("Validated {") && event.contains("anthropic"))
+        .unwrap();
+    assert!(targets < openai && targets < anthropic);
+}

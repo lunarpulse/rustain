@@ -2,9 +2,8 @@
 //! provider step over every provider with stored rows, then one provider's
 //! account step (Enter logs out of, or makes active, the row under the cursor;
 //! no confirmation, as omp's logout selector). The event loop reaches this
-//! module through `command` and the login handler's delegation lines; the
-//! store reads, the change and the live-layer update run in the tasks
-//! `tui::accounts_runtime` spawns and report back as `LoginEvent`s.
+//! module through data-only command/action outcomes; dispatch launches the
+//! non-spawning workers in `tui::accounts_runtime`, which report `LoginEvent`s.
 //!
 //! Account step behaviour adapted from oh-my-pi's logout account selector.
 //!
@@ -33,12 +32,12 @@
 //! SOFTWARE.
 
 use super::login::{LOGIN, LoginAction, close, closed, is_cancel, move_cursor, take_focus};
-use crate::adapters::tui::accounts_runtime::{self, Change};
+use super::{AuthWork, HandlerOutcome, SpawnRequest};
+use crate::adapters::tui::accounts_runtime::Change;
 use crate::adapters::tui::app::InputAction;
-use crate::adapters::tui::login_runtime::LoginCtx;
 use crate::adapters::tui::state::{LoginOrigin, LoginView, OverlayMode, TuiState};
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
-use crate::domain::models::{AppConfig, FeedbackBlock, FeedbackLevel};
+use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 
 /// What the event loop's login arm performs for the account steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,18 +52,12 @@ pub enum AccountAction {
 
 /// `/logout [provider]` and `/accounts [provider]` (`ExecuteCommand`); `name`
 /// is `logout` or `accounts`.
-pub fn command(
-    state: &mut TuiState,
-    ctx: &LoginCtx,
-    app: &AppConfig,
-    name: &str,
-    args: Option<&str>,
-) {
+pub fn command(state: &mut TuiState, name: &str, args: Option<&str>) -> HandlerOutcome {
     if state.login.running.is_some() {
         // One overlay at a time: the running login keeps (or regains) focus.
         state.focus = LOGIN;
         state.needs_redraw = true;
-        return;
+        return HandlerOutcome::Quiet;
     }
     let mode = if name == "logout" {
         OverlayMode::Logout
@@ -79,23 +72,23 @@ pub fn command(
             let generation = state
                 .login
                 .open_accounts(previous, mode, provider.to_owned(), false);
-            accounts_runtime::spawn_listing(
-                ctx.clone(),
-                app.clone(),
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Listing {
                 generation,
                 mode,
-                provider.to_owned(),
-            );
+                provider: provider.to_owned(),
+            }))
         }
         None => {
             let generation = state.login.open_picker(previous, LoginOrigin::Slash, mode);
-            accounts_runtime::spawn_providers(ctx.clone(), app.clone(), generation);
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Providers {
+                generation,
+            }))
         }
     }
 }
 
 /// `LoginAction::Accounts` (delegated by `login::on_action`).
-pub fn on_action(state: &mut TuiState, ctx: &LoginCtx, app: &AppConfig, action: AccountAction) {
+pub fn on_action(state: &mut TuiState, action: AccountAction) -> HandlerOutcome {
     let generation = state.login.generation;
     match action {
         AccountAction::List { provider } => {
@@ -107,24 +100,28 @@ pub fn on_action(state: &mut TuiState, ctx: &LoginCtx, app: &AppConfig, action: 
                     .login
                     .open_accounts(previous, mode, provider.clone(), from_picker);
             state.needs_redraw = true;
-            accounts_runtime::spawn_listing(ctx.clone(), app.clone(), generation, mode, provider);
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Listing {
+                generation,
+                mode,
+                provider,
+            }))
         }
-        AccountAction::Logout { provider, id } => accounts_runtime::spawn_change(
-            ctx.clone(),
-            app.clone(),
-            generation,
-            Change::Logout,
-            provider,
-            id,
-        ),
-        AccountAction::Select { provider, id } => accounts_runtime::spawn_change(
-            ctx.clone(),
-            app.clone(),
-            generation,
-            Change::Select,
-            provider,
-            id,
-        ),
+        AccountAction::Logout { provider, id } => {
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Change {
+                generation,
+                change: Change::Logout,
+                provider,
+                id,
+            }))
+        }
+        AccountAction::Select { provider, id } => {
+            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Change {
+                generation,
+                change: Change::Select,
+                provider,
+                id,
+            }))
+        }
     }
 }
 

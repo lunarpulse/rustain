@@ -1,7 +1,6 @@
-//! The spawn-bearing half of TUI sign-in: the login task (flow, live-layer
-//! change, result lines, discovery) and the provider-picker data task. The
-//! handlers in `handlers::login` stay spawn-free (ADR-08-01 §D8.2) and call
-//! `spawn_login` / `spawn_targets`.
+//! Non-spawning TUI sign-in work. Handlers return data outcomes; event-loop
+//! dispatch binds login cancellation/UI, starts work and independently launches
+//! the validation checks returned after picker rows are emitted.
 
 use crate::adapters::auth::flows::{self, FlowCtx, FlowError, Sleeper};
 use crate::adapters::auth::host::{self, LoginPlan};
@@ -14,40 +13,11 @@ use crate::domain::ports::AuthStorePort;
 use crate::infrastructure::live_providers::LiveProviders;
 use crate::infrastructure::runtime::event_bus::EventBus;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-
-/// Starts one login task; returns the token that cancels it.
-pub(crate) fn spawn_login(
-    ctx: &LoginCtx,
-    app: &AppConfig,
-    login_id: u64,
-    plan: &LoginPlan,
-    method: &'static AuthMethod,
-) -> CancellationToken {
-    let cancel = CancellationToken::new();
-    let ui = Arc::new(TuiLoginUi::new(
-        ctx.events.clone(),
-        login_id,
-        cancel.clone(),
-        ctx.opener.clone(),
-    ));
-    tokio::spawn(run_login(
-        ctx.clone(),
-        app.clone(),
-        login_id,
-        plan.provider_id.clone(),
-        plan.display.clone(),
-        plan.validation_config.clone(),
-        method,
-        ui,
-    ));
-    cancel
-}
 
 /// Copies text to the clipboard (production: `tui::clipboard::copy_to_clipboard`).
 pub type Copier = Arc<dyn Fn(&str) -> ClipboardResult + Send + Sync>;
 
-/// The login handlers' dependencies, built once before the event loop.
+/// Authentication worker collaborators, bound by dispatch before launching work.
 #[derive(Clone)]
 pub struct LoginCtx {
     pub events: Arc<EventBus>,
@@ -92,17 +62,22 @@ impl LoginCtx {
         let _ = self.events.emit_domain(AppEvent::Login(event));
     }
 }
-#[allow(clippy::too_many_arguments)]
-async fn run_login(
+/// Runs the real login flow and publishes the existing live/result/discovery
+/// sequence. Callers bind the UI and install running state before launching it.
+pub async fn run_login(
     ctx: LoginCtx,
     app: AppConfig,
     login_id: u64,
-    provider: String,
-    display: String,
-    validation_config: crate::domain::models::ProviderConfig,
+    plan: LoginPlan,
     method: &'static AuthMethod,
     ui: Arc<TuiLoginUi>,
 ) {
+    let LoginPlan {
+        provider_id: provider,
+        display,
+        validation_config,
+        ..
+    } = plan;
     let before =
         crate::adapters::auth_store::FileAuthStore::try_snapshot_sync().unwrap_or_default();
     let mut flow = FlowCtx::new(ui, ctx.clock.clone()).with_validation_config(validation_config);
@@ -159,71 +134,91 @@ async fn run_login(
     }
 }
 
-/// Reads the store once, emits the picker rows, then validates every served
-/// credential through the handle its adapter would use.
-pub(crate) fn spawn_targets(ctx: LoginCtx, app: AppConfig, generation: u64) {
-    tokio::spawn(async move {
-        let snapshot = ctx.store.snapshot().await.unwrap_or_default();
-        let entries = crate::infrastructure::provider_availability::effective_providers(&app);
-        let env = crate::infrastructure::utils::env_var_trimmed;
-        let mut rows = Vec::new();
-        let mut checks = Vec::new();
-        for target in host::login_targets(&app) {
-            let accounts =
-                crate::infrastructure::auth_accounts::describe(&snapshot, &app, &target.id, &env);
-            let source = host::source_label(&accounts);
-            let entry = entries
-                .iter()
-                .find(|entry| entry.cfg.enabled && entry.rows_key() == target.id);
-            let env_vars: Vec<String> = entry
-                .map(|entry| entry.env_vars().into_iter().map(str::to_owned).collect())
-                .unwrap_or_default();
-            if source.is_some() {
-                checks.push((
-                    target.id.clone(),
-                    env_vars.clone(),
-                    entry.map(|entry| entry.row_policy(&env)),
-                ));
-            }
-            rows.push(LoginTargetRow {
-                search: format!(
-                    "{} {} {}",
-                    target.id,
-                    source.as_deref().unwrap_or(""),
-                    env_vars.join(" ")
-                ),
-                id: target.id,
-                display: display_text(&target.display),
-                source,
-                status: host::status_text(&accounts),
+/// Owned credential-check data returned to dispatch; contains no executable work.
+pub struct ValidationCheck {
+    provider: String,
+    env_vars: Vec<String>,
+    policy: Option<crate::domain::services::key_cascade::RowPolicy>,
+}
+
+/// Reads the store once and emits rows before returning independent validation
+/// checks. Dispatch, not this worker, launches each returned check.
+pub async fn prepare_targets(
+    ctx: LoginCtx,
+    app: AppConfig,
+    generation: u64,
+) -> Vec<ValidationCheck> {
+    let snapshot = ctx.store.snapshot().await.unwrap_or_default();
+    let entries = crate::infrastructure::provider_availability::effective_providers(&app);
+    let env = crate::infrastructure::utils::env_var_trimmed;
+    let mut rows = Vec::new();
+    let mut checks = Vec::new();
+    for target in host::login_targets(&app) {
+        let accounts =
+            crate::infrastructure::auth_accounts::describe(&snapshot, &app, &target.id, &env);
+        let source = host::source_label(&accounts);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.cfg.enabled && entry.rows_key() == target.id);
+        let env_vars: Vec<String> = entry
+            .map(|entry| entry.env_vars().into_iter().map(str::to_owned).collect())
+            .unwrap_or_default();
+        if source.is_some() {
+            checks.push(ValidationCheck {
+                provider: target.id.clone(),
+                env_vars: env_vars.clone(),
+                policy: entry.map(|entry| entry.row_policy(&env)),
             });
         }
-        ctx.emit(LoginEvent::Targets { generation, rows });
-        for (provider, env_vars, policy) in checks {
-            let ctx = ctx.clone();
-            tokio::spawn(async move {
-                let valid = match policy {
-                    Some(policy) => crate::infrastructure::key_resolver::CredentialHandle::new(
-                        crate::infrastructure::key_resolver::shared(),
-                        provider.clone(),
-                        env_vars,
-                        policy,
-                        None,
-                    )
-                    .current()
-                    .await
-                    .is_ok(),
-                    None => false,
-                };
-                ctx.emit(LoginEvent::Validated {
-                    generation,
-                    provider,
-                    valid,
-                });
-            });
-        }
+        rows.push(LoginTargetRow {
+            search: format!(
+                "{} {} {}",
+                target.id,
+                source.as_deref().unwrap_or(""),
+                env_vars.join(" ")
+            ),
+            id: target.id,
+            display: display_text(&target.display),
+            source,
+            status: host::status_text(&accounts),
+        });
+    }
+    ctx.emit(LoginEvent::Targets { generation, rows });
+    checks
+}
+
+/// Validates one served credential through the handle its adapter would use.
+/// Independent dispatch tasks allow another provider to complete while one waits.
+pub async fn validate_target(ctx: LoginCtx, generation: u64, check: ValidationCheck) {
+    let ValidationCheck {
+        provider,
+        env_vars,
+        policy,
+    } = check;
+    let valid = match policy {
+        Some(policy) => crate::infrastructure::key_resolver::CredentialHandle::new(
+            crate::infrastructure::key_resolver::shared(),
+            provider.clone(),
+            env_vars,
+            policy,
+            None,
+        )
+        .current()
+        .await
+        .is_ok(),
+        None => false,
+    };
+    ctx.emit(LoginEvent::Validated {
+        generation,
+        provider,
+        valid,
     });
 }
+
+#[cfg(test)]
+#[path = "auth_outcome_tests.rs"]
+mod auth_outcome_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +229,7 @@ mod tests {
     };
     use crate::domain::events::{DomainInputEvent, DomainKey, LoginReply};
     use crate::domain::ports::ProviderInfoPort;
+    use tokio_util::sync::CancellationToken;
 
     fn running(state: &mut TuiState, with_section: bool) -> CancellationToken {
         let cancel = CancellationToken::new();

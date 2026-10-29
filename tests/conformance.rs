@@ -1173,3 +1173,24 @@ fn test_handler_naming_reflection() {
         spawn_violations.join("\n"),
     );
 }
+
+/// Authentication outcomes are data; each production dispatch owns its spawns.
+#[test]
+fn test_authentication_handler_spawn_boundary() {
+    for script in [
+        ".github/scripts/check-auth-handler-boundary.py",
+        ".github/scripts/test_auth_handler_boundary.py",
+    ] {
+        let output = std::process::Command::new("python3")
+            .arg(script)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("authentication boundary checker unavailable: install tools/ci/requirements-metrics.txt");
+        assert!(
+            output.status.success(),
+            "authentication boundary check {script} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
