@@ -52,6 +52,14 @@ pub async fn handle_apply_bookmark_toggle(
         state.viewport_height as usize,
         conversation.messages.len(),
     );
+    let Some(durable_idx) = conversation.durable_message_index(target_idx) else {
+        state.status = StatusState::Flash {
+            message: "Cannot bookmark a temporary display".to_string(),
+            remaining_ms: 2000,
+        };
+        state.needs_redraw = true;
+        return HandlerOutcome::Quiet;
+    };
 
     // Guard: bookmark only user/assistant messages.
     let role = conversation.messages[target_idx].role;
@@ -70,13 +78,13 @@ pub async fn handle_apply_bookmark_toggle(
 
     // Clone-mutate-save pattern for rollback safety.
     let mut new_meta = tab_manager.active_tab().session_meta.clone();
-    let was_bookmarked = new_meta.bookmarks.binary_search(&target_idx).is_ok();
+    let was_bookmarked = new_meta.bookmarks.binary_search(&durable_idx).is_ok();
     if was_bookmarked {
-        new_meta.bookmarks.retain(|&i| i != target_idx);
+        new_meta.bookmarks.retain(|&i| i != durable_idx);
     } else {
-        match new_meta.bookmarks.binary_search(&target_idx) {
+        match new_meta.bookmarks.binary_search(&durable_idx) {
             Ok(_) => {}
-            Err(pos) => new_meta.bookmarks.insert(pos, target_idx),
+            Err(pos) => new_meta.bookmarks.insert(pos, durable_idx),
         }
     }
 
@@ -138,6 +146,7 @@ pub fn handle_apply_open_bookmark_list(
 pub fn handle_apply_jump_bookmark(
     tab_manager: &TabManager,
     state: &mut TuiState,
+    conversation: &Conversation,
 ) -> HandlerOutcome {
     use crate::adapters::tui::widgets::chat_pane;
     let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
@@ -147,7 +156,11 @@ pub fn handle_apply_jump_bookmark(
         return HandlerOutcome::Quiet;
     }
     let sel = state.bookmark_list_selected.min(bookmarks.len() - 1);
-    let target_msg = bookmarks[sel];
+    let Some(target_msg) = conversation.live_message_index(bookmarks[sel]) else {
+        state.focus = FocusState::Chat;
+        state.needs_redraw = true;
+        return HandlerOutcome::Quiet;
+    };
     state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
         target_msg,
         &state.message_boundaries,
@@ -261,4 +274,70 @@ pub async fn handle_apply_undo_bookmark_delete(
     }
     state.needs_redraw = true;
     HandlerOutcome::Quiet
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::filesystem::FileSystemStorage;
+    use crate::domain::models::{ChatMessage, ContentBlockType};
+
+    #[tokio::test]
+    async fn ephemeral_bookmark_is_rejected_and_later_durable_row_is_remapped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let mut tabs = TabManager::new(Default::default());
+        let mut state = TuiState::new(80, 24);
+        let conversation = Conversation {
+            id: "bookmark-policy".into(),
+            messages: vec![
+                ChatMessage {
+                    id: "first".into(),
+                    role: MessageRole::User,
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "temporary".into(),
+                    content_blocks: vec![ContentBlockType::EphemeralDisplay],
+                    ..Default::default()
+                },
+                ChatMessage {
+                    id: "last".into(),
+                    role: MessageRole::User,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        state.message_boundaries = vec![0, 10, 20];
+        state.total_content_height = 30;
+        state.viewport_height = 10;
+        state.auto_snapshot = true;
+        handle_apply_bookmark_toggle(&mut tabs, &mut state, &conversation, &storage).await;
+        assert_eq!(tabs.active_tab().session_meta.bookmarks, [1]);
+        assert_eq!(
+            storage
+                .load_session_meta(&conversation.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .bookmarks,
+            [1]
+        );
+        state.auto_snapshot = false;
+        state.scroll_snapshot = 10;
+        handle_apply_bookmark_toggle(&mut tabs, &mut state, &conversation, &storage).await;
+        assert_eq!(tabs.active_tab().session_meta.bookmarks, [1]);
+        assert_eq!(
+            storage
+                .load_session_meta(&conversation.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .bookmarks,
+            [1]
+        );
+        handle_apply_jump_bookmark(&tabs, &mut state, &conversation);
+        assert_eq!(state.scroll_snapshot, 0);
+    }
 }

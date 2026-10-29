@@ -180,6 +180,33 @@ pub fn find_message_index_from_scroll_offset(
     idx.min(last)
 }
 
+/// Bookmark metadata uses durable indices; rendering uses live mirror indices.
+fn live_bookmarks<'a>(
+    conversation: &Conversation,
+    bookmarks: &'a [usize],
+) -> std::borrow::Cow<'a, [usize]> {
+    if bookmarks.is_empty()
+        || !conversation
+            .messages
+            .iter()
+            .any(|m| m.is_ephemeral_display())
+    {
+        return std::borrow::Cow::Borrowed(bookmarks);
+    }
+    let mut durable_index = 0;
+    let mut live = Vec::with_capacity(bookmarks.len());
+    for (index, message) in conversation.messages.iter().enumerate() {
+        if message.is_ephemeral_display() {
+            continue;
+        }
+        if bookmarks.binary_search(&durable_index).is_ok() {
+            live.push(index);
+        }
+        durable_index += 1;
+    }
+    std::borrow::Cow::Owned(live)
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
 mod targeting_tests {
@@ -1084,6 +1111,7 @@ pub fn build_layout_metrics(
     >,
     bookmarks: &[usize],
 ) -> LayoutMetrics {
+    let bookmarks = live_bookmarks(conversation, bookmarks);
     let _ = clock; // reserved for spinner-frame stability in running-turn heights (S16.5 W4)
     let width_usize = width as usize;
     let spacing = theme.spacing.normal as usize;
@@ -1753,6 +1781,7 @@ fn render_with_search_impl(
     active_feedback_id: Option<&str>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> RenderResult {
+    let bookmarks = live_bookmarks(conversation, bookmarks);
     let empty = RenderResult {
         total_content_height: 0,
         block_boundaries: Vec::new(),

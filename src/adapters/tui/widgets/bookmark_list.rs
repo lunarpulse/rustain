@@ -77,8 +77,8 @@ pub fn render(
         }
         let msg_idx = bookmarks[entry_idx];
         let first_line = conversation
-            .messages
-            .get(msg_idx)
+            .live_message_index(msg_idx)
+            .and_then(|index| conversation.messages.get(index))
             .map(|m| m.content.lines().next().unwrap_or("").to_string())
             .unwrap_or_else(|| "(missing message)".to_string());
         let shortened = shorten_text(&first_line, content_budget);
@@ -94,9 +94,7 @@ pub fn render(
         } else {
             Style::default().fg(theme.colors.fg_primary)
         };
-        // Display uses the 0-based `usize` index directly to match the
-        // internal `SessionMeta.bookmarks` representation and the rest of
-        // the code base (`message_boundaries`, `find_message_index_from_scroll_offset`).
+        // Display the durable zero-based index stored in SessionMeta.
         // Third-audit Fix R1: reverted from `msg_idx + 1` to honor the
         // original AC10 spec. A future UX discussion about 1-based display
         // for end users is tracked as DF-126 (party-mode third-audit).

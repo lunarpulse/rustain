@@ -680,8 +680,8 @@ pub async fn run(
         }
     }
 
-    // Track active turn task for cancellation
-    let mut _active_turn: Option<tokio::task::JoinHandle<()>> = None;
+    // Local producer ownership survives tab switches; no global task handle.
+    let mut turn_lifecycle = super::tui_turn_lifecycle::TuiTurnLifecycle::default();
 
     // Story 12.2a — the turn-origination seam. `LocalTurnDriver` owns the
     // agent-side dependencies (provider/security/tools/scheduler/persona/context/
@@ -715,13 +715,20 @@ pub async fn run(
     // path). This macro is the call-site shorthand: it bundles the per-turn inputs
     // into a `UserSubmission` and the view-state `&mut` group into a `TurnViewState`,
     // both forwarded to `LocalTurnDriver::submit`. The view-state locals
-    // (`conversation`/`streaming`/`state`/`_active_turn`/`session_manager`) are read
+    // (`conversation`/`streaming`/`state`/`turn_lifecycle`/`session_manager`) are read
     // from this scope so the call sites stay short.
     macro_rules! submit_turn {
         ($text:expr, $images:expr, $synthetic:expr, $activation:expr, $agent:expr, $cancel:expr $(,)?) => {
             async {
                 #[cfg(feature = "a2a")]
                 synchronize_surface(&mut state, &app_state, &tab_manager, &conversation).await;
+                // Replacement origins (retry/plan/fallback) retire the previous owner too.
+                turn_lifecycle.interrupt_active(
+                    &mut tab_manager,
+                    &mut conversation,
+                    &mut streaming,
+                    &mut state.pending_resolved_model,
+                );
                 turn_driver
                     .submit(
                         crate::infrastructure::runtime::turn_driver::UserSubmission {
@@ -736,7 +743,7 @@ pub async fn run(
                             conversation: &mut conversation,
                             streaming: &mut streaming,
                             state: &mut state,
-                            active_turn: &mut _active_turn,
+                            lifecycle: &mut turn_lifecycle,
                             session_manager: &mut session_manager,
                         },
                     )
@@ -803,7 +810,14 @@ pub async fn run(
         Err(e) => {
             handlers::render_error::handle_render_error(
                 e,
-                &mut _active_turn,
+                |streaming, state| {
+                    turn_lifecycle.interrupt_active(
+                        &mut tab_manager,
+                        &mut conversation,
+                        streaming,
+                        &mut state.pending_resolved_model,
+                    )
+                },
                 &mut streaming,
                 &mut state,
                 terminal,
@@ -1077,10 +1091,8 @@ pub async fn run(
                                         state.feedback_blocks.remove("carryover");
                                         state.active_feedback_id = None;
                                         // Story 7.4 AC10: open fresh tab immediately (no carryover)
-                                        if let Some(handle) = _active_turn.take() {
-                                            handle.abort();
-                                            streaming = StreamingState::default();
-                                        }
+                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                        streaming = StreamingState::default();
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         tab_manager.create_tab();
                                         load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
@@ -1454,26 +1466,13 @@ pub async fn run(
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
+                                            Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
                                 InputAction::Quit => {
-                                    // Story 19.3 (code review D3): a quit must not silently
-                                    // discard an in-flight reply. The partial lives in
-                                    // `streaming`, never in `conversation`, and shutdown
-                                    // persists `conversation` with clean_exit=true — so
-                                    // without this fold the response is lost AND the
-                                    // recovery prompt cannot fire. Same finalization
-                                    // CancelOrQuit performs; Ctrl+Q still QUITS (A1: it
-                                    // never degrades into a cancel).
-                                    if streaming.is_streaming {
-                                        handlers::turn_finalize::finalize_streaming_turn(
-                                            &mut streaming,
-                                            &mut conversation,
-                                            &mut _active_turn,
-                                        );
-                                    }
+                                    // Quit is unconditional, closing every owned tab before save.
+                                    turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
                                     state.should_quit = true;
                                 }
                                 InputAction::CancelOrQuit => {
@@ -1541,14 +1540,8 @@ pub async fn run(
                                         // Don't quit — wave cancel consumed the Ctrl-C.
                                         continue;
                                     }
-                                    if streaming.is_streaming {
-                                        // AC12 + Story 19.3 D3: one shared finalization,
-                                        // so a quit can never drop what a cancel keeps.
-                                        handlers::turn_finalize::finalize_streaming_turn(
-                                            &mut streaming,
-                                            &mut conversation,
-                                            &mut _active_turn,
-                                        );
+                                    if streaming.is_streaming || turn_lifecycle.is_live(&conversation.id) || tab_manager.active_tab().reducer.open_turn.is_some() {
+                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
                                         // Clear TurnQueue entirely
                                         while turn_queue.dequeue().is_some() {}
                                         // Ready for next input
@@ -2130,6 +2123,7 @@ pub async fn run(
                                             _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
                                         }
                                     } else if cmd_name == "new" || cmd_name == "clear" {
+                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
                                         #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_conversation(&mut state, &app_state, &conversation.id).await;
                                         // /new and /clear are true context resets. Unlike
                                         // /compact, they discard context and therefore clear
@@ -2203,9 +2197,6 @@ pub async fn run(
                                         // Reset streaming state
                                         streaming = StreamingState::default();
                                         while turn_queue.dequeue().is_some() {}
-                                        if let Some(handle) = _active_turn.take() {
-                                            handle.abort();
-                                        }
                                     } else if cmd_name == "deactivate" {
                                         // /deactivate [name] — Story 5-2 AC5
                                         let conv_id = conversation.id.clone();
@@ -2410,7 +2401,7 @@ pub async fn run(
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
+                                            Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
@@ -3286,57 +3277,8 @@ pub async fn run(
                                     });
                                 }
                                 InputAction::NewTab => {
-                                    // Abort any active streaming on this tab before saving,
-                                    // so the saved state reflects the abort (is_streaming = false,
-                                    // partial response finalized). Without this, Tab 1 is saved
-                                    // with is_streaming = true but no task producing chunks → stuck.
-                                    if streaming.is_streaming {
-                                        // Finalize active tool calls with [aborted]
-                                        for tc in streaming.active_tool_calls.values_mut() {
-                                            if tc.result.is_none() {
-                                                tc.result = Some(crate::domain::models::ToolResultInfo {
-                                                    content: "[aborted]".to_string(),
-                                                    is_error: true,
-                                                    diff: crate::domain::models::WriteDiffState::NotAWrite,
-                                                    images: Vec::new(),
-                                                });
-                                                tc.completed_at_ms = Some(crate::domain::models::session_meta::now_unix() as u64 * 1000);
-                                            }
-                                        }
-                                        // Preserve partial response as a finalized message
-                                        if !streaming.current_text_buffer.is_empty()
-                                            || !streaming.active_tool_calls.is_empty()
-                                        {
-                                            let content = std::mem::take(&mut streaming.current_text_buffer);
-                                            conversation.messages.push(ChatMessage {
-                                                id: generate_conversation_id(),
-                                                role: MessageRole::Assistant,
-                                                content,
-                                                content_blocks: std::mem::take(&mut streaming.current_blocks),
-                                                tool_calls: streaming.active_tool_calls.drain().map(|(_, v)| v).collect(),
-                                                created_at: crate::domain::models::session_meta::now_unix(),
-                                                token_count: None,
-                                                stop_reason: Some(crate::domain::models::StopReason::Cancelled),
-                                                synthetic: false,
-                                                images: vec![],
-                                                origin: crate::domain::models::ChannelKind::Terminal,
-                                                authorship: crate::domain::models::Authorship::HumanWritten,
-                                                send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                                retracted_at_ms: None,
-                                                history_source: Default::default(),
-                                            });
-                                        }
-                                        // Abort the streaming task
-                                        if let Some(handle) = _active_turn.take() {
-                                            handle.abort();
-                                        }
-                                        // Reset streaming state
-                                        streaming.is_streaming = false;
-                                        streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                        streaming.current_blocks.clear();
-                                        streaming.active_tool_calls.clear();
-                                        while turn_queue.dequeue().is_some() {}
-                                    }
+                                    turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                    while turn_queue.dequeue().is_some() {}
                                     // Save current tab state back to TabManager (after abort,
                                     // so stored state has is_streaming = false)
                                     save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
@@ -3390,13 +3332,9 @@ pub async fn run(
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         let closing_conv_id = conversation.id.clone();
                                         let tab_id = tab_manager.active_tab_id();
-                                        // Abort active streaming on this tab
-                                        if streaming.is_streaming {
-                                            if let Some(handle) = _active_turn.take() {
-                                                handle.abort();
-                                            }
-                                            while turn_queue.dequeue().is_some() {}
-                                        }
+                                        // Close admission even before the first content chunk.
+                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                        while turn_queue.dequeue().is_some() {}
                                         // Persist conversation if it has messages
                                         if !conversation.messages.is_empty() {
                                             conversation.updated_at = crate::domain::models::session_meta::now_unix();
@@ -3757,7 +3695,7 @@ pub async fn run(
                                                 // Single conversation delete
                                                 if conv_id == conversation.id {
                                                     let tab_id = tab_manager.active_tab_id();
-                                        if streaming.is_streaming || state.pending_consolidation_card.is_some() {
+                                        if streaming.is_streaming || turn_lifecycle.is_live(&conversation.id) || tab_manager.active_tab().reducer.open_turn.is_some() || state.pending_consolidation_card.is_some() {
                                             if state.pending_consolidation_card.is_some() {
                                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
@@ -3765,9 +3703,7 @@ pub async fn run(
                                                     message: "A consolidation review is already pending — accept or decline it first.".to_string(),
                                                 });
                                             }
-                                                        if let Some(handle) = _active_turn.take() {
-                                                            handle.abort();
-                                                        }
+                                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
                                                         while turn_queue.dequeue().is_some() {}
                                                     }
                                                     tab_manager.close_tab(tab_id);
@@ -3780,8 +3716,9 @@ pub async fn run(
                                                         }
                                                     }
                                                     session_index.set_active(Some(&conversation.id));
-                                                } else if let Some(tab) = tab_manager.tabs().iter().find(|t| t.conversation.id == conv_id) {
+                                                } else if let Some(tab) = tab_manager.find_by_conversation_mut(&conv_id) {
                                                     let tab_id = tab.id;
+                                                    turn_lifecycle.interrupt(&mut tab.streaming, &mut tab.conversation, &mut tab.reducer, &*tab.clock, &mut None);
                                                     tab_manager.close_tab(tab_id);
                                                     state.tab_render_states.remove(&tab_id);
                                                 }
@@ -3805,16 +3742,8 @@ pub async fn run(
                                             DeleteConfirmTarget::Bulk { .. } => {
                                                 #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_all(&mut state, &app_state).await;
                                                 // Delete all conversations - F16: Fix race by clearing index BEFORE spawning task
-                                                if streaming.is_streaming {
-                                                    if let Some(handle) = _active_turn.take() {
-                                                        handle.abort();
-                                                    }
-                                                    streaming.is_streaming = false;
-                                                    streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                                    streaming.current_blocks.clear();
-                                                    streaming.active_tool_calls.clear();
-                                                    while turn_queue.dequeue().is_some() {}
-                                                }
+                                                turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                                while turn_queue.dequeue().is_some() {}
                                                 // F16: Collect IDs and clear index atomically BEFORE spawning background task
                                                 let conv_ids: Vec<String> = session_index.entries().iter()
                                                     .map(|e| e.conversation_id.clone())
@@ -3914,6 +3843,11 @@ pub async fn run(
                                             }
                                             .min(conversation.messages.len().saturating_sub(1))
                                         };
+                                        if let Err(error) = handlers::transcript_target::durable_target(&conversation, fork_message_index) {
+                                            state.status = StatusState::Flash { message: error.to_string(), remaining_ms: 3000 };
+                                            state.needs_redraw = true;
+                                            continue;
+                                        }
                                         state.pending_fork_index = Some(fork_message_index);
                                         state.focus = FocusState::Overlay(
                                             crate::domain::models::visual::OverlayType::Confirmation(
@@ -3947,12 +3881,9 @@ pub async fn run(
                                     // processed after we return. Do not move `.take()` below
                                     // the await without re-analyzing this invariant.
                                     if let Some(message_index) = state.pending_fork_index.take() {
-                                        use crate::domain::models::checkpoint::CheckpointId;
-                                        let checkpoint = CheckpointId(message_index as u64);
-                                        let source_id = conversation.id.clone();
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
-                                        match storage.fork_at_checkpoint(&source_id, checkpoint).await {
+                                        match handlers::transcript_target::handle_fork_confirm(&*storage, &conversation, message_index).await {
                                             Ok(new_id) => {
                                                 match storage.load_conversation(&new_id).await {
                                                     Ok(Some(forked_conv)) => {
@@ -4059,11 +3990,19 @@ pub async fn run(
                                             }
                                             .min(conversation.messages.len().saturating_sub(1))
                                         };
+                                        let durable_target = match handlers::transcript_target::durable_target(&conversation, target_message_index) {
+                                            Ok(index) => index,
+                                            Err(error) => {
+                                                state.status = StatusState::Flash { message: error.to_string(), remaining_ms: 3000 };
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
 
                                         let messages_to_remove = conversation.messages.len()
                                             .saturating_sub(target_message_index + 1);
                                         let files = storage
-                                            .list_snapshot_files(&conversation.id, target_message_index)
+                                            .list_snapshot_files(&conversation.id, durable_target)
                                             .await
                                             .unwrap_or_default();
                                         let files_to_revert: Vec<crate::adapters::tui::state::RevertPreviewItem> = files
@@ -4103,30 +4042,27 @@ pub async fn run(
                                             target_msg_idx, conversation.id
                                         );
 
-                                        if let Err(e) = storage.begin_rewind_txn(
-                                            &conversation.id,
-                                            target_msg_idx,
-                                        ).await {
-                                            tracing::error!(
-                                                "begin_rewind_txn failed — aborting rewind: {}",
-                                                e
-                                            );
-                                            state.status = StatusState::Flash {
-                                                message: format!("Rewind aborted: could not create recovery journal ({})", e),
-                                                remaining_ms: 5000,
-                                            };
-                                            state.focus = FocusState::Chat;
-                                            state.needs_redraw = true;
-                                            continue;
-                                        }
-
-                                        // 1. Revert files FIRST — needs the checkpoint log to resolve
-                                        //    which snapshots belong to messages above target_msg_idx.
-                                        //    Truncation prunes the log, so revert must run before it.
-                                        let reverted = storage
-                                            .revert_file_snapshots(&conversation.id, target_msg_idx)
-                                            .await
-                                            .unwrap_or_default();
+                                        let outcome = match handlers::transcript_target::handle_rewind_confirm(&*storage, &conversation, target_msg_idx).await {
+                                            Ok(outcome) => outcome,
+                                            Err(handlers::transcript_target::RewindFailure::Begin(error)) => {
+                                                tracing::error!("begin_rewind_txn failed — aborting rewind: {}", error);
+                                                state.status = StatusState::Flash {
+                                                    message: format!("Rewind aborted: could not create recovery journal ({})", error),
+                                                    remaining_ms: 5000,
+                                                };
+                                                state.focus = FocusState::Chat;
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                            Err(handlers::transcript_target::RewindFailure::Truncate(error)) => {
+                                                tracing::error!("revert_to_checkpoint failed: {}", error);
+                                                state.status = StatusState::Flash { message: format!("Rewind failed: {}", error), remaining_ms: 3000 };
+                                                state.focus = FocusState::Chat;
+                                                state.needs_redraw = true;
+                                                continue;
+                                            }
+                                        };
+                                        let reverted = outcome.reverted;
                                         let restored = reverted
                                             .iter()
                                             .filter(|r| matches!(r.status, crate::domain::models::RevertStatus::Restored))
@@ -4147,19 +4083,8 @@ pub async fn run(
                                             );
                                         }
 
-                                        // 2. Truncate conversation to the user's selected message index.
-                                        match storage.truncate_conversation(&conversation.id, target_msg_idx).await {
-                                            Ok(truncated) => {
-                                                // Commit transaction journal — both phases done.
-                                                let _ = storage.commit_rewind_txn(&conversation.id)
-                                                    .await
-                                                    .map_err(|e| {
-                                                        tracing::warn!(
-                                                            "commit_rewind_txn failed (non-fatal): {}",
-                                                            e
-                                                        );
-                                                    });
-
+                                        {
+                                            let truncated = outcome.conversation;
                                                 // 3. Update active-tab proxy (AC3 step 3)
                                                 save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                 tab_manager.active_tab_mut().conversation = truncated;
@@ -4177,9 +4102,7 @@ pub async fn run(
                                                 drop(state.question_response_tx.take());
                                                 while turn_queue.dequeue().is_some() {}
                                                 // Abort active turn
-                                                if let Some(handle) = _active_turn.take() {
-                                                    handle.abort();
-                                                }
+                                                turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
 
                                                 // 6. Status hint (5000ms — completed action, Status Timeout Rule)
                                                 let status_msg = if conflicts > 0 {
@@ -4198,14 +4121,6 @@ pub async fn run(
                                                     remaining_ms: 5000,
                                                 };
                                             }
-                                            Err(e) => {
-                                                tracing::error!("revert_to_checkpoint failed: {}", e);
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Rewind failed: {}", e),
-                                                    remaining_ms: 3000,
-                                                };
-                                            }
-                                        }
                                         state.focus = FocusState::Chat;
                                         state.needs_redraw = true;
                                     }
@@ -4218,14 +4133,10 @@ pub async fn run(
                                 }
                                 InputAction::RewindForkInstead => {
                                     // AC4: rewind → fork-instead path; mirrors ForkConfirm body.
-                                    state.rewind_preview = None;
-                                    if let Some(message_index) = state.pending_rewind_index.take() {
-                                        use crate::domain::models::checkpoint::CheckpointId;
-                                        let checkpoint = CheckpointId(message_index as u64);
-                                        let source_id = conversation.id.clone();
+                                    if let Some((message_index, result)) = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &conversation, &mut state).await {
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
-                                        match storage.fork_at_checkpoint(&source_id, checkpoint).await {
+                                        match result {
                                             Ok(new_id) => {
                                                 match storage.load_conversation(&new_id).await {
                                                     Ok(Some(forked_conv)) => {
@@ -4342,7 +4253,7 @@ pub async fn run(
                                     handlers::bookmark::handle_apply_open_bookmark_list(&tab_manager, &mut state);
                                 }
                                 InputAction::JumpToBookmark => {
-                                    handlers::bookmark::handle_apply_jump_bookmark(&tab_manager, &mut state);
+                                    handlers::bookmark::handle_apply_jump_bookmark(&tab_manager, &mut state, &conversation);
                                 }
                                 InputAction::DeleteBookmark => {
                                     if let Some(prev) = _pending_save.take() {
@@ -5498,6 +5409,7 @@ pub async fn run(
 
             // Branch 2: Domain events (mpsc unbounded channel)
             Some(event) = domain_events_rx.recv() => {
+                let Some((event, completed_model)) = turn_lifecycle.admit(event) else { continue; };
                 match event {
                     AppEvent::Shutdown => break,
                     AppEvent::ToolCallTransitionBridged { conversation_id, transition } => {
@@ -5514,7 +5426,21 @@ pub async fn run(
                         }
                     }
                     AppEvent::ProviderChunk { conversation_id, chunk } => {
+                        if matches!(&chunk, StreamChunk::TurnComplete { stop_reason: crate::domain::models::StopReason::Cancelled }) {
+                            if conversation_id == conversation.id {
+                                turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                state.status = StatusState::Idle;
+                                state.token_usage = conversation.usage.clone();
+                                state.needs_redraw = true;
+                            } else if let Some(tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
+                                turn_lifecycle.interrupt(&mut tab.streaming, &mut tab.conversation, &mut tab.reducer, &*tab.clock, &mut None);
+                            }
+                            continue;
+                        }
                         if conversation_id == conversation.id {
+                            if completed_model.is_some() {
+                                state.pending_resolved_model = completed_model;
+                            }
                             // Active tab — apply chunk via reduce() + mirror sync
                             let clock = tab_manager.active_tab().clock.clone();
                             let action = reduce(
@@ -5628,7 +5554,6 @@ pub async fn run(
                                     }
                                     state.retry_state = None;
                                     state.needs_redraw = true;
-                                    _active_turn = None;
 
                                     // Dispatch any deferred AgentThenSubmit (Story 6-2a race fix)
                                     if let Some((text, synthetic)) = state.pending_agent_then_submit.take() {
@@ -5673,13 +5598,10 @@ pub async fn run(
                                     }
 
                                     // Spawn background title generation (AC1, AC3, AC5)
-                                    if title_trigger
-                                    {
+                                    if let Some((user_msg, assistant_msg)) = title_trigger.then(|| title_messages(&conversation)).flatten() {
                                         let provider_ref = provider.clone();
                                         let event_tx_ref = domain_tx.clone();
                                         let model = config.model.clone();
-                                        let user_msg = conversation.messages[0].content.clone();
-                                        let assistant_msg = truncate(&conversation.messages[1].content, 500);
                                         let title_conv_id = conversation.id.clone();
                                         tokio::spawn(async move {
                                             match tokio::time::timeout(
@@ -5711,7 +5633,7 @@ pub async fn run(
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
+                                            Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
                                 }
@@ -5739,7 +5661,10 @@ pub async fn run(
                             }
 
                             // Drain committed turn into Conversation.turns
-                            if let Some(committed) = tab.reducer.committed_turn.take() {
+                            if let Some(mut committed) = tab.reducer.committed_turn.take() {
+                                if let Some(model) = completed_model {
+                                    committed.model = model;
+                                }
                                 tab.conversation.turns.push(committed);
                                 tab.conversation.rebuild_messages_mirror();
                             }
@@ -5770,13 +5695,10 @@ pub async fn run(
                                         }
                                     }));
                                 }
-                                if bg_title_trigger
-                                {
+                                if let Some((user_msg, assistant_msg)) = bg_title_trigger.then(|| title_messages(&tab.conversation)).flatten() {
                                     let provider_ref = provider.clone();
                                     let event_tx_ref = domain_tx.clone();
                                     let model = config.model.clone();
-                                    let user_msg = tab.conversation.messages[0].content.clone();
-                                    let assistant_msg = truncate(&tab.conversation.messages[1].content, 500);
                                     let title_conv_id = tab.conversation.id.clone();
                                     tokio::spawn(async move {
                                         match tokio::time::timeout(
@@ -5875,10 +5797,7 @@ pub async fn run(
                                 streaming.phase = crate::domain::models::StreamingPhase::Idle;
                                 streaming.current_blocks.clear();
                                 streaming.active_tool_calls.clear();
-                                // Only abort _active_turn when it belongs to this tab
-                                if let Some(handle) = _active_turn.take() {
-                                    handle.abort();
-                                }
+                                turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
                             }
 
                             // Story 13-2 AC5: rewrite offline provider errors with
@@ -6069,153 +5988,13 @@ pub async fn run(
                     }
                     #[cfg(feature = "a2a")] AppEvent::TeamProposalReady { proposal } => crate::infrastructure::runtime::team_proposal_bridge::proposal_ready(&mut state, &app_state, proposal).await,
                     AppEvent::PlanProposed { conversation_id, plan } => {
-                        if conversation.id != conversation_id {
-                            tracing::warn!("PlanProposed for unknown conversation {}", conversation_id);
-                        } else {
-                            // Helper: find the ID of the turn that is currently proposing
-                            // this plan (open streaming turn, or last committed turn).
-                            // Using the turn ID ensures the PlanCard survives
-                            // rebuild_messages_mirror() because the message ID matches
-                            // the turn ID that gets committed.
-                            let current_turn_id = tab_manager
-                                .active_tab()
-                                .reducer
-                                .open_turn
-                                .as_ref()
-                                .map(|t| t.id.0.clone())
-                                .or_else(|| conversation.turns.last().map(|t| t.id.0.clone()));
-
-                            let msg_id = if let Some(last_msg) = conversation.messages.last_mut() {
-                                if last_msg.role == MessageRole::Assistant {
-                                    last_msg.content_blocks.push(ContentBlockType::PlanCard);
-                                    last_msg.id.clone()
-                                } else if let Some(ref turn_id) = current_turn_id {
-                                    // Attach to existing message for this turn if present
-                                    if let Some(existing) = conversation.messages.iter_mut().find(|m| m.id == *turn_id) {
-                                        existing.content_blocks.push(ContentBlockType::PlanCard);
-                                        turn_id.clone()
-                                    } else {
-                                        let msg = ChatMessage {
-                                            id: turn_id.clone(),
-                                            role: MessageRole::Assistant,
-                                            content: String::new(),
-                                            content_blocks: vec![ContentBlockType::PlanCard],
-                                            tool_calls: vec![],
-                                            created_at: crate::domain::models::session_meta::now_unix(),
-                                            token_count: None,
-                                            stop_reason: None,
-                                            synthetic: false,
-                                            images: vec![],
-                                            origin: crate::domain::models::ChannelKind::Terminal,
-                                            authorship: crate::domain::models::Authorship::HumanWritten,
-                                            send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                            retracted_at_ms: None,
-                                            history_source: Default::default(),
-                                        };
-                                        conversation.messages.push(msg);
-                                        turn_id.clone()
-                                    }
-                                } else {
-                                    let id = crate::domain::models::generate_message_id();
-                                    let msg = ChatMessage {
-                                        id: id.clone(),
-                                        role: MessageRole::Assistant,
-                                        content: String::new(),
-                                        content_blocks: vec![ContentBlockType::PlanCard],
-                                        tool_calls: vec![],
-                                        created_at: crate::domain::models::session_meta::now_unix(),
-                                        token_count: None,
-                                        stop_reason: None,
-                                        synthetic: false,
-                                        images: vec![],
-                                        origin: crate::domain::models::ChannelKind::Terminal,
-                                        authorship: crate::domain::models::Authorship::HumanWritten,
-                                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                        retracted_at_ms: None,
-                                        history_source: Default::default(),
-                                    };
-                                    conversation.messages.push(msg);
-                                    id
-                                }
-                            } else if let Some(ref turn_id) = current_turn_id {
-                                let msg = ChatMessage {
-                                    id: turn_id.clone(),
-                                    role: MessageRole::Assistant,
-                                    content: String::new(),
-                                    content_blocks: vec![ContentBlockType::PlanCard],
-                                    tool_calls: vec![],
-                                    created_at: crate::domain::models::session_meta::now_unix(),
-                                    token_count: None,
-                                    stop_reason: None,
-                                    synthetic: false,
-                                    images: vec![],
-                                    origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: crate::domain::models::Authorship::HumanWritten,
-                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                    retracted_at_ms: None,
-                                    history_source: Default::default(),
-                                };
-                                conversation.messages.push(msg);
-                                turn_id.clone()
-                            } else {
-                                let id = crate::domain::models::generate_message_id();
-                                let msg = ChatMessage {
-                                    id: id.clone(),
-                                    role: MessageRole::Assistant,
-                                    content: String::new(),
-                                    content_blocks: vec![ContentBlockType::PlanCard],
-                                    tool_calls: vec![],
-                                    created_at: crate::domain::models::session_meta::now_unix(),
-                                    token_count: None,
-                                    stop_reason: None,
-                                    synthetic: false,
-                                    images: vec![],
-                                    origin: crate::domain::models::ChannelKind::Terminal,
-                                    authorship: crate::domain::models::Authorship::HumanWritten,
-                                    send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                    retracted_at_ms: None,
-                                    history_source: Default::default(),
-                                };
-                                conversation.messages.push(msg);
-                                id
-                            };
-
-                            let mut plan = plan;
-                            plan.host_message_id = Some(msg_id);
-                            let plan_id = plan.id.clone();
-                            let plan_title = plan.title.clone();
-                            let task_count = plan.tasks.len();
-                            conversation.plans.insert(plan.id.clone(), plan.clone());
-
-                            if security.current_mode() == PermissionMode::Yolo {
-                                if let Some(stored_plan) = conversation.plans.get_mut(&plan_id) {
-                                    stored_plan.status = crate::domain::models::plan::PlanStatus::Executing;
-                                    stored_plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
-                                }
-                                let _ = domain_tx.send(AppEvent::SystemNotice {
-                                    conversation_id: Some(conversation.id.clone()),
-                                    level: NoticeLevel::Info,
-                                    message: format!("Plan auto-approved (YOLO mode): {} — {} tasks", plan_title, task_count),
-                                });
-                                let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
-                                    conversation_id: conversation.id.clone(),
-                                    plan_id,
-                                });
-                            } else {
-                                if let Some(ref old_pending) = state.pending_plan_card {
-                                    if let Some(old_plan) = conversation.plans.get_mut(&old_pending.plan_id) {
-                                        tracing::warn!("Superseding pending plan card: {}", old_pending.plan_id);
-                                        old_plan.status = crate::domain::models::plan::PlanStatus::Rejected;
-                                        old_plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
-                                    }
-                                }
-                                state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
-                                    conversation_id: conversation.id.clone(),
-                                    plan_id,
-                                    plan_snapshot: plan,
-                                });
-                            }
-                            state.needs_redraw = true;
+                        if let Some((notice, start)) = handlers::plan_card::handle_plan_proposed(
+                            &mut conversation, &mut state, &conversation_id, plan,
+                            security.current_mode(),
+                            tab_manager.active_tab().reducer.open_turn.as_ref().map(|turn| turn.id.0.as_str()),
+                        ) {
+                            let _ = domain_tx.send(notice);
+                            let _ = domain_tx.send(start);
                         }
                     }
                     AppEvent::PlanCardResolved { conversation_id, plan_id, decision } => {
@@ -6223,12 +6002,9 @@ pub async fn run(
                             tracing::warn!("PlanCardResolved for mismatched conversation");
                         } else {
                             let cid = conversation.id.clone();
+                            handlers::plan_card::handle_plan_decision(&mut conversation, &plan_id, &decision);
                             match decision {
                                 crate::domain::models::plan::PlanDecision::Approve => {
-                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
-                                        plan.status = crate::domain::models::plan::PlanStatus::Executing;
-                                        plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
-                                    }
                                     restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
                                         conversation_id: cid,
@@ -6236,10 +6012,6 @@ pub async fn run(
                                     });
                                 }
                                 crate::domain::models::plan::PlanDecision::Reject => {
-                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
-                                        plan.status = crate::domain::models::plan::PlanStatus::Rejected;
-                                        plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
-                                    }
                                     restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
@@ -6254,9 +6026,6 @@ pub async fn run(
                                     });
                                 }
                                 crate::domain::models::plan::PlanDecision::Edit => {
-                                    if let Some(plan) = conversation.plans.get_mut(&plan_id) {
-                                        plan.status = crate::domain::models::plan::PlanStatus::Editing;
-                                    }
                                     if let Some(ref pending) = state.pending_plan_card {
                                         if pending.plan_id == plan_id {
                                             let plan_snapshot = pending.plan_snapshot.clone();
@@ -6287,41 +6056,14 @@ pub async fn run(
                         if conversation.id != conversation_id {
                             tracing::warn!("PlanCardEditCompleted for mismatched conversation");
                         } else {
-                            match edited_plan {
-                                Some(new_plan) => {
-                                    if let Some(stored) = conversation.plans.get_mut(&plan_id) {
-                                        stored.title = new_plan.title;
-                                        stored.tasks = new_plan.tasks;
-                                        stored.estimated_effort = new_plan.estimated_effort;
-                                        stored.status = crate::domain::models::plan::PlanStatus::Pending;
-                                    }
-                                    if let Some(stored) = conversation.plans.get(&plan_id) {
-                                        state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
-                                            conversation_id,
-                                            plan_id,
-                                            plan_snapshot: stored.clone(),
-                                        });
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                None => {
-                                    if let Some(stored) = conversation.plans.get_mut(&plan_id) {
-                                        stored.status = crate::domain::models::plan::PlanStatus::Pending;
-                                    }
-                                    if let Some(stored) = conversation.plans.get(&plan_id) {
-                                        state.pending_plan_card = Some(crate::adapters::tui::state::PendingPlanCard {
-                                            conversation_id,
-                                            plan_id,
-                                            plan_snapshot: stored.clone(),
-                                        });
-                                    }
-                                    let _ = domain_tx.send(AppEvent::SystemNotice {
-                                        conversation_id: Some(conversation.id.clone()),
-                                        level: NoticeLevel::Warning,
-                                        message: "Plan edit failed (parse error). Showing original card.".to_string(),
-                                    });
-                                    state.needs_redraw = true;
-                                }
+                            let edit_failed = edited_plan.is_none();
+                            handlers::plan_card::handle_plan_edit_completed(&mut conversation, &mut state, &plan_id, edited_plan);
+                            if edit_failed {
+                                let _ = domain_tx.send(AppEvent::SystemNotice {
+                                    conversation_id: Some(conversation.id.clone()),
+                                    level: NoticeLevel::Warning,
+                                    message: "Plan edit failed (parse error). Showing original card.".to_string(),
+                                });
                             }
                         }
                     }
@@ -6782,7 +6524,7 @@ pub async fn run(
                         state.active_context_window = _ctx_window;
                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                             Ok(()) => state.needs_redraw = false,
-                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
+                            Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                         }
                     }
                     AppEvent::TitleGenerated { conversation_id, title } => {
@@ -6928,10 +6670,8 @@ pub async fn run(
                                     // Story 7.4 AC11: run fresh-tab routine, then set carryover
                                     if is_active {
                                         // Abort any in-flight turn
-                                        if let Some(handle) = _active_turn.take() {
-                                            handle.abort();
-                                            streaming = StreamingState::default();
-                                        }
+                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                        streaming = StreamingState::default();
                                         // Save current tab
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                         // Create new tab
@@ -6965,10 +6705,8 @@ pub async fn run(
                             CompactionPurpose::Carryover => {
                                 // Story 7.4 AC11: open fresh tab without carryover + warning notice
                                 if is_active {
-                                    if let Some(handle) = _active_turn.take() {
-                                        handle.abort();
-                                        streaming = StreamingState::default();
-                                    }
+                                    turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                    streaming = StreamingState::default();
                                     save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                     tab_manager.create_tab();
                                     load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
@@ -7985,7 +7723,7 @@ pub async fn run(
                                         state.active_context_window = _ctx_window;
                                         match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
-                                            Err(e) => { handlers::render_error::handle_render_error(e, &mut _active_turn, &mut streaming, &mut state, terminal); }
+                                            Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
 
@@ -8064,6 +7802,12 @@ pub async fn run(
     // Every quit path (Ctrl+Q, shutdown) cancels a running sign-in: the flow
     // ends with `Login cancelled` and its loopback listener closes.
     state.login.cancel_running();
+    turn_lifecycle.interrupt_all(
+        &mut tab_manager,
+        &mut conversation,
+        &mut streaming,
+        &mut state.pending_resolved_model,
+    );
 
     // Await any in-flight save before shutdown persist
     if let Some(prev) = _pending_save.take() {
@@ -8537,7 +8281,7 @@ pub fn rehydrate_historical_images(
 
     let mut next = 0;
     for cm in &conversation.messages {
-        if cm.role == MessageRole::Assistant {
+        if cm.is_ephemeral_display() || cm.role == MessageRole::Assistant {
             continue;
         }
         let Some(offset) = messages[next..]
@@ -9833,6 +9577,18 @@ fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
+fn title_messages(conversation: &Conversation) -> Option<(String, String)> {
+    let user = conversation
+        .messages
+        .iter()
+        .find(|m| !m.is_ephemeral_display() && m.role == MessageRole::User)?;
+    let assistant = conversation
+        .messages
+        .iter()
+        .find(|m| !m.is_ephemeral_display() && m.role == MessageRole::Assistant)?;
+    Some((user.content.clone(), truncate(&assistant.content, 500)))
+}
+
 /// Generate a concise title for a conversation using the LLM provider.
 async fn generate_title(
     provider: &dyn StreamingProvider,
@@ -10413,6 +10169,37 @@ mod tests {
                 .flatten()
                 .all(|message| message.provider_replay.is_empty())
         );
+    }
+
+    #[tokio::test]
+    async fn title_request_uses_durable_messages_after_cancelled_display() {
+        let provider = crate::adapters::noop::RecordingProvider::default();
+        let mut cancelled = mk_chat_msg_assistant("cancelled canary");
+        cancelled
+            .content_blocks
+            .push(ContentBlockType::EphemeralDisplay);
+        let conversation = mk_conversation(
+            "title",
+            vec![
+                mk_chat_msg_user_with_images("first prompt", vec![]),
+                cancelled,
+                mk_chat_msg_user_with_images("completed prompt", vec![]),
+                mk_chat_msg_assistant("completed control"),
+            ],
+        );
+        let (user, assistant) = title_messages(&conversation).unwrap();
+        generate_title(&provider, "model", &conversation.id, &user, &assistant)
+            .await
+            .unwrap();
+        let messages = provider.messages.lock().await;
+        assert_eq!(
+            messages[0][0].content,
+            "User: first prompt\n\nAssistant: completed control"
+        );
+        assert!(!messages[0][0].content.contains("cancelled canary"));
+        let mut incomplete = conversation.clone();
+        incomplete.messages.pop();
+        assert!(title_messages(&incomplete).is_none());
     }
 
     // `warning_notice_does_not_transfer_focus` moved to `handlers/notice.rs`

@@ -17,6 +17,13 @@ pub enum AppEvent {
         conversation_id: ConversationId,
         chunk: StreamChunk,
     },
+    /// Internal local-TUI ingress. Never serialized or carried over daemon/ACP.
+    /// The originating submission captures this identity before spawning.
+    LocalProviderChunk {
+        conversation_id: ConversationId,
+        producer_id: u64,
+        chunk: StreamChunk,
+    },
     /// Host-attributed inbound turn chunks; never operator commit-buffer input.
     PeerProviderChunk {
         node: std::sync::Arc<crate::domain::models::AgentId>,

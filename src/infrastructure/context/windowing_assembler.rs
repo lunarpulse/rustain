@@ -250,14 +250,16 @@ fn active_message_slice<'a>(
 ) -> Option<&'a [crate::domain::models::ChatMessage]> {
     use crate::domain::models::ChatMessage;
     let anchor_id = &turns[first_active_turn_idx].id.0;
-    let pos = conversation
-        .messages
-        .iter()
-        .position(|m: &ChatMessage| m.role == MessageRole::Assistant && &m.id == anchor_id)?;
+    let pos = conversation.messages.iter().position(|m: &ChatMessage| {
+        !m.is_ephemeral_display() && m.role == MessageRole::Assistant && &m.id == anchor_id
+    })?;
     // Back up over the immediately-preceding User/System prompt(s) so the slice
     // starts at the exchange's prompt, not mid-assistant.
     let mut start = pos;
-    while start > 0 && conversation.messages[start - 1].role != MessageRole::Assistant {
+    while start > 0
+        && (conversation.messages[start - 1].is_ephemeral_display()
+            || conversation.messages[start - 1].role != MessageRole::Assistant)
+    {
         start -= 1;
     }
     Some(&conversation.messages[start..])

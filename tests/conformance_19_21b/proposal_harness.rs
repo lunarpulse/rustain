@@ -435,14 +435,15 @@ impl ProposalFixture {
         tokio::task::JoinHandle<()>,
         tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     ) {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         let driver = self.local_turn_driver_with_tools(provider, event_tx, tools_port);
         let activation_set = self
             .skill_activator
             .snapshot_for_turn(conversation_id)
             .await;
         let agent_snapshot = self.agent_snapshot();
-        let mut active_turn = None;
+        let mut lifecycle =
+            rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
         let (state, tabs) = (&mut self.state, &mut self.tabs);
         let tab = tabs
             .find_by_conversation_mut(conversation_id)
@@ -461,17 +462,42 @@ impl ProposalFixture {
                     conversation: &mut tab.conversation,
                     streaming: &mut tab.streaming,
                     state,
-                    active_turn: &mut active_turn,
+                    lifecycle: &mut lifecycle,
                     session_manager: &mut tab.session,
                 },
             )
             .await;
-        (
-            active_turn
-                .take()
-                .expect("LocalTurnDriver must provide its completion handle"),
-            event_rx,
-        )
+        let handle = lifecycle
+            .take_task(conversation_id)
+            .expect("LocalTurnDriver must provide its completion handle");
+        let (admitted_tx, admitted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            let mut completion = handle;
+            loop {
+                tokio::select! {
+                    result = &mut completion => {
+                        result.expect("turn task");
+                        break;
+                    }
+                    event = event_rx.recv() => {
+                        let Some(event) = event else { break; };
+                        if let Some((event, _)) = lifecycle.admit(event) {
+                            if admitted_tx.send(event).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            while let Ok(event) = event_rx.try_recv() {
+                if let Some((event, _)) = lifecycle.admit(event) {
+                    if admitted_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (handle, admitted_rx)
     }
 
     pub(crate) async fn submit(&mut self, input: serde_json::Value) -> String {
@@ -491,7 +517,8 @@ impl ProposalFixture {
         let tools_port = self.tools.clone() as Arc<dyn ToolSetPort>;
         let driver = self.local_turn_driver_with_tools(provider, event_tx, tools_port);
         let mut streaming = rustain::domain::models::StreamingState::default();
-        let mut active_turn = None;
+        let mut lifecycle =
+            rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
         let mut sessions = rustain::domain::models::SessionManager::new(
             rustain::domain::models::SessionState::Empty,
         );
@@ -516,13 +543,13 @@ impl ProposalFixture {
                     conversation: &mut self.conversation,
                     streaming: &mut streaming,
                     state: &mut self.state,
-                    active_turn: &mut active_turn,
+                    lifecycle: &mut lifecycle,
                     session_manager: &mut sessions,
                 },
             )
             .await;
-        let handle = active_turn
-            .take()
+        let handle = lifecycle
+            .take_task(&self.conversation.id)
             .expect("LocalTurnDriver must provide its completion handle");
         tokio::time::timeout(SETTLE, handle)
             .await
@@ -532,6 +559,9 @@ impl ProposalFixture {
         self.last_tool_results.clear();
         self.last_tool_errors.clear();
         while let Ok(event) = event_rx.try_recv() {
+            let Some((event, _)) = lifecycle.admit(event) else {
+                continue;
+            };
             if let AppEvent::ProviderChunk {
                 chunk:
                     StreamChunk::ToolResult {

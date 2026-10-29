@@ -397,7 +397,11 @@ impl FileSystemStorage {
                             title: persisted.title,
                             created_at: persisted.created_at,
                             updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
-                            message_count: persisted.messages.len(),
+                            message_count: persisted
+                                .messages
+                                .iter()
+                                .filter(|m| !m.is_ephemeral_display())
+                                .count(),
                             has_fork_source,
                         },
                     );
@@ -486,7 +490,11 @@ impl FileSystemStorage {
                         title: persisted.title,
                         created_at: persisted.created_at,
                         updated_at: persisted.updated_at.unwrap_or(persisted.created_at),
-                        message_count: persisted.messages.len(),
+                        message_count: persisted
+                            .messages
+                            .iter()
+                            .filter(|m| !m.is_ephemeral_display())
+                            .count(),
                         has_fork_source,
                     },
                 );
@@ -556,11 +564,27 @@ impl FileSystemStorage {
     ) -> Result<(), StorageError> {
         self.ensure_dir().await?;
 
-        let has_images = conv.messages.iter().any(|m| !m.images.is_empty());
         let persisted = PersistedConversation::from_conversation_with_exit(conv, clean_exit);
+        let has_images = persisted.messages.iter().any(|m| !m.images.is_empty());
         let json = serde_json::to_string_pretty(&persisted)
             .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-        let meta = SessionMeta::from_conversation(conv);
+        let mut meta = match self.load_session_meta(&conv.id).await {
+            Ok(Some(meta)) => meta,
+            Ok(None) => SessionMeta::from_conversation(conv),
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to load session meta sidecar for {}: {}",
+                    conv.id,
+                    error
+                );
+                SessionMeta::from_conversation(conv)
+            }
+        };
+        meta.title = conv.title.clone();
+        meta.created_at = conv.created_at;
+        meta.updated_at = conv.updated_at;
+        meta.message_count = persisted.messages.len();
+        meta.fork_source = conv.fork_source.clone();
 
         let current_layout = self.detect_layout(&conv.id).await;
 
@@ -1067,7 +1091,12 @@ impl StoragePort for FileSystemStorage {
             let persisted = PersistedConversation::from_conversation_with_exit(&conv, false);
             let json = serde_json::to_string_pretty(&persisted)
                 .map_err(|e| StorageError::SerializationError(e.to_string()))?;
-            let meta = crate::domain::models::SessionMeta::from_conversation(&conv);
+            let meta = self
+                .load_session_meta(conversation_id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| crate::domain::models::SessionMeta::from_conversation(&conv));
             self.save_directory_layout(conversation_id, &json, &meta)
                 .await?;
             // Clean up stale flat-format files (best-effort).
@@ -1244,14 +1273,15 @@ impl StoragePort for FileSystemStorage {
 
         let surviving_ids: std::collections::HashSet<String> =
             conv.messages.iter().map(|m| m.id.clone()).collect();
+        // The mirror must not resurrect turns whose durable rows were rewound.
+        conv.turns.retain(|turn| surviving_ids.contains(&turn.id.0));
         conv.plans.retain(|_, plan| {
             plan.host_message_id
                 .as_ref()
-                .is_some_and(|id| surviving_ids.contains(id))
+                .is_none_or(|id| surviving_ids.contains(id))
         });
 
-        // Load the existing SessionMeta BEFORE save_conversation_inner overwrites it,
-        // so we can preserve the `extra` flatten map (DF-088 round-trip invariant).
+        // Preserve sidecar-only fields while reconciling rewind metadata.
         let pre_save_meta = self.load_session_meta(conversation_id).await.ok().flatten();
 
         // 1. Atomically save the truncated conversation.
@@ -2033,10 +2063,13 @@ impl StoragePort for FileSystemStorage {
 
         let mut forked_plans = std::collections::HashMap::new();
         for (plan_id, plan) in &source.plans {
-            if let Some(host_msg_id) = &plan.host_message_id {
-                if truncated.iter().any(|m| &m.id == host_msg_id) {
-                    forked_plans.insert(plan_id.clone(), plan.clone());
-                }
+            // A standalone plan's display host is deliberately absent after
+            // save; lack of a host is not evidence that its durable data lies
+            // beyond this transcript boundary. Legacy durable hosts still prune.
+            if plan.host_message_id.as_ref().is_none_or(|host_msg_id| {
+                truncated.iter().any(|message| &message.id == host_msg_id)
+            }) {
+                forked_plans.insert(plan_id.clone(), plan.clone());
             }
         }
 
@@ -2849,6 +2882,68 @@ mod tests {
     use crate::domain::models::{ChatMessage, MessageRole, StopReason, UsageInfo};
     use tempfile::TempDir;
 
+    #[tokio::test]
+    async fn ephemeral_projection_preserves_metadata_and_layout() {
+        use crate::domain::models::ContentBlockType;
+        for durable_image in [false, true] {
+            for clean_exit in [false, true] {
+                let tmp = TempDir::new().unwrap();
+                let sessions = tmp.path().join("sessions");
+                let storage = FileSystemStorage::new(sessions.clone());
+                let mut conv = make_test_conversation();
+                let image = ImageReference {
+                    file_name: "0123456789abcdef.png".into(),
+                    media_type: "image/png".into(),
+                    original_size: 1,
+                };
+                let display = ChatMessage {
+                    id: "transient".into(),
+                    content: "transient canary".into(),
+                    content_blocks: vec![ContentBlockType::EphemeralDisplay],
+                    images: vec![image.clone()],
+                    ..Default::default()
+                };
+                if durable_image {
+                    conv.messages[0].images.push(image);
+                }
+                conv.messages.insert(1, display);
+                storage
+                    .save_conversation_with_exit(&conv, clean_exit)
+                    .await
+                    .unwrap();
+                assert_eq!(sessions.join(&conv.id).is_dir(), durable_image);
+                let mut meta = storage.load_session_meta(&conv.id).await.unwrap().unwrap();
+                assert_eq!(meta.message_count, 2);
+                meta.bookmarks = vec![1];
+                storage.save_session_meta(&conv.id, &meta).await.unwrap();
+                storage
+                    .save_conversation_with_exit(&conv, clean_exit)
+                    .await
+                    .unwrap();
+                let meta = storage.load_session_meta(&conv.id).await.unwrap().unwrap();
+                assert_eq!(meta.bookmarks, [1]);
+                assert_eq!(meta.message_count, 2);
+                let (mut loaded, exit) = storage
+                    .load_conversation_with_exit(&conv.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(exit, clean_exit);
+                assert_eq!(loaded.messages.len(), 2);
+                assert_eq!(loaded.messages[1].id, "msg-test-002");
+                loaded.rebuild_messages_mirror();
+                assert_eq!(loaded.messages.len(), 2);
+                let path = if durable_image {
+                    storage.conversation_file(&conv.id)
+                } else {
+                    storage.session_path(&conv.id)
+                };
+                let bytes = tokio::fs::read_to_string(path).await.unwrap();
+                assert!(!bytes.contains("transient"));
+            }
+        }
+    }
+
     fn make_test_conversation() -> Conversation {
         Conversation {
             id: "test-conv-123".to_string(),
@@ -3174,6 +3269,125 @@ mod tests {
             .expect("meta should exist");
         assert_eq!(meta.title, conv.title);
         assert_eq!(meta.message_count, conv.messages.len());
+    }
+
+    async fn assert_malformed_sidecar_does_not_block_save(directory: bool) {
+        let tmp = TempDir::new().unwrap();
+        let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+        let mut conv = if directory {
+            make_test_conversation_with_image().0
+        } else {
+            make_test_conversation()
+        };
+        storage.save_conversation(&conv).await.unwrap();
+        let sidecar = if directory {
+            storage.meta_file_in_dir(&conv.id)
+        } else {
+            storage.session_meta_path(&conv.id)
+        };
+        tokio::fs::write(&sidecar, b"{ malformed").await.unwrap();
+        conv.messages.push(ChatMessage {
+            id: "new-durable".into(),
+            content: "new durable history".into(),
+            ..Default::default()
+        });
+        conv.title = "Updated title".into();
+        conv.updated_at += 1;
+
+        storage.save_conversation(&conv).await.unwrap();
+        let loaded = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 3);
+        assert_eq!(loaded.messages[2].id, "new-durable");
+        assert_eq!(loaded.messages[2].content, "new durable history");
+        let meta = storage.load_session_meta(&conv.id).await.unwrap().unwrap();
+        assert_eq!(meta.title, conv.title);
+        assert_eq!(meta.created_at, conv.created_at);
+        assert_eq!(meta.updated_at, conv.updated_at);
+        assert_eq!(meta.message_count, 3);
+    }
+
+    #[tokio::test]
+    async fn malformed_flat_sidecar_does_not_block_durable_save() {
+        assert_malformed_sidecar_does_not_block_save(false).await;
+    }
+
+    #[tokio::test]
+    async fn malformed_directory_sidecar_does_not_block_durable_save() {
+        assert_malformed_sidecar_does_not_block_save(true).await;
+    }
+
+    #[tokio::test]
+    async fn valid_sidecar_fields_survive_durable_save_in_both_layouts() {
+        for directory in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+            let mut conv = if directory {
+                make_test_conversation_with_image().0
+            } else {
+                make_test_conversation()
+            };
+            storage.save_conversation(&conv).await.unwrap();
+            let mut meta = storage.load_session_meta(&conv.id).await.unwrap().unwrap();
+            meta.bookmarks = vec![1];
+            meta.extra
+                .insert("futureField".into(), serde_json::json!({"nested": 42}));
+            storage.save_session_meta(&conv.id, &meta).await.unwrap();
+            conv.messages.push(ChatMessage {
+                id: "new-durable".into(),
+                content: "new durable history".into(),
+                ..Default::default()
+            });
+            storage.save_conversation(&conv).await.unwrap();
+            let meta = storage.load_session_meta(&conv.id).await.unwrap().unwrap();
+            assert_eq!(meta.bookmarks, [1]);
+            assert_eq!(
+                meta.extra.get("futureField"),
+                Some(&serde_json::json!({"nested": 42}))
+            );
+            assert_eq!(meta.message_count, 3);
+            let loaded = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+            assert_eq!(loaded.messages[2].content, "new durable history");
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_sidecar_preserves_layout_write_error_behavior() {
+        for directory in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+            let mut conv = if directory {
+                make_test_conversation_with_image().0
+            } else {
+                make_test_conversation()
+            };
+            storage.save_conversation(&conv).await.unwrap();
+            let sidecar = if directory {
+                storage.meta_file_in_dir(&conv.id)
+            } else {
+                storage.session_meta_path(&conv.id)
+            };
+            tokio::fs::remove_file(&sidecar).await.unwrap();
+            tokio::fs::create_dir(&sidecar).await.unwrap();
+            conv.messages.push(ChatMessage {
+                id: "new-durable".into(),
+                content: "new durable history".into(),
+                ..Default::default()
+            });
+            let result = storage.save_conversation(&conv).await;
+            if directory {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains("Failed to rename meta.json"));
+                // Preserve the existing DF-096 rollback on a genuine sidecar
+                // write failure, rather than mistaking it for a read failure.
+                assert!(!storage.conversation_file(&conv.id).exists());
+                assert!(storage.load_conversation(&conv.id).await.unwrap().is_none());
+            } else {
+                assert!(result.is_ok());
+                let loaded = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+                assert_eq!(loaded.messages.len(), 3);
+                assert_eq!(loaded.messages[2].content, "new durable history");
+            }
+        }
     }
 
     #[tokio::test]

@@ -102,7 +102,7 @@ impl PlanModeInjector for DefaultPlanInjector {
         let assistant_turns = conv
             .messages
             .iter()
-            .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| !m.is_ephemeral_display() && m.role == MessageRole::Assistant)
             .count();
 
         match assistant_turns {
@@ -165,6 +165,20 @@ mod tests {
             peer_row_controls: Default::default(),
             peer_row_revision: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_assistant_rows_do_not_advance_reminder_cadence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan_file = tmp.path().join("plan.md");
+        let injector = DefaultPlanInjector::new();
+        let mut conv = make_conv(0);
+        conv.messages.push(ChatMessage {
+            content_blocks: vec![crate::domain::models::ContentBlockType::EphemeralDisplay],
+            ..Default::default()
+        });
+        let reminder = injector.pre_turn(&conv, &plan_file).await.unwrap();
+        assert!(reminder.contains("<plan-mode>"));
     }
 
     #[tokio::test]

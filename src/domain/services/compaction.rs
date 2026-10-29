@@ -12,7 +12,7 @@ pub fn first_kept_message_id(conversation: &Conversation) -> Option<String> {
     let user_msgs: Vec<&ChatMessage> = conversation
         .messages
         .iter()
-        .filter(|m| m.role == MessageRole::User)
+        .filter(|m| !m.is_ephemeral_display() && m.role == MessageRole::User)
         .collect();
     if user_msgs.len() >= 2 {
         user_msgs.last().map(|m| m.id.clone())
@@ -31,7 +31,7 @@ pub fn build_compaction_prompt_input(
     let boundary = conversation
         .messages
         .iter()
-        .position(|m| m.id == first_kept_message_id)
+        .position(|m| !m.is_ephemeral_display() && m.id == first_kept_message_id)
         .unwrap_or(conversation.messages.len());
 
     let mut parts = Vec::new();
@@ -42,7 +42,10 @@ pub fn build_compaction_prompt_input(
     }
 
     // Flatten messages before boundary
-    for msg in &conversation.messages[..boundary] {
+    for msg in conversation.messages[..boundary]
+        .iter()
+        .filter(|m| !m.is_ephemeral_display())
+    {
         let label = match msg.role {
             MessageRole::User => "[User]",
             MessageRole::Assistant => "[Assistant]",
@@ -83,7 +86,7 @@ pub fn shape_compacted_messages(conversation: &Conversation, messages: &mut Vec<
     let kept_content = conversation
         .messages
         .iter()
-        .find(|m| m.id == cs.first_kept_message_id)
+        .find(|m| !m.is_ephemeral_display() && m.id == cs.first_kept_message_id)
         .map(|m| m.content.as_str());
 
     let Some(kept_content) = kept_content else {
@@ -159,6 +162,32 @@ mod tests {
             retracted_at_ms: None,
             history_source: Default::default(),
         }
+    }
+
+    #[test]
+    fn ephemeral_rows_are_not_compaction_input_or_boundaries() {
+        let mut display = make_msg("display", MessageRole::Assistant, "secret canary");
+        display
+            .content_blocks
+            .push(crate::domain::models::ContentBlockType::EphemeralDisplay);
+        let mut fake_user = make_msg("fake", MessageRole::User, "fake user");
+        fake_user
+            .content_blocks
+            .push(crate::domain::models::ContentBlockType::EphemeralDisplay);
+        let conversation = Conversation {
+            messages: vec![
+                make_msg("a", MessageRole::User, "control"),
+                display,
+                fake_user,
+                make_msg("b", MessageRole::User, "next"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(first_kept_message_id(&conversation).as_deref(), Some("b"));
+        let prompt = build_compaction_prompt_input(&conversation, "b", 10000);
+        assert!(prompt.contains("control"));
+        assert!(!prompt.contains("canary"));
+        assert!(!prompt.contains("fake user"));
     }
 
     #[test]

@@ -87,6 +87,9 @@ pub fn build_api_messages_for(chat_messages: &[ChatMessage], turns: &[Turn]) -> 
         .collect();
 
     for cm in chat_messages {
+        if cm.is_ephemeral_display() {
+            continue;
+        }
         if cm.role == MessageRole::Assistant {
             let replay: Vec<&ProviderReplayItem> = cm
                 .content_blocks
@@ -324,6 +327,33 @@ mod tests {
             content: text.into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn ephemeral_rows_do_not_enter_provider_history_or_break_tool_adjacency() {
+        let durable = ChatMessage {
+            content: "durable answer".into(),
+            tool_calls: vec![call("call", None, Some("durable result"))],
+            ..Default::default()
+        };
+        let display = ChatMessage {
+            content: "partial canary".into(),
+            content_blocks: vec![
+                ContentBlockType::EphemeralDisplay,
+                ContentBlockType::Thinking("thinking canary".into()),
+                ContentBlockType::ProviderReplay(item("replay canary")),
+            ],
+            tool_calls: vec![call("transient", None, Some("tool canary"))],
+            ..Default::default()
+        };
+        let messages = build_api_messages(&conversation(vec![durable, display, user("next")]));
+        let wire = serde_json::to_string(&messages).unwrap();
+        assert!(wire.contains("durable answer"));
+        assert!(wire.contains("durable result"));
+        assert!(wire.contains("next"));
+        assert!(!wire.contains("canary"));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].tool_results.len(), 1);
     }
 
     /// Two responses persisted as one row (`ask`): call A + B with replay R1,

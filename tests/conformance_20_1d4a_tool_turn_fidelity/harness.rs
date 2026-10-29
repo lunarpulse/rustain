@@ -272,7 +272,8 @@ pub(crate) async fn tui_turn(
     );
     let mut streaming = StreamingState::default();
     let mut state = TuiState::new(80, 24);
-    let mut active_turn = None;
+    let mut lifecycle =
+        rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
     let mut session_manager = SessionManager::new(SessionState::Empty);
     driver
         .submit(
@@ -288,13 +289,13 @@ pub(crate) async fn tui_turn(
                 conversation: &mut *conversation,
                 streaming: &mut streaming,
                 state: &mut state,
-                active_turn: &mut active_turn,
+                lifecycle: &mut lifecycle,
                 session_manager: &mut session_manager,
             },
         )
         .await;
-    let handle = active_turn
-        .take()
+    let handle = lifecycle
+        .take_task(&conversation.id)
         .expect("LocalTurnDriver launches run_turn");
     tokio::time::timeout(GUARD, handle)
         .await
@@ -303,7 +304,7 @@ pub(crate) async fn tui_turn(
     drop(driver);
     let mut chunks = Vec::new();
     while let Ok(event) = event_rx.try_recv() {
-        if let AppEvent::ProviderChunk { chunk, .. } = event {
+        if let Some((AppEvent::ProviderChunk { chunk, .. }, _)) = lifecycle.admit(event) {
             chunks.push(chunk);
         }
     }

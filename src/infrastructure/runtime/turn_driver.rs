@@ -101,7 +101,7 @@ pub struct TurnViewState<'a> {
     pub conversation: &'a mut Conversation,
     pub streaming: &'a mut StreamingState,
     pub state: &'a mut TuiState,
-    pub active_turn: &'a mut Option<tokio::task::JoinHandle<()>>,
+    pub lifecycle: &'a mut super::tui_turn_lifecycle::TuiTurnLifecycle,
     pub session_manager: &'a mut SessionManager,
 }
 
@@ -218,7 +218,7 @@ impl LocalTurnDriver {
             conversation,
             streaming,
             state,
-            active_turn,
+            lifecycle,
             session_manager,
         } = view;
 
@@ -324,6 +324,7 @@ impl LocalTurnDriver {
                     let assistant_turns = conversation
                         .messages
                         .iter()
+                        .filter(|message| !message.is_ephemeral_display())
                         .filter(|m| m.role == MessageRole::Assistant)
                         .count() as u32;
                     state.pending_plan_reminder_at_turn = Some(assistant_turns);
@@ -383,7 +384,12 @@ impl LocalTurnDriver {
             let new_session_id = generate_conversation_id();
             conversation.session_id = Some(new_session_id.clone());
             session_manager.mark_active(new_session_id);
-            let msg_count = conversation.messages.len().saturating_sub(1);
+            let msg_count = conversation
+                .messages
+                .iter()
+                .take(conversation.messages.len().saturating_sub(1))
+                .filter(|message| !message.is_ephemeral_display())
+                .count();
             domain_tx.send(AppEvent::SystemNotice {
                 conversation_id: Some(conversation.id.clone()),
                 level: crate::domain::models::NoticeLevel::Info,
@@ -726,6 +732,7 @@ impl LocalTurnDriver {
         let parent_ctx_tokens: u32 = conversation
             .messages
             .iter()
+            .filter(|message| !message.is_ephemeral_display())
             .map(|m| m.content.len() as u32 / 4)
             .sum();
 
@@ -750,11 +757,17 @@ impl LocalTurnDriver {
             crate::domain::models::TraceContext::new(trace_id, span_id, 1).ok()
         };
 
+        let (producer_id, producer_tx) = lifecycle.register(
+            conversation.id.clone(),
+            turn_cancel.clone(),
+            resolved.model.clone(),
+            domain_tx.clone(),
+        );
         let handle = tokio::spawn(turn::run_turn(
             provider.clone(),
             messages,
             options,
-            domain_tx.clone(),
+            producer_tx,
             security.clone(),
             tools.clone(),
             tool_scheduler.clone(),
@@ -774,7 +787,7 @@ impl LocalTurnDriver {
             context_tainted,
             Some(skill_activator.clone()),
         ));
-        *active_turn = Some(handle);
+        lifecycle.install_task(&conversation.id, producer_id, handle);
 
         state.status = StatusState::Streaming;
         state.needs_redraw = true;

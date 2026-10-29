@@ -177,6 +177,7 @@ pub(crate) fn public_transcript_message(
                     block,
                     crate::domain::models::ContentBlockType::ProviderReplay(_)
                         | crate::domain::models::ContentBlockType::ResponseSpan(_)
+                        | crate::domain::models::ContentBlockType::EphemeralDisplay
                         | crate::domain::models::ContentBlockType::AcpNotice { .. }
                 )
             })

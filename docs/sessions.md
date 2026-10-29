@@ -5,6 +5,19 @@ next to the project they belong to (git-repo-local, like `.git`). Cross-
 workspace `session list --all` uses a separate hint registry at
 `~/.rustain/workspaces.json` populated on the first successful save per workspace.
 
+## Temporary TUI displays
+
+Cancelled local replies and standalone plan cards remain visible in their
+current tab, including across ordinary tab switches and transcript rebuilds.
+They disappear when the tab is destroyed or the session is reloaded or
+restarted. These display rows are excluded from saved sessions and model
+history; they are not bookmark, fork or rewind targets.
+
+Plan and task data and their status remain durable, but a temporary card's
+host-row reference is not saved and the card is not reconstructed on reload.
+Existing unmarked session rows, including older interrupted replies and ACP
+notices, retain their prior migration and persistence behavior.
+
 ## ACP display-only diagnostics
 
 ACP warnings and errors are saved as display-only notices, separate from provider

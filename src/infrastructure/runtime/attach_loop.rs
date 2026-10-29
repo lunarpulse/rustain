@@ -100,10 +100,11 @@ impl TurnDriver for SocketTurnDriver {
     ///   daemon does NOT echo the user message back on the event stream, so this
     ///   local copy is authoritative for the session and is reconciled by the
     ///   snapshot on re-attach — verified: `server.rs` emits no user-message event);
-    /// - **row 15** — leave `*active_turn = None`; the daemon spawns the turn, so
-    ///   the client holds no `JoinHandle` (cancellation is a protocol message, not
-    ///   a local abort).
+    /// - **row 15** — the daemon owns the turn; cancellation is a protocol
+    ///   message, not a local abort.
     async fn submit(&self, sub: UserSubmission, view: TurnViewState<'_>) {
+        // A caller changing from a local driver cannot strand its old producer.
+        view.lifecycle.retire(&view.conversation.id);
         let UserSubmission {
             text,
             images,
@@ -124,7 +125,6 @@ impl TurnDriver for SocketTurnDriver {
             .is_err()
         {
             let _ = turn_cancel;
-            *view.active_turn = None;
             view.state.status = StatusState::Flash {
                 message: "attach socket closed — message not sent".into(),
                 remaining_ms: 1500,
@@ -157,7 +157,6 @@ impl TurnDriver for SocketTurnDriver {
         // row 15 — the daemon owns the turn; no local handle. Cancellation would be
         // a protocol message in a future story, so the token is intentionally unused.
         let _ = turn_cancel;
-        *view.active_turn = None;
 
         view.state.status = StatusState::Streaming;
         view.state.needs_redraw = true;
@@ -3113,7 +3112,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
         channel_count: snapshot.channels.len(),
     };
     let mut session_manager = SessionManager::new(SessionState::Empty);
-    let mut active_turn: Option<tokio::task::JoinHandle<()>> = None;
+    let mut lifecycle =
+        crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
     let mut input = String::new();
     let mut scroll_offset = 0usize;
     let mut auto_scroll = true;
@@ -3638,7 +3638,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                         conversation: &mut conversation,
                                         streaming: &mut streaming,
                                         state: &mut state,
-                                        active_turn: &mut active_turn,
+                                        lifecycle: &mut lifecycle,
                                         session_manager: &mut session_manager,
                                     };
                                     driver.submit(sub, view).await;
@@ -8462,7 +8462,16 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut state = TuiState::new(80, 24);
-        let mut active_turn: Option<tokio::task::JoinHandle<()>> = Some(tokio::spawn(async {}));
+        let mut lifecycle =
+            crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
+        let stale_cancel = CancellationToken::new();
+        let (bus, _events) = mpsc::unbounded_channel();
+        lifecycle.register(
+            conversation.id.clone(),
+            stale_cancel.clone(),
+            "stale-local".into(),
+            bus,
+        );
         let mut session_manager = SessionManager::new(SessionState::Empty);
 
         let sub = UserSubmission {
@@ -8477,12 +8486,19 @@ mod tests {
             conversation: &mut conversation,
             streaming: &mut streaming,
             state: &mut state,
-            active_turn: &mut active_turn,
+            lifecycle: &mut lifecycle,
             session_manager: &mut session_manager,
         };
         driver.submit(sub, view).await;
 
-        assert!(active_turn.is_none(), "no local turn handle (row 15)");
+        assert!(
+            !lifecycle.is_live(&conversation.id),
+            "no local producer (row 15)"
+        );
+        assert!(
+            stale_cancel.is_cancelled(),
+            "stale local ownership is retired"
+        );
         assert_eq!(conversation.messages.len(), 1, "optimistic append (row 2)");
         assert_eq!(conversation.messages[0].content, "hi daemon");
         match rx.recv().await.unwrap() {
@@ -8500,14 +8516,23 @@ mod tests {
         let mut conversation = Conversation::default();
         let mut streaming = StreamingState::default();
         let mut state = TuiState::new(80, 24);
-        let mut active_turn: Option<tokio::task::JoinHandle<()>> = Some(tokio::spawn(async {}));
+        let mut lifecycle =
+            crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
+        let stale_cancel = CancellationToken::new();
+        let (bus, _events) = mpsc::unbounded_channel();
+        lifecycle.register(
+            conversation.id.clone(),
+            stale_cancel.clone(),
+            "stale-local".into(),
+            bus,
+        );
         let mut session_manager = SessionManager::new(SessionState::Empty);
 
         let view = TurnViewState {
             conversation: &mut conversation,
             streaming: &mut streaming,
             state: &mut state,
-            active_turn: &mut active_turn,
+            lifecycle: &mut lifecycle,
             session_manager: &mut session_manager,
         };
         driver
@@ -8528,7 +8553,11 @@ mod tests {
             conversation.messages.is_empty(),
             "closed writer must not create a local phantom message"
         );
-        assert!(active_turn.is_none(), "no local turn handle");
+        assert!(!lifecycle.is_live(&conversation.id), "no local producer");
+        assert!(
+            stale_cancel.is_cancelled(),
+            "closed socket also retires stale local ownership"
+        );
         assert!(
             matches!(state.status, StatusState::Flash { ref message, .. } if message.contains("not sent")),
             "user gets a visible send failure"

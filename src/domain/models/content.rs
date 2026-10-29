@@ -16,6 +16,9 @@ pub enum ContentBlockType {
     /// Raw peer-authored transcript content. Persisted so render-time
     /// sanitization and host framing remain active after reload.
     PeerText,
+    /// In-memory-only row lifetime marker; the entire row is excluded from
+    /// persistence and provider history.
+    EphemeralDisplay,
 
     // v0.5
     Thinking(String),

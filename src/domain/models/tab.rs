@@ -421,6 +421,10 @@ impl TabManager {
     pub fn tabs(&self) -> &[TabState] {
         &self.tabs
     }
+    /// Mutable owning tabs for synchronous runtime shutdown/finalization.
+    pub fn tabs_mut(&mut self) -> &mut [TabState] {
+        &mut self.tabs
+    }
 
     /// The active tab's ID.
     pub fn active_tab_id(&self) -> TabId {

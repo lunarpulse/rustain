@@ -20,5 +20,6 @@ pub mod team_proposal_bridge;
 #[cfg(unix)]
 pub mod team_send_cli;
 pub mod transparency_bridge;
+pub mod tui_turn_lifecycle;
 pub mod turn;
 pub mod turn_driver;

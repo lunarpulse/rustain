@@ -321,7 +321,8 @@ async fn run_turn_front_door(
     };
     let mut streaming = StreamingState::default();
     let mut state = rustain::adapters::tui::state::TuiState::new(120, 24);
-    let mut active_turn = None;
+    let mut lifecycle =
+        rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
     let mut session_manager = SessionManager::new(SessionState::Empty);
 
     driver
@@ -338,13 +339,13 @@ async fn run_turn_front_door(
                 conversation: &mut conversation,
                 streaming: &mut streaming,
                 state: &mut state,
-                active_turn: &mut active_turn,
+                lifecycle: &mut lifecycle,
                 session_manager: &mut session_manager,
             },
         )
         .await;
 
-    if let Some(handle) = active_turn.take() {
+    if let Some(handle) = lifecycle.take_task(&conversation.id) {
         tokio::time::timeout(DEADLINE, handle)
             .await
             .expect("turn must finish")
@@ -353,7 +354,9 @@ async fn run_turn_front_door(
 
     let mut events = Vec::new();
     while let Ok(event) = event_rx.try_recv() {
-        events.push(event);
+        if let Some((event, _)) = lifecycle.admit(event) {
+            events.push(event);
+        }
     }
     events
 }

@@ -1,8 +1,8 @@
 //! Render-error handler — cross-epic utility.
 //!
-//! `handle_render_error` returns `HandlerOutcome::Quiet` — aborts active turn
-//! `JoinHandle`, resets streaming state, recovers terminal (may set
-//! `state.should_quit` on recovery failure). No event emission, no internal spawn.
+//! `handle_render_error` stops the owning runtime producer through an injected
+//! closure, resets streaming state and recovers the terminal (may set
+//! `state.should_quit` on recovery failure). No internal spawn.
 //!
 //! 6 call sites in `event_loop.rs` dispatch arms (after each `render()` call).
 
@@ -17,17 +17,14 @@ use super::HandlerOutcome;
 /// Handle a render failure: abort active turn, reset streaming, attempt terminal recovery.
 pub fn handle_render_error(
     err: anyhow::Error,
-    active_turn: &mut Option<tokio::task::JoinHandle<()>>,
+    stop_turn: impl FnOnce(&mut StreamingState, &mut TuiState),
     streaming: &mut StreamingState,
     state: &mut TuiState,
     terminal: &mut Tui,
 ) -> HandlerOutcome {
     tracing::error!("Render failed: {}", err);
 
-    // Abort active turn if running
-    if let Some(handle) = active_turn.take() {
-        handle.abort();
-    }
+    stop_turn(streaming, state);
 
     // Reset streaming state
     streaming.is_streaming = false;

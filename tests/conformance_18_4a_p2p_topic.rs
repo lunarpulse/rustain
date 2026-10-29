@@ -1001,7 +1001,8 @@ async fn drive_turn_through_submit(
     };
     let mut streaming = rustain::domain::models::StreamingState::default();
     let mut state = rustain::adapters::tui::state::TuiState::new(120, 24);
-    let mut active_turn = None;
+    let mut lifecycle =
+        rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
     let mut session_manager =
         rustain::domain::models::SessionManager::new(rustain::domain::models::SessionState::Empty);
     let cancel = CancellationToken::new();
@@ -1020,7 +1021,7 @@ async fn drive_turn_through_submit(
                 conversation: &mut conversation,
                 streaming: &mut streaming,
                 state: &mut state,
-                active_turn: &mut active_turn,
+                lifecycle: &mut lifecycle,
                 session_manager: &mut session_manager,
             },
         )
@@ -1049,7 +1050,7 @@ async fn drive_turn_through_submit(
         }
     });
     let _ = watcher.await;
-    if let Some(handle) = active_turn.take() {
+    if let Some(handle) = lifecycle.take_task(&conversation.id) {
         let _ = tokio::time::timeout(DEADLINE, handle).await;
     }
     (prompted, tools.executed.load(Ordering::SeqCst) > 0)

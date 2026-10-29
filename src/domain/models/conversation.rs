@@ -154,6 +154,12 @@ impl Default for ChatMessage {
 }
 
 impl ChatMessage {
+    /// Whether the whole row exists only for the current TUI tab lifetime.
+    pub fn is_ephemeral_display(&self) -> bool {
+        self.content_blocks
+            .contains(&ContentBlockType::EphemeralDisplay)
+    }
+
     /// Explicit or structurally retained legacy peer-display lineage.
     pub fn is_peer_display(&self) -> bool {
         self.history_source == HistorySource::PeerDisplay
@@ -268,6 +274,30 @@ pub struct Conversation {
 }
 
 impl Conversation {
+    /// Translate a live mirror index to its durable transcript index.
+    pub fn durable_message_index(&self, live_index: usize) -> Option<usize> {
+        let message = self.messages.get(live_index)?;
+        if message.is_ephemeral_display() {
+            return None;
+        }
+        Some(
+            self.messages[..live_index]
+                .iter()
+                .filter(|m| !m.is_ephemeral_display())
+                .count(),
+        )
+    }
+
+    /// Translate a durable transcript index to its current live mirror index.
+    pub fn live_message_index(&self, durable_index: usize) -> Option<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.is_ephemeral_display())
+            .nth(durable_index)
+            .map(|(index, _)| index)
+    }
+
     /// Rebuild the legacy `messages` mirror from the authoritative `turns`.
     ///
     /// Preserves non-Assistant messages (User, System) that are not yet represented
@@ -286,6 +316,7 @@ impl Conversation {
             .messages
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| !m.is_ephemeral_display())
             .filter(|m| !m.content_blocks.is_empty())
             .map(|m| (m.id.clone(), m.content_blocks.clone()))
             .collect();
@@ -295,6 +326,7 @@ impl Conversation {
             .messages
             .iter()
             .filter(|m| m.role == MessageRole::Assistant)
+            .filter(|m| !m.is_ephemeral_display())
             .filter(|m| m.tool_calls.iter().any(|call| call.provider_id.is_some()))
             .map(|m| {
                 (
@@ -309,6 +341,7 @@ impl Conversation {
         let old_sources: std::collections::HashSet<String> = self
             .messages
             .iter()
+            .filter(|m| !m.is_ephemeral_display())
             .filter(|m| m.is_peer_display())
             .map(|m| m.id.clone())
             .collect();
@@ -318,6 +351,7 @@ impl Conversation {
             .messages
             .iter()
             .enumerate()
+            .filter(|(_, m)| !m.is_ephemeral_display())
             .filter(|(_, m)| m.role == MessageRole::Assistant)
             .map(|(i, m)| (m.id.clone(), i))
             .collect();
@@ -478,7 +512,7 @@ impl Conversation {
 
         // Remove zombie assistant messages (turns that no longer exist)
         self.messages.retain(|m| {
-            if m.role != MessageRole::Assistant {
+            if m.role != MessageRole::Assistant || m.is_ephemeral_display() {
                 return true;
             }
             processed_turn_ids.contains(&m.id)
@@ -624,10 +658,31 @@ impl PersistedConversation {
     }
 
     pub fn from_conversation_with_exit(conv: &Conversation, clean_exit: bool) -> Self {
+        let ephemeral_ids: std::collections::HashSet<&str> = conv
+            .messages
+            .iter()
+            .filter(|m| m.is_ephemeral_display())
+            .map(|m| m.id.as_str())
+            .collect();
+        let mut plans = conv.plans.clone();
+        for plan in plans.values_mut() {
+            if plan
+                .host_message_id
+                .as_deref()
+                .is_some_and(|id| ephemeral_ids.contains(id))
+            {
+                plan.host_message_id = None;
+            }
+        }
         Self {
             id: conv.id.clone(),
             title: conv.title.clone(),
-            messages: conv.messages.clone(),
+            messages: conv
+                .messages
+                .iter()
+                .filter(|m| !m.is_ephemeral_display())
+                .cloned()
+                .collect(),
             turns: conv.turns.clone(),
             created_at: conv.created_at,
             session_id: conv.session_id.clone(),
@@ -635,7 +690,7 @@ impl PersistedConversation {
             updated_at: Some(conv.updated_at),
             last_response_at: conv.last_response_at,
             usage: conv.usage.clone(),
-            plans: conv.plans.clone(),
+            plans,
             compaction: conv.compaction.clone(),
             peer_row_controls: conv.peer_row_controls.clone(),
             peer_row_revision: conv.peer_row_revision,
@@ -660,6 +715,24 @@ impl PersistedConversation {
             peer_row_controls: self.peer_row_controls,
             peer_row_revision: self.peer_row_revision,
         };
+        // Discard marked rows before either migration, including externally
+        // supplied persisted data, and clear only hosts known to be temporary.
+        let ephemeral_ids: std::collections::HashSet<&str> = conv
+            .messages
+            .iter()
+            .filter(|m| m.is_ephemeral_display())
+            .map(|m| m.id.as_str())
+            .collect();
+        for plan in conv.plans.values_mut() {
+            if plan
+                .host_message_id
+                .as_deref()
+                .is_some_and(|id| ephemeral_ids.contains(id))
+            {
+                plan.host_message_id = None;
+            }
+        }
+        conv.messages.retain(|m| !m.is_ephemeral_display());
 
         // Story 20.1d4a T2: an assistant row appended by a messages-only
         // persister (`ask`, the daemon, ACP, a peer row) after a migrated load
@@ -744,6 +817,146 @@ fn migrate_unbacked_rows(conv: &mut Conversation) {
 
 #[cfg(test)]
 mod tests {
+    fn row(id: &str, content: &str, ephemeral: bool) -> ChatMessage {
+        ChatMessage {
+            id: id.into(),
+            content: content.into(),
+            content_blocks: if ephemeral {
+                vec![ContentBlockType::EphemeralDisplay]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ephemeral_display_projection_and_migrations_preserve_legacy_rows() {
+        let durable = row("durable", "completed", false);
+        let transient = row("transient", "partial canary", true);
+        let mut legacy = row("legacy", "legacy cancelled", false);
+        legacy.stop_reason = Some(StopReason::Cancelled);
+        assert!(transient.is_ephemeral_display());
+        assert!(!durable.is_ephemeral_display());
+        let mut conv = Conversation::default();
+        conv.messages = vec![durable.clone(), transient.clone(), legacy.clone()];
+        for clean_exit in [false, true] {
+            let saved = PersistedConversation::from_conversation_with_exit(&conv, clean_exit);
+            assert_eq!(
+                saved
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["durable", "legacy"]
+            );
+            assert!(
+                !serde_json::to_string(&saved)
+                    .unwrap()
+                    .contains("partial canary")
+            );
+        }
+        // Feed marked rows directly to the loader, both without turns and
+        // with a pre-existing turn (the two distinct migration paths).
+        for mixed in [false, true] {
+            let mut saved = PersistedConversation::from_conversation(&conv);
+            saved.messages.insert(1, transient.clone());
+            if mixed {
+                saved.turns.push(migrate_chat_message_to_turn(&durable));
+            }
+            let mut loaded = saved.to_conversation();
+            assert_eq!(loaded.turns.len(), 2);
+            assert_eq!(
+                loaded
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["durable", "legacy"]
+            );
+            loaded.rebuild_messages_mirror();
+            loaded.rebuild_messages_mirror();
+            assert_eq!(loaded.messages[1].stop_reason, Some(StopReason::Cancelled));
+            assert_eq!(
+                loaded
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["durable", "legacy"]
+            );
+        }
+    }
+
+    #[test]
+    fn ephemeral_mirror_survives_and_indices_skip_it() {
+        let mut conv = Conversation::default();
+        let first = row("first", "first", false);
+        let last = row("last", "last", false);
+        conv.turns = vec![
+            migrate_chat_message_to_turn(&first),
+            migrate_chat_message_to_turn(&last),
+        ];
+        conv.messages = vec![
+            first,
+            row("display", "temporary", true),
+            row("zombie", "obsolete", false),
+            last,
+        ];
+        conv.rebuild_messages_mirror();
+        assert_eq!(
+            conv.messages
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "display", "last"]
+        );
+        assert_eq!(conv.durable_message_index(1), None);
+        assert_eq!(conv.durable_message_index(2), Some(1));
+        assert_eq!(conv.live_message_index(1), Some(2));
+        assert_eq!(conv.live_message_index(2), None);
+        conv.rebuild_messages_mirror();
+        assert_eq!(conv.messages[1].content, "temporary");
+    }
+
+    #[test]
+    fn ephemeral_plan_host_is_cleared_but_plan_and_legacy_host_survive() {
+        use crate::domain::models::plan::{Plan, PlanStatus};
+        let plan = |id: &str, host: &str| Plan {
+            id: id.into(),
+            title: "durable plan".into(),
+            tasks: vec![],
+            estimated_effort: None,
+            status: PlanStatus::Pending,
+            created_at: 1,
+            resolved_at: None,
+            host_message_id: Some(host.into()),
+        };
+        let mut conv = Conversation::default();
+        conv.messages = vec![
+            row("temporary", "card", true),
+            row("legacy", "legacy card", false),
+        ];
+        conv.plans.insert("new".into(), plan("new", "temporary"));
+        conv.plans.insert("old".into(), plan("old", "legacy"));
+        let saved = PersistedConversation::from_conversation(&conv);
+        assert_eq!(saved.plans["new"].host_message_id, None);
+        assert_eq!(saved.plans["new"].title, "durable plan");
+        assert_eq!(
+            saved.plans["old"].host_message_id.as_deref(),
+            Some("legacy")
+        );
+        let mut marked = saved;
+        marked.messages.insert(0, conv.messages[0].clone());
+        marked.plans.get_mut("new").unwrap().host_message_id = Some("temporary".into());
+        let loaded = marked.to_conversation();
+        assert_eq!(loaded.plans["new"].host_message_id, None);
+        assert_eq!(
+            loaded.plans["old"].host_message_id.as_deref(),
+            Some("legacy")
+        );
+    }
+
     #[test]
     fn legacy_migration_gives_idless_rows_distinct_mirror_join_identities() {
         let mut conversation = Conversation::default();

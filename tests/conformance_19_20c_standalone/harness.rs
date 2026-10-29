@@ -171,6 +171,7 @@ pub(crate) struct Fixture {
     config: Arc<ArcSwap<AppConfig>>,
     workspace: tempfile::TempDir,
     turns: Vec<tokio::task::JoinHandle<()>>,
+    lifecycle: rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle,
     bridge: tokio::task::JoinHandle<()>,
 }
 
@@ -202,6 +203,8 @@ impl Fixture {
             config: Arc::new(ArcSwap::from_pointee(AppConfig::default())),
             workspace,
             turns: vec![],
+            lifecycle:
+                rustain::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default(),
             bridge,
         }
     }
@@ -247,7 +250,6 @@ impl Fixture {
         let mut conversation = tabs.active_tab().conversation.clone();
         let mut streaming = StreamingState::default();
         let mut session = SessionManager::new(SessionState::Empty);
-        let mut active_turn = None;
         driver
             .submit(
                 UserSubmission {
@@ -262,19 +264,23 @@ impl Fixture {
                     conversation: &mut conversation,
                     streaming: &mut streaming,
                     state: &mut self.state,
-                    active_turn: &mut active_turn,
+                    lifecycle: &mut self.lifecycle,
                     session_manager: &mut session,
                 },
             )
             .await;
-        self.turns
-            .push(active_turn.expect("real LocalTurnDriver launches run_turn"));
+        self.turns.push(
+            self.lifecycle
+                .take_task(&conversation.id)
+                .expect("real LocalTurnDriver launches run_turn"),
+        );
     }
 
     fn apply_event(
         &mut self,
         event: AppEvent,
     ) -> Option<(ApprovalRuntimeEvent, Option<PendingReview>)> {
+        let (event, _) = self.lifecycle.admit(event)?;
         match event {
             AppEvent::ApprovalRuntimeEventBridged { event, review } => {
                 match &event {

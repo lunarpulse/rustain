@@ -79,7 +79,11 @@ impl SessionMeta {
             title: conv.title.clone(),
             created_at: conv.created_at,
             updated_at: conv.updated_at,
-            message_count: conv.messages.len(),
+            message_count: conv
+                .messages
+                .iter()
+                .filter(|m| !m.is_ephemeral_display())
+                .count(),
             bookmarks: Vec::new(),
             fork_source: conv.fork_source.clone(),
             imported_from: None,
@@ -167,6 +171,26 @@ pub fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ephemeral_rows_do_not_count_in_session_metadata() {
+        use crate::domain::models::{ChatMessage, ContentBlockType, Conversation};
+        let conversation = Conversation {
+            messages: vec![
+                ChatMessage::default(),
+                ChatMessage {
+                    content_blocks: vec![ContentBlockType::EphemeralDisplay],
+                    ..Default::default()
+                },
+                ChatMessage::default(),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            SessionMeta::from_conversation(&conversation).message_count,
+            2
+        );
+    }
 
     #[test]
     fn test_shorten_text_no_truncation_needed() {

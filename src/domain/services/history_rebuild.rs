@@ -11,7 +11,7 @@ use crate::domain::models::{ChatMessage, MessageRole};
 /// - Prefix with `"Previous conversation context (N messages):\n"`
 /// - Format: `"[User]: {summary}\n[Assistant]: {summary}\n..."` for each message
 pub fn build_history_context(messages: &[ChatMessage]) -> String {
-    if messages.is_empty() {
+    if messages.iter().all(ChatMessage::is_ephemeral_display) {
         return String::new();
     }
 
@@ -20,7 +20,7 @@ pub fn build_history_context(messages: &[ChatMessage]) -> String {
     // Track the last image reference across all messages
     let mut last_image_ref: Option<String> = None;
 
-    for msg in messages {
+    for msg in messages.iter().filter(|m| !m.is_ephemeral_display()) {
         // Strip XML tags from content
         let stripped = strip_xml_tags(&msg.content);
 
@@ -51,7 +51,7 @@ pub fn build_history_context(messages: &[ChatMessage]) -> String {
 
     let mut result = format!(
         "Previous conversation context ({} messages):\n",
-        messages.len()
+        lines.len()
     );
     result.push_str(&lines.join("\n"));
 
@@ -121,6 +121,25 @@ mod tests {
             retracted_at_ms: None,
             history_source: Default::default(),
         }
+    }
+
+    #[test]
+    fn ephemeral_rows_are_absent_from_rebuilt_context_count_and_last_image() {
+        let mut display = make_message(MessageRole::Assistant, "partial [Image: secret.png]");
+        display
+            .content_blocks
+            .push(crate::domain::models::ContentBlockType::EphemeralDisplay);
+        assert_eq!(build_history_context(&[display.clone()]), "");
+        let messages = vec![
+            make_message(MessageRole::User, "control [Image: kept.png]"),
+            display,
+            make_message(MessageRole::Assistant, "durable"),
+        ];
+        let context = build_history_context(&messages);
+        assert!(context.starts_with("Previous conversation context (2 messages):"));
+        assert!(context.ends_with("[Image: kept.png]"));
+        assert!(context.contains("durable"));
+        assert!(!context.contains("secret"));
     }
 
     #[test]
