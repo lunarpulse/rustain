@@ -31,6 +31,8 @@ from typing import Iterator
 
 import pexpect
 import pyte
+from pyte import modes as terminal_modes
+from wcwidth import wcwidth
 
 from keys import (
     ESC, ENTER, CTRL_C, CTRL_F, CTRL_H, CTRL_P, CTRL_T,
@@ -108,6 +110,34 @@ def _resolve_binary() -> tuple[Path, bool]:
         # check here would be unfindable at spawn time.
         return Path(override).resolve(), True
     return BINARY, False
+
+
+class TerminalScreen(pyte.Screen):
+    """Model replacement of either half of a wide terminal glyph.
+
+    pyte 0.8 leaves the other half behind when a cursor-addressed repaint
+    overwrites a wide glyph. Real terminals erase it; ratatui's incremental
+    diff relies on that behavior instead of emitting redundant blank cells.
+    An orphaned pyte continuation also makes its display property raise.
+    Repair the neighboring cells at write time, not the observed screen text.
+    """
+
+    def draw(self, data: str) -> None:
+        for character in data:
+            translated = character.translate(
+                self.g1_charset if self.charset else self.g0_charset)
+            width = wcwidth(translated)
+            x = self.cursor.x
+            if x == self.columns:
+                x = 0 if terminal_modes.DECAWM in self.mode else x - max(width, 0)
+            super().draw(character)
+            if width > 0:
+                line = self.buffer[self.cursor.y]
+                if x > 0 and line[x - 1].data and wcwidth(line[x - 1].data[0]) == 2:
+                    line[x - 1] = line[x - 1]._replace(data=" ")
+                end = x + width
+                if end < self.columns and line[end].data == "":
+                    line[end] = line[end]._replace(data=" ")
 
 
 # ── Main Harness ─────────────────────────────────────────────────────────────
@@ -240,7 +270,7 @@ class RustainTUI:
 
         # Initialize pyte virtual terminal — use Stream (str) since pexpect
         # is configured with encoding="utf-8" which returns str, not bytes.
-        self._screen = pyte.Screen(TERM_COLS, TERM_ROWS)
+        self._screen = TerminalScreen(TERM_COLS, TERM_ROWS)
         self._stream = pyte.Stream(self._screen)
 
         self._child = pexpect.spawn(

@@ -4,6 +4,14 @@ Pexpect-based end-to-end tests that drive the real rustain TUI through a pseudo-
 These tests exercise the **full production stack**: binary startup, terminal rendering,
 keyboard input, API calls, tool execution, file I/O, and session persistence.
 
+The shared harness uses `TerminalScreen`, a pyte screen with terminal-correct
+wide-glyph replacement: overwriting either column of a CJK glyph erases its
+other half while preserving neighboring cells and styles. Ratatui's optimized
+incremental frames rely on this terminal behavior; pyte 0.8 otherwise leaves
+orphan continuation cells and raises `IndexError` while observing the screen.
+`test_terminal_screen.py` covers cursor-addressed repaint, overlapping wide
+glyphs, styles, wrapping, scrolling, and disabled autowrap without a live provider.
+
 ## Quick Start
 
 ```bash
