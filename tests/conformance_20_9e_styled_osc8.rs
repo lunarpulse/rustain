@@ -608,11 +608,70 @@ impl Observer {
         }
     }
 }
+#[cfg(unix)]
+fn run_k3_with_pty() {
+    use std::io::Read;
+    use std::os::fd::FromRawFd;
+    use std::process::{Command, Stdio};
+
+    let mut master = -1;
+    let mut slave = -1;
+    let size = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // The child owns the PTY slave as stdout; crossterm can query its size even
+    // when the test runner has no controlling terminal.
+    let result = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &size,
+        )
+    };
+    assert_eq!(result, 0, "openpty: {}", io::Error::last_os_error());
+    // SAFETY: openpty returned two newly owned file descriptors.
+    let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+    let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "conformance_20_9e_styled_osc8::k3_crossterm_incremental_frames_and_middle_overlay",
+            "--nocapture",
+        ])
+        .env("RUSTAIN_K3_PTY_CHILD", "1")
+        .env_remove("NO_COLOR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave))
+        .output()
+        .unwrap();
+    let mut stdout = Vec::new();
+    // Linux reports EIO rather than EOF once the slave closes.
+    if let Err(err) = master.read_to_end(&mut stdout) {
+        assert_eq!(err.raw_os_error(), Some(libc::EIO));
+    }
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed; 0 failed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
 
 #[test]
 fn k3_crossterm_incremental_frames_and_middle_overlay() {
-    // Crossterm caches NO_COLOR globally. Isolate a host-level suppression in
-    // a child, rather than changing the parallel test process's environment.
+    // Ratatui's fixed-viewport resize queries the real terminal size while
+    // clearing. Isolate a PTY (and NO_COLOR) from the parallel test process.
+    #[cfg(unix)]
+    if std::env::var_os("RUSTAIN_K3_PTY_CHILD").is_none() {
+        run_k3_with_pty();
+        return;
+    }
+    #[cfg(not(unix))]
     if std::env::var("NO_COLOR").is_ok_and(|value| !value.is_empty()) {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
