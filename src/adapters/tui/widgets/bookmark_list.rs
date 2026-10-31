@@ -15,9 +15,10 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
+use crate::adapters::tui::widgets::cross_search::shorten_to_cells;
 use crate::domain::models::conversation::Conversation;
-use crate::domain::models::shorten_text;
 
 /// Render the bookmark list panel into `area`. No-op when `bookmarks` is
 /// empty — the event loop should flash "No bookmarks" instead of opening
@@ -65,11 +66,10 @@ pub fn render(
             .add_modifier(Modifier::BOLD),
     )));
 
-    // AC10: shortened via `shorten_text(..., panel_width - 8)`.
-    // `panel_width` is the full area width here, and `8` accounts for the
-    // "msg K: " prefix (up to ~"msg 999: " = 9 chars in practice).
-    let panel_width = area.width as usize;
-    let content_budget = panel_width.saturating_sub(8);
+    // AC10: shortened to the display cells left in the row after the borders,
+    // the `▸ ` prefix and the `msg K: ` label (derived per row below). The
+    // domain `shorten_text` is a scalar source cap and is not used here.
+    let inner_width = (area.width as usize).saturating_sub(2);
     for i in 0..visible_entries {
         let entry_idx = scroll_offset + i;
         if entry_idx >= bookmarks.len() {
@@ -81,12 +81,17 @@ pub fn render(
             .and_then(|index| conversation.messages.get(index))
             .map(|m| m.content.lines().next().unwrap_or("").to_string())
             .unwrap_or_else(|| "(missing message)".to_string());
-        let shortened = shorten_text(&first_line, content_budget);
         let prefix = if entry_idx == selected_clamped {
             "▸ "
         } else {
             "  "
         };
+        // Real content budget: inside the borders, after the row prefix and
+        // the `msg K: ` label (whose width follows the index digits).
+        let label = format!("msg {}: ", msg_idx);
+        let prefix_cells = geom::cells(prefix) + geom::cells(&label);
+        let content_budget = inner_width.saturating_sub(prefix_cells);
+        let shortened = shorten_to_cells(&first_line, content_budget);
         let row_style = if entry_idx == selected_clamped {
             Style::default()
                 .fg(theme.colors.accent)
@@ -100,7 +105,7 @@ pub fn render(
         // for end users is tracked as DF-126 (party-mode third-audit).
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), row_style),
-            Span::styled(format!("msg {}: {}", msg_idx, shortened), row_style),
+            Span::styled(format!("{label}{shortened}"), row_style),
         ]));
     }
 
@@ -221,5 +226,61 @@ mod tests {
         assert!(screen.contains("msg 2"));
         // Selection marker on the second entry (idx=1, which is msg 2).
         assert!(screen.contains("▸ msg 2"));
+    }
+
+    // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
+
+    /// Paint the real panel (`width` x 5: border, header, one entry, footer,
+    /// border) and return the glyph rows plus the buffer.
+    fn draw(
+        width: u16,
+        c: &Conversation,
+        bookmark: usize,
+    ) -> (Vec<String>, ratatui::buffer::Buffer) {
+        let theme = Theme::dark();
+        let mut term =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 5)).unwrap();
+        term.draw(|frame| {
+            render(frame, frame.area(), c, &[bookmark], 0, &theme);
+        })
+        .unwrap();
+        let buffer = term.backend().buffer().clone();
+        let rows = (0..5u16)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0u16;
+                while x < width {
+                    let symbol = buffer.cell((x, y)).unwrap().symbol();
+                    row.push_str(symbol);
+                    x += u16::try_from(geom::cells(symbol).max(1)).unwrap();
+                }
+                row
+            })
+            .collect();
+        (rows, buffer)
+    }
+
+    #[test]
+    fn display_width_bookmark_budget_follows_the_label_width() {
+        // `msg 10: ` is one cell wider than `msg 0: `, so the same text gets
+        // 28 cells instead of 29: the old fixed `-8` could not tell.
+        let mut messages: Vec<ChatMessage> = (0..10).map(|_| msg("filler")).collect();
+        messages.push(msg(&"y".repeat(29)));
+        let c = conv(messages);
+        let (rows, buffer) = draw(40, &c, 10);
+        assert!(
+            rows[2].starts_with(&format!("│▸ msg 10: {}...", "y".repeat(25))),
+            "{:?}",
+            rows[2]
+        );
+        assert_eq!(buffer.cell((39, 2)).unwrap().symbol(), "│");
+        // The ASCII 29-cell text still fits whole beside the one-digit label.
+        let c = conv(vec![msg(&"y".repeat(29))]);
+        let (rows, _) = draw(40, &c, 0);
+        assert!(
+            rows[2].starts_with(&format!("│▸ msg 0: {}│", "y".repeat(29))),
+            "{:?}",
+            rows[2]
+        );
     }
 }

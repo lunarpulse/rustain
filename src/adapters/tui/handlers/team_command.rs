@@ -15,6 +15,7 @@
 //! arm's shell and arrives here as data.
 
 use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::events::AppEvent;
 use crate::domain::models::NoticeLevel;
 use crate::domain::services::transparency::{
@@ -876,9 +877,11 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
         MAX_PEER_ID_BYTES, MAX_SUMMARY_BYTES, sanitize_disclosable,
     };
 
+    // Aliases are peer-chosen and may be wide or combining: the label column
+    // is measured and padded in display cells, not scalars.
     let width = rows
         .iter()
-        .map(|row| row.alias.chars().count())
+        .map(|row| geom::cells(&row.alias))
         .max()
         .unwrap_or(0);
     let mut retro = false;
@@ -934,7 +937,11 @@ pub fn render_team_send_rows(rows: &[TeamSendRow]) -> String {
                 None,
             ),
         };
-        let _ = writeln!(text, "  {token} {:width$}  {label}", row.alias);
+        let _ = writeln!(
+            text,
+            "  {token} {}  {label}",
+            geom::pad_right(&row.alias, width)
+        );
         if let Some(cause) = cause {
             text.push_str("    ");
             let limit = match cause {
@@ -1031,7 +1038,7 @@ pub fn render_team_thread(
         .collect();
     let width = labels
         .iter()
-        .map(|label| label.chars().count())
+        .map(|label| geom::cells(label))
         .max()
         .unwrap_or(0)
         .max(8);
@@ -1042,7 +1049,8 @@ pub fn render_team_thread(
     for (turn, label) in thread.turns.iter().zip(labels) {
         let _ = write!(
             text,
-            "\n  {label:width$}  {}",
+            "\n  {}  {}",
+            geom::pad_right(label, width),
             sanitize_disclosable(&turn.turn_id, MAX_PEER_ID_BYTES)
         );
         if turn.reply && turn.authorship == Authorship::AgentComposed {
@@ -2598,6 +2606,129 @@ mod tests {
             render_team_thread("marcus", "ri_q", &ThreadRead::AccessOff, false),
             "thread access is off on marcus's host — its operator can enable it"
         );
+    }
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    /// Paint `text` line by line through a `Paragraph` and return, for each
+    /// line, the display column (cell x) at which `needle` starts, read back
+    /// from the painted glyph cells.
+    fn needle_columns(text: &str, needle: &str, width: u16) -> Vec<Option<u16>> {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::{Paragraph, Widget};
+        let height = text.lines().count() as u16;
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(text).render(area, &mut buf);
+        (0..height)
+            .map(|y| {
+                let mut glyphs: Vec<(u16, String)> = Vec::new();
+                let mut x = 0u16;
+                while x < width {
+                    let symbol = buf.cell((x, y)).map_or(" ", |c| c.symbol()).to_string();
+                    let step = geom::cells(&symbol).max(1) as u16;
+                    glyphs.push((x, symbol));
+                    x += step;
+                }
+                (0..glyphs.len()).find_map(|i| {
+                    let rest: String = glyphs[i..].iter().map(|(_, s)| s.as_str()).collect();
+                    rest.starts_with(needle).then_some(glyphs[i].0)
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn display_width_send_rows_align_outcomes_at_60_80_130() {
+        use crate::domain::models::team_send::TEAM_SEND_DELIVERED_LABEL;
+        use crate::domain::models::{RecipientOutcome, SemanticMessageType};
+        let make = |alias: &str, outcome: Option<RecipientOutcome>| TeamSendRow {
+            alias: alias.to_owned(),
+            outcome,
+            message_type: SemanticMessageType::Unknown,
+        };
+        // Widest alias 田中 is 4 cells: `  ● ` + 4 + two spaces puts every label
+        // at column 10, whatever mix of narrow/wide/combining aliases precedes.
+        let wide = [
+            make("田中", Some(RecipientOutcome::Delivered)),
+            make("ab", Some(RecipientOutcome::Delivered)),
+            make(G, Some(RecipientOutcome::Delivered)),
+            make(A, Some(RecipientOutcome::Delivered)),
+        ];
+        let ascii = [
+            make("abcd", Some(RecipientOutcome::Delivered)),
+            make("ab", Some(RecipientOutcome::Delivered)),
+        ];
+        for width in [60u16, 80, 130] {
+            for rows in [&wide[..], &ascii[..]] {
+                let text = render_team_send_rows(rows);
+                let cols = needle_columns(&text, TEAM_SEND_DELIVERED_LABEL, width);
+                assert_eq!(cols.len(), rows.len(), "{text:?}");
+                assert!(
+                    cols.iter().all(|c| *c == Some(10)),
+                    "width {width}: {cols:?}"
+                );
+            }
+        }
+        // A pending row (no outcome yet) keeps the same column.
+        let mixed = [
+            make(C, Some(RecipientOutcome::Delivered)),
+            make(A, None),
+            make("ab", None),
+        ];
+        let text = render_team_send_rows(&mixed);
+        assert_eq!(needle_columns(&text, "delivered", 80)[0], Some(8));
+        assert_eq!(
+            needle_columns(&text, "sending…", 80)[1..].to_vec(),
+            vec![Some(8), Some(8)]
+        );
+    }
+
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn display_width_thread_turn_ids_align_at_60_80_130() {
+        use crate::adapters::a2a::send::ThreadRead;
+        let alias_c10 = C.repeat(10);
+        let alias_c7 = C.repeat(7);
+        // (alias, expected turn-id column): the label column is the widest of
+        // the alias, `another sender` (14 cells) and the 8-cell floor, plus the
+        // 2-cell indent and 2-cell gap.
+        for (alias, col) in [
+            (alias_c10.as_str(), 24u16),
+            (alias_c7.as_str(), 18),
+            ("田中", 18),
+            ("ab", 18),
+            (G, 18),
+            (A, 18),
+        ] {
+            let turns = vec![
+                served_turn("ti_one", false, "question"),
+                served_turn("ti_two", true, "answer"),
+                served_turn("ti_three", false, "again"),
+            ];
+            let rendered = render_team_thread(
+                alias,
+                "ri_q",
+                &ThreadRead::Read {
+                    thread: served_thread(turns),
+                    mine: vec![false, false, true],
+                },
+                false,
+            );
+            for width in [60u16, 80, 130] {
+                for id in ["ti_one", "ti_two", "ti_three"] {
+                    let cols = needle_columns(&rendered, id, width);
+                    assert_eq!(
+                        cols.iter().flatten().collect::<Vec<_>>(),
+                        vec![&col],
+                        "alias {alias:?} width {width} id {id}: {rendered:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

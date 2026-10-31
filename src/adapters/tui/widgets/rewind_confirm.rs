@@ -6,43 +6,22 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::RewindPreview;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
-/// Truncate `text` to at most `max_chars` characters using safe char-boundary logic.
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{}…", truncated)
+use super::plan_card::wrap_description;
+
+/// `║ ┌─ <title><dashes>┐ ║`, exactly as wide as the card (`panel_inner + 8`).
+fn panel_top_row(title: &str, panel_inner: usize) -> String {
+    format!(
+        "║ ┌─ {title}{}┐ ║",
+        "─".repeat(panel_inner.saturating_sub(geom::cells(title)))
+    )
 }
 
-/// Simple word-wrap into chunks of at most `max_width` chars.
-fn wrap_to_width(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current = word.to_string();
-        } else if current.chars().count() + 1 + word.chars().count() > max_width {
-            lines.push(current);
-            current = word.to_string();
-        } else {
-            current.push(' ');
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+/// `║ │ <content padded to `cells`>│ ║`, exactly as wide as the card.
+fn panel_row(content: &str, cells: usize) -> String {
+    format!("║ │ {}│ ║", geom::pad_right(content, cells))
 }
 
 /// Render the rewind confirmation card as styled `Line`s.
@@ -82,7 +61,7 @@ pub fn render_rewind_confirmation_lines(
 
     // Title
     let title = "Rewind conversation to this message?";
-    let padded_title = format!("║ {:<width$} ║", title, width = inner_width);
+    let padded_title = format!("║ {} ║", geom::pad_right(title, inner_width));
     lines.push(Line::from(Span::styled(
         padded_title,
         Style::default()
@@ -93,40 +72,31 @@ pub fn render_rewind_confirmation_lines(
     // ── "Will be removed" panel ──────────────────────────────────────────
     let panel_inner = inner_width.saturating_sub(4); // ├──┤ boxing
 
-    let panel_top = format!(
-        "║ ┌─ {:<width$}─┐ ║",
-        "Will be removed ",
-        width = panel_inner.saturating_sub(18)
-    );
+    // Cells between `│ ` and `│` of every panel content row.
+    let content_cells = panel_inner + 1;
+
+    let panel_top = panel_top_row("Will be removed ", panel_inner);
     lines.push(Line::from(Span::styled(
         panel_top,
         Style::default().fg(theme.colors.fg_muted),
     )));
 
-    let remove_label = if preview.messages_to_remove == 0 {
-        format!(
-            "│ {:<width$}│",
-            "No messages after this point (already at end).",
-            width = panel_inner + 1
-        )
+    let remove_text = if preview.messages_to_remove == 0 {
+        "No messages after this point (already at end).".to_string()
     } else {
         format!(
-            "│ {:<width$}│",
-            format!(
-                "{} {} after message {}",
-                preview.messages_to_remove,
-                if preview.messages_to_remove == 1 {
-                    "message"
-                } else {
-                    "messages"
-                },
-                preview.target_message_index + 1
-            ),
-            width = panel_inner + 1
+            "{} {} after message {}",
+            preview.messages_to_remove,
+            if preview.messages_to_remove == 1 {
+                "message"
+            } else {
+                "messages"
+            },
+            preview.target_message_index + 1
         )
     };
     lines.push(Line::from(Span::styled(
-        format!("║ {}  ║", remove_label),
+        panel_row(&remove_text, content_cells),
         Style::default().fg(theme.colors.fg_secondary),
     )));
 
@@ -137,43 +107,37 @@ pub fn render_rewind_confirmation_lines(
     )));
 
     // ── "Files that will be reverted" panel ─────────────────────────────
-    let file_panel_top = format!(
-        "║ ┌─ {:<width$}─┐ ║",
-        "Files that will be reverted ",
-        width = panel_inner.saturating_sub(30)
-    );
+    let file_panel_top = panel_top_row("Files that will be reverted ", panel_inner);
     lines.push(Line::from(Span::styled(
         file_panel_top,
         Style::default().fg(theme.colors.fg_muted),
     )));
 
     if preview.files_to_revert.is_empty() {
-        let no_files = format!(
-            "│ {:<width$}│",
-            "(no files affected)",
-            width = panel_inner + 1
-        );
         lines.push(Line::from(Span::styled(
-            format!("║ {}  ║", no_files),
+            panel_row("(no files affected)", content_cells),
             Style::default().fg(theme.colors.fg_muted),
         )));
     } else {
-        let max_path_len = panel_inner.saturating_sub(4); // "• " prefix + margin
         for item in &preview.files_to_revert {
-            let path_display = truncate_chars(&item.display_path, max_path_len);
-            let label = if item.conflict {
-                format!("⚠ {} (modified externally)", path_display)
+            // The marker prefix and the conflict suffix come out of the row's
+            // cells; the path's "…" marker is inside what is left.
+            let (prefix, suffix) = if item.conflict {
+                ("⚠ ", " (modified externally)")
             } else {
-                format!("• {}", path_display)
+                ("• ", "")
             };
+            let path_budget =
+                content_cells.saturating_sub(geom::cells(prefix) + geom::cells(suffix));
+            let path_display = geom::ellipsize(&item.display_path, path_budget, "…");
+            let label = format!("{prefix}{path_display}{suffix}");
             let color = if item.conflict {
                 theme.colors.warning
             } else {
                 theme.colors.fg_secondary
             };
-            let file_line = format!("│ {:<width$}│", label, width = panel_inner + 1);
             lines.push(Line::from(Span::styled(
-                format!("║ {}  ║", file_line),
+                panel_row(&label, content_cells),
                 Style::default().fg(color),
             )));
         }
@@ -181,10 +145,9 @@ pub fn render_rewind_confirmation_lines(
         // AC5: if ALL files are conflicts, add a warning note.
         if preview.files_to_revert.iter().all(|f| f.conflict) {
             let note = "All files modified externally — only messages will be truncated.";
-            for chunk in wrap_to_width(note, panel_inner + 1) {
-                let note_line = format!("│ {:<width$}│", chunk, width = panel_inner + 1);
+            for chunk in wrap_description(note, content_cells) {
                 lines.push(Line::from(Span::styled(
-                    format!("║ {}  ║", note_line),
+                    panel_row(&chunk, content_cells),
                     Style::default().fg(theme.colors.warning),
                 )));
             }
@@ -199,7 +162,7 @@ pub fn render_rewind_confirmation_lines(
 
     // Footer: actions
     let actions = "[y] Rewind  [f] Fork instead  [n] Cancel";
-    let padded_actions = format!("║ {:<width$} ║", actions, width = inner_width);
+    let padded_actions = format!("║ {} ║", geom::pad_right(actions, inner_width));
     lines.push(Line::from(Span::styled(
         padded_actions,
         Style::default()
@@ -366,5 +329,182 @@ mod tests {
                 let _ = span.content.to_string();
             }
         }
+    }
+
+    // ---- Story 21.11 display-width keystones --------------------------------
+
+    use ratatui::widgets::Paragraph;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+
+    /// First (and only) file row of a one-file preview.
+    const FILE_Y: u16 = 6;
+
+    /// (terminal width, non-conflict path cells): the panel content is
+    /// `width - 7` cells wide and `• ` takes two.
+    const BUDGETS: [(u16, usize); 3] = [(60, 51), (80, 71), (130, 121)];
+
+    fn glyphs(buf: &Buffer, y: u16) -> Vec<(u16, String)> {
+        let mut out = Vec::new();
+        let mut x = buf.area.left();
+        while x < buf.area.right() {
+            let symbol = buf
+                .cell((x, y))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
+            let step = u16::try_from(geom::cells(&symbol).max(1)).unwrap_or(1);
+            out.push((x, symbol));
+            x = x.saturating_add(step);
+        }
+        out
+    }
+
+    fn row_str(buf: &Buffer, y: u16) -> String {
+        glyphs(buf, y).into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Row text between the two outer border glyphs, edge blanks trimmed.
+    fn interior(buf: &Buffer, y: u16) -> String {
+        let g = glyphs(buf, y);
+        g[1..g.len() - 1]
+            .iter()
+            .map(|(_, s)| s.as_str())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// Content of a `│ … │` panel row.
+    fn panel_content(buf: &Buffer, y: u16) -> String {
+        interior(buf, y)
+            .strip_prefix('│')
+            .and_then(|s| s.strip_suffix('│'))
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| panic!("row {y} is not a panel row: {:?}", row_str(buf, y)))
+    }
+
+    fn assert_whole_clusters(text: &str) {
+        for g in text.graphemes(true) {
+            if g.contains('\u{200d}') || g.contains('👨') {
+                assert_eq!(g, G, "partial family cluster in {text:?}");
+            }
+        }
+    }
+
+    /// Paint the real card lines into a buffer exactly `width` cells wide.
+    fn painted(preview: &RewindPreview, width: u16) -> Buffer {
+        let lines = render_rewind_confirmation_lines(preview, width, &Theme::dark());
+        let area = Rect::new(0, 0, width, u16::try_from(lines.len()).unwrap_or(u16::MAX));
+        let mut buf = Buffer::empty(area);
+        Paragraph::new(lines).render(area, &mut buf);
+        buf
+    }
+
+    /// Every `║` row (title, panel borders, panel content, actions) ends in
+    /// `║` at the last column.
+    fn assert_aligned(buf: &Buffer) {
+        let width = buf.area.width;
+        for y in buf.area.top()..buf.area.bottom() {
+            let g = glyphs(buf, y);
+            if g.first().map(|f| f.1.as_str()) != Some("║") {
+                continue;
+            }
+            let last = g.last().expect("row has cells");
+            assert_eq!(
+                (last.0, last.1.as_str()),
+                (width - 1, "║"),
+                "row {y} border misaligned at width {width}: {:?}",
+                row_str(buf, y)
+            );
+            assert_whole_clusters(&row_str(buf, y));
+        }
+    }
+
+    fn one_file(path: &str, conflict: bool) -> RewindPreview {
+        make_preview(
+            1,
+            vec![RevertPreviewItem {
+                display_path: path.to_string(),
+                conflict,
+            }],
+        )
+    }
+
+    #[test]
+    fn display_width_rewind_every_row_is_exactly_the_card_width() {
+        for width in [60u16, 80, 130] {
+            for preview in [
+                make_preview(0, vec![]),
+                make_preview(3, vec![]),
+                one_file("src/main.rs", false),
+                one_file("src/main.rs", true),
+            ] {
+                let buf = painted(&preview, width);
+                assert_aligned(&buf);
+                // Panel top/bottom borders are part of the aligned set.
+                let bordered = (0..buf.area.height)
+                    .filter(|&y| glyphs(&buf, y).first().map(|f| f.1.as_str()) == Some("║"))
+                    .count();
+                assert_eq!(bordered, buf.area.height as usize - 2, "all but top/bottom");
+            }
+        }
+    }
+
+    #[test]
+    fn display_width_rewind_marker_at_a_wide_grapheme_cut() {
+        for (width, budget) in BUDGETS {
+            // G needs two cells but one is left: dropped whole.
+            let path = format!("{}{G}xx", "x".repeat(budget - 2));
+            let buf = painted(&one_file(&path, false), width);
+            assert_aligned(&buf);
+            assert_eq!(
+                panel_content(&buf, FILE_Y),
+                format!("• {}…", "x".repeat(budget - 2)),
+                "width {width}"
+            );
+            // G ends exactly on the cut: kept whole.
+            let path = format!("{}{G}xx", "x".repeat(budget - 3));
+            let buf = painted(&one_file(&path, false), width);
+            assert_aligned(&buf);
+            assert_eq!(
+                panel_content(&buf, FILE_Y),
+                format!("• {}{G}…", "x".repeat(budget - 3)),
+                "width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_width_rewind_ascii_controls() {
+        let buf = painted(&one_file("src/main.rs", false), 60);
+        assert_eq!(panel_content(&buf, FILE_Y), "• src/main.rs");
+        let buf = painted(&one_file("src/main.rs", true), 60);
+        assert_eq!(
+            panel_content(&buf, FILE_Y),
+            "⚠ src/main.rs (modified externally)"
+        );
+        let buf = painted(&one_file(&"p".repeat(100), false), 60);
+        assert_aligned(&buf);
+        assert_eq!(
+            panel_content(&buf, FILE_Y),
+            format!("• {}…", "p".repeat(50))
+        );
+    }
+
+    #[test]
+    fn display_width_rewind_all_conflict_note_wraps_inside_the_panel() {
+        // Narrow card (46 cells, just above the 41-cell action row): the note
+        // wraps to several panel rows, each aligned.
+        let buf = painted(&one_file("a.rs", true), 46);
+        assert_aligned(&buf);
+        let note: String = (FILE_Y + 1..buf.area.bottom() - 3)
+            .map(|y| panel_content(&buf, y))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            note,
+            "All files modified externally — only messages will be truncated."
+        );
     }
 }

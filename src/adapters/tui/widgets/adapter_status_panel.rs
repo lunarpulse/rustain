@@ -14,6 +14,7 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{AdapterRef, HealthLevel, HealthSummary, McpHealthRow, PortDimension};
 use crate::domain::services::adapter_overlay;
@@ -44,13 +45,26 @@ fn health_color(level: HealthLevel, theme: &Theme) -> Color {
     }
 }
 
-fn truncate_str(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
-        format!("{truncated}…")
+/// One MCP sub-row: `└─ <glyph> <server> <transport>` with the metric
+/// right-aligned by display cells.
+fn mcp_health_line(row: &McpHealthRow, inner_width: u16, theme: &Theme) -> Line<'static> {
+    let sym = row.level.symbol();
+    let sym_color = health_color(row.level, theme);
+    let mut spans = vec![Span::styled(
+        format!("   └─ {} {} {}", sym, row.server_name, row.transport),
+        Style::default().fg(sym_color),
+    )];
+    let used_width: usize = spans.iter().map(|s| geom::cells(&s.content)).sum();
+    let available = inner_width.saturating_sub(3) as usize;
+    if available > used_width + 2 {
+        let pad = available.saturating_sub(used_width + geom::cells(&row.metric));
+        spans.push(Span::raw(geom::spaces(pad)));
     }
+    spans.push(Span::styled(
+        row.metric.clone(),
+        Style::default().fg(theme.colors.fg_muted),
+    ));
+    Line::from(spans)
 }
 
 fn get_adapter_name_from_core(agent_core: &AgentCore, port: PortDimension) -> String {
@@ -114,7 +128,7 @@ pub fn render(
         ));
 
         let name_width = 24usize.min(inner.width.saturating_sub(40) as usize);
-        let truncated = truncate_str(&adapter_name, name_width);
+        let truncated = geom::ellipsize(&adapter_name, name_width, "…");
         spans.push(Span::styled(
             format!(": {}", truncated),
             Style::default().fg(theme.colors.fg_primary),
@@ -131,11 +145,11 @@ pub fn render(
         let metric = health.metric.clone();
         let action_opt = health.suggested_action;
         let level = health.level;
-        let used_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let used_width: usize = spans.iter().map(|s| geom::cells(&s.content)).sum();
         let available = inner.width.saturating_sub(3) as usize;
         if available > used_width + 2 {
-            let pad = available.saturating_sub(used_width + metric.chars().count());
-            spans.push(Span::raw(" ".repeat(pad)));
+            let pad = available.saturating_sub(used_width + geom::cells(&metric));
+            spans.push(Span::raw(geom::spaces(pad)));
         }
 
         let metric_color = match level {
@@ -163,25 +177,7 @@ pub fn render(
         // Insert MCP sub-rows after the tools row (Story 9.1 AC-5)
         if *port == PortDimension::Tools && !mcp_rows.is_empty() {
             for row in &mcp_rows {
-                let sym = row.level.symbol();
-                let sym_color = health_color(row.level, theme);
-                let mut spans = Vec::new();
-                spans.push(Span::styled(
-                    format!("   └─ {} {} {}", sym, row.server_name, row.transport),
-                    Style::default().fg(sym_color),
-                ));
-                let metric = &row.metric;
-                let used_width: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-                let available = inner.width.saturating_sub(3) as usize;
-                if available > used_width + 2 {
-                    let pad = available.saturating_sub(used_width + metric.chars().count());
-                    spans.push(Span::raw(" ".repeat(pad)));
-                }
-                spans.push(Span::styled(
-                    metric.clone(),
-                    Style::default().fg(theme.colors.fg_muted),
-                ));
-                lines.push(Line::from(spans));
+                lines.push(mcp_health_line(row, inner.width, theme));
             }
             // Story 9.3a — registry summary line
             if let Some(summary) = get_registry_summary(agent_core) {
@@ -282,4 +278,83 @@ fn get_registry_summary(agent_core: &AgentCore) -> Option<String> {
 #[cfg(not(feature = "mcp"))]
 fn get_registry_summary(_agent_core: &AgentCore) -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    fn glyphs(buf: &Buffer, y: u16) -> Vec<(u16, String)> {
+        let mut out = Vec::new();
+        let mut x = buf.area.left();
+        while x < buf.area.right() {
+            let symbol = buf
+                .cell((x, y))
+                .map(|c| c.symbol().to_string())
+                .unwrap_or_default();
+            let step = u16::try_from(geom::cells(&symbol).max(1)).unwrap_or(1);
+            out.push((x, symbol));
+            x = x.saturating_add(step);
+        }
+        out
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        let joined: String = glyphs(buf, y).into_iter().map(|(_, s)| s).collect();
+        joined.trim_end().to_string()
+    }
+
+    /// Right edge (exclusive) of the last non-blank glyph left of `limit`.
+    fn end_x(buf: &Buffer, y: u16, limit: u16) -> u16 {
+        glyphs(buf, y)
+            .into_iter()
+            .filter(|(x, s)| *x < limit && !s.trim().is_empty())
+            .map(|(x, s)| x + u16::try_from(geom::cells(&s).max(1)).unwrap_or(1))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn assert_whole_clusters(text: &str) {
+        for g in text.graphemes(true) {
+            if g.contains('\u{200d}') || g.contains('👨') {
+                assert_eq!(g, G, "partial family cluster in {text:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn display_width_adapter_mcp_row_metric_right_aligned_by_cells() {
+        let theme = Theme::dark();
+        let servers = ["srv".to_string(), format!("{C}{G}"), format!("{G}{A}")];
+        let metrics = ["e ready".to_string(), format!("{A} ready")];
+        for inner_width in [58u16, 78, 128] {
+            for server in &servers {
+                for metric in &metrics {
+                    let row = McpHealthRow {
+                        server_name: server.clone(),
+                        transport: "stdio".to_string(),
+                        level: HealthLevel::Healthy,
+                        metric: metric.clone(),
+                    };
+                    let line = mcp_health_line(&row, inner_width, &theme);
+                    let mut buf = Buffer::empty(Rect::new(0, 0, inner_width, 1));
+                    buf.set_line(0, 0, &line, inner_width);
+                    assert_eq!(
+                        end_x(&buf, 0, inner_width),
+                        inner_width - 3,
+                        "server {server:?} metric {metric:?}: {:?}",
+                        row_text(&buf, 0)
+                    );
+                    let text = row_text(&buf, 0);
+                    assert!(text.contains(server.as_str()), "{text:?}");
+                    assert_whole_clusters(&text);
+                }
+            }
+        }
+    }
 }

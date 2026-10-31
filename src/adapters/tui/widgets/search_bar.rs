@@ -13,6 +13,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::adapters::tui::state::{SearchState, SearchSubstate};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Left-side label rendered before the query in the search bar.
@@ -31,19 +32,21 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SearchState, theme: &Theme)
 
     // Build the visible line: "Search: <query>                  <counter>"
     //
-    // The counter floats right. We compute the left (label + query) span and
-    // the right (counter / no-match) span, then pad between them to fill
-    // `area.width`. Char-counting keeps wide-char queries from breaking the
-    // layout math.
-    let label_len = LABEL.chars().count();
-    let query_len = state.query.chars().count();
+    // The counter floats right and is reserved FIRST (with one gap cell). The
+    // query gets whatever display cells remain; when it is longer it scrolls
+    // so its tail (where the caret sits) stays visible, cut on a whole
+    // grapheme boundary. All widths are display cells, not scalars.
+    let label_cells = geom::cells(LABEL);
 
     let counter_text = counter_text(state);
-    let counter_len = counter_text.chars().count();
+    let counter_cells = geom::cells(&counter_text);
 
-    // Figure out how much horizontal padding fits between the query and the counter.
-    // If the query and counter together exceed the width, truncate the query.
-    let total_content = label_len + query_len + counter_len;
+    let query_budget = (area.width as usize).saturating_sub(label_cells + 1 + counter_cells);
+    let shown_query = geom::clip_tail(&state.query, query_budget);
+    let shown_cells = geom::cells(shown_query);
+
+    // Horizontal padding between the visible query and the counter.
+    let total_content = label_cells + shown_cells + counter_cells;
     let padding_cols = (area.width as usize).saturating_sub(total_content).max(1);
 
     let (query_style, counter_style) = styles_for_substate(state, theme);
@@ -55,7 +58,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SearchState, theme: &Theme)
                 .fg(theme.colors.fg_muted)
                 .add_modifier(Modifier::ITALIC),
         ),
-        Span::styled(state.query.clone(), query_style),
+        Span::styled(shown_query.to_string(), query_style),
         Span::raw(" ".repeat(padding_cols)),
         Span::styled(counter_text, counter_style),
     ];
@@ -71,7 +74,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SearchState, theme: &Theme)
     // In Navigating, the cursor is hidden to signal the mode change — `n`/`N`
     // are now live for navigation and typed characters return to Typing.
     if state.substate == SearchSubstate::Typing {
-        let cursor_col = area.x + (label_len + query_len) as u16;
+        let cursor_col = area.x + (label_cells + shown_cells) as u16;
         let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_col, area.y));
     }
@@ -207,5 +210,52 @@ mod tests {
         let s = SearchState::default();
         // Must not panic on default state
         let _ = counter_text(&s);
+    }
+
+    // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const C: &str = "界";
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const A: &str = "e\u{301}";
+
+    fn one_match() -> Vec<SearchMatch> {
+        vec![SearchMatch {
+            message_index: 0,
+            byte_start: 0,
+            byte_end: 1,
+        }]
+    }
+
+    /// Paint the real search bar; return the painted row (continuations
+    /// dropped), the buffer and the backend cursor column.
+    fn draw(width: u16, state: &SearchState) -> (String, ratatui::buffer::Buffer, u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        let theme = Theme::dark();
+        terminal
+            .draw(|frame| render(frame, frame.area(), state, &theme))
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut row = String::new();
+        let mut x = 0u16;
+        while x < width {
+            let symbol = buffer.cell((x, 0)).unwrap().symbol();
+            row.push_str(symbol);
+            x += u16::try_from(geom::cells(symbol).max(1)).unwrap();
+        }
+        (row, buffer, cursor.x)
+    }
+
+    #[test]
+    fn display_width_search_short_query_is_untouched() {
+        let query = format!("{C}{G}{A}");
+        let state = state_with(&query, one_match(), SearchSubstate::Typing);
+        let (row, _buffer, cursor_x) = draw(40, &state);
+        assert!(row.starts_with(&format!("Search: {C}{G}{A} ")), "{row:?}");
+        assert!(row.trim_end().ends_with("1/1"), "{row:?}");
+        assert_eq!(cursor_x, 8 + 5);
     }
 }

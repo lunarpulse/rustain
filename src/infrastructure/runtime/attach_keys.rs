@@ -357,13 +357,6 @@ pub(super) fn paste_blocked(state: &TuiState) -> bool {
         || state.help_overlay.active
 }
 
-/// The scroll offset that keeps the (always at-the-end) attached cursor row
-/// inside the composer window.
-pub(super) fn composer_scroll_offset(text: &str) -> usize {
-    let (row, _) = input_box::cursor_to_row_col(text, text.chars().count());
-    (row + 1).saturating_sub(input_box::MAX_INPUT_LINES)
-}
-
 /// The status-row hint for the attached client (no key here detaches except
 /// the leader chord).
 pub(super) fn status_hint(state: &TuiState) -> Option<&'static str> {
@@ -2222,9 +2215,12 @@ mod tests {
         for hint in [hint, status_hint(&state).unwrap()] {
             assert!(!hint.contains("Esc") && !hint.contains("Ctrl+C"), "{hint}");
         }
-        assert_eq!(composer_scroll_offset("one"), 0);
+        // The attached caret is always at the end: the composer window is the
+        // visual tail of the width-aware projection (was `composer_scroll_offset`).
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        assert_eq!(input_box::tail_scroll("one", area), 0);
         assert_eq!(
-            composer_scroll_offset(&"x\n".repeat(20)),
+            input_box::tail_scroll(&"x\n".repeat(20), area),
             21 - input_box::MAX_INPUT_LINES
         );
     }

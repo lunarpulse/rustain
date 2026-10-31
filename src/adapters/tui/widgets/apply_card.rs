@@ -13,6 +13,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::artifacts_panel::id_prefix;
 use crate::domain::models::OperatorApplyFinding;
@@ -141,7 +142,7 @@ pub fn render_apply_card_lines<'a>(
         card.workspace.display()
     )));
     match card.mode {
-        ArtifactCardMode::Apply => push_apply_body(&mut lines, card, theme),
+        ArtifactCardMode::Apply => push_apply_body(&mut lines, card, theme, width),
         ArtifactCardMode::Resolve(finding) => push_resolve_body(&mut lines, finding, theme, width),
     }
     // ⛔ **Every painted key must dispatch, and every key must be painted.**
@@ -166,30 +167,50 @@ pub fn render_apply_card_lines<'a>(
     lines
 }
 
-/// Does one composed line survive the card's border and padding at `width`?
+/// Does one composed line survive the card's border at `width`?
 ///
-/// The decision-card chrome spends one column per side on the frame plus one
-/// of padding, so a line of `width - 2` columns is the last one that renders
-/// whole. Anything longer is silently clipped by the buffer.
+/// The decision-card chrome spends one column per side on the frame, so a
+/// line of `width - 2` display cells is the last one that renders whole.
+/// Anything longer is silently clipped by the buffer.
 fn fits(line: &str, width: u16) -> bool {
-    line.chars().count() <= (width as usize).saturating_sub(2)
+    geom::cells(line) <= (width as usize).saturating_sub(2)
 }
 
-fn push_apply_body<'a>(lines: &mut Vec<Line<'a>>, card: &PendingArtifactCard, theme: &Theme) {
+fn push_apply_body<'a>(
+    lines: &mut Vec<Line<'a>>,
+    card: &PendingArtifactCard,
+    theme: &Theme,
+    width: u16,
+) {
+    // ⛔ Wrapped, never clipped: each line is a consequence the operator is
+    // asked to consent to, and the 59-cell warning exceeds a 60-column
+    // card's 58-cell content area.
     if card.predates_apply_records {
-        lines.push(Line::from(
-            "  Apply state unknown — this journal predates apply records;",
-        ));
-        lines.push(Line::from("  patch may already be in the working tree."));
+        push_wrapped(
+            lines,
+            "Apply state unknown — this journal predates apply records;",
+            width,
+            Style::default(),
+        );
+        push_wrapped(
+            lines,
+            "patch may already be in the working tree.",
+            width,
+            Style::default(),
+        );
     }
-    lines.push(Line::from(Span::styled(
-        "  Warning: interruption can leave this patch indeterminate.",
+    push_wrapped(
+        lines,
+        "Warning: interruption can leave this patch indeterminate.",
+        width,
         Style::default().fg(theme.colors.warning),
-    )));
-    lines.push(Line::from(Span::styled(
-        "  Recover with: /artifact resolve <id> present|absent.",
+    );
+    push_wrapped(
+        lines,
+        "Recover with: /artifact resolve <id> present|absent.",
+        width,
         Style::default().fg(theme.colors.warning),
-    )));
+    );
 }
 
 /// The resolve card's body (Story 18.3a-f, AC4).
@@ -267,22 +288,39 @@ fn push_wrapped<'a>(lines: &mut Vec<Line<'a>>, text: &str, width: u16, style: St
 /// line sits under `Files: `; continuations align beneath it (9-space indent).
 fn wrapped_file_chunks(joined: &str, width: u16) -> Vec<String> {
     const INDENT: usize = 9;
-    wrap_words(joined, (width as usize).saturating_sub(INDENT).max(8))
+    // Border (2 cells) + the 9-cell `  Files: ` / continuation indent.
+    wrap_words(joined, (width as usize).saturating_sub(INDENT + 2).max(8))
 }
 
-/// Greedy word wrap. Shared by the file list and the resolve card's prose so
-/// one wrapping rule governs everything this widget paints.
+/// Greedy word wrap by display cells. Shared by the file list and the resolve
+/// card's prose so one wrapping rule governs everything this widget paints.
+/// A word wider than `limit` (a long unspaced file name) is broken at grapheme
+/// boundaries rather than left to be clipped at the pane edge.
 fn wrap_words(text: &str, limit: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
+    let mut cur_cells = 0usize;
     for word in text.split_whitespace() {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > limit {
+        let word_cells = geom::cells(word);
+        if !cur.is_empty() && cur_cells + 1 + word_cells > limit {
             out.push(std::mem::take(&mut cur));
+            cur_cells = 0;
+        }
+        if word_cells > limit {
+            let mut rows = geom::wrap_hard(word, limit);
+            if let Some(last) = rows.pop() {
+                out.extend(rows.into_iter().map(str::to_owned));
+                cur.push_str(last);
+                cur_cells = geom::cells(last);
+            }
+            continue;
         }
         if !cur.is_empty() {
             cur.push(' ');
+            cur_cells += 1;
         }
         cur.push_str(word);
+        cur_cells += word_cells;
     }
     if !cur.is_empty() || out.is_empty() {
         out.push(cur);

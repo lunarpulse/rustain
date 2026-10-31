@@ -244,6 +244,7 @@ nanoid = "0.4"
 petname = "2.0"
 dirs = "6.0"
 sha2 = "0.10"
+unicode-segmentation = "1.12"
 unicode-width = "0.2"
 arboard = { version = "3", optional = true }
 png = { version = "0.17", optional = true }

@@ -3,6 +3,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::adapters::tui::state::{DailyBudgetState, LogAwareness};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::offset_to_message_index;
 use crate::adapters::tui::widgets::model_selector::humanize_ctx;
@@ -300,15 +301,9 @@ pub fn render(
 
     // Active agent (Story 5.4 AC7: show name when active, suppress when none)
     if let Some(name) = active_agent_name {
-        let truncated = if name.len() > 24 {
-            let mut end = 24;
-            while !name.is_char_boundary(end) {
-                end -= 1;
-            }
-            format!("{}…", &name[..end])
-        } else {
-            name.to_string()
-        };
+        // 24 display cells, the `…` marker included in the budget, cut on a
+        // whole-grapheme boundary.
+        let truncated = geom::ellipsize(name, 24, "…").into_owned();
         left_spans.push(Span::styled(
             format!("{}Agent: {}", sep, truncated),
             Style::default().fg(theme.colors.accent),
@@ -384,10 +379,10 @@ pub fn render(
         let left_width = left_line
             .spans
             .iter()
-            .map(|s| s.content.chars().count())
+            .map(|s| geom::cells(&s.content))
             .sum::<usize>();
         let bar_width = area.width as usize;
-        let hint_width = hint.chars().count();
+        let hint_width = geom::cells(hint);
         // Only render hint if it fits in the remaining space (with at least 1 gap)
         if left_width + 1 + hint_width <= bar_width {
             let padding = bar_width - left_width - hint_width;
@@ -1064,5 +1059,105 @@ mod tests {
         );
         assert!(!row_text(&narrow).contains('7'), "{}", row_text(&narrow));
         assert!(!row_text(&narrow).contains("log"), "{}", row_text(&narrow));
+    }
+
+    // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
+    // A minimal real status row: the left side is ` {model} [F] │ Normal │
+    // Ready` (22 cells + the model's cells), the hint is right-aligned in what
+    // remains after the optional log reservation.
+
+    const C: &str = "界";
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+
+    fn draw_minimal(
+        width: u16,
+        model: &str,
+        hint: Option<&str>,
+        agent: Option<&str>,
+        awareness: LogAwareness,
+    ) -> ratatui::buffer::Buffer {
+        let mut t = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                model,
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                0,
+                false,
+                None,
+                false,
+                true,
+                0,
+                hint,
+                0,
+                agent,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                false,
+                None,
+                awareness,
+            );
+        })
+        .unwrap();
+        t.backend().buffer().clone()
+    }
+
+    /// The row as painted glyphs; wide-glyph continuation cells are skipped.
+    fn glyph_row(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        let mut x = 0u16;
+        while x < buffer.area.width {
+            let symbol = buffer.cell((x, 0)).unwrap().symbol();
+            out.push_str(symbol);
+            x += u16::try_from(geom::cells(symbol).max(1)).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn display_width_status_hint_respects_the_log_reservation_edge() {
+        // 60 columns, `log: 7` reserved with its gap (7 cells): the left
+        // region is 53 cells; beside `模型` (26) that leaves 26 hint cells.
+        let cases: Vec<(String, bool)> = vec![
+            ("h".repeat(26), true),
+            ("h".repeat(27), false),
+            (format!("{G}{}", "h".repeat(24)), true),
+            (format!("{G}{}", "h".repeat(25)), false),
+            (format!("{C}{}", "h".repeat(24)), true),
+            (format!("{C}{}", "h".repeat(25)), false),
+        ];
+        for (hint, fits) in cases {
+            let buffer = draw_minimal(60, "模型", Some(&hint), None, LogAwareness::Unseen(7));
+            let row = glyph_row(&buffer);
+            let trimmed = row.trim_end();
+            assert_eq!(geom::cells(&row), 60, "{hint:?}: {row:?}");
+            assert!(
+                trimmed.ends_with(" log: 7"),
+                "reserved segment intact: {row:?}"
+            );
+            if fits {
+                assert!(
+                    trimmed.ends_with(&format!("{hint} log: 7")),
+                    "{hint:?} must end one gap before the segment: {row:?}"
+                );
+            } else {
+                assert!(!row.contains("hh"), "{hint:?} must be omitted: {row:?}");
+                assert!(!row.contains(G), "{hint:?}: {row:?}");
+            }
+        }
     }
 }

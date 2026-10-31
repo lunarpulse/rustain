@@ -1,5 +1,7 @@
 use ratatui::prelude::*;
 
+use super::plan_card::wrap_description;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// State for an AskUserQuestion card.
@@ -37,7 +39,7 @@ pub fn render_ask_user_lines(
     // Question text (may wrap)
     let question_lines = wrap_question(&state.question, inner_width);
     for q_line in &question_lines {
-        let padded = format!("║ {:<width$} ║", q_line, width = inner_width);
+        let padded = format!("║ {} ║", geom::pad_right(q_line, inner_width));
         lines.push(Line::from(Span::styled(
             padded,
             Style::default().fg(theme.colors.accent),
@@ -46,18 +48,31 @@ pub fn render_ask_user_lines(
 
     // Input area or submitted answer
     if let Some(answer) = &state.submitted_answer {
-        // Static display: shows the submitted answer
-        let display = format!("║ > {} ", answer);
-        let padded = format!("{:<width$}║", display, width = w.saturating_sub(1));
-        lines.push(Line::from(Span::styled(
-            padded,
-            Style::default().fg(theme.colors.fg_muted),
-        )));
+        // Static display: the full submitted answer, wrapped under the prompt
+        for (i, row) in answer_rows(answer, inner_width.saturating_sub(2))
+            .into_iter()
+            .enumerate()
+        {
+            let prefix = if i == 0 { "> " } else { "  " };
+            let padded = format!(
+                "║ {} ║",
+                geom::pad_right(&format!("{prefix}{row}"), inner_width)
+            );
+            lines.push(Line::from(Span::styled(
+                padded,
+                Style::default().fg(theme.colors.fg_muted),
+            )));
+        }
     } else {
-        // Editable input with cursor
+        // Editable input with cursor: keep the editable end of the answer and
+        // the caret visible; the answer bytes are never modified.
         let prompt = "> ";
-        let display_text = format!("{}{}_", prompt, state.input_buffer);
-        let input_line = format!("║ {:<width$} ║", display_text, width = inner_width);
+        let visible = geom::clip_tail(
+            &state.input_buffer,
+            inner_width.saturating_sub(geom::cells(prompt) + 1),
+        );
+        let display_text = format!("{}{}_", prompt, visible);
+        let input_line = format!("║ {} ║", geom::pad_right(&display_text, inner_width));
         lines.push(Line::from(Span::styled(
             input_line,
             Style::default().fg(theme.colors.fg_primary),
@@ -74,32 +89,24 @@ pub fn render_ask_user_lines(
     lines
 }
 
-/// Simple word-wrapping for question text.
+/// Word-wrap the question by display cells (shared card wrapper). A long
+/// unbroken word is hard-wrapped on grapheme boundaries so the whole question
+/// is always shown; an empty question still yields one blank row.
 fn wrap_question(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-
-    for word in text.split_whitespace() {
-        if current_line.is_empty() {
-            current_line = word.to_string();
-        } else if current_line.len() + 1 + word.len() > max_width {
-            lines.push(current_line);
-            current_line = word.to_string();
-        } else {
-            current_line.push(' ');
-            current_line.push_str(word);
-        }
-    }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
+    let mut lines = wrap_description(text, max_width);
     if lines.is_empty() {
         lines.push(String::new());
     }
     lines
+}
+
+/// Display rows of a submitted answer: every logical line hard-wrapped on
+/// grapheme boundaries (the answer text is shown exactly, never reflowed).
+fn answer_rows(answer: &str, budget: usize) -> Vec<&str> {
+    answer
+        .split('\n')
+        .flat_map(|line| geom::wrap_hard(line, budget))
+        .collect()
 }
 
 #[cfg(test)]

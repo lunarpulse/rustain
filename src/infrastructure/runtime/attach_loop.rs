@@ -427,16 +427,37 @@ fn retractable_rows(conversation: &Conversation) -> impl Iterator<Item = &ChatMe
     })
 }
 
-fn preview_line(content: &str, max_chars: usize) -> String {
-    let mut chars = content.chars().map(|c| if c == '\n' { ' ' } else { c });
-    let mut output = String::with_capacity(max_chars.saturating_mul(4));
-    for _ in 0..max_chars {
-        let Some(c) = chars.next() else { return output };
-        output.push(c);
-    }
-    if max_chars > 0 && chars.next().is_some() {
-        output.pop();
-        output.push('…');
+/// A one-line preview of `content` bounded to `max_cells` terminal cells:
+/// newlines become spaces, whole graphemes only, and a cut ends in `…` that is
+/// counted inside the budget.
+fn preview_line(content: &str, max_cells: usize) -> String {
+    use crate::adapters::tui::text_geometry as geom;
+    use unicode_segmentation::UnicodeSegmentation;
+
+    let mut output = String::with_capacity(max_cells.saturating_mul(4));
+    let mut used = 0usize;
+    // Longest prefix that still leaves one cell for the marker.
+    let mut marker_cut = 0usize;
+    for grapheme in content.graphemes(true) {
+        let grapheme = if grapheme.contains('\n') {
+            " "
+        } else {
+            grapheme
+        };
+        let width = geom::cells(grapheme);
+        if used.saturating_add(width) > max_cells {
+            if max_cells == 0 {
+                return output;
+            }
+            output.truncate(marker_cut);
+            output.push('…');
+            return output;
+        }
+        output.push_str(grapheme);
+        used += width;
+        if used < max_cells {
+            marker_cut = output.len();
+        }
     }
     output
 }
@@ -1073,7 +1094,7 @@ fn consent_approval_card_lines(
 
     let mut lines = Vec::new();
     for line in pending.input_preview.lines() {
-        if width == 0 || line.chars().count() <= width {
+        if width == 0 || crate::adapters::tui::text_geometry::cells(line) <= width {
             lines.push(ratatui::text::Line::from(line.to_owned()));
         } else {
             lines.extend(
@@ -1935,7 +1956,7 @@ fn attached_composer_key_with_team_requests(
     match code {
         KeyCode::Char(c) => input.push(c),
         KeyCode::Backspace => {
-            input.pop();
+            crate::adapters::tui::text_geometry::pop_grapheme(input);
             if input.is_empty() {
                 state.pinned_peer_compose = None;
             }
@@ -2161,6 +2182,33 @@ fn attached_proposal_pending(
 /// the local buffer. Display and decision guards must consult the same text.
 fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
     crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
+}
+
+/// Paint the attached composer. The attached editor appends at the end of its
+/// own source buffer, so the caret is the end of `display_input` and the scroll
+/// window is the visual tail of the width-aware projection; both are derived at
+/// draw time from the real composer rectangle (resize included), never a
+/// literal scroll of 0.
+fn render_attached_composer(
+    frame: &mut ratatui::Frame,
+    area: ratatui::layout::Rect,
+    display_input: &str,
+    focus: crate::domain::models::FocusState,
+    theme: &crate::adapters::tui::theme::Theme,
+    multiline_mode: bool,
+    image_indicator: Option<&str>,
+) {
+    input_box::render(
+        frame,
+        area,
+        display_input,
+        display_input.chars().count(),
+        focus,
+        theme,
+        multiline_mode,
+        input_box::tail_scroll(display_input, area),
+        image_indicator,
+    );
 }
 
 fn scroll_attached_transcript(
@@ -3270,15 +3318,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             state.log_awareness.display,
 );
             let display_input = attached_display_input(&state, &input);
-            input_box::render(
+            render_attached_composer(
                 f,
                 layout.input_area,
                 display_input,
-                display_input.chars().count(),
                 state.focus.clone(),
                 &state.theme,
                 state.multiline_mode,
-                attach_keys::composer_scroll_offset(display_input),
                 if read_only {
                     Some("read-only — can't send here")
                 } else {
@@ -4217,15 +4263,13 @@ mod tests {
                             self.state.active_feedback_id.as_deref(),
                             &HashMap::new(),
                         );
-                        crate::adapters::tui::widgets::input_box::render(
+                        render_attached_composer(
                             frame,
                             layout.input_area,
                             display_input,
-                            display_input.chars().count(),
                             self.state.focus.clone(),
                             &self.state.theme,
-                            false,
-                            0,
+                            self.state.multiline_mode,
                             None,
                         );
                         let actions = recipient_surface_actions(
@@ -10108,5 +10152,232 @@ mod attached_parity_tests {
         );
         assert_eq!(state.feedback_blocks["team-retract"].message, "Landed");
         assert!(requests.pending.is_empty());
+    }
+}
+
+/// Story 21.11 (AC2/K2, attached host): the attached composer edits and paints
+/// grapheme-safe through its real key/paste/draw seams.
+#[cfg(test)]
+mod display_width_tests {
+    use super::*;
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::{Position, Rect};
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    fn press(input: &mut String, state: &mut TuiState, code: KeyCode, read_only: bool) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ClientFrame>();
+        let mut requests = AttachedTeamRequests::default();
+        attached_composer_key_with_team_requests(code, read_only, input, state, &tx, &mut requests);
+        assert!(rx.try_recv().is_err(), "editing never emits a frame");
+    }
+
+    /// The production-shaped draw: `compute_layout` (Focus, no sidebar) then the
+    /// shared `render_attached_composer` seam. Returns the painted rows, the
+    /// caret and the composer rectangle.
+    fn draw(
+        state: &TuiState,
+        input: &str,
+        width: u16,
+        height: u16,
+    ) -> (Vec<String>, Position, Rect) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut input_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                let display_input = attached_display_input(state, input);
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    frame.area(),
+                    &state.theme,
+                    display_input,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                input_area = layout.input_area;
+                render_attached_composer(
+                    frame,
+                    layout.input_area,
+                    display_input,
+                    state.focus.clone(),
+                    &state.theme,
+                    state.multiline_mode,
+                    None,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows = (0..height)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0u16;
+                while x < width {
+                    let symbol = buffer[(x, y)].symbol().to_owned();
+                    x += u16::try_from(crate::adapters::tui::text_geometry::cells(&symbol).max(1))
+                        .unwrap();
+                    row.push_str(&symbol);
+                }
+                row
+            })
+            .collect();
+        (rows, terminal.get_cursor_position().unwrap(), input_area)
+    }
+
+    #[test]
+    fn display_width_attached_backspace_removes_one_whole_grapheme() {
+        let mut state = TuiState::new(80, 24);
+        for (tail, expected) in [(G, "x"), (A, "x"), (C, "x"), ("y", "x")] {
+            let mut input = format!("x{tail}");
+            press(&mut input, &mut state, KeyCode::Backspace, false);
+            assert_eq!(input, expected, "tail {tail:?}");
+        }
+        // Read-only composers edit too; only submission is refused.
+        let mut input = format!("x{G}");
+        press(&mut input, &mut state, KeyCode::Backspace, true);
+        assert_eq!(input, "x");
+        // Emptying the draft still drops the pinned peer compose.
+        let mut input = A.to_owned();
+        press(&mut input, &mut state, KeyCode::Backspace, false);
+        assert!(input.is_empty());
+        assert!(state.pinned_peer_compose.is_none());
+    }
+
+    #[test]
+    fn display_width_attached_paste_then_backspace_keeps_source_bytes_of_the_rest() {
+        let mut state = TuiState::new(80, 24);
+        let mut input = String::new();
+        append_attached_paste(&mut input, &format!("a{A}{G}"));
+        assert_eq!(
+            input,
+            format!("a{A}{G}"),
+            "paste appends source bytes verbatim"
+        );
+        press(&mut input, &mut state, KeyCode::Backspace, false);
+        assert_eq!(input, format!("a{A}"));
+        press(&mut input, &mut state, KeyCode::Backspace, false);
+        assert_eq!(input, "a");
+    }
+
+    #[test]
+    fn display_width_attached_draw_wraps_and_shows_the_visual_tail_with_end_caret() {
+        let state = TuiState::new(80, 24);
+        // 60 columns: composer inner width 58; 30 C wrap to a second row.
+        let input = C.repeat(30);
+        let (rows, caret, area) = draw(&state, &input, 60, 20);
+        assert_eq!(area.height, 4, "two text rows + borders");
+        let text_rows = &rows[usize::from(area.y) + 1..usize::from(area.y) + 3];
+        assert_eq!(text_rows[0].matches('界').count(), 29, "{rows:?}");
+        assert_eq!(text_rows[1].matches('界').count(), 1, "{rows:?}");
+        assert_eq!(
+            (caret.x, caret.y),
+            (3, area.y + 2),
+            "end caret after the last glyph"
+        );
+
+        // More than eight visual rows: the final window is shown, caret at its end.
+        let long = format!("{}{G}", "x".repeat(58 * 9));
+        let (rows, caret, area) = draw(&state, &long, 60, 24);
+        assert_eq!(area.height, 10, "capped at eight text rows + borders");
+        let text = rows[usize::from(area.y) + 1..usize::from(area.y) + 9].concat();
+        assert!(
+            text.contains(G),
+            "the tail with the cluster is visible: {rows:?}"
+        );
+        assert_eq!(
+            caret.y,
+            area.y + 8,
+            "end caret on the last visible text row"
+        );
+        assert!(caret.x > area.x && caret.x < area.x + area.width - 1);
+
+        // Resize: the same draft re-wraps at the new width (no stale scroll).
+        let (_, _, narrow) = draw(&state, &input, 60, 20);
+        let (_, _, wide) = draw(&state, &input, 130, 20);
+        assert_eq!((narrow.height, wide.height), (4, 3));
+    }
+
+    #[test]
+    fn display_width_attached_pending_composition_still_guards_editing() {
+        let mut state = TuiState::new(80, 24);
+        state.recipient_actions.insert(
+            (
+                crate::adapters::daemon::protocol::RecipientAction::Reply,
+                crate::adapters::daemon::protocol::RecipientActionTarget::Item {
+                    item_id: "ri".into(),
+                },
+            ),
+            crate::adapters::tui::state::RecipientActionState::Pending {
+                composed_input: Some(format!("pending {G}")),
+                pinned_compose: None,
+            },
+        );
+        let mut input = String::new();
+        press(&mut input, &mut state, KeyCode::Backspace, false);
+        assert!(input.is_empty());
+        assert_eq!(
+            crate::adapters::tui::handlers::recipient_actions::pending_composition(&state),
+            Some(format!("pending {G}").as_str()),
+            "a pending composition owns the composer and is not edited"
+        );
+    }
+
+    #[test]
+    fn display_width_attached_consent_lines_wrap_by_cells_never_scalars() {
+        let cells = crate::adapters::tui::text_geometry::cells;
+        let pending = |preview: String| PendingConsentApproval {
+            request_id: crate::domain::models::RequestId::new(),
+            tool: "a2a/sender-consent".to_owned(),
+            input_preview: preview,
+        };
+        let texts = |lines: Vec<ratatui::text::Line<'static>>| -> Vec<String> {
+            lines
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .into_iter()
+                        .map(|s| s.content.into_owned())
+                        .collect()
+                })
+                .collect()
+        };
+        // 30 C = 60 cells but only 30 scalars: the old scalar fast path kept
+        // it as one overlong row at content width 40.
+        let rows = texts(consent_approval_card_lines(&pending(C.repeat(30)), 0, 40));
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert!(rows.iter().all(|row| cells(row) <= 40), "{rows:?}");
+        assert_eq!(rows.concat().replace(' ', ""), C.repeat(30));
+        // A line that fits in cells is kept byte-for-byte, double spaces included.
+        let fits = format!("[y]  Allow {C}{C}  [n] Decline");
+        assert_eq!(
+            texts(consent_approval_card_lines(&pending(fits.clone()), 0, 40)),
+            [fits]
+        );
+        // G and A at the cut stay whole.
+        let mixed = format!("{}{G}{A}{}", "x".repeat(38), "y".repeat(20));
+        let rows = texts(consent_approval_card_lines(&pending(mixed), 0, 40));
+        assert!(rows.iter().all(|row| cells(row) <= 40), "{rows:?}");
+        assert!(
+            rows.concat().contains(G) && rows.concat().contains(A),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn display_width_attached_preview_and_consent_fit_cells() {
+        let preview = preview_line(&C.repeat(72), 72);
+        assert!(crate::adapters::tui::text_geometry::cells(&preview) <= 72);
+        assert!(preview.ends_with('…'));
+        assert_eq!(preview_line("short", 10), "short");
+        assert_eq!(preview_line("a\nb", 10), "a b");
+        let cut = preview_line(&format!("{G}xx"), 3);
+        assert_eq!(cut, format!("{G}…"));
+        assert_eq!(preview_line(&format!("{G}xx"), 2), "…");
+        assert_eq!(preview_line(&format!("{G}xx"), 0), "");
+        assert_eq!(preview_line(&format!("{A}{A}{A}"), 3), format!("{A}{A}{A}"));
     }
 }

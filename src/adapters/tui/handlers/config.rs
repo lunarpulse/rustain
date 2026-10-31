@@ -15,6 +15,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::adapters::cli::commands::Cli; // CONFORMANCE_EXCEPTION: config-reload handler needs CLI struct for re-parsing flags (Story 8-1)
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::errors::DomainError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::AppConfig;
@@ -189,14 +190,21 @@ pub fn handle_config_reload_with_two_pass(ctx: ReloadContext<'_>) -> HandlerOutc
     }
 }
 
-/// Truncate a `DomainError` to ≤80 chars for the status-bar flash.
+/// Truncate a `DomainError` to ≤80 bytes for the status-bar flash.
+///
+/// The bound is a diagnostic byte limit, not a column count: the cut keeps at
+/// most 77 bytes (leaving room for the 3-byte `…`) and backs up to the
+/// preceding whole grapheme, so a ZWJ sequence or combining mark that
+/// straddles the limit is dropped rather than shown as a fragment.
 fn short_reason(e: &DomainError) -> String {
     let msg = e.to_string();
     if msg.len() <= 80 {
         msg
     } else {
-        let truncate_at = msg.floor_char_boundary(77.min(msg.len()));
-        format!("{}…", &msg[..truncate_at])
+        let cut = msg.floor_char_boundary(77.min(msg.len()));
+        let keep =
+            geom::byte_of_scalar(&msg, geom::snap_boundary(&msg, msg[..cut].chars().count()));
+        format!("{}…", &msg[..keep])
     }
 }
 
@@ -248,8 +256,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reload_success_emits_config_reloaded_true() {
+    /// Drive the real two-pass reload handler; `overrides` are the startup
+    /// `-c` overrides it re-applies.
+    fn reload_outcome(overrides: Option<&serde_json::Value>) -> HandlerOutcome {
         let store = TestConfigStore {
             inner: std::sync::Mutex::new(Arc::new(test_config())),
         };
@@ -296,12 +305,17 @@ mod tests {
             cli: &test_cli(),
             config_store: &store,
             profile_store: &profile_swap,
-            cli_config_overrides: None,
+            cli_config_overrides: overrides,
             agent_core: &agent_core_arc,
             compose_snapshot: &compose_snapshot_arc,
             mcp_config_notices: &mut Vec::new(),
         };
-        let outcome = handle_config_reload_with_two_pass(ctx);
+        handle_config_reload_with_two_pass(ctx)
+    }
+
+    #[test]
+    fn reload_success_emits_config_reloaded_true() {
+        let outcome = reload_outcome(None);
         match outcome {
             HandlerOutcome::Notify(AppEvent::ConfigReloaded { success, error, .. }) => {
                 assert!(success);
@@ -324,5 +338,91 @@ mod tests {
         let err = DomainError::Other("short".to_string());
         let reason = short_reason(&err);
         assert_eq!(reason, "short");
+    }
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const A: &str = "e\u{301}";
+    /// A regional-indicator pair: one grapheme that `Debug` does not escape.
+    const F: &str = "🇯🇵";
+
+    #[test]
+    fn display_width_short_reason_cuts_at_a_whole_grapheme_within_80_bytes() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let x = |n: usize| "x".repeat(n);
+        let cases: Vec<(String, String)> = vec![
+            // ASCII control: the old 77-byte cut, unchanged.
+            (x(200), format!("{}…", x(77))),
+            // Exactly 80 bytes is not cut at all.
+            (x(80), x(80)),
+            // The cluster straddles byte 77: it is dropped whole.
+            (format!("{}{G}tail", x(70)), format!("{}…", x(70))),
+            (format!("{}{A}yyyy", x(76)), format!("{}…", x(76))),
+            // The cluster ends exactly at byte 77: it is kept.
+            (format!("{}{G}yyyyyy", x(59)), format!("{}{G}…", x(59))),
+            (format!("{}{A}yyyyyyy", x(74)), format!("{}{A}…", x(74))),
+        ];
+        for (msg, want) in cases {
+            let reason = short_reason(&DomainError::Other(msg.clone()));
+            assert_eq!(reason, want, "msg {msg:?}");
+            assert!(reason.len() <= 80, "{reason:?}");
+            for g in reason.graphemes(true) {
+                if g.contains('👨') || g.contains('👩') || g.contains('👧') {
+                    assert_eq!(g, G);
+                }
+            }
+        }
+    }
+
+    /// The real producer: a failing reload emits
+    /// `AppEvent::ConfigReloaded { error }`. A startup `-c` override of the
+    /// wrong type fails extraction and quotes its value in the diagnostic (as a
+    /// Rust `Debug` string, which escapes joiners and combining marks, so the
+    /// quoted cluster is a regional-indicator flag: two scalars, one grapheme,
+    /// not escaped), steered until it straddles byte 77.
+    #[test]
+    fn display_width_reload_failure_event_has_no_cluster_fragment() {
+        use crate::adapters::profile_resolver::noop::NoopProfileResolver;
+        use unicode_segmentation::UnicodeSegmentation;
+
+        let cli = test_cli();
+        let overrides_for = |pad: usize| serde_json::json!({ "log_max_size_mb": format!("{}{}", "x".repeat(pad), F.repeat(6)) });
+        let (overrides, msg, start) = (0..=40)
+            .find_map(|pad| {
+                let overrides = overrides_for(pad);
+                let err = crate::infrastructure::config::try_load_with_config_overrides(
+                    &cli,
+                    &NoopProfileResolver,
+                    Some(&overrides),
+                )
+                .err()?;
+                let msg = err.to_string();
+                let start = msg
+                    .grapheme_indices(true)
+                    .find(|(at, g)| *g == F && *at < 77 && 77 < *at + g.len())
+                    .map(|(at, _)| at)?;
+                Some((overrides, msg, start))
+            })
+            .expect("an override text that puts a flag cluster across byte 77");
+
+        let HandlerOutcome::Notify(AppEvent::ConfigReloaded { success, error, .. }) =
+            reload_outcome(Some(&overrides))
+        else {
+            panic!("expected Notify(ConfigReloaded)");
+        };
+        assert!(!success);
+        let error = error.expect("a failed reload carries its reason");
+        let reason = error
+            .split_once("Reason: ")
+            .map(|(_, reason)| reason)
+            .expect("reason marker");
+        let body = reason.strip_suffix('…').expect("cut reason ends in …");
+        assert!(reason.len() <= 80, "{reason:?}");
+        assert_eq!(body.len(), start, "cut must precede the straddling cluster");
+        assert!(msg.starts_with(body), "{msg:?} vs {body:?}");
+        for g in reason.graphemes(true) {
+            if g.contains('🇯') || g.contains('🇵') {
+                assert_eq!(g, F, "fragment in {reason:?}");
+            }
+        }
     }
 }

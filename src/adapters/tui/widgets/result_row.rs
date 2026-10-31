@@ -13,8 +13,9 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::node_state::NodeState;
 use crate::domain::models::orchestration::SpokeResult;
 use crate::domain::models::subagent_view::OwnershipKind;
@@ -26,8 +27,8 @@ use super::orchestration_glyph::{node_state_glyph, ownership_glyph, spoke_result
 /// reading surface, so its summary is re-clipped here.
 pub const ROW_SALIENCE_MAX_BYTES: usize = 120;
 
-/// Max display character count for the agent label before truncation.
-const AGENT_LABEL_MAX_CHARS: usize = 20;
+/// Max display cells for the agent label before truncation.
+const AGENT_LABEL_MAX_CELLS: usize = 20;
 
 /// Compact, pure snapshot of one spoke's render-relevant state.
 ///
@@ -72,15 +73,17 @@ impl Default for ResultRowSnapshot {
 /// - `<state>` — [`spoke_result_glyph`] for the terminal outcome, OR the
 ///   Running glyph `▶` ([`node_state_glyph`] of [`NodeState::Running`]) while
 ///   `rerunning` is set (the in-progress lamp overrides the stale glyph).
-/// - `name` — `agent_label` truncated to ~20 chars (char-boundary safe).
+/// - `name` — `agent_label` clipped to 20 display cells at a whole grapheme.
 /// - `<salience>` — enum-derived (DD3): `⚠ failed` / `⚠ cancelled` /
 ///   `⚠ empty` for exceptional variants; the `summary` lede for `Completed`,
-///   clipped to [`ROW_SALIENCE_MAX_BYTES`] by display width.
+///   capped to [`ROW_SALIENCE_MAX_BYTES`] bytes (at a grapheme boundary) and
+///   then to the row's remaining display cells.
 /// - `↵` — drill affordance, always present (muted).
 ///
-/// `width` is honored as a display-column budget: the salience is clipped to
-/// `min(ROW_SALIENCE_MAX_BYTES, remaining_columns)` so a narrow overlay never
-/// overflows. While `rerunning` the whole line is dimmed (the row is in-flight).
+/// `width` is honored as a display-column budget: after the byte cap the
+/// salience is clipped, at whole graphemes, to the cells remaining on the row
+/// so a narrow overlay never overflows. While `rerunning` the whole line is
+/// dimmed (the row is in-flight).
 pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
     let muted = Style::default().fg(Color::DarkGray);
     // Compose DIM into every segment when the row is in-flight (rerunning),
@@ -106,10 +109,10 @@ pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
         spoke_result_glyph(&row.result)
     };
 
-    let name = clip_chars(&row.agent_label, AGENT_LABEL_MAX_CHARS);
+    let name = geom::clip(&row.agent_label, AGENT_LABEL_MAX_CELLS);
 
-    // Salience — enum-derived (DD3). The full string is clipped to the row's
-    // byte budget (char-boundary safe) so it never overflows `width`.
+    // Salience — enum-derived (DD3). Two independent bounds: the 120-BYTE
+    // source cap (grapheme-safe) and the row's remaining display cells.
     let salience_str = salience_full(&row.result);
     let salience_style = salience_style(&row.result);
     let sep = " \u{00B7} "; // ·
@@ -122,8 +125,11 @@ pub fn render_result_row(row: &ResultRowSnapshot, width: u16) -> Line<'static> {
         + sep.width()
         + drill.width();
     let remaining = (width as usize).saturating_sub(overhead_width);
-    let salience_budget = ROW_SALIENCE_MAX_BYTES.min(remaining);
-    let salience = clip_display_width(&salience_str, salience_budget);
+    let salience = geom::clip(
+        clip_grapheme_bytes(&salience_str, ROW_SALIENCE_MAX_BYTES),
+        remaining,
+    )
+    .to_string();
 
     let spans: Vec<Span<'static>> = vec![
         Span::styled(own.to_string(), dim_if(muted)),
@@ -166,12 +172,16 @@ fn salience_style(result: &SpokeResult) -> Style {
     }
 }
 
-/// Clip to at most `max_chars` Unicode scalar values (char-boundary safe).
-fn clip_chars(s: &str, max_chars: usize) -> &str {
-    match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => &s[..idx],
-        None => s,
+/// Byte-capped prefix that ends on a whole grapheme: the `max_bytes` ceiling
+/// is a source limit (not columns), so a cluster straddling it is dropped
+/// whole rather than kept as a fragment.
+fn clip_grapheme_bytes(s: &str, max_bytes: usize) -> &str {
+    let cut = clip_bytes(s, max_bytes);
+    if cut.len() == s.len() {
+        return cut;
     }
+    let scalars = cut.chars().count();
+    &s[..geom::byte_of_scalar(s, geom::snap_boundary(s, scalars))]
 }
 
 /// Compatibility helper kept for existing UTF-8 boundary tests.
@@ -184,21 +194,6 @@ fn clip_bytes(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
-}
-
-/// Clip to the largest prefix whose display width is `<= max_width`.
-fn clip_display_width(s: &str, max_width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + w > max_width {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out
 }
 
 #[cfg(test)]
@@ -388,10 +383,25 @@ mod tests {
     }
 
     #[test]
-    fn clip_chars_truncates_at_char_count() {
-        assert_eq!(clip_chars("hello world", 5), "hello");
-        assert_eq!(clip_chars("ab", 5), "ab"); // under cap → unchanged
-        assert_eq!(clip_chars("🦀🦀🦀", 2), "🦀🦀"); // char-count, not bytes
+    fn agent_label_truncates_at_cell_budget() {
+        // Was `clip_chars_truncates_at_char_count` (scalar budget); the label
+        // budget is now 20 display cells, so 🦀 (2 cells) counts double.
+        let label_of = |label: &str| {
+            let line = render_result_row(
+                &row(
+                    label,
+                    SpokeResult::Completed {
+                        summary: "s".into(),
+                    },
+                ),
+                120,
+            );
+            line.spans[3].content.to_string()
+        };
+        assert_eq!(label_of("hello world"), "hello world");
+        assert_eq!(label_of(&"a".repeat(25)), "a".repeat(20)); // over cap → clipped
+        assert_eq!(label_of(&"🦀".repeat(3)), "🦀🦀🦀"); // 6 cells, under cap
+        assert_eq!(label_of(&"🦀".repeat(12)), "🦀".repeat(10)); // 20 cells, not 20 scalars
     }
 
     #[test]

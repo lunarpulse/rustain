@@ -658,3 +658,146 @@ fn live_rail_with_tail_w120() {
     );
     insta::assert_snapshot!("live_rail_with_tail_w120", text);
 }
+
+// ---------------------------------------------------------------------------
+// Story 21.11 — mixed-width (CJK / ZWJ emoji / combining) representative
+// snapshots at 80 cells. The semantic K2-K7 assertions live in the
+// conformance module; these pin the whole rendered surface for review.
+// ---------------------------------------------------------------------------
+
+mod mixed_width {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use rustain::adapters::tui::layout::compute_layout;
+    use rustain::adapters::tui::theme::Theme;
+    use rustain::adapters::tui::widgets::{input_box, status_bar};
+    use rustain::domain::models::{FocusState, StatusState};
+    use unicode_width::UnicodeWidthStr;
+
+    const MIXED: &str = "界界界 e\u{301}\u{301} 👨\u{200d}👩\u{200d}👧 family and 日本語のテキストが続きます, then a very long tail of ordinary words that must be clipped at a cell boundary";
+
+    fn glyph_rows(buffer: &ratatui::buffer::Buffer) -> String {
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0;
+                while x < buffer.area.width {
+                    let symbol = buffer[(x, y)].symbol();
+                    row.push_str(symbol);
+                    x += u16::try_from(symbol.width().max(1)).unwrap();
+                }
+                row.trim_end().to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn mixed_width_stage_collapsed_and_expanded_w80() {
+        let collapsed = make_turn(
+            "mw1",
+            vec![
+                prose(&format!("{MIXED}.")),
+                tool("Read", InvocationStatus::Success),
+                tool("Grep", InvocationStatus::Success),
+                tool("Bash", InvocationStatus::Success),
+            ],
+            Some(StopReason::EndTurn),
+        );
+        let expanded = make_turn(
+            "mw2",
+            vec![prose(MIXED), tool("Read", InvocationStatus::Success)],
+            Some(StopReason::EndTurn),
+        );
+        let conv = make_conversation(
+            vec![
+                make_msg("mw1", MessageRole::Assistant),
+                make_msg("mw2", MessageRole::Assistant),
+            ],
+            vec![collapsed, expanded],
+        );
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let text = render_to_string(&conv, None, &ViewState::default(), &clock, 80, 24, None);
+        // The collapsed summary budgets its glyph gap and marker, so the tier
+        // label and status glyph at its end survive instead of being clipped.
+        let collapsed_row = text
+            .lines()
+            .find(|row| row.contains("▸"))
+            .expect("collapsed summary row");
+        assert!(
+            collapsed_row.trim_end().ends_with("3 tools ✓"),
+            "{collapsed_row:?}"
+        );
+        insta::assert_snapshot!("mixed_width_stage_w80", text);
+    }
+
+    #[test]
+    fn mixed_width_shell_and_composer_w80() {
+        let theme = Theme::dark();
+        let draft = format!("{MIXED} {MIXED}");
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let layout = compute_layout(
+                    area,
+                    &theme,
+                    &draft,
+                    1,
+                    false,
+                    rustain::domain::models::visual::DensityMode::Focus,
+                )
+                .unwrap();
+                status_bar::render(
+                    frame,
+                    layout.status_bar,
+                    "模型-mini",
+                    None,
+                    &StatusState::Idle,
+                    &theme,
+                    0,
+                    &[],
+                    0,
+                    layout.chat_pane.height,
+                    rustain::domain::models::PermissionMode::Normal,
+                    None,
+                    0,
+                    false,
+                    None,
+                    false,
+                    true,
+                    0,
+                    Some("界 help"),
+                    0,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    rustain::domain::models::visual::DensityMode::Focus,
+                    false,
+                    None,
+                    rustain::adapters::tui::state::LogAwareness::default(),
+                );
+                input_box::render(
+                    frame,
+                    layout.input_area,
+                    &draft,
+                    draft.chars().count(),
+                    FocusState::Input,
+                    &theme,
+                    false,
+                    input_box::tail_scroll(&draft, layout.input_area),
+                    None,
+                );
+            })
+            .unwrap();
+        let text = glyph_rows(terminal.backend().buffer());
+        for row in text.lines() {
+            assert!(row.width() <= 80, "shell row wider than 80 cells: {row:?}");
+        }
+        insta::assert_snapshot!("mixed_width_shell_composer_w80", text);
+    }
+}

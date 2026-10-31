@@ -99,6 +99,32 @@ impl AppLayout {
 /// Minimum terminal width to show sidebar.
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 
+/// Width of the sidebar column for a terminal `area_width` cells wide.
+fn sidebar_column_width(area_width: u16) -> u16 {
+    ((area_width as f32) * 0.3).clamp(30.0, 50.0) as u16
+}
+
+/// Width of the composer rectangle `compute_layout` allocates: the whole
+/// terminal width, except that a visible sidebar (Standard/Monitor, wide
+/// enough terminals) narrows the main column that holds the composer.
+/// Composer height, wrapping and caret math must use this width, not the
+/// terminal width (Story 21.11).
+pub fn composer_width(
+    area_width: u16,
+    sidebar_visible: bool,
+    density_mode: crate::domain::models::visual::DensityMode,
+) -> u16 {
+    use crate::domain::models::visual::DensityMode;
+    let sidebar_applies = sidebar_visible
+        && area_width >= SIDEBAR_MIN_WIDTH
+        && !matches!(density_mode, DensityMode::Dashboard | DensityMode::Focus);
+    if sidebar_applies {
+        area_width.saturating_sub(sidebar_column_width(area_width))
+    } else {
+        area_width
+    }
+}
+
 /// Compute the layout based on terminal size and tab count.
 /// Input area height is dynamic based on content (multi-line support).
 /// - >=120x24: full layout with optional sidebar
@@ -118,7 +144,10 @@ pub fn compute_layout(
         return None;
     }
 
-    let input_height = input_box::input_area_height(input, area.width);
+    let input_height = input_box::input_area_height(
+        input,
+        composer_width(area.width, sidebar_visible, density_mode),
+    );
 
     // Show tab bar when multiple tabs are open and terminal is wide enough
     let show_tab_bar = tab_count > 1 && area.width >= 80;
@@ -172,7 +201,7 @@ pub fn compute_layout(
     // Calculate sidebar width: min(50, terminal_width * 0.3) with minimum of 30
     let show_sidebar = effective_sidebar_visible && area.width >= SIDEBAR_MIN_WIDTH;
     let sidebar_width = if show_sidebar {
-        ((area.width as f32) * 0.3).clamp(30.0, 50.0) as u16
+        sidebar_column_width(area.width)
     } else {
         0
     };

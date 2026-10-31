@@ -7,6 +7,7 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::delimited_body::{approval_body_rows, wrap_text};
 use crate::adapters::tui::widgets::tool_block::display_tool_name;
@@ -299,7 +300,7 @@ fn key_rows(
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut cells = usize::MAX;
     for (key, text, color) in items {
-        let item_cells = key.chars().count() + 1 + text.chars().count();
+        let item_cells = geom::cells(key) + 1 + geom::cells(text);
         let gap = if cells == 0 || cells == usize::MAX {
             0
         } else {

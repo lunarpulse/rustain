@@ -21,6 +21,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::PendingPeerAdd;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Render the confirm card as chat-pane lines.
@@ -35,11 +36,9 @@ pub fn render_peer_add_lines<'a>(
     let inner = (width as usize).saturating_sub(4).max(20);
     let mut lines: Vec<Line<'a>> = Vec::new();
     for raw in pending.card.lines() {
-        let text: String = if raw.chars().count() > inner {
-            raw.chars().take(inner).collect()
-        } else {
-            raw.to_owned()
-        };
+        // Whole-grapheme clip to the card's cell budget (no marker: the card
+        // has always shown the leading part of an over-long row).
+        let text = geom::clip(raw, inner);
         let style = if raw.starts_with("Awaiting your decision") {
             Style::default()
                 .fg(theme.colors.accent)

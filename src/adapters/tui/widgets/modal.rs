@@ -5,6 +5,8 @@
 use ratatui::prelude::*;
 use unicode_width::UnicodeWidthStr;
 
+use crate::adapters::tui::text_geometry as geom;
+
 /// One part of a modal body, in display order.
 pub(crate) enum ModalPart {
     /// Kept whole while anything fits; at worst only the first header line.
@@ -42,14 +44,16 @@ fn ellipsize(first: &Line<'static>, width: usize) -> Line<'static> {
         .iter()
         .map(|span| span.content.as_ref())
         .collect();
-    let mut out = String::new();
-    for ch in text.chars() {
-        if (out.as_str().width() + ch.to_string().as_str().width()) + 1 > width.max(1) {
-            break;
-        }
-        out.push(ch);
+    // The marker always signals the hidden lines, so it is appended even when
+    // the first line fits; only the head is clipped, whole graphemes at a time.
+    // A zero-width budget cannot hold it and yields an empty line.
+    let marker = "…";
+    let head = geom::clip(&text, width.saturating_sub(geom::cells(marker)));
+    let mut out = String::with_capacity(head.len() + marker.len());
+    if width > 0 {
+        out.push_str(head);
+        out.push_str(marker);
     }
-    out.push('…');
     Line::from(Span::styled(out, style))
 }
 
@@ -292,5 +296,119 @@ mod tests {
         let area = Rect::new(0, 0, 60, 16);
         assert_eq!(modal_area(area, 40, 12), Rect::new(10, 2, 40, 12));
         assert_eq!(modal_area(area, 100, 40), area);
+    }
+
+    // ── Story 21.11 (AC6/K6): display-width correctness ──────────────────
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    /// A three-line notice must shrink to its first line to leave the rows
+    /// their three lines: height 6 = notice 3 + footer 1 + wanted rows 3 - 1.
+    fn shrinking_parts(first: &str) -> Vec<ModalPart> {
+        vec![
+            ModalPart::Notice(vec![
+                Line::from(first.to_owned()),
+                Line::from("second line"),
+                Line::from("third line"),
+            ]),
+            ModalPart::Rows {
+                lines: lines("r", 5),
+                selected: (4, 5),
+            },
+            ModalPart::Footer(lines("f", 1)),
+        ]
+    }
+
+    #[test]
+    fn display_width_notice_shrink_clips_whole_graphemes_inside_the_budget() {
+        let cases: Vec<(String, usize, String)> = vec![
+            // ASCII positive controls keep the existing `…`-inside-budget form.
+            ("abcdef".into(), 4, "abc…".into()),
+            ("ab".into(), 3, "ab…".into()),
+            ("abc".into(), 3, "ab…".into()),
+            ("abc".into(), 30, "abc…".into()),
+            // G is two cells: `G…` fills three exactly, never a ZWJ fragment.
+            (format!("{G}xx"), 3, format!("{G}…")),
+            (format!("x{G}xx"), 3, "x…".into()),
+            (format!("x{G}xx"), 4, format!("x{G}…")),
+            (format!("{G}xx"), 2, "…".into()),
+            (format!("{G}xx"), 1, "…".into()),
+            (format!("{G}xx"), 0, String::new()),
+            (format!("{C}xx"), 3, format!("{C}…")),
+            (format!("x{C}xx"), 3, "x…".into()),
+            (format!("{C}{C}"), 4, format!("{C}…")),
+            (format!("{C}xx"), 0, String::new()),
+            // A is one cell: the accent stays with its base letter.
+            (format!("{A}xx"), 3, format!("{A}x…")),
+            (format!("{A}xx"), 2, format!("{A}…")),
+            (format!("{A}xx"), 0, String::new()),
+            ("abc".into(), 0, String::new()),
+        ];
+        for (first, budget, expected) in cases {
+            let out = fit_modal_indexed(shrinking_parts(&first), 6, budget);
+            let identity: Vec<(usize, usize)> = out.iter().map(|(p, r, _)| (*p, *r)).collect();
+            assert_eq!(
+                identity,
+                [(0, 0), (1, 1), (1, 2), (1, 3), (1, 4), (2, 0)],
+                "source part/row identity: {first:?} at {budget}"
+            );
+            let shown: Vec<String> = out.iter().map(|(_, _, line)| line.to_string()).collect();
+            assert_eq!(shown[0], expected, "{first:?} at budget {budget}");
+            assert!(
+                geom::cells(&shown[0]) <= budget,
+                "{:?} exceeds {budget} cells",
+                shown[0]
+            );
+            // Selected row and footer survive, whatever happened to the notice.
+            assert_eq!(shown[4], "r4");
+            assert_eq!(shown[5], "f0");
+        }
+    }
+
+    #[test]
+    fn display_width_notice_shrink_keeps_the_first_span_style() {
+        let red = Style::default().fg(Color::Red);
+        let parts = vec![
+            ModalPart::Notice(vec![
+                Line::from(vec![Span::styled(format!("{G}x"), red), Span::raw("yy")]),
+                Line::from("second"),
+            ]),
+            ModalPart::Rows {
+                lines: lines("r", 3),
+                selected: (0, 1),
+            },
+            ModalPart::Footer(lines("f", 1)),
+        ];
+        // 2 + 1 + 3 = 6 > 5: the notice shrinks to one line.
+        let out = fit_modal_indexed(parts, 5, 4);
+        let (part, row, line) = &out[0];
+        assert_eq!((*part, *row), (0, 0));
+        assert_eq!(line.to_string(), format!("{G}x…"));
+        assert_eq!(line.spans.len(), 1);
+        assert_eq!(line.spans[0].style, red);
+    }
+
+    #[test]
+    fn display_width_wrapped_oversized_words_stay_whole_graphemes() {
+        let rows = |source: &str, width: usize| text(&wrapped(source, Style::default(), width));
+        // ASCII positive control.
+        assert_eq!(rows("abcdef", 4), ["abcd", "ef"]);
+        // A wider-than-row grapheme stays one intact row (A3).
+        assert_eq!(rows(&format!("{G}xx"), 1), [G, "x", "x"]);
+        assert_eq!(
+            rows(&format!("{C}ab"), 3),
+            [format!("{C}a"), "b".to_owned()]
+        );
+        assert_eq!(
+            rows(&format!("{A}{A}{A}"), 2),
+            [format!("{A}{A}"), A.to_owned()]
+        );
+        // Whole-word string width: `ab` + space + a four-cell word is seven cells.
+        assert_eq!(rows(&format!("ab {C}{C}"), 7), [format!("ab {C}{C}")]);
+        assert_eq!(
+            rows(&format!("ab {C}{C}"), 6),
+            ["ab".to_owned(), format!("{C}{C}")]
+        );
     }
 }

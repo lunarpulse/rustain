@@ -31,6 +31,7 @@ use crate::domain::services::summary_labeler::compute_summary_label;
 use super::empty_state;
 use super::plan_card;
 use crate::adapters::tui::markdown;
+use crate::adapters::tui::text_geometry as geom;
 use word_wrap::wrap_text;
 
 fn feedback_lines(
@@ -690,21 +691,39 @@ fn apply_search_highlights<'a>(
     // Rebuild the line as a sequence of unstyled (non-match) and styled
     // (match) spans. Non-matched regions lose their original span styling —
     // v1 limitation documented on `render_message`.
+    //
+    // Painted ranges are the source match ranges expanded outward to whole
+    // grapheme clusters (a query `👨` inside a ZWJ family, or `e` before a
+    // combining accent, paints the whole glyph). Match counting and the
+    // focused ordinal still follow the logical source matches; matches whose
+    // expanded ranges overlap share one painted range, styled as focused if
+    // any of them is focused, so no suffix is painted twice or dropped.
+    let mut painted: Vec<(usize, usize, bool)> = Vec::with_capacity(match_ranges.len());
+    for (ms, me) in &match_ranges {
+        let is_focused = focused_idx == Some(*match_cursor);
+        *match_cursor += 1;
+        let (ps, pe) = geom::expand_to_graphemes(&plain, *ms, *me);
+        match painted.last_mut() {
+            Some(last) if ps < last.1 => {
+                last.1 = last.1.max(pe);
+                last.2 |= is_focused;
+            }
+            _ => painted.push((ps, pe, is_focused)),
+        }
+    }
     let mut new_spans: Vec<Span<'a>> = Vec::new();
     let mut cursor = 0usize;
-    for (ms, me) in &match_ranges {
-        if *ms > cursor {
-            new_spans.push(Span::raw(plain[cursor..*ms].to_string()));
+    for (ps, pe, is_focused) in &painted {
+        if *ps > cursor {
+            new_spans.push(Span::raw(plain[cursor..*ps].to_string()));
         }
-        let is_focused = focused_idx == Some(*match_cursor);
-        let style = if is_focused {
+        let style = if *is_focused {
             focused_style
         } else {
             base_style
         };
-        new_spans.push(Span::styled(plain[*ms..*me].to_string(), style));
-        *match_cursor += 1;
-        cursor = *me;
+        new_spans.push(Span::styled(plain[*ps..*pe].to_string(), style));
+        cursor = *pe;
     }
     if cursor < plain.len() {
         new_spans.push(Span::raw(plain[cursor..].to_string()));
@@ -1264,34 +1283,19 @@ fn first_prose_sentence(turn: &Turn) -> String {
     text.to_string()
 }
 
-/// Truncate text to `max_width` visual columns, appending `…` (U+2026) if truncated.
+/// Truncate text to `max_width` display cells, appending `…` (U+2026) if truncated.
 ///
-/// Uses `unicode-width` for column-accurate truncation (P1-8).
+/// The marker is inside the budget and the kept prefix ends on a whole
+/// grapheme cluster, so a ZWJ family or combining sequence is never cut.
 fn truncate_with_ellipsis(text: &str, max_width: usize) -> String {
-    use unicode_width::UnicodeWidthStr;
-    let vis_width = text.width();
-    if vis_width <= max_width {
+    if geom::cells(text) <= max_width {
         return text.to_string();
     }
-    if max_width == 0 {
-        return String::new();
+    if max_width == 1 {
+        // Marker alone fits a one-cell budget.
+        return "…".to_string();
     }
-    // Truncate char-by-char to fit within the budget (reserve 1 col for ellipsis)
-    let ellipsis_width = 1; // U+2026
-    let max_text_width = max_width.saturating_sub(ellipsis_width);
-    let mut taken = 0usize;
-    let mut char_count = 0usize;
-    for c in text.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        if taken + cw > max_text_width {
-            break;
-        }
-        taken += cw;
-        char_count += c.len_utf8();
-    }
-    let mut truncated = text[..char_count].to_string();
-    truncated.push('…');
-    truncated
+    geom::ellipsize(text, max_width, "…").into_owned()
 }
 
 /// Render an assistant turn in expanded form: interleaved parts, gutter wrap,
@@ -1541,7 +1545,9 @@ fn render_collapsed_turn<'a>(
     let muted = Style::default().fg(theme.colors.fg_muted);
     let text_style = Style::default().fg(theme.colors.fg_primary);
 
-    let budget = width.saturating_sub(gutter_width + fixed_width);
+    // The line also carries the space before the status glyph and the literal
+    // `…` that follows the prose; both are part of the budget (Story 21.11).
+    let budget = width.saturating_sub(gutter_width + fixed_width + 2);
     if budget == 0 {
         // Fallback: omit prose, show minimal summary
         let line = Line::from(vec![
@@ -4326,5 +4332,330 @@ mod parts_aware_tests {
             "the marker carries no invented label — the local-scope statement\n\
              belongs to the retract confirmation (AC5)"
         );
+    }
+
+    // ── Story 21.11: display-width correctness ───────────────────────────────
+    //
+    // G = 2 cells / 1 grapheme / 6 scalars, C = 2 cells, A = 1 cell / 2 scalars.
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    /// No grapheme of `text` may be a fragment of the family sequence.
+    fn dw_assert_whole(text: &str) {
+        use unicode_segmentation::UnicodeSegmentation;
+        for grapheme in text.graphemes(true) {
+            if grapheme.contains('👨')
+                || grapheme.contains('👩')
+                || grapheme.contains('👧')
+                || grapheme.contains('\u{200d}')
+            {
+                assert_eq!(grapheme, G, "family fragment in {text:?}");
+            }
+        }
+    }
+
+    fn dw_conversation(messages: Vec<ChatMessage>) -> Conversation {
+        Conversation {
+            id: "display-width".into(),
+            title: String::new(),
+            messages,
+            turns: vec![],
+            created_at: 0,
+            updated_at: 0,
+            last_response_at: None,
+            session_id: None,
+            usage: None,
+            plans: HashMap::new(),
+            fork_source: None,
+            compaction: None,
+            peer_row_controls: Default::default(),
+            peer_row_revision: 0,
+        }
+    }
+
+    /// Paint through the real public chat entries into a `TestBackend`.
+    fn dw_paint(
+        conversation: &Conversation,
+        width: u16,
+        height: u16,
+        attached: bool,
+    ) -> (ratatui::buffer::Buffer, RenderResult) {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(0);
+        let mut tab = TabRenderState::default();
+        let mut result = None;
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                result = Some(if attached {
+                    render_attached(
+                        frame,
+                        area,
+                        conversation,
+                        &StreamingState::default(),
+                        0,
+                        true,
+                        &theme,
+                        &mut tab,
+                        &HashMap::new(),
+                        &BTreeMap::new(),
+                        None,
+                        &HashMap::new(),
+                    )
+                } else {
+                    render_with_search(
+                        frame,
+                        area,
+                        conversation,
+                        None,
+                        &StreamingState::default(),
+                        &ViewState::default(),
+                        &clock,
+                        0,
+                        true,
+                        &theme,
+                        &mut tab,
+                        &HashMap::new(),
+                        &BTreeMap::new(),
+                        None,
+                        None,
+                        &[],
+                        &[],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                });
+            })
+            .unwrap();
+        (terminal.backend().buffer().clone(), result.unwrap())
+    }
+
+    /// Non-blank painted rows as text, wide-glyph continuation cells dropped.
+    fn dw_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        use unicode_width::UnicodeWidthStr;
+        (0..buffer.area.height)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0u16;
+                while x < buffer.area.width {
+                    let symbol = buffer.cell((x, y)).map_or(" ", |cell| cell.symbol());
+                    row.push_str(symbol);
+                    x += u16::try_from(symbol.width().max(1)).unwrap_or(1);
+                }
+                row.trim_end().to_owned()
+            })
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    fn dw_squash(text: &str) -> String {
+        text.split_whitespace().collect()
+    }
+
+    #[test]
+    fn display_width_truncate_with_ellipsis_cuts_whole_graphemes_inside_budget() {
+        use unicode_width::UnicodeWidthStr;
+        // ASCII positive control: exact fit, then one below.
+        assert_eq!(truncate_with_ellipsis("hello world", 11), "hello world");
+        assert_eq!(truncate_with_ellipsis("hello world", 10), "hello wor…");
+        // Family + "xx" is four cells.
+        let family = format!("{G}xx");
+        assert_eq!(truncate_with_ellipsis(&family, 4), family);
+        assert_eq!(truncate_with_ellipsis(&family, 3), format!("{G}…"));
+        assert_eq!(truncate_with_ellipsis(&family, 2), "…");
+        assert_eq!(truncate_with_ellipsis(&family, 1), "…");
+        assert_eq!(truncate_with_ellipsis(&family, 0), "");
+        // CJK: three glyphs are six cells.
+        let wide = C.repeat(3);
+        assert_eq!(truncate_with_ellipsis(&wide, 6), wide);
+        assert_eq!(
+            truncate_with_ellipsis(&wide, 5),
+            format!("{}…", C.repeat(2))
+        );
+        assert_eq!(truncate_with_ellipsis(&wide, 4), format!("{C}…"));
+        // Combining accent: four glyphs are four cells.
+        let accent = A.repeat(4);
+        assert_eq!(truncate_with_ellipsis(&accent, 4), accent);
+        assert_eq!(
+            truncate_with_ellipsis(&accent, 3),
+            format!("{}…", A.repeat(2))
+        );
+        // Sweep: every budget stays inside its cells and never cuts a family.
+        let families = G.repeat(6);
+        for budget in 0..=14 {
+            let cut = truncate_with_ellipsis(&families, budget);
+            assert!(cut.width() <= budget, "budget {budget}: {cut:?}");
+            dw_assert_whole(&cut);
+        }
+    }
+
+    #[test]
+    fn display_width_peer_and_error_height_equals_painted_rows_at_real_gutters() {
+        let long = format!(
+            "note {} {} {} {} {} tail",
+            C.repeat(3),
+            G.repeat(45),
+            A.repeat(70),
+            "x".repeat(150),
+            C.repeat(70)
+        );
+        for attached in [false, true] {
+            for width in [60u16, 80, 130] {
+                for (block, gutter, role) in [
+                    (ContentBlockType::PeerText, "┆  ", MessageRole::User),
+                    (ContentBlockType::Error, "", MessageRole::System),
+                ] {
+                    let message = ChatMessage {
+                        role,
+                        content: long.clone(),
+                        content_blocks: vec![block.clone()],
+                        ..Default::default()
+                    };
+                    let computed = compute_message_height(
+                        &message.content,
+                        block == ContentBlockType::Error,
+                        false,
+                        false,
+                        false,
+                        block == ContentBlockType::PeerText,
+                        usize::from(width),
+                    );
+                    let conversation = dw_conversation(vec![message]);
+                    let (buffer, result) = dw_paint(&conversation, width, 60, attached);
+                    let rows = dw_rows(&buffer);
+                    assert_eq!(rows.len(), computed, "width {width}, attached {attached}");
+                    assert_eq!(result.total_content_height, computed);
+                    let mut body = String::new();
+                    for row in &rows[1..] {
+                        let content = row.strip_prefix(gutter).expect("gutter kept on every row");
+                        body.push_str(content);
+                    }
+                    assert_eq!(dw_squash(&body), dw_squash(&long), "width {width}");
+                    dw_assert_whole(&body);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn display_width_highlight_expands_partial_query_to_whole_grapheme() {
+        let base = Style::default().fg(Color::Red);
+        let focused = Style::default().fg(Color::Green);
+        let run = |plain: &str, query: &str, focus: Option<usize>| {
+            let mut cursor = 0usize;
+            let line = apply_search_highlights(
+                Line::from(plain.to_owned()),
+                query,
+                base,
+                focused,
+                focus,
+                &mut cursor,
+            );
+            let spans: Vec<(String, Style)> = line
+                .spans
+                .iter()
+                .map(|s| (s.content.to_string(), s.style))
+                .collect();
+            let rebuilt: String = spans.iter().map(|(text, _)| text.as_str()).collect();
+            assert_eq!(rebuilt, plain, "painting must not duplicate or drop text");
+            (spans, cursor)
+        };
+        let raw = Style::default();
+        let text = |s: &str| s.to_owned();
+
+        // ASCII positive control.
+        let (spans, cursor) = run("a b c", "b", None);
+        assert_eq!(
+            spans,
+            vec![(text("a "), raw), (text("b"), base), (text(" c"), raw)]
+        );
+        assert_eq!(cursor, 1);
+
+        // Queries that land inside G paint the whole family.
+        let plain = format!("x {G} y");
+        for query in ["👨", "👩", "👧", "\u{200d}"] {
+            let (spans, _) = run(&plain, query, None);
+            assert_eq!(
+                spans,
+                vec![(text("x "), raw), (text(G), base), (text(" y"), raw)],
+                "query {query:?}"
+            );
+        }
+        // Query inside A (case-insensitively) paints base letter and accent.
+        let plain = format!("x {A} y");
+        for query in ["e", "E"] {
+            let (spans, cursor) = run(&plain, query, None);
+            assert_eq!(
+                spans,
+                vec![(text("x "), raw), (text(A), base), (text(" y"), raw)]
+            );
+            assert_eq!(cursor, 1);
+        }
+    }
+
+    #[test]
+    fn display_width_highlight_merges_overlapping_painted_ranges_and_keeps_focus() {
+        let base = Style::default().fg(Color::Red);
+        let focused = Style::default().fg(Color::Green);
+        let raw = Style::default();
+        let plain = format!("x {G} y");
+        // Each ZWJ joiner is its own logical match, so G holds two matches.
+        for (focus, expected_style, label) in [
+            (Some(0), focused, "first match of the merged range"),
+            (Some(1), focused, "second match of the merged range"),
+            (Some(2), base, "focus beyond the matches"),
+            (None, base, "no focus"),
+        ] {
+            let mut cursor = 0usize;
+            let line = apply_search_highlights(
+                Line::from(plain.clone()),
+                "\u{200d}",
+                base,
+                focused,
+                focus,
+                &mut cursor,
+            );
+            let spans: Vec<(String, Style)> = line
+                .spans
+                .iter()
+                .map(|s| (s.content.to_string(), s.style))
+                .collect();
+            assert_eq!(
+                spans,
+                vec![
+                    ("x ".to_owned(), raw),
+                    (G.to_owned(), expected_style),
+                    (" y".to_owned(), raw),
+                ],
+                "{label}"
+            );
+            assert_eq!(cursor, 2, "logical match count is unchanged: {label}");
+        }
+
+        // Adjacent (non-overlapping) families stay separate painted ranges.
+        let mut cursor = 0usize;
+        let pair = apply_search_highlights(
+            Line::from(format!("{G}{G}")),
+            "👨",
+            base,
+            focused,
+            Some(1),
+            &mut cursor,
+        );
+        let spans: Vec<(String, Style)> = pair
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style))
+            .collect();
+        assert_eq!(spans, vec![(G.to_owned(), base), (G.to_owned(), focused)]);
+        assert_eq!(cursor, 2);
     }
 }

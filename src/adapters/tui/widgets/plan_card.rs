@@ -1,6 +1,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::BorderType;
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
@@ -13,14 +14,6 @@ fn render_sub_task_card_line(
     is_pending: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-
-    let max_title_chars = inner_width.saturating_sub(11);
-    let title_display = if sub.title.chars().count() > max_title_chars {
-        let truncated: String = sub.title.chars().take(max_title_chars).collect();
-        format!("{}...", truncated)
-    } else {
-        sub.title.clone()
-    };
 
     let (icon_str, icon_color) = if !is_pending && sub.started_at_ms.is_some() {
         match sub.status {
@@ -53,39 +46,51 @@ fn render_sub_task_card_line(
         String::new()
     };
 
+    let mut suffix_spans: Vec<Span<'static>> = Vec::new();
+    if !icon_str.is_empty() {
+        suffix_spans.push(Span::styled(
+            format!(" {}", icon_str),
+            Style::default().fg(icon_color),
+        ));
+    }
+    if !elapsed_str.is_empty() {
+        suffix_spans.push(Span::styled(
+            format!(" {}", elapsed_str),
+            Style::default().fg(theme.colors.fg_muted),
+        ));
+    }
+    if let Some(info) = &sub.delegated_to {
+        suffix_spans.push(Span::styled(
+            format!(" [delegated → {}]", info.agent_name),
+            Style::default().fg(theme.colors.accent),
+        ));
+    }
+    let prefix = format!("    {}. ", sub.number);
+    let suffix_cells: usize = suffix_spans.iter().map(|s| geom::cells(&s.content)).sum();
+    // The prefix and the suffix come out of the row's cells; the "..." marker
+    // is inside what is left for the title.
+    let title_display = geom::ellipsize(
+        &sub.title,
+        inner_width.saturating_sub(geom::cells(&prefix) + suffix_cells),
+        "...",
+    );
+
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(
             vertical_char.to_string(),
             Style::default().fg(theme.colors.decision_border),
         ),
         Span::styled(
-            format!("    {}. {}", sub.number, title_display),
+            format!("{prefix}{title_display}"),
             Style::default().fg(theme.colors.fg_primary),
         ),
     ];
+    spans.extend(suffix_spans);
 
-    if !icon_str.is_empty() {
-        spans.push(Span::styled(
-            format!(" {}", icon_str),
-            Style::default().fg(icon_color),
-        ));
-    }
-    if !elapsed_str.is_empty() {
-        spans.push(Span::styled(
-            format!(" {}", elapsed_str),
-            Style::default().fg(theme.colors.fg_muted),
-        ));
-    }
-    if let Some(ref info) = sub.delegated_to {
-        spans.push(Span::styled(
-            format!(" [delegated → {}]", info.agent_name),
-            Style::default().fg(theme.colors.accent),
-        ));
-    }
-
-    let content_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let padding = inner_width.saturating_sub(content_len);
-    spans.push(Span::raw(" ".repeat(padding)));
+    // The leading border span is outside `inner_width`.
+    let content_cells: usize = spans.iter().skip(1).map(|s| geom::cells(&s.content)).sum();
+    let padding = inner_width.saturating_sub(content_cells);
+    spans.push(Span::raw(geom::spaces(padding)));
     spans.push(Span::styled(
         vertical_char.to_string(),
         Style::default().fg(theme.colors.decision_border),
@@ -105,7 +110,9 @@ fn render_sub_task_card_line(
                     format!("        {}", desc_line),
                     Style::default().fg(theme.colors.fg_muted),
                 ),
-                Span::raw(" ".repeat(inner_width.saturating_sub(8 + desc_line.len()))),
+                Span::raw(geom::spaces(
+                    inner_width.saturating_sub(8 + geom::cells(&desc_line)),
+                )),
                 Span::styled(
                     vertical_char.to_string(),
                     Style::default().fg(theme.colors.decision_border),
@@ -159,12 +166,15 @@ pub fn render_plan_card_lines<'a>(
     )));
 
     let header_text = format!(" Plan: {} ", plan.title);
-    let header_display = if header_text.len() > inner_width {
-        format!(" {}... ", &plan.title[..inner_width.saturating_sub(7)])
+    let header_display = if geom::cells(&header_text) > inner_width {
+        format!(
+            " {}... ",
+            geom::clip(&plan.title, inner_width.saturating_sub(7))
+        )
     } else {
         header_text
     };
-    let header_pad = inner_width.saturating_sub(header_display.len());
+    let header_pad = inner_width.saturating_sub(geom::cells(&header_display));
     let left_pad = header_pad / 2;
     let right_pad = header_pad - left_pad;
     let vertical_char = match border_type {
@@ -205,15 +215,6 @@ pub fn render_plan_card_lines<'a>(
 
     for task in &plan.tasks {
         let task_title = format!("{}. {}", task.number, task.title);
-        let title_display = if task_title.len() > inner_width.saturating_sub(2) {
-            format!(
-                "{}. {}...",
-                task.number,
-                &task.title[..inner_width.saturating_sub(6)]
-            )
-        } else {
-            task_title
-        };
         let title_style = if is_pending {
             Style::default().add_modifier(Modifier::BOLD)
         } else {
@@ -261,19 +262,34 @@ pub fn render_plan_card_lines<'a>(
             String::new()
         };
 
-        let suffix = if icon_str.is_empty() && elapsed_str.is_empty() {
-            String::new()
-        } else if icon_str.is_empty() {
-            format!(" {}", elapsed_str)
-        } else if elapsed_str.is_empty() {
-            format!(" {}", icon_str)
-        } else {
-            format!(" {} {}", icon_str, elapsed_str)
-        };
-
-        let full_width_needed = 2 + title_display.len() + suffix.len();
-        let padding = inner_width.saturating_sub(full_width_needed);
-
+        // Suffix spans first: their cells come out of the title's budget.
+        let mut suffix_spans: Vec<Span<'_>> = Vec::new();
+        if !icon_str.is_empty() {
+            suffix_spans.push(Span::styled(
+                format!(" {}", icon_str),
+                Style::default().fg(icon_color),
+            ));
+        }
+        if !elapsed_str.is_empty() {
+            suffix_spans.push(Span::styled(
+                format!(" {}", elapsed_str),
+                Style::default().fg(theme.colors.fg_muted),
+            ));
+        }
+        if let Some(info) = &task.delegated_to {
+            suffix_spans.push(Span::styled(
+                format!(" [delegated → {}]", info.agent_name),
+                Style::default().fg(theme.colors.accent),
+            ));
+        }
+        let suffix_cells: usize = suffix_spans.iter().map(|s| geom::cells(&s.content)).sum();
+        // Two cells of indent and the suffix precede the right border; the
+        // "..." marker is inside what is left for `N. title`.
+        let title_display = geom::ellipsize(
+            &task_title,
+            inner_width.saturating_sub(2 + suffix_cells),
+            "...",
+        );
         let mut spans: Vec<Span<'_>> = vec![
             Span::styled(
                 vertical_char,
@@ -281,25 +297,12 @@ pub fn render_plan_card_lines<'a>(
             ),
             Span::styled(format!("  {}", title_display), title_style),
         ];
-        if !icon_str.is_empty() {
-            spans.push(Span::styled(
-                format!(" {}", icon_str),
-                Style::default().fg(icon_color),
-            ));
-        }
-        if !elapsed_str.is_empty() {
-            spans.push(Span::styled(
-                format!(" {}", elapsed_str),
-                Style::default().fg(theme.colors.fg_muted),
-            ));
-        }
-        if let Some(ref info) = task.delegated_to {
-            spans.push(Span::styled(
-                format!(" [delegated → {}]", info.agent_name),
-                Style::default().fg(theme.colors.accent),
-            ));
-        }
-        spans.push(Span::raw(" ".repeat(padding)));
+        spans.extend(suffix_spans);
+        // The leading border span is outside `inner_width`.
+        let content_cells: usize = spans.iter().skip(1).map(|s| geom::cells(&s.content)).sum();
+        spans.push(Span::raw(geom::spaces(
+            inner_width.saturating_sub(content_cells),
+        )));
         spans.push(Span::styled(
             vertical_char,
             Style::default().fg(theme.colors.decision_border),
@@ -318,7 +321,9 @@ pub fn render_plan_card_lines<'a>(
                         format!("    {}", desc_line),
                         Style::default().fg(theme.colors.fg_muted),
                     ),
-                    Span::raw(" ".repeat(inner_width.saturating_sub(4 + desc_line.len()))),
+                    Span::raw(geom::spaces(
+                        inner_width.saturating_sub(4 + geom::cells(&desc_line)),
+                    )),
                     Span::styled(
                         vertical_char,
                         Style::default().fg(theme.colors.decision_border),
@@ -364,7 +369,9 @@ pub fn render_plan_card_lines<'a>(
                             .add_modifier(Modifier::ITALIC)
                             .add_modifier(Modifier::DIM),
                     ),
-                    Span::raw(" ".repeat(inner_width.saturating_sub(2 + effort_text.len()))),
+                    Span::raw(geom::spaces(
+                        inner_width.saturating_sub(2 + geom::cells(&effort_text)),
+                    )),
                     Span::styled(
                         vertical_char,
                         Style::default().fg(theme.colors.decision_border),
@@ -374,12 +381,12 @@ pub fn render_plan_card_lines<'a>(
         }
 
         let action_text = "[y] Approve  [e] Edit  [n] Reject";
-        let action_display = if action_text.len() > inner_width {
+        let action_display = if geom::cells(action_text) > inner_width {
             "[y] [e] [n]".to_string()
         } else {
             action_text.to_string()
         };
-        let action_pad = inner_width.saturating_sub(action_display.len());
+        let action_pad = inner_width.saturating_sub(geom::cells(&action_display));
         let action_left = action_pad / 2;
         let action_right = action_pad - action_left;
         lines.push(Line::from(vec![
@@ -442,7 +449,9 @@ pub fn render_plan_card_lines<'a>(
                 format!("  {}", status_text),
                 Style::default().add_modifier(Modifier::DIM),
             ),
-            Span::raw(" ".repeat(inner_width.saturating_sub(2 + status_text.len()))),
+            Span::raw(geom::spaces(
+                inner_width.saturating_sub(2 + geom::cells(&status_text)),
+            )),
             Span::styled(
                 vertical_char,
                 Style::default().fg(theme.colors.decision_border),
@@ -466,32 +475,42 @@ pub fn render_plan_card_lines<'a>(
     lines
 }
 
-fn wrap_description(text: &str, max_width: usize) -> Vec<String> {
+/// Word-wrap `text` into rows of at most `max_width` display cells.
+///
+/// Whitespace is normalised to single spaces. A word wider than the budget is
+/// hard-wrapped on grapheme boundaries; an oversized single grapheme stays one
+/// intact row. Shared by the plan, ask, fork and rewind cards.
+pub(super) fn wrap_description(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
         return vec![text.to_string()];
     }
     let mut result = Vec::new();
     let mut current = String::new();
+    let mut current_cells = 0usize;
     for word in text.split_whitespace() {
-        if word.len() > max_width {
+        let word_cells = geom::cells(word);
+        if word_cells > max_width {
             // Flush current line first
             if !current.is_empty() {
-                result.push(current);
+                result.push(std::mem::take(&mut current));
             }
-            let mut remaining = word;
-            while remaining.len() > max_width {
-                result.push(remaining[..max_width].to_string());
-                remaining = &remaining[max_width..];
-            }
-            current = remaining.to_string();
+            // Hard-wrap on grapheme boundaries; the last row keeps filling.
+            let mut rows = geom::wrap_hard(word, max_width);
+            let last = rows.pop().unwrap_or_default();
+            result.extend(rows.into_iter().map(str::to_string));
+            current = last.to_string();
+            current_cells = geom::cells(last);
         } else if current.is_empty() {
             current = word.to_string();
-        } else if current.len() + 1 + word.len() <= max_width {
+            current_cells = word_cells;
+        } else if current_cells + 1 + word_cells <= max_width {
             current.push(' ');
             current.push_str(word);
+            current_cells += 1 + word_cells;
         } else {
-            result.push(current);
+            result.push(std::mem::take(&mut current));
             current = word.to_string();
+            current_cells = word_cells;
         }
     }
     if !current.is_empty() {
@@ -920,5 +939,37 @@ mod tests {
             })
             .collect();
         insta::assert_snapshot!(text);
+    }
+
+    // ---- Story 21.11 display-width primitive ---------------------------------
+    // Whole-card keystones run through `render_plan_card_lines` in
+    // tests/conformance_21_11_display_width/k5a_cards.rs.
+
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    #[test]
+    fn display_width_wrap_description_packs_graphemes_by_cells() {
+        assert_eq!(
+            wrap_description(&C.repeat(5), 4),
+            vec![C.repeat(2), C.repeat(2), C.to_string()]
+        );
+        assert_eq!(
+            wrap_description(&G.repeat(3), 4),
+            vec![G.repeat(2), G.to_string()]
+        );
+        assert_eq!(
+            wrap_description(&A.repeat(5), 2),
+            vec![A.repeat(2), A.repeat(2), A.to_string()]
+        );
+        assert_eq!(wrap_description("ab 界界 cd", 5), vec!["ab", "界界", "cd"]);
+        // An oversized single grapheme stays one intact row.
+        assert_eq!(wrap_description(G, 1), vec![G]);
+        // Short words keep packing after a hard-wrapped tail.
+        assert_eq!(
+            wrap_description(&format!("{} z", C.repeat(3)), 4),
+            vec![C.repeat(2), format!("{C} z")]
+        );
     }
 }

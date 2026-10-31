@@ -568,30 +568,40 @@ pub fn buffer_cell_style(buffer: &ratatui::buffer::Buffer, row: u16, col: u16) -
         .unwrap_or_default()
 }
 
-/// Scan the buffer for `text` and verify that every matching character
+/// Scan the buffer for `text` and verify that every matching rendered glyph
 /// satisfies the style predicate `check`. Returns `true` if at least one
-/// occurrence is found where all characters pass the predicate.
+/// occurrence is found where all glyphs pass the predicate.
+///
+/// Story 21.11 (AC7): the match is row-by-row, over complete rendered grapheme
+/// symbols (`text` is split into extended graphemes and each must equal one
+/// cell's symbol), advancing by display cells. Only the genuine continuation
+/// cells that follow a wide glyph are skipped, so a wide or ZWJ cluster matches
+/// as a whole, a bare first scalar or a different combining suffix does not, a
+/// match never spans a row boundary, and a buffer with a non-zero origin works.
+/// The style predicate runs on each glyph's own (leading) cell.
 pub fn buffer_contains_styled_text(
     buffer: &ratatui::buffer::Buffer,
     text: &str,
     check: impl Fn(&Style) -> bool,
 ) -> bool {
-    let cells = buffer.content();
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() || cells.len() < chars.len() {
+    use ratatui::prelude::Position;
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let wanted: Vec<&str> = text.graphemes(true).collect();
+    if wanted.is_empty() {
         return false;
     }
-
-    'outer: for start in 0..=(cells.len() - chars.len()) {
-        for (i, &expected) in chars.iter().enumerate() {
-            let cell = &cells[start + i];
-            if cell.symbol().chars().next().unwrap_or(' ') != expected {
-                continue 'outer;
-            }
-        }
-        // Text matched — now check style for every character
-        let all_styled = (0..chars.len()).all(|i| {
-            let cell = &cells[start + i];
+    let area = buffer.area;
+    for y in area.top()..area.bottom() {
+        // Glyph cells of this row: (symbol, style); continuation cells dropped.
+        let mut glyphs: Vec<(&str, Style)> = Vec::new();
+        let mut x = area.left();
+        while x < area.right() {
+            let Some(cell) = buffer.cell(Position::new(x, y)) else {
+                break;
+            };
+            let symbol = cell.symbol();
             let style = Style {
                 fg: Some(cell.fg),
                 bg: Some(cell.bg),
@@ -599,10 +609,22 @@ pub fn buffer_contains_styled_text(
                 add_modifier: cell.modifier,
                 sub_modifier: ratatui::style::Modifier::empty(),
             };
-            check(&style)
-        });
-        if all_styled {
-            return true;
+            glyphs.push((symbol, style));
+            x = x.saturating_add(u16::try_from(UnicodeWidthStr::width(symbol).max(1)).unwrap_or(1));
+        }
+        if glyphs.len() < wanted.len() {
+            continue;
+        }
+        for start in 0..=(glyphs.len() - wanted.len()) {
+            let window = &glyphs[start..start + wanted.len()];
+            if window
+                .iter()
+                .zip(&wanted)
+                .all(|((symbol, _), want)| symbol == want)
+                && window.iter().all(|(_, style)| check(style))
+            {
+                return true;
+            }
         }
     }
     false
@@ -720,6 +742,99 @@ fn test_buffer_contains_styled_text_empty_text_returns_false() {
     let terminal = Terminal::new(backend).unwrap();
     let buf = terminal.backend().buffer().clone();
     assert!(!buffer_contains_styled_text(&buf, "", |_| true));
+}
+
+// ── Story 21.11 (AC7/K7): the matcher is a non-vacuous observer ───────────
+
+/// Paint a styled `Line` with a real `Paragraph` into a buffer whose origin is
+/// NOT (0,0), exactly as widget code does.
+fn paint_line_at_origin(
+    line: ratatui::text::Line<'_>,
+    width: u16,
+    rows: u16,
+) -> ratatui::buffer::Buffer {
+    use ratatui::widgets::Widget as _;
+    let area = ratatui::layout::Rect::new(3, 2, width, rows);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    ratatui::widgets::Paragraph::new(line).render(area, &mut buf);
+    buf
+}
+
+const K7_G: &str = "👨\u{200d}👩\u{200d}👧";
+
+#[test]
+fn test_buffer_contains_styled_text_matches_wide_zwj_and_combining_clusters() {
+    let theme = Theme::dark();
+    let hot = Style::default().fg(theme.colors.error);
+    let line = ratatui::text::Line::from(vec![
+        ratatui::text::Span::raw("x "),
+        ratatui::text::Span::styled(format!("界{K7_G}e\u{301}"), hot),
+        ratatui::text::Span::raw(" y"),
+    ]);
+    let buf = paint_line_at_origin(line, 20, 2);
+    let is_hot = |s: &Style| s.fg == Some(theme.colors.error);
+    // True positive controls: whole strings and single clusters.
+    assert!(buffer_contains_styled_text(
+        &buf,
+        &format!("界{K7_G}e\u{301}"),
+        is_hot
+    ));
+    assert!(buffer_contains_styled_text(&buf, "界", is_hot));
+    assert!(buffer_contains_styled_text(&buf, K7_G, is_hot));
+    assert!(buffer_contains_styled_text(&buf, "e\u{301}", is_hot));
+    // A genuine space after the wide run still matches as a space.
+    assert!(buffer_contains_styled_text(&buf, "e\u{301} y", |_| true));
+    // Cross-check coordinates directly: origin (3,2); 'x',' ' then 界 at x=5,
+    // its continuation at x=6, G at x=7.
+    assert_eq!(buf[(5, 2)].symbol(), "界");
+    assert_eq!(buf[(7, 2)].symbol(), K7_G);
+    assert_eq!(buf[(9, 2)].symbol(), "e\u{301}");
+}
+
+#[test]
+fn test_buffer_contains_styled_text_rejects_partial_and_false_matches() {
+    let theme = Theme::dark();
+    let hot = Style::default().fg(theme.colors.error);
+    let line = ratatui::text::Line::from(vec![
+        ratatui::text::Span::raw("xy "),
+        ratatui::text::Span::styled(format!("界{K7_G}e\u{301}"), hot),
+    ]);
+    let buf = paint_line_at_origin(line, 20, 2);
+    let any = |_: &Style| true;
+    // A different combining suffix is a different cluster.
+    assert!(!buffer_contains_styled_text(&buf, "e\u{300}", any));
+    // The bare first scalar of the family is not the rendered cluster.
+    assert!(!buffer_contains_styled_text(&buf, "👨", any));
+    assert!(
+        !buffer_contains_styled_text(&buf, "e", any),
+        "bare base letter is not the accented cluster"
+    );
+    // Wrong style on the glyph cells.
+    assert!(!buffer_contains_styled_text(&buf, "界", |s| s.fg == Some(theme.colors.success)));
+    // Arbitrary blank cells are not skipped: wide glyph and the next one are adjacent.
+    assert!(!buffer_contains_styled_text(
+        &buf,
+        &format!("界 {K7_G}"),
+        any
+    ));
+}
+
+#[test]
+fn test_buffer_contains_styled_text_never_spans_rows() {
+    let area = ratatui::layout::Rect::new(0, 0, 4, 2);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    {
+        use ratatui::widgets::Widget as _;
+        ratatui::widgets::Paragraph::new(ratatui::text::Line::from("ab"))
+            .render(ratatui::layout::Rect::new(2, 0, 2, 1), &mut buf);
+        ratatui::widgets::Paragraph::new(ratatui::text::Line::from("cd"))
+            .render(ratatui::layout::Rect::new(0, 1, 2, 1), &mut buf);
+    }
+    // Row 0 ends "ab", row 1 begins "cd": a linear scan would see "abcd".
+    assert!(buffer_contains_styled_text(&buf, "ab", |_| true));
+    assert!(buffer_contains_styled_text(&buf, "cd", |_| true));
+    assert!(!buffer_contains_styled_text(&buf, "abcd", |_| true));
+    assert!(!buffer_contains_styled_text(&buf, "bc", |_| true));
 }
 
 #[test]

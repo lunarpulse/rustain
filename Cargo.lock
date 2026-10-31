@@ -6361,6 +6361,7 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "trybuild",
+ "unicode-segmentation",
  "unicode-width",
  "url",
  "wasmtime",

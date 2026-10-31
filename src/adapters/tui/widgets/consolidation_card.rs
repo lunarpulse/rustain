@@ -14,6 +14,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::PendingConsolidationCard;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Render the consolidation review card as a list of chat-pane lines.
@@ -23,7 +24,11 @@ pub fn render_consolidation_card_lines<'a>(
     width: u16,
 ) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
-    let inner = (width as usize).saturating_sub(8).max(8);
+    // The card is painted inside a single-cell border on each side, so the
+    // real content width is two cells narrower than the pane.
+    let content = (width as usize).saturating_sub(2);
+    // Detail rows are indented eight cells.
+    let detail_budget = content.saturating_sub(8).max(1);
 
     let count = card.proposals.len();
     // Header: [mem] badge + count.
@@ -42,6 +47,11 @@ pub fn render_consolidation_card_lines<'a>(
     // One selectable row per proposal: marker + `## Category — fact`.
     for (fact, selected) in &card.proposals {
         let marker = if *selected { "  [x] " } else { "  [ ] " };
+        let category = format!("## {} — ", fact.category);
+        // Reserve the marker and the actual category prefix, in cells.
+        let fact_budget = content
+            .saturating_sub(geom::cells(marker) + geom::cells(&category))
+            .max(1);
         lines.push(Line::from(vec![
             Span::styled(
                 marker.to_string(),
@@ -51,12 +61,9 @@ pub fn render_consolidation_card_lines<'a>(
                     theme.colors.fg_muted
                 }),
             ),
+            Span::styled(category, Style::default().fg(theme.colors.fg_muted)),
             Span::styled(
-                format!("## {} — ", fact.category),
-                Style::default().fg(theme.colors.fg_muted),
-            ),
-            Span::styled(
-                truncate(&fact.fact, inner),
+                truncate(&fact.fact, fact_budget),
                 Style::default().fg(theme.colors.fg_primary),
             ),
         ]));
@@ -68,7 +75,7 @@ pub fn render_consolidation_card_lines<'a>(
                 lines.push(Line::from(vec![
                     Span::raw("        "),
                     Span::styled(
-                        truncate(seg, inner),
+                        truncate(seg, detail_budget),
                         Style::default().fg(theme.colors.fg_muted),
                     ),
                 ]));
@@ -86,14 +93,10 @@ pub fn render_consolidation_card_lines<'a>(
     lines
 }
 
-/// Char-safe truncation with an ellipsis marker.
+/// Grapheme-safe truncation to `max` display cells; the `…` marker is inside
+/// the budget.
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{t}…")
-    }
+    geom::ellipsize(s, max, "…").into_owned()
 }
 
 #[cfg(test)]

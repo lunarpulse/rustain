@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 
 use crate::adapters::tui::state::CommandPaletteState;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::palette::PaletteScope;
 
@@ -159,7 +160,8 @@ fn format_palette_entry<'a>(
     entry: &crate::domain::models::palette::PaletteEntry,
     theme: &Theme,
 ) -> ListItem<'a> {
-    // Fixed column widths: name fills up to 30 chars, shortcut right-aligned in 16 chars.
+    // Fixed column widths in display cells: name fills up to 30 cells, shortcut
+    // right-aligned in 16 cells.
     const NAME_WIDTH: usize = 30;
     const SHORTCUT_WIDTH: usize = 16;
 
@@ -175,13 +177,13 @@ fn format_palette_entry<'a>(
     // Right-align shortcut within SHORTCUT_WIDTH (AC7, Task 4.3)
     if let Some(ref shortcut) = entry.shortcut {
         // Pad name to NAME_WIDTH, then right-align shortcut in SHORTCUT_WIDTH columns
-        let name_len = entry.name.len();
-        let padding = if name_len < NAME_WIDTH {
-            NAME_WIDTH - name_len
+        let name_cells = geom::cells(&entry.name);
+        let padding = if name_cells < NAME_WIDTH {
+            NAME_WIDTH - name_cells
         } else {
             1
         };
-        let shortcut_str = format!("{:>width$}", shortcut, width = SHORTCUT_WIDTH);
+        let shortcut_str = geom::pad_left(shortcut, SHORTCUT_WIDTH);
         spans.push(Span::raw(" ".repeat(padding)));
         spans.push(Span::styled(
             shortcut_str,
@@ -228,5 +230,88 @@ mod tests {
         let centered = calculate_centered_area(area);
         assert_eq!(centered.width, 80); // capped at 80
         assert_eq!(centered.height, 20); // capped at 20
+    }
+
+    // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
+    // The production constructors (`event_loop`) register external model
+    // display names with `Ctrl+X, M` and active profile names with
+    // `(active)`; these tests paint the same strings through the real
+    // renderer.
+
+    use crate::domain::models::palette::{PaletteAction, PaletteEntry};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const C: &str = "界";
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const A: &str = "e\u{301}";
+
+    fn model_entry(name: &str) -> PaletteEntry {
+        PaletteEntry {
+            name: name.to_string(),
+            description: "200K ctx".to_string(),
+            shortcut: Some("Ctrl+X, M".to_string()),
+            scope: PaletteScope::Model,
+            action: PaletteAction::SwitchModel {
+                provider_id: "p".to_string(),
+                model_id: "m".to_string(),
+            },
+        }
+    }
+
+    /// Paint the real palette on a 100x30 terminal (overlay x = 20, list
+    /// text from x = 21, first entry on row 10) and return the column where
+    /// the shortcut text starts on the first entry row, plus that row.
+    fn shortcut_column(entry: PaletteEntry) -> (u16, String) {
+        let shortcut = entry.shortcut.clone().unwrap();
+        let mut state = CommandPaletteState::new();
+        state.active = true;
+        state.filtered_entries = vec![entry];
+        let theme = Theme::dark();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), &state, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut glyphs: Vec<(u16, String)> = Vec::new();
+        let mut x = 0u16;
+        while x < 100 {
+            let symbol = buffer.cell((x, 10)).unwrap().symbol().to_string();
+            let width = u16::try_from(geom::cells(&symbol).max(1)).unwrap();
+            glyphs.push((x, symbol));
+            x += width;
+        }
+        let row: String = glyphs.iter().map(|(_, s)| s.as_str()).collect();
+        for i in 0..glyphs.len() {
+            let tail: String = glyphs[i..].iter().map(|(_, s)| s.as_str()).collect();
+            if tail.starts_with(&shortcut) {
+                return (glyphs[i].0, row);
+            }
+        }
+        panic!("shortcut {shortcut:?} not painted: {row:?}");
+    }
+
+    #[test]
+    fn display_width_palette_model_shortcut_column_matches_ascii_control() {
+        // Name column is 30 cells wide from x = 21; the 9-cell shortcut is
+        // right-aligned in 16 cells, so it starts at 21 + 30 + 7 = 58.
+        let cases: Vec<(String, u16)> = vec![
+            // ASCII control.
+            ("gpt-4 (openai)".to_string(), 58),
+            // Unicode display names, 13 / 12 / 22 / 28 / 29 cells.
+            ("模型 (openai)".to_string(), 58),
+            (format!("{G} (p)"), 58),
+            (format!("{A}{A}{A}"), 58),
+            (C.repeat(14), 58),
+            (format!("{}x", C.repeat(14)), 58),
+            // Name at / beyond the name column: one separating cell.
+            (C.repeat(15), 59),
+            (C.repeat(16), 61),
+            (format!("{}x", G.repeat(15)), 60),
+        ];
+        for (name, column) in cases {
+            let (found, row) = shortcut_column(model_entry(&name));
+            assert_eq!(found, column, "name {name:?}: {row:?}");
+        }
     }
 }

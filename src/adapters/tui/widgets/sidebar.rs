@@ -11,8 +11,9 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders, Clear, List, ListItem, ListState},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::session_meta::now_unix;
 use crate::domain::services::session_index::SessionSummary;
 
@@ -131,54 +132,25 @@ pub fn render_history_panel(
 }
 
 /// Truncate text to fit within a given display width.
-/// Uses char_indices for UTF-8 safe truncation.
-/// F18: Handles zero-width characters properly when max_width < 3.
+/// Cuts on whole extended-grapheme boundaries (never inside a ZWJ sequence or
+/// before a combining mark), measuring display cells with the shared policy.
+/// Budgets below the three-cell `...` marker return the whole-grapheme prefix
+/// that fits, with no marker; from three cells up the marker is inside the
+/// budget.
 pub fn truncate_to_width(text: &str, max_width: usize) -> String {
-    if text.width() <= max_width {
+    const MARKER: &str = "...";
+    if geom::cells(text) <= max_width {
         return text.to_string();
     }
 
-    // F18: If max_width can't even fit the ellipsis, return what fits
-    // Handle zero-width characters by tracking actual display width added
-    if max_width < 3 {
-        let mut result = String::new();
-        let mut display_width = 0;
-        for ch in text.chars() {
-            let cw = ch.width().unwrap_or(0);
-            // F18: Skip zero-width chars but include them in result if there's room
-            // They don't consume display width but need to be attached to base chars
-            if cw == 0 {
-                result.push(ch);
-                continue;
-            }
-            if display_width + cw > max_width {
-                break;
-            }
-            result.push(ch);
-            display_width += cw;
-        }
-        return result;
+    // F18: If max_width can't even fit the ellipsis, return what fits.
+    if max_width < MARKER.len() {
+        return geom::clip(text, max_width).to_string();
     }
 
     let mut result = String::with_capacity(max_width);
-    let mut current_width = 0;
-    let ellipsis_width = 3; // "..." is 3 columns
-
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        // F18: Handle zero-width characters - include them without counting toward width
-        if ch_width == 0 {
-            result.push(ch);
-            continue;
-        }
-        if current_width + ch_width > max_width - ellipsis_width {
-            result.push_str("...");
-            break;
-        }
-        result.push(ch);
-        current_width += ch_width;
-    }
-
+    result.push_str(geom::clip(text, max_width - MARKER.len()));
+    result.push_str(MARKER);
     result
 }
 
@@ -202,5 +174,85 @@ mod tests {
         // 2 CJK chars = 4 columns (next would exceed 5), so "こん..."
         assert!(result.ends_with("..."));
         assert_eq!(result, "こん...");
+    }
+
+    // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
+    // The sidebar title budget is `inner width - 17` for a row with the
+    // `just now` timestamp and a one-digit `[3]` count, so each case picks its
+    // title budget by choosing the panel width.
+
+    const C: &str = "界";
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const A: &str = "e\u{301}";
+
+    /// Paint one real history entry in a panel whose title budget is
+    /// `budget` cells and return the first list row as painted glyphs.
+    fn painted_row(title: &str, budget: usize) -> String {
+        let width = u16::try_from(budget + 17 + 2).unwrap();
+        let area = Rect::new(0, 0, width, 3);
+        let mut buf = Buffer::empty(area);
+        let now = now_unix();
+        let entry = SessionSummary::new("c1".into(), title.into(), now, now, 3);
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        render_history_panel(area, &mut buf, &[entry], 0, None, &theme);
+        let mut row = String::new();
+        let mut x = 1u16;
+        while x < width - 1 {
+            let symbol = buf.cell((x, 1)).unwrap().symbol();
+            row.push_str(symbol);
+            x += u16::try_from(geom::cells(symbol).max(1)).unwrap();
+        }
+        row.trim_end().to_string()
+    }
+
+    #[test]
+    fn display_width_sidebar_title_cuts_on_whole_graphemes() {
+        let cases: Vec<(String, usize, String)> = vec![
+            // ASCII positive control: exact fit, fit-minus-one, and longer.
+            ("abcdefgh".into(), 8, "abcdefgh".into()),
+            ("abcdefghi".into(), 8, "abcde...".into()),
+            ("abcdefghijkl".into(), 8, "abcde...".into()),
+            // C: 10 cells exact; one cell short keeps the marker inside.
+            (C.repeat(5), 10, C.repeat(5)),
+            (C.repeat(5), 9, format!("{}...", C.repeat(3))),
+            (C.repeat(5), 8, format!("{}...", C.repeat(2))),
+            // G: never `👨‍...`.
+            (G.repeat(5), 10, G.repeat(5)),
+            (G.repeat(5), 9, format!("{}...", G.repeat(3))),
+            (G.repeat(5), 8, format!("{}...", G.repeat(2))),
+            // A: one cell each, the accent stays with its base.
+            (A.repeat(10), 10, A.repeat(10)),
+            (A.repeat(10), 9, format!("{}...", A.repeat(6))),
+            (A.repeat(10), 8, format!("{}...", A.repeat(5))),
+            // Budgets below the marker: whole-grapheme prefix, no marker.
+            (format!("{G}xx"), 4, format!("{G}xx")),
+            (format!("{G}xx"), 3, "...".into()),
+            (format!("{G}xx"), 2, G.into()),
+            (format!("{G}xx"), 1, String::new()),
+            (format!("{G}xx"), 0, String::new()),
+            (format!("{C}x"), 1, String::new()),
+            (format!("{A}xx"), 2, format!("{A}x")),
+        ];
+        for (title, budget, shown) in cases {
+            assert_eq!(
+                painted_row(&title, budget),
+                format!("  {shown} just now [3]").trim_end(),
+                "title {title:?} budget {budget}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_width_truncate_to_width_never_leaves_a_zwj_fragment() {
+        for budget in 0..14 {
+            let out = truncate_to_width(&G.repeat(6), budget);
+            assert!(
+                geom::cells(&out) <= budget.max(3),
+                "budget {budget}: {out:?}"
+            );
+            assert!(!out.ends_with('\u{200d}'), "budget {budget}: {out:?}");
+            let body = out.trim_end_matches('.');
+            assert_eq!(body.len() % G.len(), 0, "whole families only: {out:?}");
+        }
     }
 }

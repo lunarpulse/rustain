@@ -1,7 +1,7 @@
 use ratatui::prelude::*;
-use unicode_width::UnicodeWidthStr;
 
 use super::transform::{StyledBlock, StyledListItem, StyledSpan};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Right-arrow indicator for clipped long lines in code blocks.
@@ -192,29 +192,16 @@ fn build_code_header(language: Option<&str>, width: usize, border_style: Style) 
     Line::from(Span::styled(format!("┌{}┐", header_inner), border_style))
 }
 
-/// Clip a string to at most `max_display_width` display columns.
-/// Uses unicode-width for correct display width calculation.
+/// Clip a string to at most `max_cols` display cells on whole-grapheme
+/// boundaries and pad the remainder with spaces to exactly `max_cols` (a wide
+/// grapheme that does not fit leaves a padded gap, never a fragment).
 fn clip_str(s: &str, max_cols: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cw > max_cols {
-            break;
-        }
-        out.push(ch);
-        used += cw;
-    }
-    // Pad to max_cols if needed
-    if used < max_cols {
-        out.push_str(&" ".repeat(max_cols - used));
-    }
-    out
+    geom::fit_exact(s, max_cols)
 }
 
-/// Calculate display width of a string using `unicode-width`.
+/// Display cells of a string under the shared string-width policy.
 fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
+    geom::cells(s)
 }
 
 /// Word-wrap a list of `StyledSpan` to `width` columns, returning one `Line` per visual row.
@@ -606,5 +593,132 @@ mod tests {
             let leading_spaces = line1.chars().take_while(|c| *c == ' ').count();
             assert_eq!(leading_spaces, bullet_prefix_w);
         }
+    }
+
+    // ── Story 21.11 display-width tests (entered through `markdown::render`) ──
+    //
+    // G = 2 cells / 1 grapheme / 6 scalars, C = 2 cells, A = 1 cell / 2 scalars.
+    const G: &str = "👨\u{200d}👩\u{200d}👧";
+    const C: &str = "界";
+    const A: &str = "e\u{301}";
+
+    fn md_lines(markdown: &str, width: usize) -> Vec<Line<'static>> {
+        crate::adapters::tui::markdown::render(
+            markdown,
+            width,
+            &theme(),
+            &crate::adapters::tui::markdown::RenderOptions::completed(),
+        )
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Content row 1 of a fenced code block (row 0 is the header).
+    fn code_row(content: &str, width: usize) -> String {
+        let lines = md_lines(&format!("```\n{content}\n```"), width);
+        line_text(&lines[1])
+    }
+
+    fn assert_row_cells(row: &str, width: usize) {
+        assert_eq!(
+            geom::cells(row),
+            width,
+            "row {row:?} must be exactly {width} cells"
+        );
+    }
+
+    #[test]
+    fn display_width_code_block_ascii_positive_control() {
+        // 10-cell line: exact fit at width 12, clipped (marker budgeted) at 8.
+        let fit = code_row("abcdefghij", 12);
+        assert_eq!(fit, "│abcdefghij│");
+        let clipped = code_row("abcdefghij", 8);
+        assert_eq!(clipped, "│abcde→│");
+        assert_row_cells(&clipped, 8);
+    }
+
+    #[test]
+    fn display_width_code_block_clips_whole_family() {
+        let content = G.repeat(4); // 8 cells
+        let fit = code_row(&content, 10);
+        assert_eq!(fit, format!("│{content}│"));
+        assert_row_cells(&fit, 10);
+        // Fit-minus-one: three whole families, then the indicator.
+        let minus_one = code_row(&content, 9);
+        assert_eq!(minus_one, format!("│{}→│", G.repeat(3)));
+        assert_row_cells(&minus_one, 9);
+        // Next narrower: the fourth family would be cut, so a padded gap
+        // replaces it instead of a dangling `👨‍`.
+        let narrower = code_row(&content, 8);
+        assert_eq!(narrower, format!("│{} →│", G.repeat(2)));
+        assert_row_cells(&narrower, 8);
+    }
+
+    #[test]
+    fn display_width_code_block_clips_cjk_and_combining_whole() {
+        let wide = C.repeat(4); // 8 cells
+        assert_eq!(code_row(&wide, 10), format!("│{wide}│"));
+        assert_eq!(code_row(&wide, 9), format!("│{}→│", C.repeat(3)));
+        assert_eq!(code_row(&wide, 8), format!("│{} →│", C.repeat(2)));
+
+        let accent = A.repeat(4); // 4 cells, 8 scalars
+        assert_eq!(code_row(&accent, 6), format!("│{accent}│"));
+        let clipped = code_row(&accent, 5);
+        assert_eq!(clipped, format!("│{}→│", A.repeat(2)));
+        assert_row_cells(&clipped, 5);
+    }
+
+    #[test]
+    fn display_width_prose_oversized_token_ascii_positive_control() {
+        let rows: Vec<String> = md_lines("abcdef", 4).iter().map(line_text).collect();
+        assert_eq!(rows[0], "abcd");
+        let rows: Vec<String> = md_lines("abcdef", 6).iter().map(line_text).collect();
+        assert_eq!(rows[0], "abcdef");
+    }
+
+    #[test]
+    fn display_width_prose_oversized_token_keeps_whole_graphemes() {
+        let token = format!("{G}xx"); // 4 cells: exact fit at 4, cut at 3 and 2
+        let at = |width: usize| line_text(&md_lines(&token, width)[0]);
+        assert_eq!(at(4), token);
+        assert_eq!(at(3), format!("{G}x"));
+        assert_eq!(at(2), G);
+        // Below one grapheme the glyph is omitted, never fragmented.
+        let tiny = at(1);
+        assert!(
+            !tiny.contains('👨') && !tiny.contains('\u{200d}'),
+            "fragment of G painted at width 1: {tiny:?}"
+        );
+        assert_eq!(geom::cells(&tiny), 1);
+
+        let wide = C.repeat(3); // 6 cells
+        let at = |width: usize| line_text(&md_lines(&wide, width)[0]);
+        assert_eq!(at(6), wide);
+        assert_eq!(at(5), format!("{} ", C.repeat(2)));
+
+        let accent = A.repeat(4); // 4 cells
+        let at = |width: usize| line_text(&md_lines(&accent, width)[0]);
+        assert_eq!(at(4), accent);
+        assert_eq!(at(3), A.repeat(3));
+    }
+
+    #[test]
+    fn display_width_clipped_rows_paint_whole_glyphs_into_buffer() {
+        use ratatui::widgets::{Paragraph, Widget};
+
+        let content = G.repeat(4);
+        let lines = md_lines(&format!("```\n{content}\n```"), 9);
+        let area = Rect::new(0, 0, 9, lines.len() as u16);
+        let mut buffer = Buffer::empty(area);
+        Paragraph::new(lines).render(area, &mut buffer);
+        let symbol = |x: u16| buffer.cell((x, 1)).map(|c| c.symbol().to_owned());
+        assert_eq!(symbol(0).as_deref(), Some("│"));
+        for x in [1u16, 3, 5] {
+            assert_eq!(symbol(x).as_deref(), Some(G), "whole family at column {x}");
+        }
+        assert_eq!(symbol(7).as_deref(), Some("→"));
+        assert_eq!(symbol(8).as_deref(), Some("│"));
     }
 }

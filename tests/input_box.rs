@@ -10,6 +10,12 @@ use rustain::adapters::tui::widgets::input_box;
 use rustain::domain::models::FocusState;
 
 use crate::common;
+
+/// Logical (unwrapped) caret position of a scalar index: the composer's own
+/// projection at an unbounded width.
+fn cursor_to_row_col(text: &str, cursor_pos: usize) -> (usize, usize) {
+    input_box::InputGeometry::new(text, usize::MAX).cursor(text, cursor_pos)
+}
 fn render_input_box(
     width: u16,
     height: u16,
@@ -331,18 +337,18 @@ fn test_estimate_tokens_empty() {
 // Covers: FR16 — cursor_to_row_col helper
 #[test]
 fn test_cursor_to_row_col_single_line() {
-    assert_eq!(input_box::cursor_to_row_col("hello", 0), (0, 0));
-    assert_eq!(input_box::cursor_to_row_col("hello", 3), (0, 3));
-    assert_eq!(input_box::cursor_to_row_col("hello", 5), (0, 5));
+    assert_eq!(cursor_to_row_col("hello", 0), (0, 0));
+    assert_eq!(cursor_to_row_col("hello", 3), (0, 3));
+    assert_eq!(cursor_to_row_col("hello", 5), (0, 5));
 }
 
 #[test]
 fn test_cursor_to_row_col_multi_line() {
-    assert_eq!(input_box::cursor_to_row_col("ab\ncd\nef", 0), (0, 0));
-    assert_eq!(input_box::cursor_to_row_col("ab\ncd\nef", 2), (0, 2)); // at '\n'
-    assert_eq!(input_box::cursor_to_row_col("ab\ncd\nef", 3), (1, 0)); // start of line 2
-    assert_eq!(input_box::cursor_to_row_col("ab\ncd\nef", 5), (1, 2)); // at second '\n'
-    assert_eq!(input_box::cursor_to_row_col("ab\ncd\nef", 6), (2, 0)); // start of line 3
+    assert_eq!(cursor_to_row_col("ab\ncd\nef", 0), (0, 0));
+    assert_eq!(cursor_to_row_col("ab\ncd\nef", 2), (0, 2)); // at '\n'
+    assert_eq!(cursor_to_row_col("ab\ncd\nef", 3), (1, 0)); // start of line 2
+    assert_eq!(cursor_to_row_col("ab\ncd\nef", 5), (1, 2)); // at second '\n'
+    assert_eq!(cursor_to_row_col("ab\ncd\nef", 6), (2, 0)); // start of line 3
 }
 
 // Covers: FR16 — input_area_height function
@@ -426,27 +432,30 @@ fn test_input_box_multiple_images_indicator() {
 fn test_cursor_to_row_col_emoji_display_width() {
     // "hello 😀" has 7 chars: h(0) e(1) l(2) l(3) o(4) ' '(5) 😀(6)
     // 😀 is a wide char (display width 2), so cursor after it is display col 8, not 7
-    assert_eq!(input_box::cursor_to_row_col("hello \u{1F600}", 7), (0, 8));
+    assert_eq!(cursor_to_row_col("hello \u{1F600}", 7), (0, 8));
     // Cursor at the emoji itself (i=6) → display col 6 (before emoji is consumed)
-    assert_eq!(input_box::cursor_to_row_col("hello \u{1F600}", 6), (0, 6));
+    assert_eq!(cursor_to_row_col("hello \u{1F600}", 6), (0, 6));
 }
 
 // Covers: DF-052 — CJK cursor positions use display width
 #[test]
 fn test_cursor_to_row_col_cjk_display_width() {
     // "你好界" = 3 CJK chars, each display width 2
-    assert_eq!(input_box::cursor_to_row_col("你好界", 0), (0, 0));
-    assert_eq!(input_box::cursor_to_row_col("你好界", 1), (0, 2));
-    assert_eq!(input_box::cursor_to_row_col("你好界", 2), (0, 4));
-    assert_eq!(input_box::cursor_to_row_col("你好界", 3), (0, 6));
+    assert_eq!(cursor_to_row_col("你好界", 0), (0, 0));
+    assert_eq!(cursor_to_row_col("你好界", 1), (0, 2));
+    assert_eq!(cursor_to_row_col("你好界", 2), (0, 4));
+    assert_eq!(cursor_to_row_col("你好界", 3), (0, 6));
 }
 
 // Covers: DF-060 — CJK input wraps at display width, not char count
 #[test]
 fn test_input_area_height_cjk_wraps_at_display_width() {
     // "你好世界" = 4 CJK chars × display width 2 = 8 display cols
-    // area_width=6 → inner_width=4 → ceil(8/4) = 2 visual rows → 2+2 borders = 4
-    assert_eq!(input_box::input_area_height("你好世界", 6), 4);
+    // area_width=7 → inner_width=5 → "你好" | "世界" = 2 visual rows → 2+2 borders = 4
+    assert_eq!(input_box::input_area_height("你好世界", 7), 4);
+    // Story 21.11 (A2): at area_width=6 → inner_width=4 the two rows are exactly
+    // full, so the end-of-buffer caret needs its own blank row: 3 rows + 2 borders.
+    assert_eq!(input_box::input_area_height("你好世界", 6), 5);
 }
 
 // Covers: DF-060 — single CJK line that fits without wrapping

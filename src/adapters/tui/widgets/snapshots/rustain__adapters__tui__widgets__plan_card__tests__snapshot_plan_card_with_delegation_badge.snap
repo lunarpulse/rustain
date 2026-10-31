@@ -5,8 +5,8 @@ expression: text
 ╔══════════════════════════════════════════════════════════════════════════════╗
 ║                               Plan: Exec Plan                                ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  1. Init ✓ (5s)                                                            ║
-║  2. Build [delegated → code-reviewer]                                                                    ║
+║  1. Init ✓ (5s)                                                              ║
+║  2. Build [delegated → code-reviewer]                                        ║
 ║  3. Test                                                                     ║
 ║  4. Deploy                                                                   ║
 ║  [approved 22:14:20]                                                         ║

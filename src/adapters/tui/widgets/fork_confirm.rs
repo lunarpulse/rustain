@@ -1,23 +1,13 @@
 use ratatui::prelude::*;
 
+use super::plan_card::wrap_description;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
-
-/// Truncate `text` to at most `max_chars` characters using safe char-boundary logic.
-/// Returns the truncated string, appending "…" if truncation occurred.
-fn truncate_chars(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    // Collect up to max_chars-1 chars to leave room for ellipsis
-    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
-    format!("{}…", truncated)
-}
 
 /// Render a fork confirmation card as styled lines.
 ///
 /// Uses double border `╔═╗` with fork prompt and `[y] Fork  [n] Cancel`.
-/// Char-boundary-safe truncation for message preview.
+/// Grapheme-safe, cell-bounded truncation for the message preview.
 pub fn render_fork_confirmation_lines(
     message_preview: &str,
     message_index: usize,
@@ -40,7 +30,7 @@ pub fn render_fork_confirmation_lines(
 
     // Title line
     let title = "Fork conversation at this message?";
-    let padded_title = format!("║ {:<width$} ║", title, width = inner_width);
+    let padded_title = format!("║ {} ║", geom::pad_right(title, inner_width));
     lines.push(Line::from(Span::styled(
         padded_title,
         Style::default()
@@ -48,10 +38,13 @@ pub fn render_fork_confirmation_lines(
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Message preview line (truncated, with message index)
-    let preview = truncate_chars(message_preview, 50.min(inner_width.saturating_sub(10)));
-    let preview_label = format!("Message {}: \"{}\"", message_index + 1, preview);
-    let padded_preview = format!("║ {:<width$} ║", preview_label, width = inner_width);
+    // Message preview line (cell-bounded, with message index): the label's
+    // own cells come out of the row budget, the marker is inside the preview's.
+    let label_head = format!("Message {}: \"", message_index + 1);
+    let preview_budget = 50.min(inner_width.saturating_sub(geom::cells(&label_head) + 1));
+    let preview = geom::ellipsize(message_preview, preview_budget, "…");
+    let preview_label = format!("{label_head}{preview}\"");
+    let padded_preview = format!("║ {} ║", geom::pad_right(&preview_label, inner_width));
     lines.push(Line::from(Span::styled(
         padded_preview,
         Style::default().fg(theme.colors.fg_secondary),
@@ -60,9 +53,9 @@ pub fn render_fork_confirmation_lines(
     // Info line
     let info = "A new tab will be created with messages up to this point.";
     // Wrap if needed
-    let info_chunks = wrap_to_width(info, inner_width);
+    let info_chunks = wrap_description(info, inner_width);
     for chunk in info_chunks {
-        let padded = format!("║ {:<width$} ║", chunk, width = inner_width);
+        let padded = format!("║ {} ║", geom::pad_right(&chunk, inner_width));
         lines.push(Line::from(Span::styled(
             padded,
             Style::default().fg(theme.colors.fg_muted),
@@ -71,7 +64,7 @@ pub fn render_fork_confirmation_lines(
 
     // Action line
     let actions = "[y] Fork  [n] Cancel";
-    let padded_actions = format!("║ {:<width$} ║", actions, width = inner_width);
+    let padded_actions = format!("║ {} ║", geom::pad_right(actions, inner_width));
     lines.push(Line::from(Span::styled(
         padded_actions,
         Style::default()
@@ -88,33 +81,6 @@ pub fn render_fork_confirmation_lines(
             .add_modifier(Modifier::BOLD),
     )));
 
-    lines
-}
-
-/// Simple word-wrapping into chunks of at most `max_width` chars.
-fn wrap_to_width(text: &str, max_width: usize) -> Vec<String> {
-    if max_width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            current = word.to_string();
-        } else if current.chars().count() + 1 + word.chars().count() > max_width {
-            lines.push(current);
-            current = word.to_string();
-        } else {
-            current.push(' ');
-            current.push_str(word);
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
     lines
 }
 

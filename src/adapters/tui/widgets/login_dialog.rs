@@ -363,21 +363,8 @@ fn picker(state: &LoginOverlayState, width: usize, styles: &Styles) -> Vec<Modal
 /// One unwrapped line that keeps its column spacing, cut to `width` cells
 /// with `…`.
 fn single_line(text: &str, style: Style, width: usize) -> Line<'static> {
-    if text.width() <= width {
-        return Line::from(Span::styled(text.to_owned(), style));
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if used + cells + 1 > width {
-            break;
-        }
-        out.push(ch);
-        used += cells;
-    }
-    out.push('…');
-    Line::from(Span::styled(out, style))
+    let fitted = crate::adapters::tui::text_geometry::ellipsize(text, width, "…");
+    Line::from(Span::styled(fitted.into_owned(), style))
 }
 
 /// The `/logout` / `/accounts` account step: the `auth accounts` header, at
@@ -994,5 +981,105 @@ mod tests {
                 .draw(|f| render(f, f.area(), &state, &theme, osc8))
                 .unwrap();
         }
+    }
+
+    // ── Story 21.11 (AC6/K6): display-width correctness ──────────────────
+    fn painted(
+        state: &LoginOverlayState,
+        osc8: bool,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height))
+            .expect("test terminal");
+        let theme = Theme::dark();
+        terminal
+            .draw(|f| render(f, f.area(), state, &theme, osc8))
+            .expect("draw");
+        terminal.backend().buffer().clone()
+    }
+
+    /// `(x, symbol)` of every glyph of one buffer row; the continuation cell of
+    /// a wide glyph is skipped.
+    fn glyph_cells(buffer: &ratatui::buffer::Buffer, y: u16) -> Vec<(u16, String)> {
+        let mut out = Vec::new();
+        let mut x = 0;
+        while x < buffer.area.width {
+            let symbol = buffer[(x, y)].symbol().to_owned();
+            let advance = u16::try_from(symbol.width().max(1)).unwrap_or(1);
+            out.push((x, symbol));
+            x += advance;
+        }
+        out
+    }
+
+    /// The text between the modal's side borders, row by row.
+    fn inner_rows(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+        (0..buffer.area.height)
+            .filter_map(|y| {
+                let cells = glyph_cells(buffer, y);
+                let first = cells.iter().position(|(_, symbol)| symbol == "│")?;
+                let last = cells.iter().rposition(|(_, symbol)| symbol == "│")?;
+                (first < last).then(|| {
+                    cells[first + 1..last]
+                        .iter()
+                        .map(|(_, symbol)| symbol.as_str())
+                        .collect()
+                })
+            })
+            .collect()
+    }
+
+    /// 20-9j / A6: a raw Unicode URL is re-serialized to ASCII (IDNA host,
+    /// percent-encoded path and query) before the link path counts and chunks it.
+    #[test]
+    fn display_width_raw_unicode_url_is_ascii_before_the_link_rows() {
+        let raw = "https://例え.test/界?q=é";
+        let safe = safe_url(raw).expect("a Unicode http(s) URL is a safe URL");
+        assert!(safe.is_ascii(), "{safe}");
+        assert!(safe.starts_with("https://xn--"), "{safe}");
+        assert!(safe.contains("%E7%95%8C"), "{safe}");
+        assert!(safe.ends_with("?q=%C3%A9"), "{safe}");
+        for ch in ['例', 'え', '界', 'é'] {
+            assert!(!safe.contains(ch), "{ch} survived in {safe}");
+        }
+
+        let one_row = inner_rows(&painted(
+            &browser(raw, "http://localhost:43123/launch", false),
+            false,
+            80,
+            24,
+        ));
+        let link = one_row
+            .iter()
+            .find(|row| row.starts_with("Sign-in link: "))
+            .expect("link row");
+        assert_eq!(link.trim_end(), format!("Sign-in link: {safe}"));
+        assert!(link.is_ascii());
+
+        // Wrapped: every URL row stays ASCII and they rejoin to the safe URL.
+        let long_raw = format!("https://例え.test/界?q=é&{}", "p".repeat(120));
+        let long_safe = safe_url(&long_raw).expect("safe");
+        assert!(long_safe.is_ascii());
+        let wrapped_rows = inner_rows(&painted(
+            &browser(&long_raw, "http://localhost:43123/launch", false),
+            false,
+            50,
+            30,
+        ));
+        let label = wrapped_rows
+            .iter()
+            .position(|row| row.trim_end() == "Sign-in link:")
+            .expect("label-only row");
+        let want = without_scheme(&long_safe);
+        let mut joined = String::new();
+        for row in &wrapped_rows[label + 1..] {
+            if joined.len() >= want.len() {
+                break;
+            }
+            joined.push_str(row.trim_end());
+        }
+        assert_eq!(joined, want);
+        assert!(joined.is_ascii());
     }
 }

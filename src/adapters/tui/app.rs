@@ -1,5 +1,6 @@
 use crate::adapters::tui::handlers::login::LoginAction;
 use crate::adapters::tui::state::{ChordAction, Direction, TuiState};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
 use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
@@ -695,6 +696,20 @@ pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputActi
     };
     let modal_owned_focus = permission_modal_owns_focus(state);
     let action = dispatch_input(state, event);
+    if state.focus == FocusState::Input
+        && matches!(
+            event,
+            DomainInputEvent::KeyPress(_)
+                | DomainInputEvent::Paste(_)
+                | DomainInputEvent::Resize(_, _)
+        )
+    {
+        // Typing, paste and resize move the caret or the composer width: keep
+        // the visual-row scroll window on the caret (Story 21.11). Special keys
+        // keep the window themselves (navigation arms) or restore an exact
+        // saved one (Esc closing a popup-owned slash edit, Story 21.2).
+        ensure_cursor_visible(state);
+    }
     if modal_owned_focus && !permission_modal_owns_focus(state) {
         advance_deferred_permission(state);
     }
@@ -2619,11 +2634,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         // Ctrl+E: end of the current logical line (Story 21.2 AC12, RU-19). It no
         // longer toggles multiline — Alt+M and `/ml` own the toggle.
         DomainKey::CtrlE if state.focus == FocusState::Input => {
-            let (row, _col) =
-                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
-            let line_len = input_box::line_len_at_row(&state.input_buffer, row);
-            state.cursor_position =
-                input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
+            // Logical line (unbounded width), not the wrapped visual row End uses.
+            let geometry = input_box::InputGeometry::new(&state.input_buffer, usize::MAX);
+            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, usize::MAX);
+            ensure_cursor_visible(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2646,75 +2661,90 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
         DomainKey::Backspace if state.focus == FocusState::Input => {
             if state.cursor_position > 0 {
-                state.cursor_position -= 1;
-                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
-                state.input_buffer.remove(byte_pos);
+                // Remove one whole grapheme cluster, never half of G or A.
+                let from = geom::prev_boundary(&state.input_buffer, state.cursor_position);
+                let to = geom::next_boundary(&state.input_buffer, from).max(state.cursor_position);
+                let (start, end) = (
+                    char_to_byte(&state.input_buffer, from),
+                    char_to_byte(&state.input_buffer, to),
+                );
+                state.input_buffer.replace_range(start..end, "");
+                state.cursor_position = from;
+                ensure_cursor_visible(state);
                 state.needs_redraw = true;
             }
             InputAction::Consumed
         }
 
-        // Delete key: remove character at cursor position
+        // Delete key: remove the grapheme cluster at the cursor
         DomainKey::Delete if state.focus == FocusState::Input => {
             let total_chars = state.input_buffer.chars().count();
             if state.cursor_position < total_chars {
-                let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
-                state.input_buffer.remove(byte_pos);
+                let from = geom::snap_boundary(&state.input_buffer, state.cursor_position);
+                let to = geom::next_boundary(&state.input_buffer, from);
+                let (start, end) = (
+                    char_to_byte(&state.input_buffer, from),
+                    char_to_byte(&state.input_buffer, to),
+                );
+                state.input_buffer.replace_range(start..end, "");
+                state.cursor_position = from;
+                ensure_cursor_visible(state);
                 state.needs_redraw = true;
             }
             InputAction::Consumed
         }
 
         DomainKey::Left if state.focus == FocusState::Input => {
-            state.cursor_position = state.cursor_position.saturating_sub(1);
+            state.cursor_position = geom::prev_boundary(&state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         DomainKey::Right if state.focus == FocusState::Input => {
             if state.cursor_position < state.input_buffer.chars().count() {
-                state.cursor_position += 1;
+                state.cursor_position =
+                    geom::next_boundary(&state.input_buffer, state.cursor_position);
+                ensure_cursor_visible(state);
                 state.needs_redraw = true;
             }
             InputAction::Consumed
         }
 
-        // Home: move to start of current line
+        // Home: move to start of the current visual row
         DomainKey::Home if state.focus == FocusState::Input => {
-            let (row, _col) =
-                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
-            state.cursor_position = input_box::row_col_to_cursor(&state.input_buffer, row, 0);
+            let geometry = composer_geometry(state);
+            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, 0);
+            ensure_cursor_visible(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
 
-        // End: move to end of current line
+        // End: move to end of the current visual row
         DomainKey::End if state.focus == FocusState::Input => {
-            let (row, _col) =
-                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
-            let line_len = input_box::line_len_at_row(&state.input_buffer, row);
-            state.cursor_position =
-                input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
+            let geometry = composer_geometry(state);
+            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, usize::MAX);
+            ensure_cursor_visible(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
 
-        // Up/Down in Input focus: multi-line navigation or history
+        // Up/Down in Input focus: multi-row navigation or history
         // Covers: UX-DR74, UX-DR76
         DomainKey::Up if state.focus == FocusState::Input => {
-            let has_multiline_content = state.input_buffer.contains('\n');
-            let (row, col) =
-                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let geometry = composer_geometry(state);
+            let has_newline = state.input_buffer.contains('\n');
+            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
 
-            if has_multiline_content && row > 0 && !state.input_history.is_navigating() {
-                // Move cursor up one line (only if not already navigating history)
-                let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row - 1));
-                state.cursor_position =
-                    input_box::row_col_to_cursor(&state.input_buffer, row - 1, target_col);
+            if row > 0 && !state.input_history.is_navigating() {
+                // Move cursor up one visual row (only if not already navigating history)
+                state.cursor_position = geometry.cursor_at(&state.input_buffer, row - 1, col);
                 ensure_cursor_visible(state);
                 state.needs_redraw = true;
             } else if state.input_buffer.is_empty()
                 || state.input_history.is_navigating()
-                || !has_multiline_content
+                || !has_newline
             {
                 // Navigate history
                 let current = state.input_buffer.clone();
@@ -2730,19 +2760,16 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
 
         DomainKey::Down if state.focus == FocusState::Input => {
-            let has_multiline_content = state.input_buffer.contains('\n');
-            let (row, col) =
-                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
-            let total_lines = input_box::line_count(&state.input_buffer);
+            let geometry = composer_geometry(state);
+            let has_multiline_content = geometry.row_count() > 1;
+            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
 
             if has_multiline_content
-                && row + 1 < total_lines
+                && row + 1 < geometry.row_count()
                 && !state.input_history.is_navigating()
             {
-                // Move cursor down one line (only if not already navigating history)
-                let target_col = col.min(input_box::line_len_at_row(&state.input_buffer, row + 1));
-                state.cursor_position =
-                    input_box::row_col_to_cursor(&state.input_buffer, row + 1, target_col);
+                // Move cursor down one visual row (only if not already navigating history)
+                state.cursor_position = geometry.cursor_at(&state.input_buffer, row + 1, col);
                 ensure_cursor_visible(state);
                 state.needs_redraw = true;
             } else if state.input_history.is_navigating() {
@@ -3144,15 +3171,31 @@ fn submit_message(state: &mut TuiState) -> InputAction {
     InputAction::SubmitMessage(text)
 }
 
-/// Ensure the cursor's row is visible within the input box scroll window.
+/// The composer's width-aware projection at the width the layout actually
+/// gives it (sidebar-narrowed main column, not the terminal width).
+fn composer_geometry(state: &TuiState) -> input_box::InputGeometry {
+    let width = if state.terminal_width == 0 {
+        u16::MAX
+    } else {
+        crate::adapters::tui::layout::composer_width(
+            state.terminal_width,
+            state.sidebar_visible,
+            state.density_mode,
+        )
+    };
+    input_box::InputGeometry::new(&state.input_buffer, input_box::inner_width(width))
+}
+
+/// Ensure the cursor's visual row is visible within the input box scroll window
+/// (`input_scroll_offset` counts visual rows).
 fn ensure_cursor_visible(state: &mut TuiState) {
-    let (cursor_row, _) = input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
-    let max_visible = input_box::MAX_INPUT_LINES;
-    if cursor_row >= state.input_scroll_offset + max_visible {
-        state.input_scroll_offset = cursor_row + 1 - max_visible;
-    } else if cursor_row < state.input_scroll_offset {
-        state.input_scroll_offset = cursor_row;
-    }
+    let geometry = composer_geometry(state);
+    let (cursor_row, _) = geometry.cursor(&state.input_buffer, state.cursor_position);
+    state.input_scroll_offset = geometry.scroll_to_show(
+        cursor_row,
+        state.input_scroll_offset,
+        input_box::MAX_INPUT_LINES,
+    );
 }
 
 /// Strip a case-insensitive `a2a/` namespace prefix from an A2A mention

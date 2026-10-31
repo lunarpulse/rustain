@@ -13,6 +13,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::PendingForgetCard;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Render the forget confirm card as a list of chat-pane lines.
@@ -22,13 +23,11 @@ pub fn render_forget_card_lines<'a>(
     width: u16,
 ) -> Vec<Line<'a>> {
     let mut lines: Vec<Line<'a>> = Vec::new();
-    // Account for the marker "  [x] " (6 chars) + key suffix "  [deadbeef]" (~13 chars)
-    // so the summary truncation doesn't overflow the pane width.
-    let marker_width = 6usize;
-    let key_suffix_width = 13usize;
-    let inner = (width as usize)
-        .saturating_sub(marker_width + key_suffix_width)
-        .max(8);
+    // The card is painted inside a single-cell border on each side, so the
+    // real content width is two cells narrower than the pane. Each row
+    // reserves its focus indicator, marker and actual key suffix in cells
+    // (see below), so the summary excerpt never overflows the pane width.
+    let content = (width as usize).saturating_sub(2);
 
     let count = card.candidates.len();
     // Header: [mem] badge + count. "forget" wording is honest (this purges).
@@ -49,6 +48,12 @@ pub fn render_forget_card_lines<'a>(
         let is_focused = idx == card.focused_index;
         let marker = if *selected { "  [x] " } else { "  [ ] " };
         let focus_indicator = if is_focused { "> " } else { "  " };
+        let key_suffix = format!("  [{:016x}]", *key);
+        let inner = content
+            .saturating_sub(
+                geom::cells(focus_indicator) + geom::cells(marker) + geom::cells(&key_suffix),
+            )
+            .max(1);
         lines.push(Line::from(vec![
             Span::styled(
                 focus_indicator.to_string(),
@@ -70,10 +75,7 @@ pub fn render_forget_card_lines<'a>(
                 truncate(&entry.summary, inner),
                 Style::default().fg(theme.colors.fg_primary),
             ),
-            Span::styled(
-                format!("  [{:016x}]", *key),
-                Style::default().fg(theme.colors.fg_muted),
-            ),
+            Span::styled(key_suffix, Style::default().fg(theme.colors.fg_muted)),
         ]));
     }
 
@@ -87,14 +89,10 @@ pub fn render_forget_card_lines<'a>(
     lines
 }
 
-/// Char-safe truncation with an ellipsis marker.
+/// Grapheme-safe truncation to `max` display cells; the `…` marker is inside
+/// the budget.
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{t}…")
-    }
+    geom::ellipsize(s, max, "…").into_owned()
 }
 
 #[cfg(test)]

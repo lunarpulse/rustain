@@ -10,7 +10,7 @@ use crate::domain::models::NodeState;
 use crate::domain::models::subagent_view::{AgentRowView, OwnershipKind};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
-use super::sidebar::truncate_to_width;
+use crate::adapters::tui::text_geometry as geom;
 
 pub fn render(
     area: Rect,
@@ -98,27 +98,18 @@ pub fn render(
                 .and_then(|s| s.lines().last().map(|l| l.to_string()))
                 .unwrap_or_default();
 
-            let prefix_width = icon_sym.chars().count()
+            let prefix_width = geom::cells(icon_sym)
                 + 1
-                + glyph.chars().count()
+                + geom::cells(glyph)
                 + 1
-                + indent.chars().count()
-                + entry.subagent_type.chars().count()
+                + geom::cells(&indent)
+                + geom::cells(&entry.subagent_type)
                 + 2
                 + if entry.isolated {
-                    super::orchestration_glyph::isolation_glyph()
-                        .chars()
-                        .count()
-                        + 1
+                    geom::cells(super::orchestration_glyph::isolation_glyph()) + 1
                 } else {
                     0
                 };
-            let max_task_width = (inner_area.width as usize).saturating_sub(prefix_width + 12);
-            let truncated_task = if task_summary.len() > max_task_width && max_task_width > 3 {
-                truncate_to_width(&task_summary, max_task_width)
-            } else {
-                task_summary
-            };
 
             let mut spans: Vec<Span> = vec![
                 Span::styled(icon_sym.to_string(), Style::default().fg(icon_color)),
@@ -166,6 +157,14 @@ pub fn render(
                 NodeState::Created => Some("queued"),
                 _ => None,
             };
+
+            // Cells left for the task tail after the actual prefix and status
+            // suffix; 12 cells stay reserved for the elapsed column. The
+            // budget is always applied (it may be zero).
+            let prefix_width = prefix_width + status_suffix.map_or(0, |s| 1 + geom::cells(s));
+            let max_task_width = (inner_area.width as usize).saturating_sub(prefix_width + 12);
+            let truncated_task = geom::ellipsize(&task_summary, max_task_width, "...");
+
             if let Some(suffix) = status_suffix {
                 spans.push(Span::styled(
                     format!(" {}", suffix),

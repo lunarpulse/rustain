@@ -315,6 +315,11 @@ rustain/
 **Terminal UI** — ratatui 0.30 + crossterm 0.29. Multi-tab streaming chat,
 collapsible tool blocks, vim-style navigation (`j`/`k`/`i`), command palette,
 @-mention autocomplete, context meter with cache breakdown, plan mode overlay.
+Text is laid out by terminal cells and grapheme clusters, not bytes or code
+points: CJK text, emoji sequences (such as ZWJ families) and combining marks
+wrap, clip, pad and edit as whole glyphs, and the composer's height, caret and
+scrolling follow the same wrapped rows. The supported terminal floor is
+unchanged (60×16).
 
 **Tool execution** — seven-state FSM per tool call (`Validating → Scheduled →
 AwaitingApproval → Executing → Success/Error/Cancelled`). Parallel batching for

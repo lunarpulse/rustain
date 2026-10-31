@@ -18,6 +18,7 @@
 use ratatui::prelude::*;
 
 use crate::adapters::tui::state::PendingTeamRetract;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Render the card as chat-pane lines, pre-wrapped to `width`.
@@ -49,37 +50,44 @@ pub fn render_team_retract_lines<'a>(
     lines
 }
 
-/// Word-wrap one logical line to `width` characters; a word longer than the
-/// line (a 35-character item id on a narrow pane) is split rather than
-/// clipped. A blank line stays one blank line.
+/// Word-wrap one logical line to `width` display cells; a word longer than the
+/// line (a 35-character item id on a narrow pane) is split at grapheme
+/// boundaries rather than clipped. A blank line stays one blank line.
 fn wrap_chars(raw: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
-    let mut current_len = 0usize;
+    let mut current_cells = 0usize;
     for word in raw.split(' ') {
-        let word_len = word.chars().count();
-        if current_len > 0 && current_len + 1 + word_len > width {
+        let word_cells = geom::cells(word);
+        if current_cells > 0 && current_cells + 1 + word_cells > width {
             out.push(std::mem::take(&mut current));
-            current_len = 0;
+            current_cells = 0;
         }
-        if current_len > 0 {
+        if current_cells > 0 {
             current.push(' ');
-            current_len += 1;
+            current_cells += 1;
         }
         let mut rest = word;
-        while current_len + rest.chars().count() > width {
-            let take = width - current_len;
-            let split = rest
-                .char_indices()
-                .nth(take)
-                .map_or(rest.len(), |(at, _)| at);
-            current.push_str(&rest[..split]);
+        while current_cells + geom::cells(rest) > width {
+            let mut piece = geom::clip(rest, width.saturating_sub(current_cells));
+            if piece.is_empty() {
+                if current_cells > 0 {
+                    out.push(std::mem::take(&mut current));
+                    current_cells = 0;
+                    continue;
+                }
+                // One grapheme wider than the whole row: keep it intact on its
+                // own row so the loop always makes progress.
+                let first = geom::byte_of_scalar(rest, geom::next_boundary(rest, 0));
+                piece = &rest[..first];
+            }
+            current.push_str(piece);
             out.push(std::mem::take(&mut current));
-            current_len = 0;
-            rest = &rest[split..];
+            current_cells = 0;
+            rest = &rest[piece.len()..];
         }
         current.push_str(rest);
-        current_len += rest.chars().count();
+        current_cells += geom::cells(rest);
     }
     out.push(current);
     out
@@ -127,7 +135,7 @@ mod tests {
         ));
         for line in &lines {
             assert!(
-                line.chars().count() <= usize::from(width) - 2,
+                geom::cells(line) <= usize::from(width) - 2,
                 "{line:?} overflows {width}"
             );
         }
@@ -139,5 +147,47 @@ mod tests {
                 .is_some_and(|last| last.contains("Cancel (Esc)")),
             "{lines:?}"
         );
+
+        // Long unbroken wide words: every row fits the pane in display cells,
+        // no cluster is split, and no source character is lost.
+        const G: &str = "👨\u{200d}👩\u{200d}👧";
+        const C: &str = "界";
+        let keys = "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)";
+        for word in [
+            C.repeat(40),
+            G.repeat(30),
+            format!("{}{}", "x".repeat(35), G.repeat(10)),
+        ] {
+            let source = format!("Retract on jun-dev's host\n\nitem         {word}\n\n{keys}");
+            for width in [40u16, 60] {
+                let lines = texts(&render_team_retract_lines(
+                    &pending(&source),
+                    &crate::adapters::tui::theme::Theme::dark(),
+                    width,
+                ));
+                for line in &lines {
+                    assert!(
+                        geom::cells(line) <= usize::from(width) - 2,
+                        "{line:?} overflows {width}"
+                    );
+                    for g in
+                        unicode_segmentation::UnicodeSegmentation::graphemes(line.as_str(), true)
+                    {
+                        if g.contains('👨') || g.contains('👩') || g.contains('👧') {
+                            assert_eq!(g, G, "split cluster in {line:?}");
+                        }
+                    }
+                }
+                let kept: String = lines.concat().split_whitespace().collect();
+                let want: String = source.split_whitespace().collect();
+                assert_eq!(kept, want, "width {width}: source lost");
+                assert!(
+                    lines
+                        .last()
+                        .is_some_and(|last| last.contains("Cancel (Esc)")),
+                    "{lines:?}"
+                );
+            }
+        }
     }
 }

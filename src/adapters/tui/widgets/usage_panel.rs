@@ -12,6 +12,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::adapters::tui::state::{SessionUsageSummary, UsagePanelState};
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::model_selector::humanize_ctx;
 use crate::adapters::tui::widgets::status_bar::format_token_count;
@@ -238,15 +239,14 @@ fn section_rule(lines: &mut Vec<Line<'static>>, width: u16, theme: &Theme) {
     )));
 }
 
+/// Model-column excerpt: at most `max` display cells of whole graphemes, then
+/// the `…` marker (outside the budget, as it always was) when the id was cut.
+/// Provider model ids are external strings, so they are measured in cells.
 fn truncate_model(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if geom::cells(s) <= max {
         return s.to_string();
     }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &s[..end])
+    format!("{}…", geom::clip(s, max))
 }
 
 fn calculate_centered_area(area: Rect) -> Rect {

@@ -3,6 +3,7 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
 /// Render trust prompt lines for inline display in the chat pane.
@@ -111,12 +112,8 @@ pub fn render_inspect_lines<'a>(
     // Content lines (truncated)
     let content_lines: Vec<&str> = content.lines().take(max_lines).collect();
     for line_content in &content_lines {
-        let display = if line_content.chars().count() > 78 {
-            let truncated: String = line_content.chars().take(75).collect();
-            format!("{}...", truncated)
-        } else {
-            line_content.to_string()
-        };
+        // Fixed 78-cell presentation budget; the `...` marker is inside it.
+        let display = geom::ellipsize(line_content, 78, "...").into_owned();
         lines.push(Line::from(vec![
             Span::styled("┃ ", border_style),
             Span::styled(display, Style::default().fg(theme.colors.fg_primary)),

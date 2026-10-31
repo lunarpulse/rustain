@@ -47,6 +47,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState},
 };
 
+use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
 
@@ -146,11 +147,8 @@ fn sub_task_line_for(
     ];
 
     if let Some(ref info) = sub.delegated_to {
-        let name = if info.agent_name.chars().count() > 12 {
-            format!("{}…", info.agent_name.chars().take(12).collect::<String>())
-        } else {
-            info.agent_name.clone()
-        };
+        // 12-cell name budget; the marker is inside it.
+        let name = geom::ellipsize(&info.agent_name, 12, "…");
         spans.push(Span::styled(
             format!(" [delegated → {}]", name),
             Style::default().fg(theme.colors.accent),
@@ -307,11 +305,8 @@ pub fn render_task_panel(
                 ];
 
                 if let Some(ref info) = task.delegated_to {
-                    let name = if info.agent_name.chars().count() > 12 {
-                        format!("{}…", info.agent_name.chars().take(12).collect::<String>())
-                    } else {
-                        info.agent_name.clone()
-                    };
+                    // 12-cell name budget; the marker is inside it.
+                    let name = geom::ellipsize(&info.agent_name, 12, "…");
                     spans.push(Span::styled(
                         format!(" [delegated → {}]", name),
                         Style::default().fg(theme.colors.accent),

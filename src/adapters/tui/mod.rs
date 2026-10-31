@@ -22,6 +22,7 @@ pub mod state;
 mod story21_2_slash_tests;
 pub mod task_panel_handlers;
 pub mod terminal;
+pub mod text_geometry;
 #[allow(dead_code)]
 pub mod theme;
 pub mod version_info;

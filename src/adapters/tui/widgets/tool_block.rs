@@ -4,6 +4,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::adapters::daemon::protocol::ToolInputWithheld;
+use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::clock::Clock;
 use crate::domain::models::{
@@ -47,14 +48,9 @@ fn tool_summary(name: &str, input: &serde_json::Value) -> String {
         "Bash" | "bash" => input
             .get("command")
             .and_then(|v| v.as_str())
-            .map(|s| {
-                if s.chars().count() > 60 {
-                    let truncated: String = s.chars().take(57).collect();
-                    format!("{}...", truncated)
-                } else {
-                    s.to_string()
-                }
-            })
+            // Display summary only: a 60-cell budget with the `...` marker
+            // inside it. The raw command stays untouched in `tc.input`.
+            .map(|s| geom::ellipsize(s, 60, "...").into_owned())
             .unwrap_or_default(),
         "Read" | "read" => input
             .get("file_path")
@@ -442,7 +438,9 @@ pub fn render_tool_block_lines_attached<'a>(
                 let border_char = "─";
                 let header = format!("─ {} ", display_tool_name(&tc.name));
                 let trailer = format!(" ✓ ({}) ", elapsed);
-                let fill_len = w.saturating_sub(header.len() + trailer.len() + 2);
+                // `┌` and `┐` are one cell each; `─` and `✓` are one cell but
+                // several bytes, so the fill is measured in cells.
+                let fill_len = w.saturating_sub(geom::cells(&header) + geom::cells(&trailer) + 2);
                 let fill = border_char.repeat(fill_len);
 
                 let mut lines = Vec::new();

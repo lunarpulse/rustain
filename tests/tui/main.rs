@@ -31,6 +31,9 @@ mod conformance_21_2_shortcut_truth;
 #[path = "../conformance_19_1_line_diff.rs"]
 mod conformance_19_1_line_diff;
 
+#[path = "../conformance_21_11_display_width.rs"]
+mod conformance_21_11_display_width;
+
 #[path = "../conformance_density_mode.rs"]
 mod conformance_density_mode;
 
