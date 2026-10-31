@@ -2,7 +2,7 @@
 //! production `XAI_DEVICE` rebased); K04 (AC4) Esc during a device poll;
 //! K06 (AC3) the Copilot Enterprise `prompt_line` in a visible field.
 
-use super::common::{Tui, World, assert_link_cells};
+use super::common::{Tui, World, assert_link_cells, decoded_text};
 use crate::conformance_20_1d2_device_and_xai::device::xai_access;
 use crate::conformance_20_1d3_copilot::common::{
     DEVICE_PATH as COPILOT_DEVICE_PATH, ENDPOINT_A, ENTERPRISE_CLIENT, PROMPT, PUBLIC_CLIENT,
@@ -121,7 +121,11 @@ async fn k05_device_code_view_renders_links_and_copies() {
     ] {
         assert!(frame.contains(text), "{text}\n{frame}");
     }
-    assert_link_cells(&tui, 80, 24, &[("Sign-in page: ", VERIFY_COMPLETE)]);
+    // The 48-cell page fits one row at 80 columns: label and URL on one line.
+    assert_eq!(
+        assert_link_cells(&tui, 80, 24, &[("Sign-in page: ", VERIFY_COMPLETE)]),
+        [1]
+    );
     assert_eq!(tui.opened.lock().unwrap().as_slice(), [VERIFY_COMPLETE]);
     tui.input(DomainInputEvent::KeyPress('c'));
     tui.input(DomainInputEvent::KeyPress('u'));
@@ -271,4 +275,83 @@ async fn k06_copilot_enterprise_prompt_is_a_visible_field() {
         [device_form(ENTERPRISE_CLIENT), device_form(PUBLIC_CLIENT)]
     );
     assert_eq!(copilot_row().await.routing.enterprise_domain, None);
+}
+
+/// K8 (20-9j, AC1-AC4): a verification URL too long for one row wraps under the
+/// code, every row linked to the full URL (OSC 8 on) or scheme-less (plain);
+/// `c` copies the code and `u` the full URL; the fitter keeps the whole link or
+/// its label, and the code line when it cuts the header to its first line.
+#[tokio::test]
+#[serial]
+async fn k8_long_device_url_wraps_all_or_none_and_copies_the_full_url() {
+    let long = format!(
+        "https://accounts.x.ai/device?user_code={USER_CODE}&next={}",
+        "n".repeat(150)
+    );
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    mount_xai(
+        &server,
+        device_body(&long, USER_CODE),
+        ResponseTemplate::new(400).set_body_json(json!({"error": "authorization_pending"})),
+    )
+    .await;
+    let mut tui = Tui::new(AppConfig::default());
+    tui.ctx = tui.ctx.clone().with_sleeper(never());
+    tui.submit("/login xai-oauth");
+    tui.until_login("device code", |event| {
+        matches!(event, LoginEvent::DeviceCode { .. })
+    })
+    .await;
+    let flat = |text: &str| {
+        text.replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let plain = flat(&tui.frame_at(80, 24));
+    assert!(plain.contains(USER_CODE), "{plain}");
+    assert!(
+        !plain.contains("https://"),
+        "plain rows drop the scheme\n{plain}"
+    );
+    let scheme_less = long.strip_prefix("https://").unwrap();
+    assert!(plain.replace(' ', "").contains(scheme_less), "{plain}");
+    let linked = flat(&decoded_text(&tui.login_buffer_at(80, 24, true)));
+    assert!(linked.replace(' ', "").contains(&long), "{linked}");
+    let rows = assert_link_cells(&tui, 80, 24, &[("Sign-in page: ", &long)]);
+    assert!(rows[0] > 1, "the long page wraps: {rows:?}");
+
+    // The device link shares the code header: fit keeps the whole header or its
+    // first line (the code), so the link is whole or gone; the code always stays.
+    let (mut whole, mut code_only) = (false, false);
+    for height in 8..=24 {
+        let frame = tui.frame_at(60, height);
+        assert!(frame.contains(USER_CODE), "{height}\n{frame}");
+        assert!(frame.contains("Esc cancel"), "{height}\n{frame}");
+        if frame.contains("Sign-in page:") {
+            let rows = assert_link_cells(&tui, 60, height, &[("Sign-in page: ", &long)]);
+            assert!(rows[0] > 1, "whole link at height {height}: {rows:?}");
+            whole = true;
+        } else {
+            code_only = true;
+            assert!(!frame.contains("accounts.x.ai"), "{frame}");
+        }
+    }
+    assert!(whole && code_only, "{whole} {code_only}");
+
+    // `c` copies the code and `u` the full URL, never the displayed rows.
+    assert_eq!(tui.opened.lock().unwrap().as_slice(), [long.as_str()]);
+    tui.input(DomainInputEvent::KeyPress('c'));
+    tui.input(DomainInputEvent::KeyPress('u'));
+    assert_eq!(
+        tui.copied.lock().unwrap().as_slice(),
+        [USER_CODE, long.as_str()]
+    );
+    tui.key(DomainKey::Esc);
+    tui.until_login("cancelled", |event| {
+        matches!(event, LoginEvent::Finished { .. })
+    })
+    .await;
+    assert_eq!(tui.flash(), "Login cancelled");
 }

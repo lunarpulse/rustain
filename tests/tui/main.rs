@@ -40,6 +40,9 @@ mod conformance_20_9a_tui_ephemeral_rows;
 #[path = "../conformance_20_9e_styled_osc8.rs"]
 mod conformance_20_9e_styled_osc8;
 
+#[path = "../conformance_20_9j_sign_in_link.rs"]
+mod conformance_20_9j_sign_in_link;
+
 #[path = "../conformance_vim_keymap_conflicts.rs"]
 mod conformance_vim_keymap_conflicts;
 

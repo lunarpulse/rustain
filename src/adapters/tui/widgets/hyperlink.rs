@@ -1,4 +1,4 @@
-//! Styled, independently balanced OSC 8 cells and conservative output detection.
+//! Styled, independently balanced OSC 8 cells and default-on output detection.
 
 use std::{io::IsTerminal, num::NonZeroU16, sync::OnceLock};
 
@@ -9,37 +9,29 @@ use ratatui::{
 
 use crate::infrastructure::utils::env_var_trimmed;
 
-/// Conservative terminal hints; denials take precedence over known programs.
-/// Hints use the same trimming and empty-value semantics as the environment helper.
+/// OSC 8 is on by default and denied only where it is unsafe: stdout is not a
+/// terminal, `TERM` is missing, empty or `dumb`, or the session is GNU screen
+/// (`STY` set, or a `screen` `TERM` family outside tmux, whose default `TERM` is
+/// also `screen`). The Linux console parser swallows the sequence silently, so it
+/// needs no denial. Hints use the environment helper's trimming and empty-value
+/// semantics.
 pub fn supports_osc8(
     stdout_is_terminal: bool,
     term: Option<&str>,
-    term_program: Option<&str>,
     tmux: Option<&str>,
     sty: Option<&str>,
 ) -> bool {
-    let term = term.map(str::trim);
-    let term_program = term_program.map(str::trim);
-    let tmux = tmux.map(str::trim);
-    let sty = sty.map(str::trim);
-    let Some(term) = term.filter(|term| !term.is_empty()) else {
+    fn non_empty(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    let Some(term) = non_empty(term) else {
         return false;
     };
     let family = term.split(['-', '.']).next().unwrap_or_default();
-    if !stdout_is_terminal
-        || term.eq_ignore_ascii_case("dumb")
-        || family.eq_ignore_ascii_case("screen")
-        || family.eq_ignore_ascii_case("tmux")
-        || tmux.is_some_and(|value| !value.is_empty())
-        || sty.is_some_and(|value| !value.is_empty())
-    {
-        return false;
-    }
-    term_program.is_some_and(|program| {
-        ["wezterm", "kitty", "iTerm.app", "iTerm2", "foot"]
-            .iter()
-            .any(|known| program.eq_ignore_ascii_case(known))
-    }) || matches!(term, "xterm-kitty" | "foot" | "foot-extra")
+    stdout_is_terminal
+        && !term.eq_ignore_ascii_case("dumb")
+        && non_empty(sty).is_none()
+        && !(family.eq_ignore_ascii_case("screen") && non_empty(tmux).is_none())
 }
 
 /// Capture the output's environment/TTY once, never probe during a frame.
@@ -49,7 +41,6 @@ pub fn terminal_supports_osc8() -> bool {
         supports_osc8(
             std::io::stdout().is_terminal(),
             env_var_trimmed("TERM").as_deref(),
-            env_var_trimmed("TERM_PROGRAM").as_deref(),
             env_var_trimmed("TMUX").as_deref(),
             env_var_trimmed("STY").as_deref(),
         )
@@ -84,81 +75,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn capability_denials_override_known_terminal_hints() {
+    fn capability_denials_cover_only_unsafe_outputs() {
         for term in [
             None,
             Some(""),
             Some("DuMb"),
             Some("screen-256color"),
-            Some("tmux"),
+            Some("screen"),
         ] {
-            assert!(!supports_osc8(true, term, Some("wezterm"), None, None));
+            assert!(!supports_osc8(true, term, None, None), "{term:?}");
         }
-        assert!(!supports_osc8(false, Some("foot"), None, None, None));
+        assert!(!supports_osc8(false, Some("xterm-256color"), None, None));
         assert!(!supports_osc8(
             true,
-            Some("foot"),
-            None,
-            Some("session"),
-            None
-        ));
-        assert!(!supports_osc8(
-            true,
-            Some("foot"),
-            None,
+            Some("xterm-256color"),
             None,
             Some("session")
         ));
-        assert!(supports_osc8(
-            true,
-            Some("xterm-256color"),
-            Some("WezTerm"),
-            None,
-            None
-        ));
-        assert!(supports_osc8(true, Some("xterm-kitty"), None, None, None));
         assert!(!supports_osc8(
             true,
-            Some("xterm-256color"),
-            None,
+            Some("screen-256color"),
+            Some(""),
+            None
+        ));
+        assert!(!supports_osc8(
+            true,
+            Some("screen.xterm-256color"),
             None,
             None
         ));
     }
 
     #[test]
+    fn capability_is_default_on_for_every_other_terminal() {
+        for (term, tmux) in [
+            ("xterm-256color", None),
+            ("xterm-kitty", None),
+            ("xterm-ghostty", None),
+            ("foot", None),
+            ("linux", None),
+            ("vt100", None),
+            ("tmux-256color", Some("/tmp/tmux-1000/default,1,0")),
+            ("tmux", None),
+            ("screen-256color", Some("/tmp/tmux-1000/default,1,0")),
+            ("screen", Some("session")),
+        ] {
+            assert!(supports_osc8(true, Some(term), tmux, None), "{term}");
+        }
+    }
+
+    #[test]
     fn capability_hints_follow_trimmed_environment_semantics() {
         let cases = [
-            (Some(""), Some("wezterm"), None, None, false),
-            (Some(" \t"), Some("wezterm"), None, None, false),
-            (Some(" dumb "), Some("wezterm"), None, None, false),
+            (Some(""), None, None, false),
+            (Some(" \t"), None, None, false),
+            (Some(" dumb "), None, None, false),
+            (Some(" screen-256color "), None, None, false),
+            (Some(" screen-256color "), Some(" \t"), None, false),
+            (Some(" screen-256color "), Some(" 1 "), None, true),
+            (Some(" xterm-256color "), None, None, true),
+            (Some("xterm-256color"), Some(""), Some(""), true),
+            (Some("xterm-256color"), Some(" \t"), Some(" \n"), true),
+            (Some("xterm-256color"), None, Some(" session "), false),
             (
-                Some(" screen-256color "),
-                Some("wezterm"),
-                None,
-                None,
+                Some("xterm-256color"),
+                Some(" 1 "),
+                Some(" session "),
                 false,
             ),
-            (Some(" tmux "), Some("wezterm"), None, None, false),
-            (
-                Some(" xterm-256color "),
-                Some(" WezTerm "),
-                None,
-                None,
-                true,
-            ),
-            (Some(" foot "), None, None, None, true),
-            (Some("xterm-256color"), Some(" \t"), None, None, false),
-            (Some("foot"), None, Some(""), Some(""), true),
-            (Some("foot"), None, Some(" \t"), Some(" \n"), true),
-            (Some("foot"), None, Some(" session "), None, false),
-            (Some("foot"), None, None, Some(" session "), false),
         ];
-        for (term, program, tmux, sty, expected) in cases {
+        for (term, tmux, sty, expected) in cases {
             assert_eq!(
-                supports_osc8(true, term, program, tmux, sty),
+                supports_osc8(true, term, tmux, sty),
                 expected,
-                "{term:?}, {program:?}, {tmux:?}, {sty:?}"
+                "{term:?}, {tmux:?}, {sty:?}"
             );
         }
     }

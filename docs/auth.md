@@ -794,22 +794,35 @@ share the same login engines, method list, success lines and discovery line.
 - **`/models`** (or Ctrl+X, M) opens the model picker. On a locked provider that
   a sign-in can unlock, the footer reads `Enter sign in`: Enter starts that
   login, and the picker reopens at the provider afterwards.
-- **While signing in** the overlay shows the sign-in link, the `/launch` shortcut
-  that works on this machine only, the provider's instructions and progress.
-  Links are clickable via OSC 8 only when stdout is a terminal and the terminal
-  hints identify WezTerm, kitty, iTerm, or foot. Specifically, `TERM_PROGRAM`
-  may be `wezterm`, `kitty`, `iTerm.app`, `iTerm2`, or `foot` (case-insensitive),
-  or `TERM` may be exactly `xterm-kitty`, `foot`, or `foot-extra`.
-  Missing, empty or `dumb` `TERM`, screen/tmux terminal families, and nonempty `TMUX` or `STY`
-  always disable links. Unknown terminals, including generic `xterm-256color`
-  alone, also get styled, readable plain text instead. This is a conservative
-  heuristic, not terminal capability negotiation; SSH alone does not change it.
-  Copy and opening controls work the same in either case. A device login shows
-  the code to enter and the sign-in page. Copy keys: `c` copies the link (device:
-  the code), `l` the local shortcut, `u` the device sign-in page; while a field
-  is focused use Alt+C / Alt+L / Alt+U so the letters type normally. Text a
-  provider supplies is shown with terminal controls removed; a link that is not
-  a plain `http(s)` URL is shown but never linked, opened or copied.
+- **While signing in** the overlay shows the complete sign-in link, the `/launch`
+  shortcut that works on this machine only, the provider's instructions and
+  progress. A link that fits on one row reads `Sign-in link: <url>`; a longer one
+  is its label followed by the whole URL wrapped over as many rows as it needs,
+  and the whole URL is never cut with `…`. A short terminal drops the URL rows
+  together (the label stays) rather than showing part of a link. A device login
+  puts the sign-in page under the code in one block, so a reduced block can keep
+  only the code and omit the link label and URL altogether.
+  Links are clickable via OSC 8 by default, on every URL row, for the full URL.
+  OSC 8 is off only when stdout is not a terminal, `TERM` is missing, empty or
+  `dumb`, or the session is GNU screen (`STY` set, or a `screen` `TERM` without
+  `TMUX`; inside tmux the link is emitted). Without OSC 8 a wrapped link is shown
+  without its `https://` so that no terminal can turn a partial row into a broken
+  link. If what remains still contains an embedded `http://` or `https://`, or
+  starts with `www.` or `ftp.` (terminals such as GNOME Terminal link those
+  without a scheme), the wrapped link shows its label only, with no URL rows.
+  The lead line names the copy key: **Alt+C** while a field is focused, `c`
+  otherwise, copies the full link (browsers accept a pasted URL without a
+  scheme). The lead is best-effort: on a short terminal it can be shortened or
+  dropped like any notice, and the footer line with the `c` / Alt+C copy keys is
+  the copy hint that is always kept. A link that fits one row keeps its scheme.
+  There is no setting to turn OSC 8 off. The local shortcut works only where the
+  browser shares this machine's loopback, so from a host browser into a container
+  or SSH session use the sign-in link instead. Copy keys: `c` copies the link
+  (device: the code), `l` the local shortcut, `u` the device sign-in page, always
+  the full URL; while a field is focused use Alt+C / Alt+L / Alt+U so the letters
+  type normally. Text a provider supplies is shown with terminal controls
+  removed; a link that is not a plain `http(s)` URL is shown but never linked,
+  opened or copied.
 - **Fields.** API keys and pasted authorization codes or redirect URLs are
   masked (`•`); the GitHub Enterprise domain prompt is visible. Bracketed paste
   goes into the field, never into the chat input, with control characters

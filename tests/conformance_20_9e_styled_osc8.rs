@@ -25,6 +25,8 @@ use unicode_width::UnicodeWidthChar;
 const AUTH: &str =
     "https://auth.example/authorize?client=example&state=abcdefghijklmnopqrstuvwxyz0123456789";
 const LOCAL: &str = "http://localhost:43123/launch";
+/// Fits one row at 80 columns, so its plain and linked projections are equal.
+const SHORT_AUTH: &str = "https://auth.example/authorize?client=example";
 const DEVICE: &str = "https://device.example/verify?user_code=ABCD";
 
 fn state(sections: Vec<LoginSection>) -> LoginOverlayState {
@@ -178,74 +180,34 @@ fn assert_link_rectangles(
 
 #[test]
 fn k1_k2_browser_cells_and_capability_fallback() {
+    let tmux = Some("/tmp/tmux-1000/default,1,0");
     let cases = [
-        (
-            true,
-            Some("xterm-256color"),
-            Some("WezTerm"),
-            None,
-            None,
-            true,
-        ),
-        (true, Some("xterm-kitty"), None, None, None, true),
-        (true, Some("foot-extra"), None, None, None, true),
-        (true, Some("foot"), None, None, None, true),
-        (true, Some("xterm"), Some("KITTY"), None, None, true),
-        (true, Some("xterm"), Some("iTerm2"), None, None, true),
-        (true, Some("xterm"), Some("foot"), None, None, true),
-        (
-            true,
-            Some("xterm-256color"),
-            Some("iTerm.app"),
-            None,
-            None,
-            true,
-        ),
-        (false, Some("xterm-kitty"), Some("kitty"), None, None, false),
-        (true, None, Some("kitty"), None, None, false),
-        (true, Some(""), Some("kitty"), None, None, false),
-        (true, Some("DUMB"), Some("kitty"), None, None, false),
-        (
-            true,
-            Some("screen-256color"),
-            Some("kitty"),
-            None,
-            None,
-            false,
-        ),
-        (
-            true,
-            Some("tmux-256color"),
-            Some("kitty"),
-            None,
-            None,
-            false,
-        ),
-        (
-            true,
-            Some("xterm-256color"),
-            Some("kitty"),
-            Some("session"),
-            None,
-            false,
-        ),
-        (
-            true,
-            Some("xterm-256color"),
-            Some("kitty"),
-            None,
-            Some("session"),
-            false,
-        ),
-        (true, Some("xterm-256color"), None, None, None, false),
-        (true, Some("linux"), Some("unknown"), None, None, false),
+        (true, Some("xterm-256color"), None, None, true),
+        (true, Some("xterm-kitty"), None, None, true),
+        (true, Some("foot-extra"), None, None, true),
+        (true, Some("xterm"), None, None, true),
+        (true, Some("linux"), None, None, true),
+        (true, Some("tmux-256color"), tmux, None, true),
+        (true, Some("screen-256color"), tmux, None, true),
+        (false, Some("xterm-kitty"), None, None, false),
+        (true, None, None, None, false),
+        (true, Some(""), None, None, false),
+        (true, Some("DUMB"), None, None, false),
+        (true, Some("screen-256color"), None, None, false),
+        (true, Some("xterm-256color"), None, Some("session"), false),
     ];
     let theme = Theme::dark();
-    let state = browser(AUTH, LOCAL);
+    let state = browser(SHORT_AUTH, LOCAL);
     let plain = buffer(&state, &theme, false, 80, 24);
     let expected = projection(&plain);
     assert!(expected.contains("Sign-in link: https://auth.example/"));
-    assert!(expected.contains('…'));
+    assert!(
+        expected
+            .lines()
+            .filter(|row| row.contains("Sign-in link"))
+            .all(|row| !row.contains('…')),
+        "the sign-in link is never truncated"
+    );
     assert!(expected.contains(LOCAL));
     assert!(expected.contains("Esc cancel"));
     let label = expected
@@ -259,14 +221,14 @@ fn k1_k2_browser_cells_and_capability_fallback() {
     assert_eq!(plain[(label_x, label)].fg, theme.colors.fg_muted);
     assert_eq!(plain[(label_x, label)].bg, theme.colors.bg_surface);
     assert!(!plain[(label_x, label)].modifier.contains(Modifier::BOLD));
-    for (tty, term, program, tmux, sty, wanted) in cases {
-        let support = supports_osc8(tty, term, program, tmux, sty);
-        assert_eq!(support, wanted);
+    for (tty, term, tmux, sty, wanted) in cases {
+        let support = supports_osc8(tty, term, tmux, sty);
+        assert_eq!(support, wanted, "{term:?}");
         let drawn = buffer(&state, &theme, support, 80, 24);
         assert_eq!(projection(&drawn), expected);
         let encoded = links(&drawn, &theme);
         if wanted {
-            assert!(encoded.iter().any(|(_, _, target)| target == AUTH));
+            assert!(encoded.iter().any(|(_, _, target)| target == SHORT_AUTH));
             assert!(encoded.iter().any(|(_, _, target)| target == LOCAL));
         } else {
             assert!(encoded.is_empty());
@@ -278,6 +240,22 @@ fn k1_k2_browser_cells_and_capability_fallback() {
                 assert_eq!((a.fg, a.bg, a.modifier), (b.fg, b.bg, b.modifier));
             }
         }
+    }
+    // O2: a wrapped value differs by exactly its omitted scheme.
+    let wrapped = browser(AUTH, LOCAL);
+    let plain_rows = projection(&buffer(&wrapped, &theme, false, 80, 24));
+    let linked_rows = projection(&buffer(&wrapped, &theme, true, 80, 24));
+    assert_ne!(plain_rows, linked_rows);
+    assert!(!plain_rows.contains("https://auth.example"));
+    assert!(
+        plain_rows.contains("auth.example/authorize?client=example&state=abcdefghijklmnopqrst")
+    );
+    assert!(linked_rows.contains("https://auth.example/authorize?client=example&state=abcdef"));
+    for rows in [&plain_rows, &linked_rows] {
+        assert!(
+            rows.lines()
+                .all(|row| !row.contains("authorize") || !row.contains('…'))
+        );
     }
 }
 
@@ -350,7 +328,7 @@ fn k5_dark_and_color16_plain_login_views() {
         Theme::dark(),
         Theme::for_capability(ColorCapability::Color16),
     ] {
-        for state in [browser(AUTH, LOCAL), device(DEVICE, "ABCD-EFGH")] {
+        for state in [browser(SHORT_AUTH, LOCAL), device(DEVICE, "ABCD-EFGH")] {
             let plain = buffer(&state, &theme, false, 80, 24);
             let supported = buffer(&state, &theme, true, 80, 24);
             let visible = projection(&plain);
@@ -359,31 +337,43 @@ fn k5_dark_and_color16_plain_login_views() {
             assert!(visible.contains("Esc cancel"));
             assert!(!links(&supported, &theme).is_empty());
         }
+        // The long browser fixture wraps: only the plain view omits the scheme.
+        let long = browser(AUTH, LOCAL);
+        let plain = projection(&buffer(&long, &theme, false, 80, 24));
+        let supported = projection(&buffer(&long, &theme, true, 80, 24));
+        assert_ne!(plain, supported);
+        assert!(plain.contains("Esc cancel") && supported.contains("Esc cancel"));
+        assert!(!links(&buffer(&long, &theme, true, 80, 24), &theme).is_empty());
     }
 }
 
 #[test]
 fn k3_duplicate_rows_clipping_and_tiny_rectangles() {
     let theme = Theme::dark();
-    let section = LoginSection::Device {
-        verification_url: DEVICE.into(),
+    let section = |url: &str| LoginSection::Device {
+        verification_url: url.into(),
         user_code: "ABCD".into(),
         instructions: String::new(),
     };
-    let state = state(vec![section.clone(), section]);
+    let state = state(vec![section(DEVICE), section(DEVICE)]);
     let b = buffer(&state, &theme, true, 80, 24);
     let encoded = links(&b, &theme);
     let rows: std::collections::BTreeSet<_> = encoded.iter().map(|(_, y, _)| y).collect();
     assert_eq!(rows.len(), 2, "equal link rows must both be encoded");
+    let short = self::state(vec![
+        section("https://d.test/v?c=1"),
+        section("https://d.test/v?c=1"),
+    ]);
+    assert_eq!(
+        projection(&buffer(&short, &theme, true, 60, 16)),
+        projection(&buffer(&short, &theme, false, 60, 16))
+    );
     for (w, h) in [(60, 16), (10, 5), (1, 1), (0, 0)] {
         let b = buffer(&state, &theme, true, w, h);
         for (x, y, _) in links(&b, &theme) {
             assert!(x < w && y < h);
         }
-        assert_eq!(
-            projection(&b),
-            projection(&buffer(&state, &theme, false, w, h))
-        );
+        assert!(links(&buffer(&state, &theme, false, w, h), &theme).is_empty());
     }
 }
 
@@ -748,7 +738,8 @@ fn k3_crossterm_incremental_frames_and_middle_overlay() {
         .collect();
     assert!(auth_cells.len() > 8);
     draw(&state, None, &mut terminal);
-    // Change only a truncated-away target segment.
+    // Change only the target; exactly one visible glyph (A → B) differs, every
+    // other URL cell keeps its glyph and must be re-sent with the new target.
     let changed_target = original.replace('A', "B");
     state = browser(&changed_target, LOCAL);
     let changed = draw(&state, None, &mut terminal);
@@ -758,11 +749,12 @@ fn k3_crossterm_incremental_frames_and_middle_overlay() {
             Some(changed_target.as_str())
         );
     }
-    assert_eq!(
-        projection(&first),
-        projection(&changed),
-        "only the hidden target changed"
-    );
+    let glyph_changes = projection(&first)
+        .chars()
+        .zip(projection(&changed).chars())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(glyph_changes, 1, "only one visible glyph changed");
     // Change exactly one visible cell without changing its URL, style, or width.
     let middle = auth_cells[auth_cells.len() / 2];
     let altered = draw(&state, Some(Edit::Glyph(middle.0, middle.1)), &mut terminal);

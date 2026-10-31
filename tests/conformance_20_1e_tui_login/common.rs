@@ -357,48 +357,63 @@ pub(crate) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
     out
 }
 
-/// Inspect the actual supported cells against the readable fallback at the
-/// same coordinates; only this exact balanced per-glyph envelope is accepted.
-pub(crate) fn assert_link_cells(tui: &Tui, width: u16, height: u16, targets: &[(&str, &str)]) {
+/// `buffer_text` with every OSC 8 envelope reduced to its one visible glyph.
+pub(crate) fn decoded_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let area = buffer.area;
+    let mut out = String::new();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let symbol = buffer[(x, y)].symbol();
+            match symbol
+                .strip_prefix("\x1b]8;;")
+                .and_then(|rest| rest.split_once('\x07'))
+                .and_then(|(_, rest)| rest.strip_suffix("\x1b]8;;\x07"))
+            {
+                Some(glyph) => out.push_str(glyph),
+                None => out.push_str(symbol),
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Inspect the supported cells of the login overlay. Only the exact balanced
+/// per-glyph envelope is accepted, and the enveloped cells must be exactly the
+/// URL glyphs of each target: the text after its label on a one-row link, or
+/// every glyph of the rows right after a wrapped link's label row. A label with
+/// no enveloped row after it is a label-only link. The plain buffer carries no
+/// envelope. Returns each target's retained URL-row count (0 = label only).
+pub(crate) fn assert_link_cells(
+    tui: &Tui,
+    width: u16,
+    height: u16,
+    targets: &[(&str, &str)],
+) -> Vec<usize> {
     use ratatui::buffer::CellDiffOption;
     use ratatui::style::Modifier;
     let plain = tui.login_buffer_at(width, height, false);
     let linked = tui.login_buffer_at(width, height, true);
     let theme = Theme::dark();
-    let text = buffer_text(&plain);
-    let rectangles: Vec<_> = targets
-        .iter()
-        .map(|(label, target)| {
-            let matches: Vec<_> = text
-                .lines()
-                .enumerate()
-                .filter(|(_, row)| row.contains(label))
-                .collect();
-            assert_eq!(matches.len(), 1, "one visible row for {label:?}");
-            let (y, row) = matches[0];
-            let start = row[..row.find(label).unwrap()].chars().count() + label.chars().count();
-            let end = row[..row.rfind('│').expect("modal right border")]
-                .trim_end()
-                .chars()
-                .count();
-            assert!(end > start, "visible URL after {label:?}");
-            (y as u16, start as u16, end as u16, *target)
-        })
-        .collect();
+    let (width, height) = (width as usize, height as usize);
+    let mut cells = vec![vec![String::new(); width]; height];
+    let mut linked_to: Vec<Vec<Option<String>>> = vec![vec![None; width]; height];
     for y in 0..height {
         for x in 0..width {
-            let cell = &linked[(x, y)];
-            let fallback = &plain[(x, y)];
-            assert_eq!(cell.style(), fallback.style());
-            if let Some((_, _, _, target)) = rectangles
-                .iter()
-                .find(|(row, start, end, _)| y == *row && x >= *start && x < *end)
-            {
-                assert_eq!(
-                    cell.symbol(),
-                    format!("\x1b]8;;{target}\x07{}\x1b]8;;\x07", fallback.symbol()),
-                    "complete URL rectangle at {x},{y}"
-                );
+            let cell = &linked[(x as u16, y as u16)];
+            let fallback = &plain[(x as u16, y as u16)];
+            assert!(
+                !fallback.symbol().chars().any(char::is_control),
+                "plain cell at {x},{y} carries a control"
+            );
+            let symbol = cell.symbol();
+            if let Some(rest) = symbol.strip_prefix("\x1b]8;;") {
+                let (target, rest) = rest.split_once('\x07').expect("OSC target terminator");
+                let glyph = rest
+                    .strip_suffix("\x1b]8;;\x07")
+                    .expect("balanced OSC close");
+                assert_eq!(glyph.chars().count(), 1, "one glyph per envelope");
+                assert!(!glyph.chars().any(char::is_control));
                 assert_eq!(cell.fg, theme.colors.accent);
                 assert_eq!(cell.bg, theme.colors.bg_surface);
                 assert!(cell.modifier.contains(Modifier::BOLD));
@@ -406,12 +421,100 @@ pub(crate) fn assert_link_cells(tui: &Tui, width: u16, height: u16, targets: &[(
                     cell.diff_option,
                     CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap())
                 );
+                cells[y][x] = glyph.to_owned();
+                linked_to[y][x] = Some(target.to_owned());
             } else {
-                assert_eq!(cell.symbol(), fallback.symbol());
-                assert!(!cell.symbol().chars().any(char::is_control));
+                assert!(!symbol.chars().any(char::is_control), "control at {x},{y}");
+                cells[y][x] = symbol.to_owned();
             }
         }
     }
+    let envelope_xs =
+        |y: usize| -> Vec<usize> { (0..width).filter(|x| linked_to[y][*x].is_some()).collect() };
+    let rows: Vec<String> = cells.iter().map(|row| row.concat()).collect();
+    let mut claimed = 0;
+    let mut counts = Vec::new();
+    for (label, target) in targets {
+        let needle = label.trim_end();
+        let found: Vec<usize> = (0..height).filter(|y| rows[*y].contains(needle)).collect();
+        assert_eq!(found.len(), 1, "one visible row for {label:?}");
+        let y = found[0];
+        let label_x = rows[y][..rows[y].find(needle).unwrap()].chars().count();
+        let left = rows[y].find('│').map(|at| rows[y][..at].chars().count());
+        let url_start = label_x + label.chars().count();
+        let one_row = envelope_xs(y);
+        if !one_row.is_empty() {
+            let wanted: Vec<usize> = (url_start..url_start + target.chars().count()).collect();
+            assert_eq!(one_row, wanted, "a one-row link covers exactly its value");
+            assert_eq!(
+                wanted
+                    .iter()
+                    .map(|x| cells[y][*x].as_str())
+                    .collect::<String>(),
+                *target
+            );
+            assert!(
+                wanted
+                    .iter()
+                    .all(|x| linked_to[y][*x].as_deref() == Some(*target))
+            );
+            claimed += wanted.len();
+            counts.push(1);
+            continue;
+        }
+        let x0 = left.expect("modal left border") + 1;
+        let mut joined = String::new();
+        let mut count = 0;
+        let mut at = y + 1;
+        while at < height
+            && joined.chars().count() < target.chars().count()
+            && envelope_xs(at).first() == Some(&x0)
+        {
+            let xs = envelope_xs(at);
+            let wanted: Vec<usize> = (x0..x0 + xs.len()).collect();
+            assert_eq!(xs, wanted, "URL rows start at the inner left edge");
+            assert!(
+                xs.iter()
+                    .all(|x| linked_to[at][*x].as_deref() == Some(*target))
+            );
+            let right = rows[at]
+                .rfind('│')
+                .map(|index| rows[at][..index].chars().count())
+                .expect("modal right border");
+            assert!(
+                x0 + xs.len() < right,
+                "a blank cell stays before the right border"
+            );
+            joined.extend(xs.iter().map(|x| cells[at][*x].as_str()));
+            claimed += xs.len();
+            count += 1;
+            at += 1;
+        }
+        assert!(
+            joined.is_empty() || joined == *target,
+            "the retained rows rejoin to the full URL or none: {joined:?}"
+        );
+        counts.push(count);
+    }
+    let total: usize = (0..height).map(|y| envelope_xs(y).len()).sum();
+    assert_eq!(total, claimed, "an envelope outside every link");
+    if !targets.is_empty() && counts.iter().all(|count| *count == 1) {
+        assert_eq!(
+            rows.join("\n") + "\n",
+            buffer_text(&plain),
+            "one-row links read the same"
+        );
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(
+                    linked[(x as u16, y as u16)].style(),
+                    plain[(x as u16, y as u16)].style(),
+                    "style at {x},{y}"
+                );
+            }
+        }
+    }
+    counts
 }
 
 /// The `[provider.stubai]` entry of the 20-1c smoke form: a full

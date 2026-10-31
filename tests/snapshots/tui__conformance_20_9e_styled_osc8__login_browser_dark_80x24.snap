@@ -8,11 +8,12 @@ expression: browser
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
   ┌ Sign in to Example ──────────────────────────────────────────────────────┐  
-  │Continue in your browser. If it didn't open, open or copy the link below. │  
-  │Sign-in link: https://auth.example/authorize…hijklmnopqrstuvwxyz0123456789│  
+  │Continue in your browser. If it didn't open, press c to copy the full     │  
+  │sign-in link.                                                             │  
+  │Sign-in link:                                                             │  
+  │auth.example/authorize?client=example&state=abcdefghijklmnopqrstuvwxyz012 │  
+  │3456789                                                                   │  
   │Local shortcut (this machine only): http://localhost:43123/launch         │  
   │                                                                          │  
   │Waiting for you to finish in the browser…                                 │  

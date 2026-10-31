@@ -4,7 +4,9 @@
 //! a masked key field and a device poll; K10's login waiting view at 60×16.
 
 use super::bloom::stub;
-use super::common::{Tui, World, assert_link_cells, clipboard_file, config_with, stubai};
+use super::common::{
+    Tui, World, assert_link_cells, clipboard_file, config_with, decoded_text, stubai,
+};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::adapters::tui::state::{LoginSection, LoginView};
@@ -122,15 +124,29 @@ async fn k03_body() {
     let frame = tui.frame_at(80, 24);
     for text in [
         " Sign in to Anthropic ",
-        "Continue in your browser. If it didn't open, open or copy the link below.",
-        "Sign-in link: ",
+        "Sign-in link:",
         &format!("Local shortcut (this machine only): {launch}"),
         "› Preferred port 0 unavailable, using port",
         "Enter submit · Alt+C copy link · Alt+L copy local link · Esc cancel",
     ] {
         assert!(frame.contains(text), "{text}\n{frame}");
     }
-    assert_link_cells(
+    // O2 (20-9j): plain mode names the copy key for a wrapped link (the lead
+    // wraps over two rows at 80 columns, so compare the flattened text).
+    let flat_frame = frame
+        .replace('│', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat_frame.contains(
+            "Continue in your browser. If it didn't open, press Alt+C to copy the full sign-in link."
+        ),
+        "{frame}"
+    );
+    // The wrapped plain link shows no partial URL: its rows drop the scheme.
+    assert!(!frame.contains("http://127.0.0.1"), "{frame}");
+    let rows = assert_link_cells(
         &tui,
         80,
         24,
@@ -139,6 +155,11 @@ async fn k03_body() {
             ("Local shortcut (this machine only): ", &launch),
         ],
     );
+    assert!(
+        rows[0] > 1,
+        "the real authorize URL wraps over several rows"
+    );
+    assert_eq!(rows[1], 1, "the local shortcut stays one row");
 
     // Crossterm emits balanced in-buffer cells targeting the full URL.
     let full = url::Url::parse(&authorize).unwrap().to_string();
@@ -162,7 +183,7 @@ async fn k03_body() {
     // K10: the same waiting view at 60×16 keeps borders, link, field and footer.
     let small = tui.frame_at(60, 16);
     super::small_terminal::assert_fitted(&small, &["Sign-in link:", "> "], "Esc cancel");
-    assert_link_cells(
+    let rows = assert_link_cells(
         &tui,
         60,
         16,
@@ -170,6 +191,10 @@ async fn k03_body() {
             ("Sign-in link: ", &authorize),
             ("Local shortcut (this machine only): ", &launch),
         ],
+    );
+    assert!(
+        rows.iter().all(|count| *count == 0),
+        "60×16 keeps link labels only, never a partial URL: {rows:?}"
     );
 
     // Plain letters type into the focused field; Alt+L/Alt+C copy.
@@ -292,4 +317,75 @@ async fn k04_esc_in_a_masked_key_field_cancels_before_any_request() {
     assert!(!world.dir.path().join("auth.json").exists());
     let store: Arc<dyn AuthStorePort> = Arc::new(FileAuthStore::new());
     assert!(store.snapshot().await.unwrap().rows("stubai").is_empty());
+}
+
+/// K6 (20-9j, AC2/AC6): the real flow's wrapped sign-in link, plain mode, paste
+/// field focused. The lead names Alt+C, the rows drop the scheme and rejoin to the
+/// link, Alt+C / Alt+L copy the full URLs through the real copy seam while plain
+/// `c` / `l` type into the field; with OSC 8 on the lead is the original one.
+#[tokio::test]
+#[serial]
+async fn k6_plain_lead_and_alt_copies_give_the_full_sign_in_url() {
+    let server = MockServer::start().await;
+    let _world = World::new(&server);
+    let mut tui = Tui::new(AppConfig::default());
+    let (authorize, launch) = open_browser_login(&mut tui).await;
+    let full = url::Url::parse(&authorize).unwrap().to_string();
+    let flat = |text: &str| {
+        text.replace('│', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let plain = flat(&tui.frame_at(80, 24));
+    assert!(
+        plain.contains(
+            "Continue in your browser. If it didn't open, press Alt+C to copy the full sign-in link."
+        ),
+        "{plain}"
+    );
+    assert!(!plain.contains("http://127.0.0.1"), "{plain}");
+    let scheme_less = full.split_once("://").unwrap().1;
+    assert!(plain.replace(' ', "").contains(scheme_less), "{plain}");
+    let linked = flat(&decoded_text(&tui.login_buffer_at(80, 24, true)));
+    assert!(
+        linked.contains("If it didn't open, open or copy the link below."),
+        "OSC 8 on keeps the original lead\n{linked}"
+    );
+    assert!(linked.replace(' ', "").contains(&full), "{linked}");
+
+    // Plain letters type into the focused field; they never copy.
+    tui.input(DomainInputEvent::KeyPress('c'));
+    tui.input(DomainInputEvent::KeyPress('l'));
+    assert!(tui.copied.lock().unwrap().is_empty());
+    let typed = |tui: &Tui| {
+        tui.state
+            .login
+            .running
+            .as_ref()
+            .unwrap()
+            .field
+            .as_ref()
+            .unwrap()
+            .buffer
+            .char_count()
+    };
+    assert_eq!(typed(&tui), 2);
+    tui.key(DomainKey::Backspace);
+    tui.key(DomainKey::Backspace);
+    tui.key(DomainKey::AltC);
+    tui.key(DomainKey::AltL);
+    assert_eq!(
+        tui.copied.lock().unwrap().as_slice(),
+        [full.clone(), launch.clone()],
+        "the full URL, scheme included, never the displayed rows"
+    );
+    assert_eq!(typed(&tui), 0);
+
+    tui.key(DomainKey::Esc);
+    tui.until_login("cancelled", |event| {
+        matches!(event, LoginEvent::Finished { .. })
+    })
+    .await;
+    assert_eq!(tui.flash(), "Login cancelled");
 }

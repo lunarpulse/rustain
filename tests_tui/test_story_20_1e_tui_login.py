@@ -52,19 +52,44 @@ def _modal(screen, title):
                for y in range(top + 1, bottom))
 
 
-def _assert_link_cells(tui, screen, label, target, raw_text):
-    """Compare every visible link glyph with its balanced on-wire OSC 8 cell."""
+def _link_rows(screen, label):
+    """The visible URL rows of one link: `(y, x, text)` per row. A link that fits
+    one row reads `label value`; a wrapped one is its label row alone followed by
+    unindented rows that run until a blank or non-URL row. The modal's own side
+    borders bound every row (the chat underneath may draw others)."""
     rows = screen.split("\n")
-    matches = [(y, row.index(label) + len(label)) for y, row in enumerate(rows) if label in row]
+    needle = label.rstrip()
+    matches = [y for y, row in enumerate(rows) if needle in row]
     assert len(matches) == 1, (label, matches)
-    y, start = matches[0]
-    end = rows[y].rfind("│")
-    visible = rows[y][start:end].rstrip()
-    assert visible, (label, rows[y])
-    for x, glyph in enumerate(visible, start):
-        cell = tui._screen.buffer[y][x]
-        assert cell.data == glyph
-        assert (cell.fg, cell.bg, cell.bold) == ("00c8c8", "282828", True), (label, x, cell)
+    y = matches[0]
+    label_end = rows[y].index(needle) + len(needle)
+    left = rows[y].rfind("│", 0, rows[y].index(needle))
+    right = rows[y].find("│", label_end)
+    assert left >= 0 and right > label_end, rows[y]
+    after = rows[y][label_end:right]
+    if after.strip():
+        text = after.strip()
+        return [(y, rows[y].index(text, label_end), text)]
+    found = []
+    for follow in range(y + 1, len(rows)):
+        inner = rows[follow][left + 1:right].rstrip()
+        if not inner or " " in inner:
+            break
+        found.append((follow, left + 1, inner))
+    return found
+
+
+def _assert_link_cells(tui, screen, label, target, raw_text):
+    """Compare every visible link glyph, on every row, with its balanced on-wire
+    OSC 8 cell; the rows rejoin to the full target."""
+    found = _link_rows(screen, label)
+    assert found, (label, screen)
+    assert "".join(text for _, _, text in found) == target, (label, found)
+    for y, start, visible in found:
+        for x, glyph in enumerate(visible, start):
+            cell = tui._screen.buffer[y][x]
+            assert cell.data == glyph
+            assert (cell.fg, cell.bg, cell.bold) == ("00c8c8", "282828", True), (label, x, cell)
 
     # One fully balanced wrapper per glyph; neither a whole-row wrapper nor
     # a target shortened to the visible ellipsis can satisfy this comparison.
@@ -74,7 +99,8 @@ def _assert_link_cells(tui, screen, label, target, raw_text):
     symbols = list(symbol.finditer(raw_text))
     assert len(symbols) == raw_text.count("\x1b]8;;" + target + "\x07"), label
     glyphs = "".join(match.group(1) for match in symbols)
-    assert visible in glyphs, (label, visible, glyphs)
+    assert target in glyphs, (label, target, glyphs)
+    return len(found)
 
 
 def _launch_target(port):
