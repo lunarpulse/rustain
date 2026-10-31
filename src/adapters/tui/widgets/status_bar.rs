@@ -1030,7 +1030,7 @@ mod tests {
                         width,
                         model,
                         session,
-                        Some("Esc/Ctrl+D/Ctrl+C detach"),
+                        Some("^X d detach"),
                         DensityMode::Focus,
                         awareness,
                     );

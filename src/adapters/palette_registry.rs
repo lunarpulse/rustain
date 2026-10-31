@@ -33,30 +33,54 @@ pub struct PaletteRegistry {
     registered_entries: Vec<PaletteEntry>,
     /// Track whether we populated from a discovered CommandRegistry.
     populated_from_discovered: bool,
+    /// Command count at the last population (discovery of new commands).
+    populated_command_count: usize,
+    /// Which host's catalogue the slash entries are drawn from (Story 21.2 AC1).
+    host: crate::adapters::builtin_commands::CommandHost,
 }
 
 impl PaletteRegistry {
     pub fn new() -> Self {
+        Self::for_host(crate::adapters::builtin_commands::CommandHost::Local)
+    }
+
+    /// A registry whose slash entries are the commands `host` offers.
+    pub fn for_host(host: crate::adapters::builtin_commands::CommandHost) -> Self {
         Self {
             slash_entries: Vec::new(),
             registered_entries: Vec::new(),
             populated_from_discovered: false,
+            populated_command_count: 0,
+            host,
         }
+    }
+
+    /// Discovery signature of a `CommandRegistry`: `(discovered, command count)`.
+    /// Cheap and in-memory (no filesystem access); a change means the palette's
+    /// slash entries are stale and must be rebuilt.
+    pub fn command_signature(command_registry: &CommandRegistry) -> (bool, usize) {
+        (
+            command_registry.is_discovered(),
+            command_registry.filter("").len(),
+        )
     }
 
     /// Populate from the CommandRegistry. Lazy-loads on first call.
     /// Re-populates if the CommandRegistry discovery state changed.
     /// Only clears `slash_entries`; `registered_entries` survive (DF-041).
     pub fn populate_from_command_registry(&mut self, command_registry: &CommandRegistry) {
-        let cr_discovered = command_registry.is_discovered();
+        let (cr_discovered, command_count) = Self::command_signature(command_registry);
 
-        if !self.slash_entries.is_empty() && self.populated_from_discovered == cr_discovered {
+        if !self.slash_entries.is_empty()
+            && self.populated_from_discovered == cr_discovered
+            && self.populated_command_count == command_count
+        {
             return;
         }
 
         self.slash_entries.clear();
 
-        let all_commands = command_registry.filter("");
+        let all_commands = command_registry.filter_for_host("", self.host);
         for cmd in all_commands {
             self.slash_entries.push(PaletteEntry {
                 name: format!("/{}", cmd.name),
@@ -207,6 +231,7 @@ impl PaletteRegistry {
         }
 
         self.populated_from_discovered = cr_discovered;
+        self.populated_command_count = command_count;
     }
 
     /// Register a single entry. Survives `populate_from_command_registry` calls (DF-041).
@@ -487,7 +512,7 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 45); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts
+        assert_eq!(reg.all_entries().len(), 47); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts + 1 /ml + 1 /quit (21-2 AC1; /detach is attached-only)
         assert!(reg.all_entries().iter().any(|e| e.name == "/login"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/models"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/logout"));
@@ -509,7 +534,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 45); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts
+        assert_eq!(reg.all_entries().len(), 47); // 45 + /ml + /quit (21-2 AC1)
     }
 
     #[test]
@@ -525,19 +550,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 45); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts
+        assert_eq!(reg.slash_entries.len(), 47); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts + 1 /ml + 1 /quit (21-2 AC1; /detach is attached-only)
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 46);
+        assert_eq!(reg.all_entries().len(), 48);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 46);
+        assert_eq!(reg.all_entries().len(), 48);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 47);
+        assert_eq!(reg.all_entries().len(), 49);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 47);
+        assert_eq!(reg.all_entries().len(), 49);
     }
 }

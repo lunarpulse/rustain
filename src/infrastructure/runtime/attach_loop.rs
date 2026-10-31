@@ -76,6 +76,11 @@ use crate::domain::services::reducer::{ReducerState, reduce, update_streaming_mi
 use crate::infrastructure::runtime::event_bus::{RawEvent, RawEventKind};
 use crate::infrastructure::runtime::turn_driver::{TurnDriver, TurnViewState, UserSubmission};
 
+// The attached key front door lives in its own file but is a child of this
+// module so it can use the private team/approval/surface machinery.
+#[path = "attach_keys.rs"]
+mod attach_keys;
+
 /// The second [`TurnDriver`] implementation (Story 12.2c, Q3 — shared origination
 /// seam). Where [`LocalTurnDriver`](crate::infrastructure::runtime::turn_driver::LocalTurnDriver)
 /// assembles messages and spawns `run_turn`, `SocketTurnDriver::submit` forwards
@@ -402,29 +407,24 @@ fn pending_peer_card<'a>(
     Some(pending)
 }
 
-/// The most recent unretracted automatic response supported by the daemon.
+/// Unretracted automatic responses supported by the daemon, newest first.
 /// Diagnostic/tool-evidence rows have no response identity, and pending response
 /// controls remain ineligible even when an edited draft is agent-composed.
-fn latest_retractable(conversation: &Conversation) -> Option<ChatMessage> {
-    conversation
-        .messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.send_authorization == crate::domain::models::SendAuthorization::Automatic
-                && message.retracted_at_ms.is_none()
-                && message
-                    .id
-                    .strip_prefix("peer-response-")
-                    .is_some_and(|node| !node.is_empty())
-                && !conversation
-                    .peer_row_controls
-                    .get(&message.id)
-                    .is_some_and(|control| {
-                        control.stage != crate::domain::models::PeerRowStage::Settled
-                    })
-        })
-        .cloned()
+fn retractable_rows(conversation: &Conversation) -> impl Iterator<Item = &ChatMessage> {
+    conversation.messages.iter().rev().filter(move |message| {
+        message.send_authorization == crate::domain::models::SendAuthorization::Automatic
+            && message.retracted_at_ms.is_none()
+            && message
+                .id
+                .strip_prefix("peer-response-")
+                .is_some_and(|node| !node.is_empty())
+            && !conversation
+                .peer_row_controls
+                .get(&message.id)
+                .is_some_and(|control| {
+                    control.stage != crate::domain::models::PeerRowStage::Settled
+                })
+    })
 }
 
 fn preview_line(content: &str, max_chars: usize) -> String {
@@ -743,18 +743,17 @@ async fn dispatch_recipient_surface_key(
     input: &mut String,
     state: &mut TuiState,
     write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
-) -> Option<bool> {
+) -> bool {
     use crossterm::event::{KeyCode, KeyModifiers};
     if state.recipient_surface.is_none()
         || higher_confirmation
         || (key.code, key.modifiers) == (KeyCode::Char('x'), KeyModifiers::CONTROL)
     {
-        return None;
+        return false;
     }
-    Some(recipient_surface_key(key, workspace, conversation, input, state, write_frames).await)
+    recipient_surface_key(key, workspace, conversation, input, state, write_frames).await;
+    true
 }
-/// Returns true only for the existing attached detach chords.
-
 async fn recipient_surface_key(
     key: crossterm::event::KeyEvent,
     _workspace: &Path,
@@ -762,23 +761,27 @@ async fn recipient_surface_key(
     input: &mut String,
     state: &mut TuiState,
     write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
-) -> bool {
+) {
     use crate::adapters::daemon::protocol::PeerDraftAction;
     use crate::adapters::tui::state::{
         PeerComposeAction, PinnedPeerCompose, RecipientSurfaceTarget,
     };
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     if key.kind != KeyEventKind::Press {
-        return false;
+        return;
     }
-    if matches!(
-        (key.code, key.modifiers),
-        (KeyCode::Char('c' | 'd'), KeyModifiers::CONTROL)
-    ) {
-        return true;
+    // Ctrl+C is "back one frame" (RU-20): it closes this surface exactly like
+    // Esc. Ctrl+D is inert here. Neither ever detaches the client.
+    let key = if (key.code, key.modifiers) == (KeyCode::Char('c'), KeyModifiers::CONTROL) {
+        crossterm::event::KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+    } else {
+        key
+    };
+    if (key.code, key.modifiers) == (KeyCode::Char('d'), KeyModifiers::CONTROL) {
+        return;
     }
     if key.modifiers != KeyModifiers::NONE {
-        return false;
+        return;
     }
     match key.code {
         KeyCode::Esc => {
@@ -787,7 +790,7 @@ async fn recipient_surface_key(
             }
             crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
             state.needs_redraw = true;
-            return false;
+            return;
         }
         KeyCode::PageUp | KeyCode::PageDown => {
             if let Some(surface) = state.recipient_surface.as_mut() {
@@ -802,7 +805,7 @@ async fn recipient_surface_key(
                 };
             }
             state.needs_redraw = true;
-            return false;
+            return;
         }
         KeyCode::Tab => {
             let Some(surface) = state
@@ -810,7 +813,7 @@ async fn recipient_surface_key(
                 .as_ref()
                 .filter(|surface| surface.can_toggle_target)
             else {
-                return false;
+                return;
             };
             let target = match &surface.target {
                 RecipientSurfaceTarget::Item(_) => surface.node_id.clone(),
@@ -831,7 +834,7 @@ async fn recipient_surface_key(
                     recipient_surface_flash(state, error.to_string());
                 }
             }
-            return false;
+            return;
         }
         KeyCode::Char('p' | 'l') => {
             if let Err(error) = super::recipient_surface::navigate_received_surface(
@@ -844,23 +847,23 @@ async fn recipient_surface_key(
             {
                 recipient_surface_flash(state, error.to_string());
             }
-            return false;
+            return;
         }
         _ => {}
     }
     let read_only = write_frames.is_none();
     let Some(surface) = state.recipient_surface.as_ref() else {
-        return false;
+        return;
     };
     let Some(action) = recipient_surface_actions(state, conversation, read_only)
         .into_iter()
         .flatten()
         .find(|action| matches!(key.code, KeyCode::Char(c) if action.accepts(c)))
     else {
-        return false;
+        return;
     };
     let Some(frame_tx) = write_frames else {
-        return false;
+        return;
     };
     match action {
         RecipientSurfaceAction::Respond
@@ -873,14 +876,14 @@ async fn recipient_surface_key(
             if !input.is_empty() {
                 recipient_surface_flash(state,
                     "input already contains text — close this view and finish or clear it before composing a reply".to_owned());
-                return false;
+                return;
             }
             if action == RecipientSurfaceAction::Edit {
                 let Some(node) = surface.node_id.as_deref() else {
-                    return false;
+                    return;
                 };
                 let Some((message, _)) = pinned_response(conversation, node) else {
-                    return false;
+                    return;
                 };
                 *input = message
                     .content
@@ -920,7 +923,7 @@ async fn recipient_surface_key(
         // reply.
         RecipientSurfaceAction::Accept => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return false;
+                return;
             };
             let frame = ClientFrame::ReplyToRecipientItem {
                 item_id: address.item().as_str().to_owned(),
@@ -931,7 +934,7 @@ async fn recipient_surface_key(
         }
         RecipientSurfaceAction::Busy | RecipientSurfaceAction::Acknowledge => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return false;
+                return;
             };
             if action == RecipientSurfaceAction::Busy {
                 // The card fast path reuses the durable principal/task join,
@@ -949,7 +952,7 @@ async fn recipient_surface_key(
                             }),
                         Err(error) => {
                             recipient_surface_flash(state, error.to_string());
-                            return false;
+                            return;
                         }
                     };
                     if joined.is_none_or(|item| &item.address != address) {
@@ -957,7 +960,7 @@ async fn recipient_surface_key(
                             state,
                             format!("recipient item '{}' not found", address.item().as_str()),
                         );
-                        return false;
+                        return;
                     }
                 }
             }
@@ -971,7 +974,7 @@ async fn recipient_surface_key(
         }
         RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return false;
+                return;
             };
             let frame = ClientFrame::ShareRecipientStatus {
                 item_id: address.item().as_str().to_owned(),
@@ -983,7 +986,7 @@ async fn recipient_surface_key(
         // list; Decline sends no fields (the daemon refuses decline + fields).
         RecipientSurfaceAction::RetroShare | RecipientSurfaceAction::RetroDecline => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return false;
+                return;
             };
             let item_id = address.item().as_str().to_owned();
             let decline = action == RecipientSurfaceAction::RetroDecline;
@@ -1009,12 +1012,12 @@ async fn recipient_surface_key(
             let (RecipientSurfaceTarget::Item(address), KeyCode::Char(digit)) =
                 (&surface.target, key.code)
             else {
-                return false;
+                return;
             };
             let Some(field) =
                 crate::adapters::tui::widgets::recipient_surface::retro_field_for_key(digit)
             else {
-                return false;
+                return;
             };
             let item_id = address.item().as_str().to_owned();
             let set = state.retro_left_out.entry(item_id.clone()).or_default();
@@ -1027,7 +1030,7 @@ async fn recipient_surface_key(
         }
         RecipientSurfaceAction::Context => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
-                return false;
+                return;
             };
             let frame = ClientFrame::SetRecipientContext {
                 item_id: address.item().as_str().to_owned(),
@@ -1039,7 +1042,7 @@ async fn recipient_surface_key(
         | RecipientSurfaceAction::Reject
         | RecipientSurfaceAction::Decline => {
             let Some(node) = surface.node_id.as_ref() else {
-                return false;
+                return;
             };
             let action = if action == RecipientSurfaceAction::Approve {
                 PeerDraftAction::Approve
@@ -1054,7 +1057,6 @@ async fn recipient_surface_key(
         }
     }
     state.needs_redraw = true;
-    false
 }
 
 /// The consent card's lines, each wrapped to the card's inner `width` when
@@ -1804,7 +1806,7 @@ impl AttachedTeamRequests {
     }
 }
 
-/// Story 19.21c: own every card key before detach, Ctrl+X or the composer.
+/// Story 19.21c: own every card key before the leader, palette or the composer.
 fn attached_team_retract_key(
     state: &mut TuiState,
     requests: &mut AttachedTeamRequests,
@@ -1893,7 +1895,7 @@ fn attached_composer_key(
     )
 }
 
-const ATTACHED_SIGN_IN: &str = "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.";
+use crate::adapters::tui::chord_menu::ATTACHED_SIGN_IN;
 
 fn attached_sign_in_command(input: &str) -> bool {
     matches!(
@@ -3050,8 +3052,10 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
 }
 
 /// Connect to this workspace's daemon and run the rich attach TUI until the user
-/// detaches (`Esc`/`Ctrl+D`) or the daemon closes the connection. The daemon and
-/// any in-flight turn keep running across detach (AC4).
+/// detaches (`Ctrl+X d` / `/detach`) or quits this client (guarded `q` / `Ctrl+Q` /
+/// idle `Ctrl+C` / `/quit`), or the daemon closes the connection. `Esc`, `Ctrl+D`
+/// and `Ctrl+C` never detach. The daemon and any in-flight turn keep running
+/// across detach (AC4).
 pub async fn run_attached(workspace: &Path) -> Result<()> {
     let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
     let stream = UnixStream::connect(&socket).await.with_context(|| {
@@ -3129,6 +3133,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
     let mut attached_team_requests = AttachedTeamRequests::default();
     let mut approvals = AttachedApprovals::default();
+    let mut attached_interrupt =
+        crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(read_only);
+    let mut attached_chrome = attach_keys::AttachedChrome::new();
 
     // ── Terminal ──
     let mut term = terminal::setup(false)?;
@@ -3160,7 +3167,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     // Attached clients render the same feedback blocks as the local TUI so
     // forwarded transparency room/failure events have the same visible result.
 
-    use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::event::{Event, EventStream, KeyEventKind};
     use futures::StreamExt;
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
@@ -3249,7 +3256,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 false,
                 true,
                 0,
-                state.recipient_surface.is_none().then_some("Esc/Ctrl+D/Ctrl+C detach"),
+                attach_keys::status_hint(&state),
                 0,
                 None,
                 None,
@@ -3270,8 +3277,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 display_input.chars().count(),
                 state.focus.clone(),
                 &state.theme,
-                false,
-                0,
+                state.multiline_mode,
+                attach_keys::composer_scroll_offset(display_input),
                 if read_only {
                     Some("read-only — can't send here")
                 } else {
@@ -3361,6 +3368,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             {
                 visible_approval = approvals.paint(f, layout.chat_pane, &state.theme);
             }
+            attach_keys::paint_overlays(f, area, layout.input_area, layout.status_bar, &state);
         });
         after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
         state.team_proposal_visible = drawn.is_ok().then_some(visible_proposal).flatten();
@@ -3370,310 +3378,38 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             maybe_ev = events.next() => {
                 match maybe_ev {
                     Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        if attached_team_retract_key(&mut state, &mut attached_team_requests, key, &frame_tx) {
-                            continue;
-                        }
-                        let approval_higher = attached_proposal_higher_confirmation(
-                            &state, !pending_consent_approvals.is_empty(),
-                            pending_consolidation_card.is_some(), retract_confirm.is_some(),
-                        );
-                        if approvals.key(
-                            key, read_only || approval_higher
-                                || !matches!(state.focus, FocusState::Chat | FocusState::Input),
-                            attached_display_input(&state, &input), &frame_tx,
-                        ) {
-                            state.needs_redraw = true;
-                            continue;
-                        }
-                        let proposal_higher = approval_higher
-                            || (!read_only && !approvals.pending.is_empty());
-                        if attached_proposal_key(
-                            key, proposal_higher, read_only, &input, &mut state,
-                            &mut tab_render_state, &mut attached_team_requests, &frame_tx,
-                            &mut scroll_offset, &mut auto_scroll,
-                        ) {
-                            continue;
-                        }
-                        let higher_confirmation = proposal_higher
-                            || attached_proposal_pending(&state).is_some();
-                        if key.kind != KeyEventKind::Press
-                            && (state.recipient_surface.is_some() || higher_confirmation)
-                        {
-                            continue;
-                        }
-                        if let Some(detach) = dispatch_recipient_surface_key(
-                            key, higher_confirmation, workspace, &conversation,
-                            &mut input, &mut state, (!read_only).then_some(&frame_tx),
-                        ).await {
-                            if detach {
-                                break Ok(());
-                            }
-                            continue;
-                        }
-                        if key.code == KeyCode::Tab && key.modifiers == KeyModifiers::NONE
-                            && !higher_confirmation && key.kind == KeyEventKind::Press
-                            && let Some(pending) = pending_peer_response(&conversation)
-                        {
-                            let node = pending.node.to_owned();
-                            if let Err(error) = open_response_surface(
-                                workspace, &conversation, &node, &mut state, read_only, true,
-                            ).await {
-                                recipient_surface_flash(&mut state, error.to_string());
-                            }
-                            continue;
-                        }
-                        // Any further keypress dismisses the retract confirmation.
-                        state.feedback_blocks.remove("peer-retract");
-                        match (key.code, key.modifiers) {
-                            // Story 18.3d AC1 — sender-consent Approval Pattern.
-                            // The guard is the daemon-derived pending FIFO, so
-                            // these single-letter keys are inert everywhere else.
-                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
-                                && !pending_consent_approvals.is_empty() =>
-                            {
-                                if let Some(pending) = pending_consent_approvals.pop_front() {
-                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
-                                        request_id: pending.request_id,
-                                        outcome: crate::domain::models::ApprovalOutcome::Once,
-                                    });
-                                }
-                                state.needs_redraw = true;
-                            }
-                            (KeyCode::Char('a'), m) if !m.contains(KeyModifiers::CONTROL)
-                                && !pending_consent_approvals.is_empty() =>
-                            {
-                                if let Some(pending) = pending_consent_approvals.pop_front() {
-                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
-                                        request_id: pending.request_id,
-                                        outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
-                                            scope: crate::domain::models::ApprovalScope::Tool(
-                                                pending.tool,
-                                            ),
-                                        },
-                                    });
-                                }
-                                state.needs_redraw = true;
-                            }
-                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-                                if !m.contains(KeyModifiers::CONTROL)
-                                    && !pending_consent_approvals.is_empty() =>
-                            {
-                                if let Some(pending) = pending_consent_approvals.pop_front() {
-                                    let _ = frame_tx.send(ClientFrame::ApprovalResponse {
-                                        request_id: pending.request_id,
-                                        outcome: crate::domain::models::ApprovalOutcome::Reject {
-                                            feedback: None,
-                                        },
-                                    });
-                                }
-                                state.needs_redraw = true;
-                            }
-                            // Story 12.2d AC4/AC5 — consolidation card intercept.
-                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
-                                && pending_consolidation_token.is_some() =>
-                            {
-                                if let Some(token) = pending_consolidation_token.take() {
-                                    let _ = frame_tx.send(ClientFrame::ConsolidationResolve {
-                                        token,
-                                        accept: true,
-                                    });
-                                }
-                                pending_consolidation_card = None;
-                                state.needs_redraw = true;
-                            }
-                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-                                if !m.contains(KeyModifiers::CONTROL)
-                                    && pending_consolidation_token.is_some() =>
-                            {
-                                // n or Esc while card shown → decline.
-                                if let Some(token) = pending_consolidation_token.take() {
-                                    let _ = frame_tx.send(ClientFrame::ConsolidationResolve {
-                                        token,
-                                        accept: false,
-                                    });
-                                }
-                                pending_consolidation_card = None;
-                                state.needs_redraw = true;
-                            }
-                            // Story 18.3c AC5 — the retract confirmation owns
-                            // y/n/Esc while open (Approval grammar, never a
-                            // bare key on a transient surface).
-                            (KeyCode::Char('y'), m) if !m.contains(KeyModifiers::CONTROL)
-                                && retract_confirm.is_some() =>
-                            {
-                                if read_only {
-                                    state.status = StatusState::Flash {
-                                        message: "read-only — can't retract here".into(),
-                                        remaining_ms: 1500,
-                                    };
-                                } else if let Some((message_id, _)) = retract_confirm.take() {
-                                    let _ = frame_tx.send(ClientFrame::RetractAutoResponse {
-                                        message_id,
-                                        target_seq: None,
-                                    });
-                                    state.feedback_blocks.insert(
-                                        "peer-retract".to_owned(),
-                                        crate::domain::models::FeedbackBlock {
-                                            id: "peer-retract".to_owned(),
-                                            level: crate::domain::models::FeedbackLevel::Info,
-                                            message: "Retracted. Marked in your log — never deleted.\nWhat was already read, was read."
-                                                .to_owned(),
-                                            actions: vec![],
-                                        },
-                                    );
-                                }
-                                state.needs_redraw = true;
-                            }
-                            (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-                                if !m.contains(KeyModifiers::CONTROL)
-                                    && retract_confirm.is_some() =>
-                            {
-                                retract_confirm = None;
-                                state.needs_redraw = true;
-                            }
-                            // Story 18.3c AC5 — Ctrl+X opens the retract
-                            // confirmation for the most recent auto-sent row.
-                            (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-                                if read_only {
-                                    state.status = StatusState::Flash {
-                                        message: "read-only — can't retract here".into(),
-                                        remaining_ms: 1500,
-                                    };
-                                } else if let Some(row) = latest_retractable(&conversation) {
-                                    retract_confirm =
-                                        Some((row.id.clone(), preview_line(&row.content, 48)));
-                                } else {
-                                    state.status = StatusState::Flash {
-                                        message: "no auto-sent message to retract".into(),
-                                        remaining_ms: 1500,
-                                    };
-                                }
-                                state.needs_redraw = true;
-                            }
-                            // AC4 — detach (keybinding only, no CLI verb).
-                            (KeyCode::Esc, _)
-                            | (KeyCode::Char('d'), KeyModifiers::CONTROL)
-                            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                                break Ok(());
-                            }
-                            (KeyCode::Enter, _) | (KeyCode::Backspace, _) => {
-                                if state.recipient_surface.is_some() {
-                                    continue;
-                                }
-                                let text = match attached_composer_key_with_team_requests(
-                                    key.code,
-                                    read_only,
-                                    &mut input,
-                                    &mut state,
-                                    &frame_tx,
-                                    &mut attached_team_requests,
-                                ) {
-                                    ComposerOutcome::Handled => continue,
-                                    ComposerOutcome::FrameSent => {
-                                        auto_scroll = true;
-                                        continue;
-                                    }
-                                    // Story 19.16g — a user-initiated log may
-                                    // scroll its own result into view.
-                                    ComposerOutcome::LocalLog(args) => {
-                                        for notice in crate::infrastructure::runtime::transparency_bridge::attached_team_log(
-                                            &log_service,
-                                            &mut state,
-                                            &args,
-                                        )
-                                        .await
-                                        {
-                                            conversation.messages.push(system_message(notice));
-                                        }
-                                        auto_scroll = true;
-                                        continue;
-                                    }
-                                    ComposerOutcome::LocalView(item_id) => {
-                                        let access = if read_only {
-                                            crate::adapters::tui::state::RecipientSurfaceAccess::ReadOnly
-                                        } else {
-                                            crate::adapters::tui::state::RecipientSurfaceAccess::Writer
-                                        };
-                                        if let Err(error) = super::recipient_surface::open_received_surface(
-                                            workspace, Some(&conversation), &item_id, &mut state, access,
-                                            super::recipient_view::ReceivedThreadWindow::Newest,
-                                        ).await {
-                                            recipient_surface_flash(&mut state, error.to_string());
-                                        }
-                                        continue;
-                                    }
-                                    ComposerOutcome::Submit(text) => text,
-                                };
-                                let compose = match take_current_peer_compose(&mut state, &conversation) {
-                                    Ok(compose) => compose,
-                                    Err(()) => {
-                                        input = text;
-                                        recipient_surface_flash(&mut state,
-                                            "response already settled — your text was not sent".to_owned());
-                                        continue;
-                                    }
-                                };
-                                if let Some(compose) = compose {
-                                    input.clone_from(&text);
-                                    let action = match compose.action {
-                                        crate::adapters::tui::state::PeerComposeAction::Respond =>
-                                            crate::adapters::daemon::protocol::PeerDraftAction::WriteOwn { content: text },
-                                        crate::adapters::tui::state::PeerComposeAction::Edit =>
-                                            crate::adapters::daemon::protocol::PeerDraftAction::Edit { content: text },
-                                    };
-                                    let node = compose.node_id.clone();
-                                    state.pinned_peer_compose = Some(compose);
-                                    let frame = ClientFrame::ResolvePeerDraft { node, action };
-                                    queue_recipient_action(&mut state, &mut input, frame, &frame_tx, true);
-                                } else {
-                                    let sub = UserSubmission {
-                                        text,
-                                        images: vec![],
-                                        synthetic: false,
-                                        activation_set: None,
-                                        agent_snapshot: None,
-                                        turn_cancel: CancellationToken::new(),
-                                    };
-                                    let view = TurnViewState {
-                                        conversation: &mut conversation,
-                                        streaming: &mut streaming,
-                                        state: &mut state,
-                                        lifecycle: &mut lifecycle,
-                                        session_manager: &mut session_manager,
-                                    };
-                                    driver.submit(sub, view).await;
-                                    auto_scroll = true;
-                                }
-                            }
-                            (KeyCode::PageUp | KeyCode::PageDown, _) => {
-                                scroll_attached_transcript(
-                                    key.code == KeyCode::PageUp,
-                                    state.viewport_height,
-                                    streaming.is_streaming,
-                                    &mut scroll_offset,
-                                    &mut auto_scroll,
-                                );
-                            }
-                            (KeyCode::Char(_), m) if !m.contains(KeyModifiers::CONTROL) => {
-                                if state.recipient_surface.is_some() {
-                                    continue;
-                                }
-                                // Story 19.16g: read-only composers edit too;
-                                // only submission is refused.
-                                attached_composer_key_with_team_requests(
-                                    key.code,
-                                    read_only,
-                                    &mut input,
-                                    &mut state,
-                                    &frame_tx,
-                                    &mut attached_team_requests,
-                                );
-                            }
-                            _ => {}
+                        let mut key_ctx = attach_keys::KeyCtx {
+                            workspace,
+                            read_only,
+                            state: &mut state,
+                            conversation: &mut conversation,
+                            streaming: &mut streaming,
+                            input: &mut input,
+                            frame_tx: &frame_tx,
+                            team_requests: &mut attached_team_requests,
+                            approvals: &mut approvals,
+                            consent: &mut pending_consent_approvals,
+                            consolidation_card: &mut pending_consolidation_card,
+                            consolidation_token: &mut pending_consolidation_token,
+                            retract_confirm: &mut retract_confirm,
+                            tab: &mut tab_render_state,
+                            scroll_offset: &mut scroll_offset,
+                            auto_scroll: &mut auto_scroll,
+                            interrupt: &attached_interrupt,
+                            driver: &driver,
+                            lifecycle: &mut lifecycle,
+                            session_manager: &mut session_manager,
+                            log_service: &log_service,
+                            chrome: &mut attached_chrome,
+                        };
+                        match attach_keys::handle_attached_key(&mut key_ctx, key).await {
+                            attach_keys::KeyFlow::Continue => {}
+                            attach_keys::KeyFlow::Detach | attach_keys::KeyFlow::Quit => break Ok(()),
                         }
                     }
                     Some(Ok(Event::Paste(text))) => {
                         if state.recipient_surface.is_none()
+                            && !attach_keys::paste_blocked(&state)
                             && crate::adapters::tui::handlers::recipient_actions::pending_composition(&state).is_none()
                             && pending_consent_approvals.is_empty()
                             && approvals.pending.is_empty()
@@ -3682,6 +3418,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             && state.pending_team_retract.is_none()
                         {
                             append_attached_paste(&mut input, &text);
+                            state.autocomplete.dismiss();
                             state.needs_redraw = true;
                         }
                     }
@@ -3824,6 +3561,12 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             &mut state, &mut tab_render_state, &mut attached_team_requests,
                             &conversation.id, frame,
                         );
+                    }
+                    Ok(Some(frame @ (DaemonFrame::ActiveTurn { .. } | DaemonFrame::InterruptResult { .. }))) => {
+                        if let Some(notice) = attached_interrupt.apply(&frame) {
+                            conversation.messages.push(system_message(notice.text));
+                        }
+                        state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
                     Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
@@ -7010,17 +6753,15 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
         ] {
-            assert!(
-                !recipient_surface_key(
-                    key,
-                    workspace.path(),
-                    &conversation,
-                    &mut input,
-                    &mut state,
-                    Some(&tx)
-                )
-                .await
-            );
+            recipient_surface_key(
+                key,
+                workspace.path(),
+                &conversation,
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await;
         }
         assert!(
             rx.try_recv().is_err(),
@@ -7653,8 +7394,8 @@ mod tests {
         )
         .count();
         let modal_key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
-        assert_eq!(
-            dispatch_recipient_surface_key(
+        assert!(
+            !dispatch_recipient_surface_key(
                 modal_key,
                 true,
                 workspace.path(),
@@ -7664,7 +7405,7 @@ mod tests {
                 Some(&tx)
             )
             .await,
-            None,
+            "a modal owner keeps the key from the surface"
         );
         assert!(
             rx.try_recv().is_err(),
@@ -7685,7 +7426,7 @@ mod tests {
             notices_before_modal,
             "the modal-owned key leaves the busy notice intact"
         );
-        assert_eq!(
+        assert!(
             dispatch_recipient_surface_key(
                 modal_key,
                 false,
@@ -7696,7 +7437,7 @@ mod tests {
                 Some(&tx)
             )
             .await,
-            Some(false),
+            "without a modal owner the surface takes the key"
         );
         assert!(matches!(
             rx.try_recv().unwrap(),
@@ -8007,7 +7748,10 @@ mod tests {
             messages: vec![peer_row("human-1", "operator text"), older, latest.clone()],
             ..Default::default()
         };
-        let target = latest_retractable(&conversation).expect("a retract target");
+        let target = retractable_rows(&conversation)
+            .next()
+            .cloned()
+            .expect("a retract target");
         assert_eq!(target.id, latest.id);
         // …and once it is retracted, no target remains.
         let conversation = Conversation {
@@ -8018,7 +7762,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(latest_retractable(&conversation).is_none());
+        assert!(retractable_rows(&conversation).next().is_none());
     }
 
     #[test]
@@ -8033,7 +7777,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            latest_retractable(&conversation).map(|row| row.id),
+            retractable_rows(&conversation)
+                .next()
+                .map(|row| row.id.clone()),
             Some(response.id),
             "displayed peer tool evidence cannot mask an actual response target"
         );
@@ -8041,11 +7787,11 @@ mod tests {
             messages: vec![evidence],
             ..Default::default()
         };
-        assert!(latest_retractable(&conversation).is_none());
+        assert!(retractable_rows(&conversation).next().is_none());
     }
 
     #[test]
-    fn latest_retractable_skips_human_decided_rows() {
+    fn retractable_rows_skip_human_decided_rows() {
         use crate::domain::models::{Authorship, PeerRowStage, SendAuthorization};
         let mut automatic = peer_row("peer-response-automatic", "automatic");
         automatic.authorship = Authorship::Unknown;
@@ -8070,13 +7816,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            latest_retractable(&conversation).map(|row| row.id),
+            retractable_rows(&conversation)
+                .next()
+                .map(|row| row.id.clone()),
             Some(automatic.id),
             "M07: finder must skip newer human-decided, evidence, RAP and unsettled rows"
         );
         conversation.messages.remove(0);
         assert!(
-            latest_retractable(&conversation).is_none(),
+            retractable_rows(&conversation).next().is_none(),
             "without the automatic row, no remaining row has retraction authority"
         );
     }
@@ -9951,8 +9699,11 @@ mod tests {
         ));
         assert!(rx.try_recv().is_err(), "View is local display, not consent");
     }
+    // Replaces `scoped_surface_ctrl_c_and_ctrl_d_take_attached_detach_exit`
+    // (Story 21.2 AC8/AC13): Ctrl+C/Ctrl+D used to be the surface's detach exit;
+    // RU-3/RU-20 make Ctrl+C "back one frame" and Ctrl+D inert — never a detach.
     #[tokio::test]
-    async fn scoped_surface_ctrl_c_and_ctrl_d_take_attached_detach_exit() {
+    async fn story21_2_scoped_surface_ctrl_c_closes_and_ctrl_d_is_inert_never_detach() {
         use crate::adapters::tui::state::RecipientSurfaceAccess;
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -9982,25 +9733,40 @@ mod tests {
         .unwrap();
         let mut input = "preserved local input".to_owned();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        for chord in ['c', 'd'] {
-            assert_eq!(
-                dispatch_recipient_surface_key(
-                    KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL),
-                    false,
-                    workspace.path(),
-                    &Conversation::default(),
-                    &mut input,
-                    &mut state,
-                    Some(&tx),
-                )
-                .await,
-                Some(true),
-                "attached Ctrl+C/Ctrl+D must reach the real detach exit signal",
-            );
-        }
+        let key = |chord| KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL);
+        assert!(
+            dispatch_recipient_surface_key(
+                key('d'),
+                false,
+                workspace.path(),
+                &Conversation::default(),
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await,
+            "the surface owns Ctrl+D (and swallows it)"
+        );
+        assert!(state.recipient_surface.is_some(), "Ctrl+D is inert");
+        assert!(
+            dispatch_recipient_surface_key(
+                key('c'),
+                false,
+                workspace.path(),
+                &Conversation::default(),
+                &mut input,
+                &mut state,
+                Some(&tx),
+            )
+            .await,
+            "the surface owns Ctrl+C"
+        );
+        assert!(
+            state.recipient_surface.is_none(),
+            "Ctrl+C is back one frame: it closes the surface like Esc"
+        );
         assert_eq!(input, "preserved local input");
-        assert!(state.recipient_surface.is_some());
-        assert!(rx.try_recv().is_err(), "detach chords are not peer actions");
+        assert!(rx.try_recv().is_err(), "neither chord is a peer action");
     }
 }
 

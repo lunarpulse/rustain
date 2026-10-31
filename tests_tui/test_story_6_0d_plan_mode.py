@@ -114,16 +114,19 @@ def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
 def test_slash_command_plan_no_args_shows_status(tui: RustainTUI):
     """Bug-fix E2E: typing '/plan' with no args flashes current mode status.
 
-    Note: the slash-command autocomplete is active after typing '/plan',
-    so we dismiss it with Esc before pressing Enter.
+    Story 21-2 AC4: Esc on a popup-owned slash popup restores the exact
+    pre-trigger composer (it erases the provisional '/plan'), so the old
+    "Esc to dismiss autocomplete, then Enter" route no longer submits. The
+    first Enter accepts the highlighted suggestion (closing the popup, which
+    leaves the composer holding '/plan'); the second Enter submits it.
     """
     for c in "/plan":
         tui.send(c)
         tui.wait(0.05)
     tui.wait(0.3)
-    tui.send(ESC)  # dismiss autocomplete so Enter submits
+    tui.send(ENTER)  # accept the suggestion, popup closes
     tui.wait(0.3)
-    tui.send(ENTER)
+    tui.send(ENTER)  # submit '/plan'
     found = tui.wait_for_screen(
         "Plan mode is not Plan — use /plan on|off|toggle to switch",
         timeout=3.0,
@@ -144,19 +147,22 @@ def test_slash_command_plan_invalid_arg_shows_error(tui: RustainTUI):
 
 @pytest.mark.story_6_0d
 def test_shift_tab_in_input_cycles_modes(tui: RustainTUI):
-    """AC5: Shift+Tab in input focus cycles Normal → AutoEdit → Plan → Yolo → Normal."""
+    """AC5 + Story 21-2 AC9: Shift+Tab in input focus cycles Normal → AutoEdit → Plan → Normal.
+
+    Yolo is never reachable by cycling; only an explicit `/mode yolo` selects it.
+    """
     tui.input_mode()
-    # Cycle through all four modes
     mode_flash = {
         "AutoEdit": "Permission mode: AutoEdit",
         "Plan": "Permission mode: Plan",
-        "Yolo": "YOLO mode active",
         "Normal": "Permission mode: Normal",
     }
-    for expected in ["AutoEdit", "Plan", "Yolo", "Normal"]:
+    for expected in ["AutoEdit", "Plan", "Normal"]:
         tui.send(SHIFT_TAB)
         found = tui.wait_for_screen(mode_flash[expected], timeout=3.0)
         assert found, f"Expected mode change to {expected} after Shift+Tab"
+    # Yolo is only reachable through an explicit `/mode yolo`.
+    assert "YOLO mode active" not in tui.get_screen_text(), "Shift+Tab must never enter Yolo"
 
 
 @pytest.mark.story_6_0d

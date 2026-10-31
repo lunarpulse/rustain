@@ -1,7 +1,7 @@
 //! E2E tests for Story 3.1: Multi-line Input, History & Token Estimate
 //!
 //! Uses TestHarness to verify end-to-end behavior of:
-//! - Multi-line input (Shift+Enter, Ctrl+E toggle)
+//! - Multi-line input (Shift+Enter, Alt+M toggle)
 //! - Input history navigation (Up/Down arrows)
 //! - Reverse-search (Ctrl+R)
 //! - Token estimate display for long messages
@@ -14,7 +14,7 @@ use crate::e2e_harness;
 use e2e_harness::TestHarness;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AC1: Multi-line Input (Shift+Enter, Ctrl+E toggle)
+// AC1: Multi-line Input (Shift+Enter, Alt+M toggle)
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Covers: AC1 — Shift+Enter action consumed
@@ -36,7 +36,8 @@ fn test_e2e_multiline_shift_enter_action() {
     assert!(h.state.input_buffer.contains("Second line"));
 }
 
-/// Covers: AC1 — Ctrl+E toggles multi-line mode
+/// Covers: AC1 — Alt+M toggles multi-line mode; Ctrl+E (Story 21.2 AC12/RU-19)
+/// moves to the end of the current line and never toggles.
 #[test]
 fn test_e2e_multiline_ctrl_e_toggle() {
     let mut h = TestHarness::new();
@@ -45,13 +46,21 @@ fn test_e2e_multiline_ctrl_e_toggle() {
     // Initially single-line mode
     assert!(!h.state.multiline_mode);
 
-    // Ctrl+E toggles multi-line on
+    // Ctrl+E no longer toggles: it is consumed and only moves the cursor.
+    h.type_text("abc");
+    h.state.cursor_position = 0;
     let action = h.press_key(DomainKey::CtrlE);
+    assert!(matches!(action, InputAction::Consumed));
+    assert!(!h.state.multiline_mode);
+    assert_eq!(h.state.cursor_position, 3);
+
+    // Alt+M toggles multi-line on
+    let action = h.press_key(DomainKey::AltM);
     assert!(matches!(action, InputAction::Consumed));
     assert!(h.state.multiline_mode);
 
-    // Ctrl+E toggles multi-line off
-    let action = h.press_key(DomainKey::CtrlE);
+    // Alt+M toggles multi-line off
+    let action = h.press_key(DomainKey::AltM);
     assert!(matches!(action, InputAction::Consumed));
     assert!(!h.state.multiline_mode);
 }
@@ -63,7 +72,7 @@ fn test_e2e_multiline_mode_persists() {
     h.focus_input();
 
     // Enable multi-line mode
-    h.press_key(DomainKey::CtrlE);
+    h.press_key(DomainKey::AltM);
     assert!(h.state.multiline_mode);
 
     // Type some text

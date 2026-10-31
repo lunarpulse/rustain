@@ -528,9 +528,6 @@ pub(crate) fn render_recipient_surface(
         if surface.omitted_after > 0 {
             footer.push_str("[l] Newer  ");
         }
-        if surface.access != RecipientSurfaceAccess::LocalOnly {
-            footer.push_str("  Ctrl+D/Ctrl+C: detach");
-        }
         footer.push_str("[PgUp/PgDn] Scroll  [Esc] Close");
         surface.cached_footer = footer
             .split('\n')

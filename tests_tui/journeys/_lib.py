@@ -289,8 +289,21 @@ def quit_ctrl_q(tui, timeout: float = 10.0) -> None:
         )
         sys.exit(1)
     tui.send("\x11")
+    # Story 21.2 AC7: with live work or an unsent draft Ctrl+Q raises the
+    # System/Quit decision instead of exiting. A journey that quits on purpose
+    # answers it with the explicit `y` (and says so), then still needs the exit.
+    answered = False
     deadline = time.monotonic() + timeout
     while tui.child.isalive() and time.monotonic() < deadline:
+        if not answered:
+            try:
+                shown = "System · Quit" in tui.get_screen_text()
+            except RuntimeError:  # exited between the liveness check and the read
+                break
+            if shown:
+                log("Ctrl+Q raised System/Quit; answering the explicit y")
+                tui.send("y")
+                answered = True
         time.sleep(0.2)
     if tui.child.isalive():
         tui.stop()

@@ -33,7 +33,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             bindings: vec![
                 HelpBinding {
                     key: "Esc",
-                    description: "Switch focus / dismiss overlay",
+                    description: "Switch focus / dismiss overlay (never sends or quits)",
                     available: true,
                 },
                 HelpBinding {
@@ -53,12 +53,12 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "{ / }",
-                    description: "Jump to next / previous user message",
+                    description: "Jump to previous / next user message",
                     available: true,
                 },
                 HelpBinding {
-                    key: "Tab",
-                    description: "Toggle sidebar focus",
+                    key: "Tab (Chat)",
+                    description: "Cycle tool calls in the expanded turn (needs 2+); else sidebar focus, else next tab",
                     available: true,
                 },
             ],
@@ -153,7 +153,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Tab",
-                    description: "Cycle invocations within focused expanded turn",
+                    description: "Cycle tool calls in the expanded turn (needs 2+); else sidebar focus, else next tab",
                     available: true,
                 },
                 HelpBinding {
@@ -193,12 +193,27 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Ctrl+E",
-                    description: "Toggle multi-line mode",
+                    description: "Move to the end of the current line",
                     available: true,
                 },
                 HelpBinding {
                     key: "Alt+M",
-                    description: "Toggle multi-line mode (alternative when Ctrl+E is intercepted)",
+                    description: "Toggle multi-line mode",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+Enter",
+                    description: "Send (where the terminal distinguishes it from Enter)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, Enter",
+                    description: "Send from any terminal (portable multi-line send)",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Esc",
+                    description: "Close popup / return to Chat — never sends; unsent text is kept",
                     available: true,
                 },
                 HelpBinding {
@@ -218,7 +233,7 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Shift+Tab in input",
-                    description: "Cycle permission mode",
+                    description: "Cycle permission mode (normal, auto-edit, plan; Yolo only via /mode yolo)",
                     available: true,
                 },
             ],
@@ -455,12 +470,17 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 },
                 HelpBinding {
                     key: "Ctrl+X, D",
-                    description: "Dashboard mode (panels + compact chat)",
+                    description: "Dashboard mode (panels + compact chat); Detach in an attached client",
                     available: true,
                 },
                 HelpBinding {
                     key: "Ctrl+X, ?",
                     description: "This help overlay",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, Enter",
+                    description: "Send the composer from any terminal (multi-line safe send)",
                     available: true,
                 },
             ],
@@ -585,22 +605,22 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
             bindings: vec![
                 HelpBinding {
                     key: "?",
-                    description: "Toggle this help overlay",
+                    description: "Toggle this help overlay (Chat focus). In Input `?` types a question mark — use Ctrl+X ?",
                     available: true,
                 },
                 HelpBinding {
                     key: "Ctrl+C",
-                    description: "Interrupt / cancel",
+                    description: "Stop active work; when idle, quit (confirms first if work or a draft exists)",
                     available: true,
                 },
                 HelpBinding {
                     key: "q",
-                    description: "Quit (from chat focus)",
+                    description: "Quit (from chat focus) — asks first if work or a draft exists",
                     available: true,
                 },
                 HelpBinding {
                     key: "Ctrl+Q",
-                    description: "Quit (any focus)",
+                    description: "Quit (any focus) — asks first if work or a draft exists",
                     available: true,
                 },
             ],

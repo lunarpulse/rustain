@@ -241,16 +241,19 @@ fn test_e2e_which_key_invalid_dismisses() {
     assert!(!h.state.which_key.active);
 }
 
-/// Covers: AC3 — Which-key timeout auto-dismisses
+/// Covers: AC6 (Story 21.2) — the Ctrl+X leader is untimed: only a follow-up key
+/// or Esc dismisses it, and Esc restores the originating focus. (The production
+/// tick is exercised by the inline `story21_2_` test in `panel_bridge`.)
 #[test]
-fn test_e2e_which_key_timeout() {
+fn test_e2e_which_key_esc_restores_origin_focus() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlX);
     assert!(h.state.which_key.active);
 
-    // Check that timeout tracking exists
-    assert!(h.state.which_key.started_at.is_some());
+    h.press_key(DomainKey::Esc);
+    assert!(!h.state.which_key.active);
+    assert_eq!(h.state.focus, rustain::domain::models::FocusState::Input);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

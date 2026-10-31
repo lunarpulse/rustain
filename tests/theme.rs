@@ -56,7 +56,6 @@ fn test_dark_theme_timing_populated() {
     assert_eq!(theme.timing.notification_hold_ms, 3000);
     assert_eq!(theme.timing.status_flash_ms, 1000);
     assert_eq!(theme.timing.typing_pulse_ms, 500);
-    assert_eq!(theme.timing.which_key_timeout_ms, 2000);
     assert_eq!(theme.timing.auto_scroll_resume_ms, 200);
 }
 

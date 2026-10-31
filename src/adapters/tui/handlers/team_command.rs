@@ -31,7 +31,7 @@ pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is
 /// so every refusal of one names the others **by object** (Story 19.16f
 /// `AC3(d)`).
 const THREE_RETRACTS: &str = "'/team retract' marks an item on a peer's host; '/team remove' \
-     removes your own received item on this host; Ctrl+X retracts this host's auto-sent message.";
+     removes your own received item on this host; the command palette's retract entry retracts this host's auto-sent message.";
 
 /// What the dispatch arm already did on the caller's behalf.
 pub struct TeamLogInput {
@@ -55,9 +55,9 @@ pub struct TeamLogInput {
 }
 
 /// Story 19.16g — which client presents the in-chat log. Only the access
-/// guidance differs: the attached client has no `Ctrl+X, L` (its `Ctrl+X`
-/// already retracts an auto-sent message), so it names the full CLI reader
-/// alone.
+/// guidance differs: the attached client has no `Ctrl+X, L` (its leader menu
+/// has no log panel; retracting an auto-sent message is the palette's retract
+/// entry), so it names the full CLI reader alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogRail {
     Standalone,
@@ -1900,8 +1900,8 @@ mod tests {
             "silent truncation is a lie with good intentions: {text}"
         );
         assert!(text.contains("Ctrl+X, L"), "the full surface must be named");
-        // Story 19.16g: the attached client has no `Ctrl+X, L` — its Ctrl+X
-        // retracts an auto-sent message — so it names only the full reader,
+        // Story 19.16g: the attached client has no `Ctrl+X, L` — it retracts an
+        // auto-sent message through the palette — so it names only the full reader,
         // and keeps the same explicit truncation disclosure.
         let attached = render_rows(&rows, false, LogRail::Attached);
         assert!(

@@ -347,10 +347,14 @@ impl PinnedPeerCompose {
     pub fn new(node_id: String, action: PeerComposeAction) -> Self {
         let label = match action {
             PeerComposeAction::Respond => {
-                format!("reply to {node_id} — Enter sends to this response; Esc detaches")
+                format!(
+                    "reply to {node_id} — Enter sends to this response; Esc returns to Chat (draft kept)"
+                )
             }
             PeerComposeAction::Edit => {
-                format!("edit reply to {node_id} — Enter sends the edited reply; Esc detaches")
+                format!(
+                    "edit reply to {node_id} — Enter sends the edited reply; Esc returns to Chat (draft kept)"
+                )
             }
         };
         Self {
@@ -856,6 +860,19 @@ pub struct AutocompleteState {
     pub selected_index: usize,
     /// Scroll offset for long suggestion lists.
     pub scroll_offset: usize,
+    /// Pre-trigger composer saved when a slash popup opened from typed input.
+    /// `None` for mention popups, pasted/literal slash text and after any
+    /// accept/dismiss (Story 21-2 A2).
+    pub slash_rollback: Option<SlashRollback>,
+}
+
+/// Composer snapshot taken immediately before a slash trigger is typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashRollback {
+    pub buffer: String,
+    /// Cursor (char index) before the trigger; equals the trigger position.
+    pub cursor: usize,
+    pub scroll: usize,
 }
 
 impl AutocompleteState {
@@ -868,6 +885,7 @@ impl AutocompleteState {
             suggestions: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
+            slash_rollback: None,
         }
     }
 
@@ -886,6 +904,7 @@ impl AutocompleteState {
         self.suggestions = suggestions;
         self.selected_index = 0;
         self.scroll_offset = 0;
+        self.slash_rollback = None;
     }
 
     /// Dismiss the autocomplete popup.
@@ -895,6 +914,44 @@ impl AutocompleteState {
         self.suggestions.clear();
         self.selected_index = 0;
         self.scroll_offset = 0;
+        self.slash_rollback = None;
+    }
+
+    /// Record the composer as it was before a slash trigger was typed, so the
+    /// provisional `/` + filter can be rolled back by Esc (Story 21-2 A2).
+    /// Call only when a *new* slash popup opens from typed input.
+    pub fn own_slash_edit(&mut self, buffer: &str, cursor: usize, scroll: usize) {
+        self.slash_rollback = Some(SlashRollback {
+            buffer: buffer.to_owned(),
+            cursor,
+            scroll,
+        });
+    }
+
+    /// Consume slash ownership for an Esc cancel. Returns the saved composer
+    /// only while the live composer still equals the provisional edit this
+    /// popup made (`before + "/" + filter + after`, cursor at filter end);
+    /// any unrelated edit or cursor relocation yields `None` so a stale
+    /// snapshot is never restored. Ownership is always cleared.
+    pub fn take_slash_rollback(&mut self, buffer: &str, cursor: usize) -> Option<SlashRollback> {
+        let rollback = self.slash_rollback.take()?;
+        if self.kind != AutocompleteKind::SlashCommand || self.trigger_position != rollback.cursor {
+            return None;
+        }
+        let split = rollback
+            .buffer
+            .char_indices()
+            .nth(rollback.cursor)
+            .map_or(rollback.buffer.len(), |(byte, _)| byte);
+        let (before, after) = rollback.buffer.split_at(split);
+        let expected = format!("{before}/{}{after}", self.filter_text);
+        let expected_cursor = rollback.cursor + 1 + self.filter_text.chars().count();
+        (buffer == expected && cursor == expected_cursor).then_some(rollback)
+    }
+
+    /// True while a slash popup owns a provisional edit it may roll back.
+    pub fn owns_slash_edit(&self) -> bool {
+        self.slash_rollback.is_some()
     }
 
     /// Navigate up or down in the suggestion list (wraps around).
@@ -2285,6 +2342,9 @@ pub struct CommandPaletteState {
     pub current_scope: Option<PaletteScope>,
     /// Previous focus state to restore on dismiss.
     pub previous_focus: Option<FocusState>,
+    /// Incremented by every `open`; lets the populate gate distinguish an
+    /// inactive→active transition from an unchanged empty query.
+    pub open_epoch: u64,
 }
 
 impl CommandPaletteState {
@@ -2297,12 +2357,14 @@ impl CommandPaletteState {
             scroll_offset: 0,
             current_scope: None,
             previous_focus: None,
+            open_epoch: 0,
         }
     }
 
     /// Open the command palette, saving the current focus for restoration.
     pub fn open(&mut self, current_focus: FocusState) {
         self.active = true;
+        self.open_epoch = self.open_epoch.wrapping_add(1);
         self.filter_text.clear();
         self.filtered_entries.clear();
         self.selected_index = 0;
@@ -2422,7 +2484,7 @@ impl Default for HelpOverlayState {
 // Covers: UX-DR19, UX-DR60
 pub struct WhichKeyState {
     pub active: bool,
-    pub started_at: Option<Instant>,
+    // Untimed leader (Story 21.2 AC6): no clock, no timeout method, no tick.
     /// Previous focus state to restore on dismiss.
     pub previous_focus: Option<FocusState>,
     /// Chord map: key → action.
@@ -2481,7 +2543,6 @@ impl WhichKeyState {
 
         Self {
             active: false,
-            started_at: None,
             previous_focus: None,
             chord_map,
         }
@@ -2490,30 +2551,17 @@ impl WhichKeyState {
     /// Open the which-key hint bar, saving the current focus.
     pub fn open(&mut self, current_focus: FocusState) {
         self.active = true;
-        self.started_at = Some(Instant::now());
         self.previous_focus = Some(current_focus);
     }
 
     /// Dismiss the which-key bar, returning the previous focus.
     pub fn dismiss(&mut self) -> Option<FocusState> {
         self.active = false;
-        self.started_at = None;
         self.previous_focus.take()
     }
 
-    /// Check if the timeout has expired.
-    /// A timeout_ms of 0 is treated as "no timeout" (never expires) to prevent
-    /// accidental immediate expiry when callers pass 0.
-    pub fn is_timed_out(&self, timeout_ms: u64) -> bool {
-        if timeout_ms == 0 {
-            return false;
-        }
-        if let Some(started) = self.started_at {
-            started.elapsed().as_millis() as u64 >= timeout_ms
-        } else {
-            false
-        }
-    }
+    // Story 21.2 AC6: the Ctrl+X leader is untimed — it stays active until a
+    // follow-up key or Esc, so there is no timeout field, method or tick.
 
     /// Look up a chord key. Returns Some(action) for valid keys, None for invalid.
     pub fn lookup_chord(&self, key: char) -> Option<&ChordAction> {
@@ -2712,7 +2760,7 @@ pub struct TuiState {
     /// Session-scoped input history for Up/Down and Ctrl+R.
     // Covers: UX-DR74
     pub input_history: InputHistory,
-    /// Whether multi-line mode is active (toggled by Ctrl+E).
+    /// Whether multi-line mode is active (toggled by Alt+M or `/ml`).
     // Covers: UX-DR76
     pub multiline_mode: bool,
     /// Story 11.4 (AC7) — whether memory-based context injection is enabled for
@@ -2769,6 +2817,9 @@ pub struct TuiState {
     /// Which-key hint bar state (Ctrl+X).
     // Covers: UX-DR19, UX-DR60
     pub which_key: WhichKeyState,
+    /// S-QUIT decision frame (Story 21.2 AC7): one bounded presentation state
+    /// with a saved caller focus; 21-4 migrates it onto the modal stack.
+    pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
     /// Help overlay state (? key or Ctrl+X, ?).
     // Covers: FR108, UX-DR94
     pub help_overlay: HelpOverlayState,
@@ -3259,6 +3310,7 @@ impl TuiState {
             image_indicator: None,
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
+            quit_confirm: None,
             help_overlay: HelpOverlayState::new(),
             model_selector: ModelSelectorState::new(),
             login: LoginOverlayState::default(),

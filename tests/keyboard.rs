@@ -233,18 +233,28 @@ fn test_shift_enter_inserts_newline() {
     assert_eq!(state.cursor_position, 2);
 }
 
-// Covers: UX-DR76 — Ctrl+E toggles multiline mode
+// Covers: UX-DR76 — Alt+M toggles multiline mode; Ctrl+E (Story 21.2 AC12/RU-19)
+// moves to the end of the current line and never toggles.
 #[test]
-fn test_ctrl_e_toggles_multiline_mode() {
+fn test_alt_m_toggles_multiline_mode_and_ctrl_e_is_end_of_line() {
     let mut state = TuiState::new(80, 24);
     assert!(!state.multiline_mode);
 
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlE));
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
     assert_eq!(action, InputAction::Consumed);
     assert!(state.multiline_mode);
 
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
+    assert_eq!(action, InputAction::Consumed);
+    assert!(!state.multiline_mode);
+
+    // Ctrl+E: consumed, cursor to end of line, mode untouched.
+    handle_input(&mut state, &DomainInputEvent::KeyPress('a'));
+    handle_input(&mut state, &DomainInputEvent::KeyPress('b'));
+    state.cursor_position = 0;
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlE));
     assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.cursor_position, 2);
     assert!(!state.multiline_mode);
 }
 
@@ -273,14 +283,17 @@ fn test_ctrl_enter_submits_in_multiline_mode() {
     assert_eq!(action, InputAction::SubmitMessage("hi".to_string()));
 }
 
-// Covers: UX-DR76 — Esc submits in multiline mode when content exists
+// Covers: UX-DR76 — Story 21.2 AC12/RU-19: Esc NEVER submits in multiline mode;
+// the unsent text is preserved and focus returns safely to Chat.
 #[test]
-fn test_esc_submits_in_multiline_mode_with_content() {
+fn test_esc_never_submits_in_multiline_mode_with_content() {
     let mut state = TuiState::new(80, 24);
     state.multiline_mode = true;
     handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert_eq!(action, InputAction::SubmitMessage("x".to_string()));
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.input_buffer, "x");
+    assert_eq!(state.focus, FocusState::Chat);
 }
 
 // Covers: UX-DR76 — Esc toggles focus in multiline mode when input is empty
@@ -577,7 +590,8 @@ fn test_enter_selects_autocomplete() {
     assert_eq!(state.input_buffer, "/new");
 }
 
-// Covers: AC1 — Esc dismisses autocomplete
+// Covers: AC1 — Esc dismisses autocomplete; Story 21.2 A2/AC4: a popup-owned
+// provisional slash edit is rolled back, so a lone slash leaves no residue.
 #[test]
 fn test_esc_dismisses_autocomplete() {
     let mut state = TuiState::new(80, 24);
@@ -586,7 +600,7 @@ fn test_esc_dismisses_autocomplete() {
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert!(!state.autocomplete.active);
-    assert_eq!(state.input_buffer, "/"); // Content preserved
+    assert_eq!(state.input_buffer, ""); // exact pre-trigger composer restored
 }
 
 // Covers: AC1 — Backspace past trigger dismisses autocomplete
@@ -1260,20 +1274,19 @@ fn test_alt_enter_behaves_like_shift_enter() {
 }
 
 // Covers: Sprint Change Proposal 2026-04-08, AC#7 (backward compatibility)
-/// Alt+M behaves identically to Ctrl+E — toggles multi-line mode.
+/// Alt+M toggles multi-line mode; Ctrl+E (Story 21.2 AC12/RU-19) is end-of-line
+/// and never toggles, so the two no longer behave identically.
 #[test]
-fn test_alt_m_behaves_like_ctrl_e() {
-    // Ctrl+E baseline
+fn test_alt_m_toggles_and_ctrl_e_does_not() {
+    // Ctrl+E baseline: moves the cursor, leaves the mode alone.
     let mut state1 = TuiState::new(80, 24);
     handle_input(&mut state1, &DomainInputEvent::SpecialKey(DomainKey::CtrlE));
-    let mode_after_ctrl_e = state1.multiline_mode;
+    assert!(!state1.multiline_mode);
 
-    // Alt+M should produce the same result
+    // Alt+M toggles.
     let mut state2 = TuiState::new(80, 24);
     handle_input(&mut state2, &DomainInputEvent::SpecialKey(DomainKey::AltM));
-    let mode_after_alt_m = state2.multiline_mode;
-
-    assert_eq!(mode_after_ctrl_e, mode_after_alt_m);
+    assert!(state2.multiline_mode);
 }
 
 // Covers: Sprint Change Proposal 2026-04-08, AC11 (negative focus-state tests)

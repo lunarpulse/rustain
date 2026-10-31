@@ -123,7 +123,6 @@ pub struct TimingTokens {
     pub notification_hold_ms: u64,
     pub status_flash_ms: u64,
     pub typing_pulse_ms: u64,
-    pub which_key_timeout_ms: u64,
     pub auto_scroll_resume_ms: u64,
 }
 
@@ -274,7 +273,6 @@ impl Theme {
                 notification_hold_ms: 3000,
                 status_flash_ms: 1000,
                 typing_pulse_ms: 500,
-                which_key_timeout_ms: 2000,
                 auto_scroll_resume_ms: 200,
             },
             borders: Self::dark_borders(),

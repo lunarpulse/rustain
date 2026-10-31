@@ -24,12 +24,13 @@ pub fn contextual_hint(
             if is_vscode {
                 // VS Code terminal: show keybinding alternatives as the primary hint (AC#4, AC#5)
                 Some(
-                    "VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode"
+                    "VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode, [^X Enter] Send"
                         .to_string(),
                 )
             } else {
+                // Story 21.2 RU-2: a bare `?` is literal text in Input; help is Ctrl+X ?.
                 Some(
-                    "Tip: Press ? for help, Ctrl+P for commands, /mode to switch permission mode"
+                    "Tip: Ctrl+X ? for help, Ctrl+P for commands, [^X Enter] Send, /mode to switch permission mode"
                         .to_string(),
                 )
             }

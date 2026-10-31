@@ -115,14 +115,4 @@ pub(crate) fn tick_status(state: &mut TuiState, conversation: &Conversation, tic
             *remaining_ms -= tick_ms;
         }
     }
-    if state.which_key.active
-        && state
-            .which_key
-            .is_timed_out(state.theme.timing.which_key_timeout_ms)
-    {
-        if let Some(focus) = state.which_key.dismiss() {
-            state.focus = focus;
-        }
-        state.needs_redraw = true;
-    }
 }

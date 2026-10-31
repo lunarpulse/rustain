@@ -228,12 +228,10 @@ fn test_which_key_open_dismiss() {
 
     wk.open(FocusState::Input);
     assert!(wk.active);
-    assert!(wk.started_at.is_some());
     assert_eq!(wk.previous_focus, Some(FocusState::Input));
 
     let prev = wk.dismiss();
     assert!(!wk.active);
-    assert!(wk.started_at.is_none());
     assert_eq!(prev, Some(FocusState::Input));
 }
 
@@ -260,18 +258,6 @@ fn test_which_key_invalid_chord_lookup() {
     assert!(wk.lookup_chord('z').is_none());
     assert!(wk.lookup_chord('q').is_none());
     assert!(wk.lookup_chord('1').is_none());
-}
-
-#[test]
-fn test_which_key_timeout_check() {
-    let mut wk = WhichKeyState::new();
-    wk.open(FocusState::Input);
-
-    // Just opened — should NOT be timed out with generous timeout
-    assert!(!wk.is_timed_out(2000));
-
-    // timeout_ms == 0 means "no timeout" — should never fire (P12 fix)
-    assert!(!wk.is_timed_out(0));
 }
 
 #[test]
@@ -571,7 +557,13 @@ fn test_which_key_bar_renders_chord_labels() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            which_key_bar::render(frame, area, &state, &theme);
+            which_key_bar::render(
+                frame,
+                area,
+                &state,
+                &theme,
+                rustain::adapters::tui::chord_menu::ChordHost::Local,
+            );
         })
         .unwrap();
 
@@ -680,26 +672,6 @@ fn test_palette_rapid_dismiss_reopen() {
         state.focus,
         FocusState::Overlay(OverlayType::CommandPalette)
     );
-}
-
-// ============================================================
-// Edge: Which-key timeout at boundary (Task 9.14)
-// ============================================================
-
-#[test]
-fn test_which_key_timeout_at_zero() {
-    let mut wk = WhichKeyState::new();
-    wk.open(FocusState::Input);
-
-    // P12: timeout_ms == 0 means "no timeout" — should NOT immediately fire
-    assert!(!wk.is_timed_out(0));
-}
-
-#[test]
-fn test_which_key_not_timed_out_when_inactive() {
-    let wk = WhichKeyState::new();
-    // Not opened — should not be timed out
-    assert!(!wk.is_timed_out(0));
 }
 
 // ============================================================

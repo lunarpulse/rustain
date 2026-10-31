@@ -25,6 +25,9 @@ mod command_palette;
 #[path = "../slash_argument_parsing.rs"]
 mod slash_argument_parsing;
 
+#[path = "../conformance_21_2_shortcut_truth.rs"]
+mod conformance_21_2_shortcut_truth;
+
 #[path = "../conformance_19_1_line_diff.rs"]
 mod conformance_19_1_line_diff;
 

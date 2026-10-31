@@ -31,6 +31,7 @@ PROMPT_PLAN = "k5 propose the plan"
 PROMPT_QUIT = "k5 hold for quit"
 PROMPT_RELOAD = "k5 continue after restart"
 RELOAD_REPLY = "K5 restart reply complete"
+QUIT_FRAME = "System · Quit"
 
 
 def _event(obj):
@@ -80,15 +81,29 @@ class _NativeTUI(harness.RustainTUI):
         _wait(self, lambda screen: text in screen, text, timeout)
         return True
 
-    def quit(self):
+    def quit(self, expect_confirmation=False, before_confirm=None):
+        """Ctrl+Q. With live work (21.2 AC7) the host first raises the System/Quit
+        decision; the first `y` is the explicit confirmation that exits.
+
+        `expect_confirmation` pins which path the caller means: a held stream must
+        raise the frame (and `before_confirm` observes that nothing was interrupted
+        yet); an idle quit must exit without one.
+        """
         self.child.sendcontrol("q")
+        answered = False
         while True:
             try:
                 data = self.child.read_nonblocking(size=65536, timeout=30)
             except pexpect.EOF:
                 break
             self._stream.feed(data)
+            if not answered and QUIT_FRAME in "\n".join(self._screen.display):
+                answered = True
+                if before_confirm is not None:
+                    before_confirm()
+                self.child.send("y")
         self.child.close()
+        assert answered == expect_confirmation, (answered, expect_confirmation)
         return self.child.exitstatus, self.child.signalstatus
 
     def stop(self):
@@ -299,14 +314,28 @@ def _exercise(binary, evidence, root, monkeypatch):
         _capture(tui, evidence, "04-plan-card", screen)
         _wait(tui, lambda s: "K5 plan tool completed" in s and "Ready" in s,
               "plan tool response completed")
+        # 21.2 AC10: plan y/e/n are Chat-focus keys (in Input they are text), so the
+        # operator moves to Chat first; the rejection itself is asserted unchanged.
+        tui.send("\x1b")
+        _wait(tui, lambda _s: tui._screen.cursor.hidden, "chat focus")
         tui.send("n")
         _wait(tui, lambda s: "rejected" in s.lower(), "plan rejection")
         _wait(tui, lambda s: "K5 rejection acknowledged" in s and "Ready" in s,
               "plan rejection response completed")
+        tui.send("i")
+        _wait(tui, lambda _s: not tui._screen.cursor.hidden, "input focus")
         _submit(tui, PROMPT_QUIT)
         screen = _wait(tui, lambda s: QUIT_PARTIAL in s, "quit held partial")
         _capture(tui, evidence, "05-quit-partial", screen)
-        assert tui.quit() == (0, None)
+        # 21.2 AC7: the held stream is live work, so Ctrl+Q raises System/Quit
+        # first and interrupts nothing until the explicit `y`.
+        assert tui.quit(
+            expect_confirmation=True,
+            before_confirm=lambda: (
+                _capture(tui, evidence, "05b-quit-confirm", "\n".join(tui._screen.display)),
+                disconnected["quit"].is_set() and pytest.fail("quit request cancelled the held stream"),
+            ),
+        ) == (0, None)
         closed = disconnected["quit"].wait(30)
         check_server()
         assert closed, "quit did not close its provider stream"

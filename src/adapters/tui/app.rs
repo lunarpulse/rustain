@@ -24,6 +24,9 @@ pub enum InputAction {
     SubmitMessage(String),
     /// User wants to exit.
     Quit,
+    /// The S-QUIT decision frame was explicitly confirmed with `y`: the host
+    /// performs its existing exit exactly once (Story 21.2 AC7).
+    QuitConfirmed,
     /// Ctrl+C: cancel streaming if active, otherwise quit.
     CancelOrQuit,
     /// Permission prompt: user pressed y.
@@ -651,6 +654,20 @@ pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
 /// Handle a domain input event by updating TUI state.
 /// Returns an InputAction telling the event loop what to do.
 pub fn handle_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
+    // S-QUIT owns every user key while its frame is open — before the login
+    // overlay, plan/permission/peer cards or any focus handler, so a `y` can
+    // never leak to a card underneath (Story 21.2 AC7). Resize/focus events
+    // are not user keys and fall through.
+    if state.quit_confirm.is_some()
+        && let Some(outcome) = crate::adapters::tui::quit_confirm::handle_domain_event(state, event)
+    {
+        return match outcome {
+            crate::adapters::tui::quit_confirm::QuitKeyOutcome::Confirmed => {
+                InputAction::QuitConfirmed
+            }
+            _ => InputAction::Consumed,
+        };
+    }
     // The login overlay owns every key while it has focus (Ctrl+Q still quits).
     if state.focus == FocusState::Overlay(OverlayType::Login)
         && !matches!(
@@ -846,6 +863,8 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
             if matches!(state.focus, FocusState::Input) {
                 let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
                 state.input_buffer.insert_str(byte_pos, text);
+                // A paste is authored text, not part of the popup's provisional edit.
+                state.autocomplete.slash_rollback = None;
                 state.cursor_position += text.chars().count();
                 state.needs_redraw = true;
             }
@@ -996,10 +1015,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         return InputAction::Consumed;
     }
 
-    // Inline PlanCard takes priority over Permission overlay when pending (H1 fix).
-    // Without this guard, ApprovalRuntime steals focus to Overlay(Permission) and 'y'
-    // routes to PermissionAllow instead of PlanCardApprove.
-    if state.pending_plan_card.is_some() {
+    // Inline PlanCard keys belong to Chat focus only (Story 21.2 AC10): in Input y/e/n
+    // are literal text, and a focused overlay (a Permission confirmation included)
+    // keeps ownership of its own keys — the plan waits behind the higher card.
+    if state.pending_plan_card.is_some() && state.focus == FocusState::Chat {
         match c {
             'y' => return InputAction::PlanCardApprove,
             'n' => return InputAction::PlanCardReject,
@@ -1237,19 +1256,8 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         }
     }
 
-    // Inline PlanCard: y/e/n when focus is Chat and card is pending (Story 6-1a AC7).
-    // Overlay PlanApproval (6-0d) takes precedence — handled above.
-    if state.pending_plan_card.is_some() {
-        match state.focus {
-            FocusState::Chat | FocusState::Input => match c {
-                'y' => return InputAction::PlanCardApprove,
-                'n' => return InputAction::PlanCardReject,
-                'e' => return InputAction::PlanCardEdit,
-                _ => {}
-            },
-            _ => {}
-        }
-    }
+    // Inline PlanCard y/e/n in Chat is handled by the single interceptor above
+    // (Story 21.2 AC10: one owner; Input never resolves the plan).
 
     // AskUserQuestion focus: type into question input buffer
     if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
@@ -1368,8 +1376,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
             }
 
-            // Detect '/' at position 0 → trigger slash command autocomplete
+            // Detect '/' at position 0 → trigger slash command autocomplete.
+            // The popup owns this provisional edit: save the pre-trigger
+            // composer so Esc can restore it (Story 21-2 A2).
             if c == '/' && state.cursor_position == 0 && state.input_buffer.is_empty() {
+                state.autocomplete.own_slash_edit(
+                    &state.input_buffer,
+                    state.cursor_position,
+                    state.input_scroll_offset,
+                );
                 let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
                 state.input_buffer.insert(byte_pos, c);
                 state.cursor_position += 1;
@@ -1391,6 +1406,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 let trigger_pos = state.cursor_position;
                 state.cursor_position += 1;
                 state.autocomplete.active = true;
+                state.autocomplete.slash_rollback = None;
                 state.autocomplete.kind = AutocompleteKind::FileMention;
                 state.autocomplete.trigger_position = trigger_pos;
                 state.autocomplete.filter_text.clear();
@@ -2268,12 +2284,18 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         return handle_command_palette_key(state, key);
     }
 
-    // Which-key overlay handling — any special key dismisses
+    // Which-key overlay handling — the leader is untimed; Enter sends from the
+    // originating Input (portable multiline send, Story 21.2 AC12), every other
+    // special key (Esc included) dismisses without action and restores the origin.
     // Covers: UX-DR19
     if state.which_key.active {
-        // Special keys (non-char) dismiss which-key without action (AC6)
-        state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
+        let origin = state.which_key.dismiss().unwrap_or(FocusState::Input);
+        state.focus = origin.clone();
         state.needs_redraw = true;
+        if key == DomainKey::Enter && origin == FocusState::Input && !state.input_buffer.is_empty()
+        {
+            return submit_message(state);
+        }
         return InputAction::Consumed;
     }
 
@@ -2405,23 +2427,9 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
     match key {
         DomainKey::Esc => {
-            // In multiline mode with content: submit message (alternative send)
-            // If navigating history, cancel navigation instead of submitting.
-            // Covers: UX-DR76
-            if state.focus == FocusState::Input
-                && state.multiline_mode
-                && !state.input_buffer.is_empty()
-            {
-                if state.input_history.is_navigating() {
-                    state.input_history.reset_navigation();
-                    state.input_buffer.clear();
-                    state.cursor_position = 0;
-                    state.input_scroll_offset = 0;
-                    state.needs_redraw = true;
-                    return InputAction::Consumed;
-                }
-                return submit_message(state);
-            }
+            // Story 21.2 AC12 / RU-19: Esc NEVER submits. In Input it falls through
+            // to the safe focus return below (unsent text, incl. a recalled
+            // history entry, is preserved); Ctrl+Enter / Ctrl+X Enter send.
             // Story 6.4: reorder-mode Esc — cancel and restore
             if state.focus == FocusState::Chat && state.task_panel_state.reorder_mode_for.is_some()
             {
@@ -2608,10 +2616,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
-        // Ctrl+E: toggle multi-line mode
-        // Covers: UX-DR76 (Ctrl+E fallback)
+        // Ctrl+E: end of the current logical line (Story 21.2 AC12, RU-19). It no
+        // longer toggles multiline — Alt+M and `/ml` own the toggle.
         DomainKey::CtrlE if state.focus == FocusState::Input => {
-            state.multiline_mode = !state.multiline_mode;
+            let (row, _col) =
+                input_box::cursor_to_row_col(&state.input_buffer, state.cursor_position);
+            let line_len = input_box::line_len_at_row(&state.input_buffer, row);
+            state.cursor_position =
+                input_box::row_col_to_cursor(&state.input_buffer, row, line_len);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2897,7 +2909,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         // instead of silently consuming.
         DomainKey::CtrlF if state.focus == FocusState::Input && !state.input_buffer.is_empty() => {
             state.status = StatusState::Flash {
-                message: "Clear input or press Esc to search".into(),
+                message: "Search needs an empty input: clear it, then press Ctrl+F".into(),
                 remaining_ms: 1500,
             };
             state.needs_redraw = true;
@@ -3084,144 +3096,22 @@ fn submit_message(state: &mut TuiState) -> InputAction {
     state.input_buffer.clear();
 
     if let Some((cmd_name, args)) = parse_slash_command(&text) {
-        // Check if it's a built-in command
-        if cmd_name == "new" || cmd_name == "clear" {
+        // Built-ins: ONE authority (`builtin_commands`) decides which names the
+        // local runtime dispatcher handles — the same table the catalogue
+        // offers from — so a command that discovery shows is never silently
+        // sent down the user-defined-command path (Story 21.2 AC1). Each such
+        // name reaches its real `ExecuteCommand` arm; WITHOUT its entry a name
+        // falls through to SubmitWithContext, resolves no command file and
+        // dispatches an empty turn (the 14.3c `/fanout` failure class).
+        // `/ml` (multi-line toggle), `/quit`, `/new` and `/clear` take no args.
+        if let Some(builtin) = crate::adapters::builtin_commands::local_dispatch(cmd_name) {
             return InputAction::ExecuteCommand {
                 name: cmd_name.to_owned(),
-                args: None,
-            };
-        }
-        // /ml: toggle multi-line mode (AC#3)
-        // Covers: Sprint Change Proposal 2026-04-08
-        if cmd_name == "ml" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: None,
-            };
-        }
-        // /export [filename]: export conversation to markdown.
-        // Covers: Story 4-4, AC11/AC12
-        if cmd_name == "export" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /login [provider] (sign-in overlay), /models (model picker),
-        // /logout [provider] and /accounts [provider] (account steps).
-        if matches!(cmd_name, "login" | "models" | "logout" | "accounts") {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /mode plan|normal|autoedit|yolo: switch permission mode (AC9)
-        if cmd_name == "mode" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /plan on|off|toggle: enter/exit plan mode — Story 6-0d AC5
-        if cmd_name == "plan" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /compact: summarize and compact conversation — Story 7.4 AC4
-        if cmd_name == "compact" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /deactivate [name]: deactivate active skill(s) — Story 5-2 AC5
-        if cmd_name == "deactivate" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /context show|off|on: inspect/toggle injected memory context —
-        // Story 11.4 AC6/AC7. Routed as ExecuteCommand (not the user-defined
-        // SubmitWithContext path) so the event-loop `/context` dispatch arm
-        // sees the sub-verb arg.
-        if cmd_name == "context" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /memory consolidate|forget|<adapter>: every `/memory` semantic lives
-        // in the event-loop ExecuteCommand arm — consolidation (11.2a), forget
-        // (11.4a), and the adapter-override (8.5). Route here as ExecuteCommand,
-        // mirroring /context, so they reach those handlers instead of falling
-        // through to the user-defined SubmitWithContext path (which treats it as
-        // a missing custom command and dispatches an EMPTY turn).
-        if cmd_name == "memory" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /fanout <N> <prompt> | /fanout cancel: fan out N spokes (Story
-        // 14.3b/14.3c). Route as ExecuteCommand — mirroring /memory and
-        // /context — so the event-loop `/fanout` dispatch arm sees the args.
-        // Before this, `fanout` fell through to the user-defined
-        // SubmitWithContext path, which treats it as a missing custom command
-        // and dispatches an EMPTY turn (provider 400 "Empty input messages"),
-        // so the wave never launched. Caught by the 14.3c AI-12.3 human smoke.
-        if cmd_name == "fanout" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /team log: render the A2A transparency log in-chat (Story 18.2
-        // AC6). Route as ExecuteCommand — mirroring /context and /fanout —
-        // so the event-loop `/team` dispatch arm sees the sub-verb and
-        // flags. WITHOUT this entry `/team log` falls through to
-        // SubmitWithContext, resolves no command file, and silently never
-        // runs: the exact 14.3c failure `/fanout` shipped with.
-        if cmd_name == "team" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /room: the durable-room viewer and its role subcommands (Story
-        // 18.3a AC1/AC4). Same reason as `team` above — WITHOUT this entry
-        // `/room` falls through to SubmitWithContext, resolves no command
-        // file, and silently never runs.
-        if cmd_name == "room" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /artifacts and /artifact: the durable artifact list, its
-        // drill-down and the patch-review verdict verb (Story 18.3a-c
-        // AC3/AC5). Same reason as `room` above — and BOTH spellings need
-        // an entry: an unlisted `/artifact` silently never runs while
-        // `/artifacts` keeps working, which reads as "the verdict verb is
-        // broken" rather than "the verdict verb was never routed".
-        if cmd_name == "artifacts" || cmd_name == "artifact" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
-            };
-        }
-        // /peer: the transport admission verbs (Story 18.4b). Same reason as
-        // `artifacts` above — WITHOUT this entry `/peer` falls through to
-        // SubmitWithContext, resolves no command file, and silently never
-        // runs, which is the 14.3c failure `/fanout` shipped with. A
-        // handler-only test stays green while the command is dead, so the
-        // integration keystone enters through `submit_message_for_test`.
-        if cmd_name == "peer" {
-            return InputAction::ExecuteCommand {
-                name: cmd_name.to_owned(),
-                args: args.map(str::to_owned),
+                args: if builtin.takes_args {
+                    args.map(str::to_owned)
+                } else {
+                    None
+                },
             };
         }
         // Discovered skill name → activate via ExecuteCommand so the event loop
@@ -3275,6 +3165,22 @@ fn strip_a2a_namespace(filter: &str) -> &str {
     }
 }
 
+/// Esc on an autocomplete popup: close it and, when a slash popup still owns
+/// its provisional edit, restore the exact pre-trigger composer (buffer,
+/// cursor, scroll). Host-neutral: the attached host reaches this through
+/// `handle_input` like the local one. Never submits or changes focus.
+pub(crate) fn cancel_autocomplete_popup(state: &mut TuiState) {
+    let rollback = state
+        .autocomplete
+        .take_slash_rollback(&state.input_buffer, state.cursor_position);
+    state.autocomplete.dismiss();
+    if let Some(rollback) = rollback {
+        state.input_buffer = rollback.buffer;
+        state.cursor_position = rollback.cursor;
+        state.input_scroll_offset = rollback.scroll;
+    }
+}
+
 /// Handle keys while autocomplete popup is active.
 // Covers: UX-DR75
 fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction {
@@ -3301,9 +3207,11 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             state.needs_redraw = true;
             action.unwrap_or(InputAction::Consumed)
         }
-        // Esc dismisses the popup
+        // Esc closes only the popup. A slash popup that still owns its
+        // provisional edit also restores the exact pre-trigger composer
+        // (Story 21-2 A2/AC4); accepted/authored text is never erased.
         DomainKey::Esc => {
-            state.autocomplete.dismiss();
+            cancel_autocomplete_popup(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -4058,7 +3966,7 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('d') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlD));
             }
-            // Ctrl+E → toggle multi-line mode
+            // Ctrl+E → end of the current line in Input (Story 21.2 AC12; no longer a toggle)
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('e') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlE));
             }
@@ -4082,7 +3990,7 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('k') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlK));
             }
-            // Alt+M → toggle multi-line mode (VS Code terminal alternative to Ctrl+E)
+            // Alt+M → toggle multi-line mode (VS Code terminal friendly; `/ml` is the typed route)
             // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment
             if *modifiers == KeyModifiers::ALT && *code == KeyCode::Char('m') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::AltM));
@@ -6726,5 +6634,285 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod story21_2_shortcut_tests {
+    use super::*;
+    use crate::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
+    use crate::adapters::tui::state::PendingPlanCard;
+    use crate::domain::models::plan::{Plan, PlanStatus};
+
+    fn key(c: char) -> DomainInputEvent {
+        DomainInputEvent::KeyPress(c)
+    }
+    fn special(k: DomainKey) -> DomainInputEvent {
+        DomainInputEvent::SpecialKey(k)
+    }
+    fn state_with_plan(focus: FocusState) -> TuiState {
+        let mut state = TuiState::new(80, 24);
+        state.focus = focus;
+        state.pending_plan_card = Some(PendingPlanCard {
+            conversation_id: "c1".into(),
+            plan_id: "p1".into(),
+            plan_snapshot: Plan {
+                id: "p1".into(),
+                title: "t".into(),
+                tasks: vec![],
+                estimated_effort: None,
+                status: PlanStatus::Pending,
+                created_at: 0,
+                resolved_at: None,
+                host_message_id: None,
+            },
+        });
+        state
+    }
+
+    /// B-4 (AC10 "higher focused overlays keep ownership"): a pending plan under a
+    /// focused Permission confirmation lets `y`/`n` answer the permission.
+    #[test]
+    fn story21_2_permission_focus_keeps_y_and_n_over_a_pending_plan() {
+        let permission =
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
+        let mut state = state_with_plan(permission.clone());
+        assert_eq!(
+            handle_input(&mut state, &key('y')),
+            InputAction::PermissionAllow
+        );
+        let mut state = state_with_plan(permission);
+        assert_eq!(
+            handle_input(&mut state, &key('n')),
+            InputAction::PermissionDeny
+        );
+    }
+
+    #[test]
+    fn story21_2_input_plan_letters_are_text_and_chat_resolves_the_same_plan() {
+        let mut input = state_with_plan(FocusState::Input);
+        for c in ['y', 'e', 'n'] {
+            let action = handle_input(&mut input, &key(c));
+            assert!(
+                !matches!(
+                    action,
+                    InputAction::PlanCardApprove
+                        | InputAction::PlanCardEdit
+                        | InputAction::PlanCardReject
+                ),
+                "Input `{c}` must not resolve the plan, got {action:?}"
+            );
+        }
+        assert_eq!(input.input_buffer, "yen", "letters typed at the cursor");
+        assert!(input.pending_plan_card.is_some(), "plan retained");
+        // Positive control: the same letters in Chat still resolve.
+        let mut chat = state_with_plan(FocusState::Chat);
+        assert_eq!(
+            handle_input(&mut chat, &key('y')),
+            InputAction::PlanCardApprove
+        );
+        assert_eq!(
+            handle_input(&mut chat, &key('e')),
+            InputAction::PlanCardEdit
+        );
+        assert_eq!(
+            handle_input(&mut chat, &key('n')),
+            InputAction::PlanCardReject
+        );
+    }
+
+    #[test]
+    fn story21_2_esc_never_submits_multiline_input_and_preserves_text() {
+        let mut state = TuiState::new(80, 24);
+        state.multiline_mode = true;
+        state.input_buffer = "line one\nline two".into();
+        state.cursor_position = state.input_buffer.chars().count();
+        let action = handle_input(&mut state, &special(DomainKey::Esc));
+        assert!(
+            !matches!(action, InputAction::SubmitMessage(_)),
+            "{action:?}"
+        );
+        assert_eq!(state.input_buffer, "line one\nline two");
+        assert_eq!(state.focus, FocusState::Chat);
+        // History recall is unsent text too: Esc does not send it.
+        let mut recalled = TuiState::new(80, 24);
+        recalled.multiline_mode = true;
+        recalled.input_history.push("older message".into());
+        handle_input(&mut recalled, &special(DomainKey::Up));
+        let before = recalled.input_buffer.clone();
+        let action = handle_input(&mut recalled, &special(DomainKey::Esc));
+        assert!(
+            !matches!(action, InputAction::SubmitMessage(_)),
+            "{action:?}"
+        );
+        assert_eq!(recalled.input_buffer, before);
+    }
+
+    #[test]
+    fn story21_2_ctrl_e_is_end_of_line_and_alt_m_toggles() {
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer = "ab\ncd".into();
+        state.cursor_position = 0;
+        let before = state.multiline_mode;
+        handle_input(&mut state, &special(DomainKey::CtrlE));
+        assert_eq!(state.cursor_position, 2, "end of the first logical line");
+        assert_eq!(state.multiline_mode, before, "Ctrl+E no longer toggles");
+        handle_input(&mut state, &special(DomainKey::AltM));
+        assert_ne!(state.multiline_mode, before, "Alt+M toggles");
+        // Mid-line on a LATER logical line: moves to that line's end, not the buffer's.
+        state.input_buffer = "ab\ncd\nef".into();
+        state.cursor_position = 4; // between `c` and `d`
+        handle_input(&mut state, &special(DomainKey::CtrlE));
+        assert_eq!(state.cursor_position, 5, "end of the SECOND logical line");
+        assert_eq!(state.input_buffer, "ab\ncd\nef", "text untouched");
+    }
+
+    #[test]
+    fn story21_2_leader_enter_sends_once_while_plain_enter_inserts_newline() {
+        let mut state = TuiState::new(80, 24);
+        state.multiline_mode = true;
+        state.input_buffer = "hello\nworld".into();
+        state.cursor_position = state.input_buffer.chars().count();
+        // Plain Enter in multiline mode is a newline, never a send.
+        let plain = handle_input(&mut state, &special(DomainKey::Enter));
+        assert_eq!(plain, InputAction::Consumed);
+        assert_eq!(state.input_buffer, "hello\nworld\n");
+        // Ctrl+X Enter sends exactly once and restores the Input origin.
+        assert_eq!(
+            handle_input(&mut state, &special(DomainKey::CtrlX)),
+            InputAction::Consumed
+        );
+        assert!(state.which_key.active);
+        let sent = handle_input(&mut state, &special(DomainKey::Enter));
+        assert_eq!(sent, InputAction::SubmitMessage("hello\nworld\n".into()));
+        assert!(!state.which_key.active);
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(state.input_buffer.is_empty());
+        // The leader is consumed: a second Enter sends nothing.
+        assert_eq!(
+            handle_input(&mut state, &special(DomainKey::Enter)),
+            InputAction::Consumed
+        );
+    }
+
+    #[test]
+    fn story21_2_leader_is_untimed_esc_restores_origin_and_unknown_is_consumed_once() {
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Chat;
+        handle_input(&mut state, &special(DomainKey::CtrlX));
+        assert!(state.which_key.active);
+        handle_input(&mut state, &special(DomainKey::Esc));
+        assert!(!state.which_key.active);
+        assert_eq!(state.focus, FocusState::Chat);
+        handle_input(&mut state, &special(DomainKey::CtrlX));
+        assert_eq!(handle_input(&mut state, &key('z')), InputAction::Consumed);
+        assert!(!state.which_key.active);
+        assert_eq!(state.focus, FocusState::Chat);
+        // The follow-up was consumed: it did not become text or a command.
+        assert!(state.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn story21_2_question_mark_is_literal_in_input_and_help_in_chat_or_leader() {
+        let mut input = TuiState::new(80, 24);
+        handle_input(&mut input, &key('?'));
+        assert_eq!(input.input_buffer, "?");
+        assert!(!input.help_overlay.active);
+        handle_input(&mut input, &special(DomainKey::CtrlX));
+        handle_input(&mut input, &key('?'));
+        assert!(input.help_overlay.active, "Ctrl+X ? opens help");
+        handle_input(&mut input, &special(DomainKey::Esc));
+        assert_eq!(input.focus, FocusState::Input, "Esc restores Input");
+        assert_eq!(input.input_buffer, "?");
+        let mut chat = TuiState::new(80, 24);
+        chat.focus = FocusState::Chat;
+        handle_input(&mut chat, &key('?'));
+        assert!(chat.help_overlay.active);
+    }
+
+    #[test]
+    fn story21_2_ctrl_f_cue_names_an_executable_route() {
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer = "draft".into();
+        handle_input(&mut state, &special(DomainKey::CtrlF));
+        let StatusState::Flash { message, .. } = &state.status else {
+            panic!("expected a flash cue");
+        };
+        assert!(
+            message.contains("Ctrl+F") && !message.contains("Esc"),
+            "{message}"
+        );
+        // The named path really works: clear the input, then Ctrl+F opens search.
+        state.input_buffer.clear();
+        state.cursor_position = 0;
+        assert_eq!(
+            handle_input(&mut state, &special(DomainKey::CtrlF)),
+            InputAction::OpenSearch
+        );
+    }
+
+    #[test]
+    fn story21_2_every_local_builtin_routes_to_execute_command() {
+        for builtin in crate::adapters::builtin_commands::BUILTINS
+            .iter()
+            .filter(|b| b.local)
+        {
+            let mut state = TuiState::new(80, 24);
+            state.input_buffer = format!("/{} ünï args", builtin.name);
+            let action = submit_message_for_test(&mut state);
+            let expected_args = builtin.takes_args.then(|| "ünï args".to_string());
+            assert_eq!(
+                action,
+                InputAction::ExecuteCommand {
+                    name: builtin.name.to_string(),
+                    args: expected_args,
+                },
+                "/{} must reach its dispatcher",
+                builtin.name
+            );
+        }
+        // `/ cmd` stays literal text and an unregistered name stays a custom lookup.
+        let mut literal = TuiState::new(80, 24);
+        literal.input_buffer = "/ quit".into();
+        assert_eq!(
+            submit_message_for_test(&mut literal),
+            InputAction::SubmitMessage("/ quit".into())
+        );
+        let mut custom = TuiState::new(80, 24);
+        custom.input_buffer = "/not-a-builtin x".into();
+        assert!(matches!(
+            submit_message_for_test(&mut custom),
+            InputAction::SubmitWithContext {
+                command: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn story21_2_quit_frame_owns_y_before_a_pending_plan_card() {
+        let mut state = state_with_plan(FocusState::Chat);
+        let facts = QuitFacts {
+            streams: 1,
+            ..QuitFacts::idle(QuitHost::Local)
+        };
+        crate::adapters::tui::quit_confirm::request(&mut state, facts);
+        // n cancels, restores the caller and leaves the plan untouched.
+        assert_eq!(handle_input(&mut state, &key('n')), InputAction::Consumed);
+        assert!(state.quit_confirm.is_none());
+        assert!(state.pending_plan_card.is_some());
+        // Re-raise: `y` is owned by S-QUIT only — never PlanCardApprove.
+        crate::adapters::tui::quit_confirm::request(
+            &mut state,
+            QuitFacts {
+                streams: 1,
+                ..QuitFacts::idle(QuitHost::Local)
+            },
+        );
+        assert_eq!(
+            handle_input(&mut state, &key('y')),
+            InputAction::QuitConfirmed
+        );
+        assert!(state.pending_plan_card.is_some(), "no card was resolved");
     }
 }

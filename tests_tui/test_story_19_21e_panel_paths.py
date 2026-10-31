@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from harness import RustainTUI
-from keys import CTRL_X, ENTER, ESC
+from keys import CTRL_X, ENTER
 
 
 def _seed_journal(journal: Path) -> None:
@@ -106,10 +106,12 @@ def _assert_rows(tui: RustainTUI, rows: tuple[str, ...], diagnostic: str) -> Non
 def _submit(tui: RustainTUI, command: str) -> None:
     tui.send(command)
     assert tui.wait_for_screen(command, timeout=5), tui.get_screen_text()
-    # A bare slash command leaves autocomplete open; Enter would only accept
-    # its completion. Use the existing harness's paced key helper to dismiss
-    # the popup before submitting the actual root command.
-    tui.send_keys(ESC, ENTER)
+    # A bare slash command leaves autocomplete open. Story 21-2 AC4: Esc on a
+    # popup-owned slash restores the pre-trigger composer (erasing the typed
+    # command), so it can no longer dismiss the popup before submit. The first
+    # Enter accepts the highlighted completion and closes the popup; the second
+    # submits the actual root command. The helper paces both keys.
+    tui.send_keys(ENTER, ENTER)
 
 
 def test_room_chord_renders_durable_rows(populated_panel_tui: RustainTUI):

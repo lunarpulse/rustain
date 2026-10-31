@@ -118,7 +118,7 @@ fn test_e2e_[feature]_[behavior]() {
 |----|-------------|----------------|
 | AC1 | Command Palette | `test_e2e_palette_opens_with_ctrl_p`, `test_e2e_palette_shows_input_and_results`, `test_e2e_palette_fuzzy_filtering`, `test_e2e_palette_enter_executes`, `test_e2e_palette_esc_closes` |
 | AC2 | Scoped Prefixes | `test_e2e_palette_slash_scope`, `test_e2e_palette_at_scope`, `test_e2e_palette_colon_scope`, `test_e2e_palette_gt_scope`, `test_e2e_palette_bang_scope`, `test_e2e_palette_unscoped_shows_all` |
-| AC3 | Which-Key Chords | `test_e2e_which_key_opens`, `test_e2e_which_key_shows_options`, `test_e2e_which_key_valid_chord`, `test_e2e_which_key_invalid_dismisses`, `test_e2e_which_key_timeout` |
+| AC3 | Which-Key Chords | `test_e2e_which_key_opens`, `test_e2e_which_key_shows_options`, `test_e2e_which_key_valid_chord`, `test_e2e_which_key_invalid_dismisses`, `test_e2e_which_key_esc_restores_origin_focus` |
 | AC4 | Shortcut Graduation | `test_e2e_palette_shortcut_graduation` |
 | AC5 | Streaming Compatibility | `test_e2e_palette_opens_during_stream` |
 

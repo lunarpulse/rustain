@@ -220,7 +220,13 @@ def _exercise_authorship_marks(binary, evidence, tmp_path, monkeypatch):
                 assert "error" not in result, result
                 return result if result["result"]["status"]["state"] == "completed" else None
             _wait(terminal, lambda: "Remote task did not reach product-minted completed state")
-        answerer.send("\x18")
+        # Story 21.2 AC13: Ctrl+X is the attached leader, never retract. The
+        # retract route is the palette entry over the real retractable row.
+        answerer.send("\x10")
+        wait("Command Palette", "palette-open")
+        answerer.send("retract: Received")
+        wait("retract: Received. Reviewing.", "palette-retract-entry")
+        answerer.send("\r")
         preview = wait("Retract this auto-sent message?", "retract-preview")
         assert AUTO in preview and APPROVED not in preview.split("Retract this auto-sent message?", 1)[1], preview
         for card in ("[y] Approve", "[y] Allow", "[r] Review", "sender consent", "[y] Send"):
@@ -234,5 +240,5 @@ def _exercise_authorship_marks(binary, evidence, tmp_path, monkeypatch):
         assert approved_after == approved_before, (approved_before, approved_after)
         (evidence / "assertions.txt").write_text(
             "PASS: auto span has both provenance marks; approved newer span has exactly one agent-composed mark and no auto/retract mark.\n"
-            "PASS: Ctrl+X preview selects older auto body; no competing approval/consent card before y.\n"
+            "PASS: palette retract entry preview selects older auto body; no competing approval/consent card before y.\n"
             "PASS: auto body preserved with retracted and consumed-retract marks; approved complete span unchanged.\n")

@@ -1,49 +1,46 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-use unicode_width::UnicodeWidthStr;
 
-use crate::adapters::tui::state::{ChordAction, WhichKeyState};
+use crate::adapters::tui::chord_menu::{self, ChordHost, ChordMenuItem};
+use crate::adapters::tui::state::WhichKeyState;
 use crate::adapters::tui::theme::Theme;
 
-/// Chord labels in display order.
-const CHORD_LABELS: &[(char, &str)] = &[
-    ('P', "rofile"),
-    ('M', "odel"),
-    ('I', " sign in"),
-    ('A', "dapter"),
-    ('S', "ubagent"),
-    ('L', "og"),
-    ('T', "ask"),
-    ('U', "sage"),
-    ('F', "ocus"),
-    ('W', "atch"),
-    ('D', "ashboard"),
-    ('?', "all"),
-];
+/// Rows (borders included) the menu needs inside `width` columns for `host`.
+pub fn bar_height(state: &WhichKeyState, host: ChordHost, width: u16) -> u16 {
+    let items = chord_menu::menu_items(state, host);
+    let inner = usize::from(width.saturating_sub(2));
+    let rows = chord_menu::wrap_rows(&items, inner).len();
+    u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2)
+}
 
-/// Render the which-key hint bar at the bottom of the screen.
+/// Render the complete, untimed, wrapped Ctrl+X chord menu anchored to the
+/// bottom of `area` (Story 21.2 AC6). The menu paints over feedback/ambient
+/// rows; the caller passes an `area` that ends above the status row so the
+/// status row is never covered, and nothing reserves Stage rows for it.
 // Covers: UX-DR19, UX-DR60
-pub fn render(frame: &mut Frame, area: Rect, state: &WhichKeyState, theme: &Theme) {
-    if !state.active {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &WhichKeyState,
+    theme: &Theme,
+    host: ChordHost,
+) {
+    if !state.active || area.width < 4 || area.height < 3 {
         return;
     }
 
-    // Calculate bar height (1-2 rows depending on width)
-    let total_label_width: usize = CHORD_LABELS
-        .iter()
-        .map(|(_, label)| 3 + UnicodeWidthStr::width(*label) + 2) // [X]label + spacing
-        .sum();
-
-    let bar_height = if total_label_width > area.width as usize {
-        4
-    } else {
-        3
-    }; // +2 for borders
+    let items = chord_menu::menu_items(state, host);
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let rows = chord_menu::wrap_rows(&items, inner_width);
+    let height = u16::try_from(rows.len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height);
     let bar_area = Rect::new(
         area.x,
-        area.y + area.height.saturating_sub(bar_height as u16),
+        area.y + area.height.saturating_sub(height),
         area.width,
-        bar_height as u16,
+        height,
     );
 
     frame.render_widget(Clear, bar_area);
@@ -53,40 +50,23 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WhichKeyState, theme: &Them
         .border_style(Style::default().fg(theme.colors.accent))
         .title(" Ctrl+X ");
 
-    // Build spans for all chord labels
-    let mut spans: Vec<Span> = Vec::new();
-    for (i, (key, label)) in CHORD_LABELS.iter().enumerate() {
-        let is_implemented = state
-            .chord_map
-            .get(&key.to_ascii_lowercase())
-            .is_some_and(|a| !matches!(a, ChordAction::Noop(_)));
+    let visible_rows = usize::from(height.saturating_sub(2));
+    let lines: Vec<Line> = rows
+        .iter()
+        .take(visible_rows)
+        .map(|row| {
+            let mut spans: Vec<Span> = Vec::new();
+            for (position, &index) in row.iter().enumerate() {
+                if position > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.extend(item_spans(&items[index], theme));
+            }
+            Line::from(spans)
+        })
+        .collect();
 
-        // Bracket letter style: accent + bold for implemented, fg_muted for stubs
-        let key_style = if is_implemented {
-            Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.colors.fg_muted)
-        };
-
-        let label_style = if is_implemented {
-            Style::default().fg(theme.colors.fg_primary)
-        } else {
-            Style::default().fg(theme.colors.fg_muted)
-        };
-
-        spans.push(Span::styled("[", key_style));
-        spans.push(Span::styled(format!("{}", key), key_style));
-        spans.push(Span::styled("]", key_style));
-        spans.push(Span::styled(label.to_string(), label_style));
-
-        if i < CHORD_LABELS.len() - 1 {
-            spans.push(Span::raw("  "));
-        }
-    }
-
-    let content = Paragraph::new(Line::from(spans))
+    let content = Paragraph::new(lines)
         .block(block)
         .alignment(Alignment::Center)
         .style(
@@ -96,4 +76,98 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WhichKeyState, theme: &Them
         );
 
     frame.render_widget(content, bar_area);
+}
+
+fn item_spans<'a>(item: &ChordMenuItem, theme: &Theme) -> Vec<Span<'a>> {
+    let (key_style, label_style) = if item.available {
+        (
+            Style::default()
+                .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.colors.fg_primary),
+        )
+    } else {
+        (
+            Style::default().fg(theme.colors.fg_muted),
+            Style::default().fg(theme.colors.fg_muted),
+        )
+    };
+    let suffix = if item.available { "" } else { " (n/a)" };
+    vec![
+        Span::styled(format!("[{}]", item.key), key_style),
+        Span::styled(format!(" {}{}", item.name, suffix), label_style),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn paint(width: u16, height: u16, host: ChordHost) -> String {
+        let mut wk = WhichKeyState::new();
+        wk.open(crate::domain::models::FocusState::Input);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render(frame, area, &wk, &Theme::dark(), host);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn story21_2_which_key_paints_every_chord_at_60_80_130_in_both_hosts() {
+        let wk = WhichKeyState::new();
+        for host in [ChordHost::Local, ChordHost::Attached] {
+            for width in [60u16, 80, 130] {
+                let text = paint(width, 12, host);
+                for item in chord_menu::menu_items(&wk, host) {
+                    let painted = item.text();
+                    assert!(
+                        text.contains(&painted),
+                        "{host:?} {width}: `{painted}` missing/clipped in\n{text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn story21_2_which_key_shows_r_e_and_enter_send_that_the_static_table_omitted() {
+        let text = paint(80, 12, ChordHost::Local);
+        assert!(text.contains("[R] Room"), "{text}");
+        assert!(text.contains("[E] Evidence"), "{text}");
+        assert!(text.contains("[Enter] Send"), "{text}");
+    }
+
+    #[test]
+    fn story21_2_which_key_stays_above_the_status_row() {
+        let mut wk = WhichKeyState::new();
+        wk.open(crate::domain::models::FocusState::Input);
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                let full = frame.area();
+                // Status row is the last row; the menu area ends above it.
+                let above = Rect::new(full.x, full.y, full.width, full.height - 1);
+                frame.render_widget(Paragraph::new("STATUS-ROW-CANARY"), Rect::new(0, 11, 80, 1));
+                render(frame, above, &wk, &Theme::dark(), ChordHost::Local);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let last: String = (0..80)
+            .map(|x| buffer[(x, 11)].symbol().to_string())
+            .collect();
+        assert!(last.contains("STATUS-ROW-CANARY"));
+    }
 }

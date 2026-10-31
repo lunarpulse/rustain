@@ -301,8 +301,14 @@ def test_attached_slash_log_is_local_and_reachable_read_only(tmp_path, stub, sce
         ).start()
         assert reader.wait_for_screen("read-only", timeout=10), reader.get_screen_text()
         assert reader.wait_for_screen("log: 1", timeout=10), reader.get_screen_text()
-        reader.send("hello model")
+        # Story 21-2 AC13: a read-only client opens in Chat focus, where plain
+        # letters are Chat commands (never composer text); `i` moves to Input,
+        # as in the local host. Read-only composers still edit (19.16g) once
+        # Input has focus; only submission is refused.
+        reader.send("i")
         reader.wait(0.3)
+        reader.send("hello model")
+        assert reader.wait_for_screen("hello model", timeout=5), reader.get_screen_text()
         reader.send("\r")
         assert reader.wait_for_screen("can't send here", timeout=5), reader.get_screen_text()
         for _ in "hello model":

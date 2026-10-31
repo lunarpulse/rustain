@@ -371,7 +371,7 @@ pub enum DaemonAction {
     /// Attach an interactive client to the running daemon over its Unix socket
     /// (Story 12.2b/12.2c). The default is the rich multi-channel TUI
     /// (`run_attached`): unified scrollback with dimmed channel prefixes, history,
-    /// read-only multi-attach, and `Ctrl+D` to detach (the daemon and any in-flight
+    /// read-only multi-attach, and `Ctrl+X d` (or `/detach`) to detach (the daemon and any in-flight
     /// turn keep running). `--plain` selects the line-based client for scripting.
     Attach {
         /// Use the minimal line-based stdin/stdout client instead of the rich TUI

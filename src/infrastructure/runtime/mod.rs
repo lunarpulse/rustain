@@ -4,16 +4,21 @@ pub mod app_state;
 pub mod approval_bridge;
 pub mod artifact_bridge;
 #[cfg(unix)]
+pub(crate) mod attach_interrupt;
+#[cfg(unix)]
 pub mod attach_loop;
 pub mod event_bus;
 pub mod event_loop;
 pub(crate) mod panel_bridge;
 pub mod peer_bridge;
+pub(crate) mod quit_guard;
 pub(crate) mod recipient_surface;
 pub mod recipient_view;
+pub(crate) mod recovery_prompt;
 pub mod room_bridge;
 #[cfg(test)]
 mod state_extraction_tests;
+pub(crate) mod system_notice;
 pub(crate) mod task_panel_bridge;
 #[cfg(feature = "a2a")]
 pub mod team_proposal_bridge;

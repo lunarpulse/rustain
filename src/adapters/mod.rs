@@ -10,6 +10,7 @@ pub mod auth_store;
 pub mod authority;
 pub mod budget;
 pub mod builtin;
+pub mod builtin_commands;
 #[cfg(feature = "telegram")]
 pub mod channel;
 pub mod cli;

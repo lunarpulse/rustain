@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
     if state.suggestions.is_empty() {
         // "No matches" state
         let popup_height = 3u16; // 1 line + 2 borders
-        let popup_area = calculate_popup_area(input_area, popup_height);
+        let popup_area = calculate_popup_area(input_area, frame.area(), popup_height);
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
 
     let visible_count = state.suggestions.len().min(MAX_VISIBLE_ITEMS);
     let popup_height = visible_count as u16 + 2; // +2 for borders
-    let popup_area = calculate_popup_area(input_area, popup_height);
+    let popup_area = calculate_popup_area(input_area, frame.area(), popup_height);
 
     let has_more = state.suggestions.len() > MAX_VISIBLE_ITEMS;
     let title_with_scroll = if has_more {
@@ -102,14 +102,26 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
     frame.render_stateful_widget(list, popup_area, &mut list_state);
 }
 
-/// Calculate popup area positioned above the input box.
-fn calculate_popup_area(input_area: Rect, popup_height: u16) -> Rect {
-    let popup_width = input_area.width.min(60);
+/// Calculate the popup's outer rectangle above the composer.
+///
+/// Host-neutral: both the local and attached hosts pass the composer `Rect`
+/// they actually laid out (including any sidebar-reduced width or nonzero x)
+/// and the `drawable` rectangle (the terminal/frame area) the popup must stay
+/// inside. The outer width follows the composer width — there is no fixed cap
+/// — and the result is clamped wholly inside `drawable`.
+pub fn calculate_popup_area(input_area: Rect, drawable: Rect, popup_height: u16) -> Rect {
+    let x = input_area.x.max(drawable.x).min(drawable.right());
+    let right = input_area.right().min(drawable.right()).max(x);
+    let height = popup_height.min(drawable.height);
+    let y = input_area
+        .y
+        .saturating_sub(popup_height.saturating_add(1))
+        .max(drawable.y);
     Rect {
-        x: input_area.x,
-        y: input_area.y.saturating_sub(popup_height + 1),
-        width: popup_width,
-        height: popup_height,
+        x,
+        y,
+        width: right - x,
+        height,
     }
 }
 
@@ -253,5 +265,114 @@ mod tests {
         assert!(rendered.contains("description"), "{rendered}");
         assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
         assert!(!rendered.contains("[urgent] peer"), "{rendered}");
+    }
+
+    fn slash_state(count: usize, selected: usize, scroll: usize) -> AutocompleteState {
+        let mut state = AutocompleteState::new();
+        state.open(
+            AutocompleteKind::SlashCommand,
+            0,
+            (0..count)
+                .map(|i| AutocompleteSuggestion::SlashCommand {
+                    name: format!("cmd{i}"),
+                    description: "d".to_owned(),
+                })
+                .collect(),
+        );
+        state.selected_index = selected;
+        state.scroll_offset = scroll;
+        state
+    }
+
+    /// Paint the popup and return `(rows, left, right)` of its outer border,
+    /// plus the whole buffer text.
+    fn paint(
+        term_width: u16,
+        composer: Rect,
+        state: &AutocompleteState,
+    ) -> (u16, u16, u16, String) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(term_width, 24)).unwrap();
+        let theme = Theme::dark();
+        terminal
+            .draw(|frame| render(frame, composer, state, &theme))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (mut top, mut left, mut right) = (None, None, None);
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let symbol = buffer[(x, y)].symbol();
+                text.push_str(symbol);
+                if symbol == "┌" && top.is_none() {
+                    top = Some(y);
+                    left = Some(x);
+                }
+                if symbol == "┐" && right.is_none() {
+                    right = Some(x);
+                }
+            }
+            text.push('\n');
+        }
+        (
+            top.expect("popup top-left corner painted"),
+            left.unwrap(),
+            right.expect("popup top-right corner painted"),
+            text,
+        )
+    }
+
+    #[test]
+    fn story21_2_slash_popup_outer_width_follows_composer_at_60_80_130_with_nonzero_x() {
+        let mut widths = Vec::new();
+        for term_width in [60u16, 80, 130] {
+            // Composer offset from the left edge and narrowed by a right sidebar.
+            let composer = Rect::new(3, 18, term_width - 3 - 9, 4);
+            let (_, left, right, _) = paint(term_width, composer, &slash_state(3, 0, 0));
+            assert_eq!(left, composer.x, "popup starts at the composer x");
+            assert_eq!(
+                right + 1,
+                composer.right(),
+                "popup ends at the composer edge"
+            );
+            assert!(right < term_width, "popup is inside the terminal");
+            widths.push(right - left + 1);
+        }
+        assert_eq!(widths, vec![48, 68, 118]);
+        assert!(widths[2] > 60, "no 60-column cap");
+    }
+
+    #[test]
+    fn story21_2_no_matches_popup_uses_the_same_composer_width() {
+        let composer = Rect::new(2, 18, 110, 4);
+        let (_, left, right, text) = paint(130, composer, &slash_state(0, 0, 0));
+        assert!(text.contains("No matches"));
+        assert_eq!((left, right - left + 1), (2, 110));
+    }
+
+    #[test]
+    fn story21_2_wide_popup_retains_scrolled_selection() {
+        let composer = Rect::new(5, 18, 120, 4);
+        let (_, _, _, text) = paint(130, composer, &slash_state(15, 9, 2));
+        assert!(text.contains("[10/15]"), "{text}");
+        assert!(text.contains("/cmd9"), "{text}");
+        assert!(!text.contains("/cmd0 "), "{text}");
+    }
+
+    #[test]
+    fn story21_2_popup_area_is_clamped_inside_the_drawable_rect() {
+        let drawable = Rect::new(0, 0, 100, 24);
+        // Composer reported wider/farther right than the drawable area.
+        let area = calculate_popup_area(Rect::new(10, 20, 200, 4), drawable, 5);
+        assert!(area.right() <= drawable.right());
+        assert_eq!((area.x, area.width), (10, 90));
+        // Composer entirely outside the drawable area collapses, never overflows.
+        let area = calculate_popup_area(Rect::new(150, 20, 40, 4), drawable, 5);
+        assert!(area.right() <= drawable.right());
+        assert_eq!(area.width, 0);
+        // Near the top there is no room above: stay inside, never underflow.
+        let area = calculate_popup_area(Rect::new(0, 2, 80, 3), drawable, 10);
+        assert_eq!(area.y, 0);
+        assert!(area.bottom() <= drawable.bottom());
     }
 }

@@ -286,9 +286,12 @@ fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
         );
     }
 
-    let attach = std::fs::read_to_string("src/infrastructure/runtime/attach_loop.rs").unwrap();
-    let production = attach.split("#[cfg(test)]\nmod tests").next().unwrap();
-    let dispatch = production
+    // Story 21.2: the attached key dispatcher moved out of `attach_loop.rs` into
+    // `attach_keys.rs`; the pending-consent FIFO is now `ctx.consent`. The card
+    // producer (`tool == "a2a/sender-consent"`) stays in `attach_loop.rs`.
+    let keys = std::fs::read_to_string("src/infrastructure/runtime/attach_keys.rs").unwrap();
+    let keys_production = keys.split("#[cfg(test)]\nmod tests").next().unwrap();
+    let dispatch = keys_production
         .split("Story 18.3d AC1")
         .nth(1)
         .expect("sender consent dispatcher must exist in production")
@@ -299,7 +302,7 @@ fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
         "(KeyCode::Char('y'), m)",
         "(KeyCode::Char('a'), m)",
         "(KeyCode::Char('n'), m) | (KeyCode::Esc, m)",
-        "!pending_consent_approvals.is_empty()",
+        "!ctx.consent.is_empty()",
         "ApprovalOutcome::Once",
         "ApprovalOutcome::AlwaysAndSave",
         "ApprovalOutcome::Reject",
@@ -307,5 +310,7 @@ fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
     ] {
         assert!(dispatch.contains(arm), "missing guarded dispatch: {arm}");
     }
+    let attach = std::fs::read_to_string("src/infrastructure/runtime/attach_loop.rs").unwrap();
+    let production = attach.split("#[cfg(test)]\nmod tests").next().unwrap();
     assert!(production.contains(r#"tool == "a2a/sender-consent""#));
 }

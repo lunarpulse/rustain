@@ -218,6 +218,26 @@ impl CommandRegistry {
                 source: CommandSource::BuiltIn,
                 content: None,
             },
+            SlashCommandDef {
+                name: "ml".to_string(),
+                description: "Toggle multi-line input mode (also Alt+M)".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "quit".to_string(),
+                description: "Quit rustain (asks first when work or a draft exists)"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
+                name: "detach".to_string(),
+                description: "Detach this attached client (daemon work keeps running)"
+                    .to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
         ];
         Self {
             commands,
@@ -290,7 +310,19 @@ impl CommandRegistry {
         self.refresh(workspace);
     }
 
+    /// Local-host discovery (the TUI's autocomplete / palette).
     pub fn filter(&self, query: &str) -> Vec<&SlashCommandDef> {
+        self.filter_for_host(query, crate::adapters::builtin_commands::CommandHost::Local)
+    }
+
+    /// Discovery for one host (Story 21.2 AC1, RU-34): a built-in is offered only
+    /// where `builtin_commands` says its dispatcher exists; custom files and
+    /// discovered skills keep their existing discovery in every host.
+    pub fn filter_for_host(
+        &self,
+        query: &str,
+        host: crate::adapters::builtin_commands::CommandHost,
+    ) -> Vec<&SlashCommandDef> {
         let lower_query = query.to_lowercase();
         let mut builtins: Vec<&SlashCommandDef> = Vec::new();
         let mut user_defined: Vec<&SlashCommandDef> = Vec::new();
@@ -298,7 +330,11 @@ impl CommandRegistry {
         for cmd in &self.commands {
             if lower_query.is_empty() || cmd.name.to_lowercase().contains(&lower_query) {
                 match cmd.source {
-                    CommandSource::BuiltIn => builtins.push(cmd),
+                    CommandSource::BuiltIn => {
+                        if crate::adapters::builtin_commands::offered_in(host, &cmd.name) {
+                            builtins.push(cmd)
+                        }
+                    }
                     CommandSource::UserDefined { .. } => user_defined.push(cmd),
                 }
             }

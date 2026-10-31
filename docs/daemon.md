@@ -386,9 +386,16 @@ rustain daemon attach --plain # connect the minimal line-based client (scripting
 rendered bottom-anchored with an honest `— session start — · Earlier sessions not
 loaded` top boundary, dimmed `[terminal]`/`[telegram]`/`[cron]` channel-origin
 prefixes in attach-mode scrollback (provenance that survives re-attach), an
-`attached` status indicator, and an `Esc/Ctrl+D/Ctrl+C detach` hint. Type a
-message and press Enter to submit; **`Esc`, `Ctrl+D`, or `Ctrl+C` detaches** —
-there is no `daemon detach` CLI verb (detach is a client keybinding).
+`attached` status indicator, and a `^X d detach` hint. Type a
+message and press Enter to submit. **`Ctrl+X d` or `/detach` detaches** (attached
+client only; `Esc`, `Ctrl+D` and `Ctrl+C` never detach — `Ctrl+C` stops the active
+terminal turn, or asks before quitting when idle, and `Ctrl+Q` / `q` in Chat ask
+before leaving when work or a draft exists). Quitting exits this client only; the
+daemon keeps running. `Ctrl+X` opens the same untimed, complete chord menu as the
+local TUI (`?` help, `l` log, `Enter` send; panels that are local to a standalone
+session answer with an explicit unavailable result and the real remedy), and a bare
+`?` types a question mark in the composer. There is no `daemon detach` CLI verb
+(detach is a client keybinding or `/detach`).
 The daemon and any in-flight turn keep running across detach (the turn is driven on
 the daemon-owned event bus, not the socket, so it completes and persists).
 
@@ -488,7 +495,7 @@ The daemon has no human at a prompt, so tool approval (Story 12.2b AC6):
 ### Wire protocol
 
 Frames use a `u32` big-endian length prefix and a `serde_json` body. The signed
-attach handshake negotiates **protocol v15**; a client speaking another version
+attach handshake negotiates **protocol v16**; a client speaking another version
 receives `VersionMismatch` before proof verification, registration or other
 attach side effects.
 Forwarded turn events reuse the existing `RawEvent` projection
@@ -593,7 +600,9 @@ this host authorized the act. `[agent-composed]` is not an automatic-send claim.
 An approved or edited draft keeps that authorship label without `[auto-sent]`.
 Unknown facts add no label.
 
-In the attached TUI, **Ctrl+X** retracts automatic sends only.
+In the attached TUI, retraction goes through `/team retract` and the command
+palette's retract entry (never a bare `Ctrl+X`, which is now the leader key).
+It retracts automatic sends only.
 `RetractAutoResponse` refuses any row whose send authorization is not
 `automatic` with `retraction refused: NotAutomatic`. The existing gates are
 unchanged: the connection must be a trusted-local, same-host read-write
@@ -640,7 +649,7 @@ remote cancellation.
 Legacy rows are never backfilled: without recorded send authorization, that
 fact is Unknown. A legacy approved draft loses its false `[auto-sent]` label.
 A legacy genuine auto-response shows `[agent-composed]` only and is no longer
-Ctrl+X-retractable. A legacy retracted row keeps its append-only record:
+retractable through `/team retract`. A legacy retracted row keeps its append-only record:
 `┆ [retracted HH:MM]  [✗] Retract (used)`. Neither journal history nor authorship
 is used to infer automatic-send authorization.
 
@@ -754,4 +763,31 @@ Status reports now disclose when the served thread window may omit a Status
 reply instead of claiming a definite empty/Answer-only status.
 See [Sharing a retrospective](a2a.md#sharing-a-retrospective-story-1925) for the
 fixed received-side manifest, 14-day bounds and transport/privacy limits.
+
+Protocol v16 (Story 21.2 A4): the attached stop capability. The daemon gives
+every ordinary turn a server-minted `TurnGeneration`; a terminal-origin turn
+retains its existing cancellation token for its lifetime in the active-turn slot
+and projects the generation to the trusted-local read-write writer as
+`ActiveTurn { generation }` when the turn starts, on attach during an active
+turn, and as `generation: null` when it ends. The writer sends
+`InterruptTurn { generation }` and receives `InterruptResult { generation,
+outcome }`: `interrupted`, or `refused` with `notWriter`, `readOnly`,
+`peerTier`, `noActiveTurn`, `stale`, `alreadyInterrupted` or `wrongOrigin`.
+A refusal cancels nothing, and the client's `read_only` claim is never
+trusted: the daemon's own grant decides.
+
+The interrupt is handled in the connection's reader, outside the operator FIFO
+and the turn mutex, so it reaches a turn that the FIFO is blocked behind.
+Authorization (the registered, live, trusted-local read-write writer), the
+generation match and the token firing are one synchronous step under the
+connection registry's mutex — the same admission fence that serializes writer
+grant, registration and removal — so a writer handoff or slot replacement lands
+wholly before or wholly after it. Lock order is `turn_serial` then registry; no
+await runs while the fence is held. The generation is a stale-target fence, not
+an authorization token. The fired token reaches the existing turn and tool
+cancellation machinery: the daemon aborts a turn whose provider stream never
+yields and enqueues the ordered `Cancelled` terminal event, so the normal event
+projection and persistence fold run (no partial answer is committed). Detach
+never cancels the turn. Channel-origin turns are tracked but never exposed to
+interruption.
 

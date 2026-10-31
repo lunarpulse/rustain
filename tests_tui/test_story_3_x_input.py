@@ -101,13 +101,15 @@ class TestCommandPalette:
         tui.wait_for_idle()
 
         tui.send(CTRL_X)
-        tui.wait_for_screen("Ctrl+X")
-        tui.assert_screen_contains("Ctrl+X", "Which-key bar title should be visible when open")
+        # 21.2 AC5/AC6: the Input hint now also says "Ctrl+X ?", so the menu is
+        # identified by its own chord label, not by the leader name alone.
+        tui.wait_for_screen("[P] Profile")
+        tui.assert_screen_contains("[P] Profile", "Which-key menu should be visible when open")
 
         tui.send("a")  # Dismiss with any chord key
-        tui.wait_for_screen_not_contains("Ctrl+X", timeout=2.0)
+        tui.wait_for_screen_not_contains("[P] Profile", timeout=2.0)
         tui.assert_screen_not_contains(
-            "Ctrl+X", "Which-key bar should be gone after dismissal"
+            "[P] Profile", "Which-key menu should be gone after dismissal"
         )
 
 

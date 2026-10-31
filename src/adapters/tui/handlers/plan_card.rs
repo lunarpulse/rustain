@@ -315,6 +315,8 @@ mod tests {
             );
             assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "p");
             assert!(painted(&conversation, &state).contains("plan p"));
+            // Story 21.2 AC10: plan keys belong to Chat focus (was: default Input focus).
+            state.focus = crate::domain::models::FocusState::Chat;
             for (key, action) in [
                 ('y', InputAction::PlanCardApprove),
                 ('n', InputAction::PlanCardReject),
@@ -445,6 +447,9 @@ mod tests {
                 PermissionMode::Normal,
                 None,
             );
+            // Story 21.2 AC10: y/e/n resolve the plan from Chat only; in Input they
+            // are literal text (old assertion: resolved from the default Input focus).
+            state.focus = crate::domain::models::FocusState::Chat;
             let host = conversation.plans["selected"].host_message_id.clone();
             let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
             assert!(matches!(

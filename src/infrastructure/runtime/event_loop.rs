@@ -38,6 +38,7 @@ use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_inp
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
+use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
@@ -50,7 +51,9 @@ use crate::domain::services::session_index::SessionIndex;
 use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
 #[cfg(feature = "a2a")]
 use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
-use crate::infrastructure::runtime::{artifact_bridge, room_bridge, transparency_bridge};
+use crate::infrastructure::runtime::{
+    artifact_bridge, quit_guard, recovery_prompt, room_bridge, system_notice, transparency_bridge,
+};
 use ratatui::layout::Rect;
 
 /// Timeout for background tasks (title generation, session save).
@@ -665,8 +668,8 @@ pub async fn run(
 
     // P4: Cache last filter text to avoid re-scanning on every keystroke
     let mut last_autocomplete_filter = String::new();
-    // P6: Cache last palette filter text to avoid re-filtering on every keystroke
-    let mut last_palette_filter = String::new();
+    // AC3: palette populate gate (inactive cached as absence, not as an empty query)
+    let mut palette_gate = crate::adapters::tui::palette_gate::PaletteGate::new();
 
     // Initialize SessionManager from the active tab
     let mut session_manager = tab_manager.active_tab().session.clone();
@@ -996,12 +999,22 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
+                            // Story 21.2 AC7: the S-QUIT frame owns every user key — it is
+                            // consulted before the recovery/carryover/override interceptors so
+                            // no lower card can see (or answer) a `y`.
+                            if state.quit_confirm.is_some()
+                                && let Some(outcome) = crate::adapters::tui::quit_confirm::handle_domain_event(&mut state, &domain_event)
+                            {
+                                if outcome == crate::adapters::tui::quit_confirm::QuitKeyOutcome::Confirmed {
+                                    turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                    state.should_quit = true;
+                                }
+                                continue;
+                            }
                             // Intercept input when recovery prompt is active
-                            if state.active_feedback_id.as_deref() == Some("recovery") {
-                                use crate::domain::events::DomainInputEvent;
-                                match &domain_event {
-                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Enter)
-                                    | DomainInputEvent::KeyPress('y') => {
+                            if state.active_feedback_id.as_deref() == Some(recovery_prompt::RECOVERY_BLOCK_ID) {
+                                match recovery_prompt::recovery_choice(&domain_event) {
+                                    recovery_prompt::RecoveryChoice::Continue => {
                                         // Continue: dismiss recovery block, keep conversation
                                         state.feedback_blocks.remove("recovery");
                                         state.active_feedback_id = None;
@@ -1009,16 +1022,15 @@ pub async fn run(
                                         state.needs_redraw = true;
                                         continue;
                                     }
-                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlC)
-                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ)
-                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
-                                        // Always allow quit escape hatch
-                                        state.feedback_blocks.remove("recovery");
-                                        state.active_feedback_id = None;
-                                        state.should_quit = true;
+                                    recovery_prompt::RecoveryChoice::Quit => {
+                                        // Quit escape hatch, but through the same guard as every other route.
+                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
+                                            state.feedback_blocks.remove("recovery");
+                                            state.active_feedback_id = None;
+                                        }
                                         continue;
                                     }
-                                    DomainInputEvent::KeyPress('n') => {
+                                    recovery_prompt::RecoveryChoice::NewSession => {
                                         // New session: dismiss block, reset conversation
                                         state.feedback_blocks.remove("recovery");
                                         state.active_feedback_id = None;
@@ -1051,7 +1063,7 @@ pub async fn run(
                                         }));
                                         continue;
                                     }
-                                    _ => {
+                                    recovery_prompt::RecoveryChoice::Swallow => {
                                         // Block all other input while recovery prompt is active
                                         continue;
                                     }
@@ -1111,9 +1123,11 @@ pub async fn run(
                                     // DECLINES carryover (fresh tab) rather than quitting,
                                     // so this cannot be folded into that arm.
                                     DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
-                                        state.feedback_blocks.remove("carryover");
-                                        state.active_feedback_id = None;
-                                        state.should_quit = true;
+                                        // Story 21.2 AC7: the prompt does not bypass S-QUIT.
+                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
+                                            state.feedback_blocks.remove("carryover");
+                                            state.active_feedback_id = None;
+                                        }
                                         continue;
                                     }
                                     _ => {
@@ -1153,10 +1167,12 @@ pub async fn run(
                                     // being blocked by the wildcard below. Esc above only
                                     // dismisses the override banner.
                                     DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
-                                        if let Some(fb_id) = state.active_feedback_id.take() {
-                                            state.feedback_blocks.remove(&fb_id);
+                                        // Story 21.2 AC7: the banner does not bypass S-QUIT.
+                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
+                                            if let Some(fb_id) = state.active_feedback_id.take() {
+                                                state.feedback_blocks.remove(&fb_id);
+                                            }
                                         }
-                                        state.should_quit = true;
                                         continue;
                                     }
                                     _ => continue,
@@ -1388,21 +1404,16 @@ pub async fn run(
                                 last_autocomplete_filter.clear();
                             }
 
-                            // Repopulate command palette entries only when filter changes (P6)
-                            if state.command_palette.active
-                                && state.command_palette.filter_text != last_palette_filter
-                            {
-                                last_palette_filter = state.command_palette.filter_text.clone();
-                                populate_palette_entries(
+                            // AC3: host-neutral populate gate — repopulates on every
+                            // inactive→active open, query/scope and discovery change.
+                            palette_gate
+                                .sync(
                                     &mut state,
                                     &mut command_registry,
                                     &mut palette_registry,
                                     &workspace_path,
                                 )
                                 .await;
-                            } else if !state.command_palette.active {
-                                last_palette_filter.clear();
-                            }
 
                             match action {
                                 InputAction::RecipientThreadPage { earlier } => {
@@ -1470,10 +1481,16 @@ pub async fn run(
                                         }
                                     }
                                 }
-                                InputAction::Quit => {
-                                    // Quit is unconditional, closing every owned tab before save.
-                                    turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
-                                    state.should_quit = true;
+                                quit @ (InputAction::Quit | InputAction::QuitConfirmed) => {
+                                    // Story 21.2 AC7: every quit route (q, Ctrl+Q) asks the guard
+                                    // first; only an explicit `y` (QuitConfirmed) or a clean idle
+                                    // host exits, closing every owned tab before save.
+                                    if quit == InputAction::QuitConfirmed
+                                        || quit_guard::request_local(&mut state, &conversation, &tab_manager, &streaming, &turn_lifecycle, &turn_queue) == QuitRequest::ExitNow
+                                    {
+                                        turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                        state.should_quit = true;
+                                    }
                                 }
                                 InputAction::CancelOrQuit => {
                                     // AC-10-4-10: Esc from a read-only tab returns to the previous tab
@@ -1482,6 +1499,20 @@ pub async fn run(
                                         tab_manager.switch_to_index(prev_idx);
                                         state.focus = FocusState::Chat;
                                         state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    // Story 21.2 AC7 / RU-14: with nothing to stop, Ctrl+C is a quit
+                                    // REQUEST — the same guarded decision as `q` / Ctrl+Q / `/quit`.
+                                    // It runs BEFORE any card is drained so a cancelled request leaves
+                                    // permissions, plans and drafts exactly as they were.
+                                    if !(state.is_wave_in_flight()
+                                        || streaming.is_streaming
+                                        || turn_lifecycle.is_live(&conversation.id)
+                                        || tab_manager.active_tab().reducer.open_turn.is_some())
+                                    {
+                                        if quit_guard::request_local(&mut state, &conversation, &tab_manager, &streaming, &turn_lifecycle, &turn_queue) == QuitRequest::ExitNow {
+                                            state.should_quit = true;
+                                        }
                                         continue;
                                     }
                                     // Cancel active feedback input flow first (AC5)
@@ -1548,9 +1579,6 @@ pub async fn run(
                                         state.focus = FocusState::Input;
                                         state.status = StatusState::Idle;
                                         state.needs_redraw = true;
-                                    } else {
-                                        // Not streaming → quit
-                                        state.should_quit = true;
                                     }
                                 }
                                 action @ (InputAction::PermissionAllow
@@ -2094,6 +2122,15 @@ pub async fn run(
                                         // Covers: Sprint Change Proposal 2026-04-08
                                         state.multiline_mode = !state.multiline_mode;
                                         state.needs_redraw = true;
+                                    } else if cmd_name == "quit" {
+                                        // Story 21.2 AC7: `/quit` takes the SAME guarded decision as
+                                        // `q` / Ctrl+Q / idle Ctrl+C. The typed command was already
+                                        // cleared from the composer and is not itself a draft; images,
+                                        // queued turns and other tabs' work still count.
+                                        if quit_guard::request_local(&mut state, &conversation, &tab_manager, &streaming, &turn_lifecycle, &turn_queue) == QuitRequest::ExitNow {
+                                            turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                            state.should_quit = true;
+                                        }
                                     } else if cmd_name == "export" {
                                         apply_export_command(
                                             cmd_arg,
@@ -2373,10 +2410,8 @@ pub async fn run(
                                         if let Some(ref cmd) = command {
                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conversation.id.clone()),
-                                                level: crate::domain::models::NoticeLevel::Warning,
-                                                message: format!(
-                                                    "Unknown command: /{cmd} — not a built-in or a custom command."
-                                                ),
+                                                level: crate::domain::models::NoticeLevel::Advisory,
+                                                message: crate::adapters::builtin_commands::unknown_command_notice(crate::adapters::builtin_commands::CommandHost::Local, cmd),
                                             });
                                         }
                                         state.needs_redraw = true;
@@ -5789,79 +5824,15 @@ pub async fn run(
                                 }
                             }
 
-                            // Only turn-fatal notices reset streaming and abort the
-                            // turn. `Advisory` is warning-class but NOT fatal (story 19.2
-                            // review): a disclosure must never cancel the turn it describes.
-                            if level.is_turn_fatal() {
-                                streaming.is_streaming = false;
-                                streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                streaming.current_blocks.clear();
-                                streaming.active_tool_calls.clear();
-                                turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
-                            }
-
-                            // Story 13-2 AC5: rewrite offline provider errors with
-                            // user-friendly copy instead of raw error strings.
-                            let msg = if matches!(level, crate::domain::models::NoticeLevel::Error)
-                                && msg.starts_with("Offline:")
-                            {
-                                "✗ No provider available. Configure a local LLM for offline use, or check your connection.".to_string()
-                            } else {
-                                msg
-                            };
-
-                            // Create FeedbackBlock for errors and warnings; flash for info
-                            match level {
-                                crate::domain::models::NoticeLevel::Error => {
-                                    static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-                                    let fb_id = format!("fb-{}", FB_COUNTER.fetch_add(1, Ordering::Relaxed));
-                                    let fb = FeedbackBlock {
-                                        id: fb_id.clone(),
-                                        level: FeedbackLevel::Error,
-                                        message: msg,
-                                        actions: vec![FeedbackAction::Retry],
-                                    };
-                                    state.feedback_blocks.insert(fb_id.clone(), fb);
-                                    state.active_feedback_id = Some(fb_id);
-                                    state.status = StatusState::Idle;
-                                    state.focus = FocusState::Chat;
-                                    handlers::notice::auto_switch_to_monitor_on_error(&mut state, &app_state.event_bus);
-                                }
-                                crate::domain::models::NoticeLevel::Warning
-                                | crate::domain::models::NoticeLevel::Advisory => {
-                                    handlers::notice::apply_warning_notice(&mut state, msg);
-                                }
-                                _ => {
-                                    let flash_duration = state.theme.timing.status_flash_ms;
-                                    crate::adapters::tui::handlers::notice::notify_or_queue(
-                                        &mut state,
-                                        crate::adapters::tui::state::QueuedNotification::StatusFlash {
-                                            level,
-                                            message: msg,
-                                            duration_ms: flash_duration,
-                                        },
-                                    );
-                                }
-                            }
-                            state.needs_redraw = true;
-                        } else if let Some(id) = notice_conv_id {
-                            // Background tab error — apply to its stored state in TabManager
-                            if let Some(tab) = tab_manager.find_by_conversation_mut(&id) {
-                                if level.is_turn_fatal() {
-                                    tab.streaming.is_streaming = false;
-                                    tab.streaming.phase = crate::domain::models::StreamingPhase::Idle;
-                                    tab.streaming.current_blocks.clear();
-                                    tab.streaming.active_tool_calls.clear();
-                                }
-                            // Errors were always stored; a Warning/Advisory
-                            // notice addressed here (e.g. a late `/team
-                            // send` reply) must survive the switch too.
-                            crate::adapters::tui::handlers::notice::store_background_notice(
-                                tab, level, msg,
+                            // Effects live in `system_notice` so the production arm and the
+                            // K2 keystone drive the same code (Story 21.2 AC2).
+                            system_notice::apply_active_notice(
+                                &mut state, &mut streaming, &mut tab_manager, &mut conversation,
+                                &mut turn_lifecycle, &app_state.event_bus, level, msg,
                             );
-                                // Redraw so tab bar can reflect the state change
-                                state.needs_redraw = true;
-                            }
+                        } else if let Some(id) = notice_conv_id {
+                            // Background tab notice — apply to its stored state in TabManager
+                            system_notice::apply_background_notice(&mut state, &mut tab_manager, &id, level, msg);
                         }
                     }
                     #[cfg(feature = "a2a")]
@@ -6804,21 +6775,9 @@ pub async fn run(
                         // Silently drop if conversation not found (tab closed)
                     }
                     AppEvent::RecoveryPrompt { title, token_count, .. } => {
-                        let msg = format!(
-                            "\u{2139} Recovered: '{}' (partial response, {} tokens). [Enter/y] continue [n] new",
-                            title, token_count,
-                        );
-                        let fb = FeedbackBlock {
-                            id: "recovery".to_string(),
-                            level: FeedbackLevel::Info,
-                            message: msg,
-                            actions: vec![
-                                FeedbackAction::Custom("[Enter] continue".to_string()),
-                                FeedbackAction::StartFresh,
-                            ],
-                        };
-                        state.feedback_blocks.insert("recovery".to_string(), fb);
-                        state.active_feedback_id = Some("recovery".to_string());
+                        let fb = recovery_prompt::recovery_block(&title, token_count);
+                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                        state.active_feedback_id = Some(recovery_prompt::RECOVERY_BLOCK_ID.to_string());
                         state.focus = FocusState::Chat;
                         state.needs_redraw = true;
                     }
@@ -8324,12 +8283,14 @@ pub fn rehydrate_historical_images(
     }
 }
 
+/// Shift+Tab cycle (Story 21.2 AC9/KG-7): Yolo is never a cycle target — it is
+/// entered only through the explicit `/mode yolo` command (or the equivalent
+/// explicit palette entry). Leaving Yolo by cycling goes to Normal.
 fn cycle_mode(current: PermissionMode) -> PermissionMode {
     match current {
         PermissionMode::Normal => PermissionMode::AutoEdit,
         PermissionMode::AutoEdit => PermissionMode::Plan,
-        PermissionMode::Plan => PermissionMode::Yolo,
-        PermissionMode::Yolo => PermissionMode::Normal,
+        PermissionMode::Plan | PermissionMode::Yolo => PermissionMode::Normal,
     }
 }
 
@@ -8464,6 +8425,7 @@ fn render(
         ref autocomplete,
         ref command_palette,
         ref which_key,
+        ref quit_confirm,
         ref help_overlay,
         ref model_selector,
         ref login,
@@ -9493,9 +9455,22 @@ fn render(
                     command_palette_widget::render(frame, area, command_palette, theme);
                 }
 
-                // Render which-key hint bar (bottom of screen)
+                // Render which-key hint bar: untimed, wrapped, bottom-anchored ABOVE the
+                // status row (never covering it) and reserving no Stage rows (AC6).
                 if which_key.active {
-                    which_key_bar::render(frame, area, which_key, theme);
+                    let above_status = Rect::new(
+                        area.x,
+                        area.y,
+                        area.width,
+                        app_layout.status_bar.y.saturating_sub(area.y),
+                    );
+                    which_key_bar::render(
+                        frame,
+                        above_status,
+                        which_key,
+                        theme,
+                        crate::adapters::tui::chord_menu::ChordHost::Local,
+                    );
                 }
 
                 // Render help overlay (full-screen modal, on top of everything)
@@ -9531,6 +9506,11 @@ fn render(
                 // Render profile switcher overlay (Story 8.4 AC-1)
                 if profile_switcher.active {
                     profile_switcher::render(frame, area, profile_switcher, theme);
+                }
+
+                // S-QUIT decision frame: painted last, over every other overlay (AC7).
+                if let Some(quit_frame) = quit_confirm.as_ref() {
+                    crate::adapters::tui::quit_confirm::render(frame, area, quit_frame, theme);
                 }
             }
             None => {
@@ -9911,57 +9891,6 @@ fn reconcile_startup_selected_model(
             config_model, active_provider_id, first_id
         ),
     });
-}
-
-/// Populate command palette filtered entries from the registry.
-/// Called after handle_input when palette is active and filter text changes.
-async fn populate_palette_entries(
-    state: &mut TuiState,
-    command_registry: &mut CommandRegistry,
-    palette_registry: &mut PaletteRegistry,
-    workspace_path: &std::path::Path,
-) {
-    // Ensure command registry is discovered
-    if !command_registry.is_discovered() {
-        command_registry.refresh(workspace_path);
-        let guard = state.skill_registry.read().await;
-        command_registry.warn_skill_shadows(&guard);
-    }
-
-    // Populate palette from command registry (cached, only rebuilds if discovery state changed)
-    palette_registry.populate_from_command_registry(command_registry);
-
-    // Determine scope from filter prefix
-    let (scope, query) = if let Some(palette_scope) = state.command_palette.current_scope {
-        // Strip prefix character from query
-        let q = if state.command_palette.filter_text.len() > 1 {
-            state
-                .command_palette
-                .filter_text
-                .chars()
-                .skip(1)
-                .collect::<String>()
-        } else {
-            String::new()
-        };
-        (Some(palette_scope), q)
-    } else {
-        (None, state.command_palette.filter_text.clone())
-    };
-
-    // Fuzzy filter entries
-    let filtered = palette_registry.fuzzy_filter(&query, scope);
-    let entries: Vec<_> = filtered.into_iter().cloned().collect();
-    state.command_palette.filtered_entries = entries;
-
-    // Clamp selection and scroll_offset to valid range after filter update
-    let max_idx = state
-        .command_palette
-        .filtered_entries
-        .len()
-        .saturating_sub(1);
-    state.command_palette.selected_index = state.command_palette.selected_index.min(max_idx);
-    state.command_palette.scroll_offset = state.command_palette.scroll_offset.min(max_idx);
 }
 
 /// Resolve file mentions and build context prefix for a message submission.
@@ -10950,5 +10879,52 @@ mod tests {
         reconcile_startup_selected_model(&mut state, "empty", &registry, "claude-sonnet-4-6", &tx);
 
         assert!(state.selected_model.is_none());
+    }
+
+    #[test]
+    fn story21_2_shift_tab_cycle_never_enters_yolo_but_explicit_mode_yolo_works() {
+        use crate::domain::events::{DomainInputEvent, DomainKey};
+        // Front door: Input Shift+Tab emits CycleMode; the runtime maps it with cycle_mode.
+        let mut state = TuiState::new(80, 24);
+        assert_eq!(
+            handle_input(
+                &mut state,
+                &DomainInputEvent::SpecialKey(DomainKey::ShiftTab)
+            ),
+            InputAction::CycleMode
+        );
+        let mut mode = PermissionMode::Normal;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            mode = cycle_mode(mode);
+            seen.push(mode);
+        }
+        assert_eq!(
+            seen,
+            [
+                PermissionMode::AutoEdit,
+                PermissionMode::Plan,
+                PermissionMode::Normal,
+                PermissionMode::AutoEdit,
+                PermissionMode::Plan,
+                PermissionMode::Normal,
+            ]
+        );
+        // Leaving an explicitly selected Yolo goes to Normal.
+        assert_eq!(cycle_mode(PermissionMode::Yolo), PermissionMode::Normal);
+        // Explicit entry still works (`/mode yolo` shares this parser with the palette entry).
+        assert_eq!(
+            crate::domain::services::permission_chain::parse_mode_arg(Some("yolo")),
+            Some(PermissionMode::Yolo)
+        );
+        // Chat Shift+Tab remains previous-tab.
+        state.focus = FocusState::Chat;
+        assert_eq!(
+            handle_input(
+                &mut state,
+                &DomainInputEvent::SpecialKey(DomainKey::ShiftTab)
+            ),
+            InputAction::SwitchToPrevTab
+        );
     }
 }
