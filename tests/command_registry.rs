@@ -113,24 +113,20 @@ fn test_user_command_with_content() {
 // Covers: AC6 — refresh reads from directory with frontmatter
 #[test]
 fn test_refresh_commands_from_directory() {
-    let tmp = tempfile::tempdir().unwrap();
-    let cmd_dir = tmp.path().join(".claude").join("commands");
-    std::fs::create_dir_all(&cmd_dir).unwrap();
-
+    // One file per refresh: the production scan budget may truncate after the first entry.
+    // Loading several files in one refresh is pinned by `adapters::command_registry::tests`
+    // with a budget that never expires.
+    let tmp_deploy = tempfile::tempdir().unwrap();
+    let deploy_dir = tmp_deploy.path().join(".claude").join("commands");
+    std::fs::create_dir_all(&deploy_dir).unwrap();
     std::fs::write(
-        cmd_dir.join("deploy-staging.md"),
+        deploy_dir.join("deploy-staging.md"),
         "---\ndescription: Deploy to staging\n---\n# Deploy\nRun deploy script.",
     )
     .unwrap();
 
-    std::fs::write(
-        cmd_dir.join("run-tests.md"),
-        "Run all test suites.\n\nMore details here.",
-    )
-    .unwrap();
-
     let mut registry = CommandRegistry::new();
-    registry.refresh(tmp.path());
+    registry.refresh(tmp_deploy.path());
     let all = registry.filter("");
 
     let user_cmds: Vec<&str> = all
@@ -139,10 +135,29 @@ fn test_refresh_commands_from_directory() {
         .map(|c| c.name.as_str())
         .collect();
     assert!(user_cmds.contains(&"deploy-staging"));
-    assert!(user_cmds.contains(&"run-tests"));
 
     let deploy = all.iter().find(|c| c.name == "deploy-staging").unwrap();
     assert_eq!(deploy.description, "Deploy to staging");
+
+    let tmp_tests = tempfile::tempdir().unwrap();
+    let tests_dir = tmp_tests.path().join(".claude").join("commands");
+    std::fs::create_dir_all(&tests_dir).unwrap();
+    std::fs::write(
+        tests_dir.join("run-tests.md"),
+        "Run all test suites.\n\nMore details here.",
+    )
+    .unwrap();
+
+    let mut registry = CommandRegistry::new();
+    registry.refresh(tmp_tests.path());
+    let all = registry.filter("");
+
+    let user_cmds: Vec<&str> = all
+        .iter()
+        .filter(|c| matches!(c.source, CommandSource::UserDefined { .. }))
+        .map(|c| c.name.as_str())
+        .collect();
+    assert!(user_cmds.contains(&"run-tests"));
 
     let tests = all.iter().find(|c| c.name == "run-tests").unwrap();
     assert_eq!(tests.description, "Run all test suites.");

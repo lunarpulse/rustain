@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::domain::services::command_normalize;
 use crate::domain::services::frontmatter;
@@ -43,6 +43,8 @@ pub struct FileRefError {
 pub struct CommandRegistry {
     commands: Vec<SlashCommandDef>,
     discovered: bool,
+    /// Wall-clock budget for one refresh scan; always `COMMAND_SCAN_BUDGET_MS` outside this module's unit tests.
+    scan_budget: Duration,
 }
 
 impl CommandRegistry {
@@ -220,6 +222,7 @@ impl CommandRegistry {
         Self {
             commands,
             discovered: false,
+            scan_budget: Duration::from_millis(COMMAND_SCAN_BUDGET_MS),
         }
     }
 
@@ -248,7 +251,7 @@ impl CommandRegistry {
             .retain(|c| matches!(c.source, CommandSource::BuiltIn));
 
         let cmd_dir = workspace.join(".claude").join("commands");
-        let user_commands = scan_commands_dir(&cmd_dir);
+        let user_commands = scan_commands_dir(&cmd_dir, self.scan_budget);
 
         let builtin_names: HashSet<&str> = self.commands.iter().map(|c| c.name.as_str()).collect();
         for cmd in &user_commands {
@@ -317,7 +320,12 @@ impl Default for CommandRegistry {
     }
 }
 
-fn scan_commands_dir(cmd_dir: &Path) -> Vec<SlashCommandDef> {
+/// Scans `.claude/commands/` for user-defined commands.
+///
+/// The `budget` is measured from before directory collection, but it can stop the scan only
+/// after the first sorted entry has been examined, so a loaded machine can never drop entry 0.
+/// The overrun past the budget is bounded by one file (at most `MAX_COMMAND_FILE_SIZE`).
+fn scan_commands_dir(cmd_dir: &Path, budget: Duration) -> Vec<SlashCommandDef> {
     if !cmd_dir.is_dir() {
         return Vec::new();
     }
@@ -340,7 +348,7 @@ fn scan_commands_dir(cmd_dir: &Path) -> Vec<SlashCommandDef> {
             tracing::warn!("Command scan truncated at {} files", MAX_COMMAND_SCAN_FILES);
             break;
         }
-        if start.elapsed().as_millis() as u64 > COMMAND_SCAN_BUDGET_MS {
+        if file_count > 0 && start.elapsed() >= budget {
             tracing::warn!(
                 "Command scan truncated after {}ms ({} files)",
                 start.elapsed().as_millis(),
@@ -662,4 +670,173 @@ pub fn resolve_file_refs(
 
     result.push_str(&body[last_end..]);
     (result, errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry_with(budget: Duration) -> CommandRegistry {
+        CommandRegistry {
+            scan_budget: budget,
+            ..CommandRegistry::new()
+        }
+    }
+
+    fn write_command(root: &Path, rel: &str, body: &str) {
+        let path = root.join(".claude").join("commands").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// Three files written out of sorted order: `b.md`, `c.md`, then `a/z.md`.
+    /// Sorted relative-path order is `a/z.md`, `b.md`, `c.md`.
+    fn three_file_workspace() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        write_command(tmp.path(), "b.md", "B");
+        write_command(tmp.path(), "c.md", "C");
+        write_command(tmp.path(), "a/z.md", "Z");
+        tmp
+    }
+
+    fn user_names(registry: &CommandRegistry) -> Vec<String> {
+        registry
+            .filter("")
+            .into_iter()
+            .filter(|c| matches!(c.source, CommandSource::UserDefined { .. }))
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn k0_production_budget_is_fifty_milliseconds() {
+        assert_eq!(
+            CommandRegistry::new().scan_budget,
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            CommandRegistry::default().scan_budget,
+            Duration::from_millis(50)
+        );
+    }
+
+    #[test]
+    fn k1_expired_budget_keeps_only_the_first_sorted_entry() {
+        let tmp = three_file_workspace();
+        let mut registry = registry_with(Duration::ZERO);
+        registry.refresh(tmp.path());
+
+        let names = user_names(&registry);
+        assert_eq!(names, vec!["a:z".to_string()], "user names: {names:?}");
+        assert_eq!(
+            registry.find("a:z").and_then(|c| c.content.as_deref()),
+            Some("Z"),
+            "user names: {names:?}"
+        );
+        assert!(registry.find("b").is_none(), "user names: {names:?}");
+        assert!(registry.find("c").is_none(), "user names: {names:?}");
+        assert!(registry.is_discovered());
+        assert!(registry.find("new").is_some(), "built-in `new` must remain");
+    }
+
+    #[test]
+    fn k1c_expired_budget_orders_by_path_components_not_raw_string() {
+        // `Path` orders by component: `x/z.md` precedes `x.md`; a raw-string order would put `x.md` first ('.' < '/').
+        let tmp = tempfile::tempdir().unwrap();
+        write_command(tmp.path(), "x/z.md", "Z");
+        write_command(tmp.path(), "x.md", "X");
+        let mut registry = registry_with(Duration::ZERO);
+        registry.refresh(tmp.path());
+
+        let names = user_names(&registry);
+        assert_eq!(names, vec!["x:z".to_string()], "user names: {names:?}");
+        assert_eq!(
+            registry.find("x:z").and_then(|c| c.content.as_deref()),
+            Some("Z"),
+            "user names: {names:?}"
+        );
+    }
+
+    #[test]
+    fn k1b_expired_budget_still_loads_the_three_ci_shapes() {
+        let cases = [
+            (
+                "---\ndescription: \"\"\n---\nFirst body line.\nMore text.",
+                "First body line.",
+            ),
+            ("## Code Review\nBody text here.", "Code Review"),
+            ("", "(no description)"),
+        ];
+        for budget in [Duration::ZERO, Duration::MAX] {
+            for (content, expected) in cases {
+                let tmp = tempfile::tempdir().unwrap();
+                write_command(tmp.path(), "cmd.md", content);
+                let mut registry = registry_with(budget);
+                registry.refresh(tmp.path());
+
+                let names = user_names(&registry);
+                let found = registry.find("cmd");
+                assert!(
+                    found.is_some(),
+                    "budget {budget:?}, content {content:?}: `cmd` missing; user names: {names:?}"
+                );
+                assert_eq!(
+                    found.map(|c| c.description.as_str()),
+                    Some(expected),
+                    "budget {budget:?}, content {content:?}; user names: {names:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn k2_non_expiring_budget_loads_everything_in_order() {
+        let tmp = three_file_workspace();
+        let mut registry = registry_with(Duration::MAX);
+        registry.refresh(tmp.path());
+
+        let names = user_names(&registry);
+        assert_eq!(
+            names,
+            vec!["a:z".to_string(), "b".to_string(), "c".to_string()],
+            "user names: {names:?}"
+        );
+        for (name, content) in [("a:z", "Z"), ("b", "B"), ("c", "C")] {
+            assert_eq!(
+                registry.find(name).and_then(|c| c.content.as_deref()),
+                Some(content),
+                "{name}; user names: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn k3_scan_cap_is_exactly_two_hundred_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..=MAX_COMMAND_SCAN_FILES {
+            write_command(tmp.path(), &format!("cmd-{i:03}.md"), "body");
+        }
+        let mut registry = registry_with(Duration::MAX);
+        registry.refresh(tmp.path());
+
+        let names = user_names(&registry);
+        assert_eq!(
+            names.len(),
+            200,
+            "user name count; first/last: {:?}/{:?}",
+            names.first(),
+            names.last()
+        );
+        assert!(
+            registry.find("cmd-000").is_some(),
+            "cmd-000 missing; last: {:?}",
+            names.last()
+        );
+        assert!(
+            registry.find("cmd-199").is_some(),
+            "cmd-199 missing; last: {:?}",
+            names.last()
+        );
+        assert!(registry.find("cmd-200").is_none(), "cmd-200 must be absent");
+    }
 }
