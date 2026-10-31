@@ -100,6 +100,9 @@ impl AttachServer {
                     // stays as unanswered audit evidence.
                     self.retain_interrupted_proposals(turn).await;
                     turn.clear();
+                    // The fold is complete: a driver waiting on this turn's
+                    // terminal must not time out because it was cancelled.
+                    self.turn_complete.notify_waiters();
                 } else {
                     self.commit_assistant_turn(turn, stop_reason).await;
                     turn.clear();

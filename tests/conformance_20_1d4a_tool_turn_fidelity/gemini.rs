@@ -410,7 +410,11 @@ fn transcript_calls(frame: &DaemonFrame) -> Vec<Value> {
 #[tokio::test]
 #[serial]
 async fn k5_markers_reach_only_the_session_store_on_every_daemon_path() {
-    assert_eq!(PROTOCOL_VERSION, 15, "the default branch: no protocol bump");
+    // 21.2 A4 bumped the attach protocol to v16 (interrupt frames); this branch adds no frame of its own.
+    assert_eq!(
+        PROTOCOL_VERSION, 16,
+        "the default branch: no protocol bump of its own"
+    );
     let world = World::start().await;
     let mut attempts = script(&[]);
     attempts.extend(script(&[]));

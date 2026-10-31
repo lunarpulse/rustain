@@ -67,6 +67,7 @@ mod retro_share;
 use rap_inbound::DaemonPeerConsumer;
 mod team;
 use team::TeamSendPayload;
+mod turn_interrupt;
 
 /// Per-connection bounded writer queue depth. A connection that cannot keep up is
 /// dropped (its queue fills) — the turn is never blocked (AC3).
@@ -583,6 +584,8 @@ impl TeamSendTestHooks {
             | DaemonFrame::ConsolidationProposed { .. }
             | DaemonFrame::TeamProposal { .. }
             | DaemonFrame::TeamProposalClosed { .. }
+            | DaemonFrame::ActiveTurn { .. }
+            | DaemonFrame::InterruptResult { .. }
             | DaemonFrame::PeerAccepted { .. }
             | DaemonFrame::PeerShareResult { .. }
             | DaemonFrame::RecipientActionResult { .. }
@@ -815,6 +818,8 @@ fn frame_variant_name(frame: &DaemonFrame) -> &'static str {
         DaemonFrame::TeamRetractAnswered { .. } => "TeamRetractAnswered",
         DaemonFrame::TeamStatusResult { .. } => "TeamStatusResult",
         DaemonFrame::SenderConsentRevoked { .. } => "SenderConsentRevoked",
+        DaemonFrame::ActiveTurn { .. } => "ActiveTurn",
+        DaemonFrame::InterruptResult { .. } => "InterruptResult",
         DaemonFrame::Detached => "Detached",
         DaemonFrame::Error(_) => "Error",
     }
@@ -891,6 +896,8 @@ struct Conn {
 #[derive(Default)]
 struct ConnRegistry {
     conns: Vec<Conn>,
+    /// Story 21.2 A4: guarded by this registry's mutex, the admission fence.
+    active_turn: turn_interrupt::ActiveTurnSlot,
 }
 
 impl ConnRegistry {
@@ -1412,6 +1419,8 @@ pub struct AttachServer {
     team_send_saturation_refusals: Arc<AtomicUsize>,
     #[cfg(any(test, feature = "test-instrumentation"))]
     team_send_test_hooks: Option<TeamSendTestHooks>,
+    #[cfg(test)]
+    interrupt_probe: turn_interrupt::InterruptProbe,
     /// Story 18.1b — the assistant answer produced by each inbound A2A peer
     /// node, captured at the moment its turn finished.
     ///
@@ -1969,6 +1978,8 @@ impl AttachServer {
             team_peers: Vec::new(),
             team_proposals,
             team_send_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_TEAM_SENDS)),
+            #[cfg(test)]
+            interrupt_probe: Default::default(),
             team_send_shutdown: CancellationToken::new(),
             team_send_tasks: Mutex::new(Vec::new()),
             #[cfg(feature = "a2a")]
@@ -2465,6 +2476,7 @@ impl AttachServer {
                 tier,
                 approval_ready: false,
             });
+            reg.project_active_turn_to(conn_id);
             granted
         };
 
@@ -2622,6 +2634,7 @@ impl AttachServer {
                 .send_modify(|generation| *generation += 1);
         }
 
+        let interrupt_reply = tx.clone();
         // Turns, History fences and context commands share a bounded writer-side FIFO.
         // Approval replies and independent recipient actions remain reader-side.
         let operator_turns =
@@ -2774,6 +2787,10 @@ impl AttachServer {
                 frame = read_frame::<_, ClientFrame>(&mut read_half) => frame,
             };
             match next_frame {
+                Ok(Some(ClientFrame::InterruptTurn { generation })) => {
+                    self.answer_interrupt(conn_id, &interrupt_reply, generation)
+                        .await;
+                }
                 Ok(Some(frame)) => {
                     if let Some((turns, _worker)) = &operator_turns
                         && matches!(
@@ -3671,6 +3688,7 @@ impl AttachServer {
         conn_id: u64,
     ) -> bool {
         match frame {
+            ClientFrame::InterruptTurn { .. } => {}
             ClientFrame::Detach => {
                 self.send_to(conn_id, DaemonFrame::Detached).await;
                 return true;
@@ -4432,120 +4450,6 @@ impl AttachServer {
             }
         }
         false
-    }
-
-    /// Build the runtime (first activity), spawn the approval gate once, drive
-    /// the turn. The turn emits to the daemon bus; the forwarder fans out + folds.
-    async fn drive_user_turn(&self, text: String) {
-        if text.trim() == "/clear" {
-            let _turn_guard = self.turn_serial.lock().await;
-            let _action_guard = self.peer_reply_serial.lock().await;
-            if let Some(handler) = self.peer_delivery.read().await.clone() {
-                handler.clear_all_taint().await;
-            }
-            if let Err(error) = clear_conversation_rows(
-                &self.pending_drafts,
-                &self.peer_row_serial,
-                &self.conversation,
-                &self.registry,
-                self.core.storage.as_ref(),
-            )
-            .await
-            {
-                tracing::warn!(%error, "clearing conversation rows failed");
-            } else {
-                let conversation_id = self.conversation.lock().await.id.clone();
-                self.team_proposals
-                    .withdraw_conversation(&conversation_id)
-                    .await;
-                let _row_guard = self.peer_row_serial.lock().await;
-                if let Some(runtime) = self.core.built_runtime() {
-                    runtime.recipient_context.clear().await;
-                }
-                self.broadcast_recipient_context().await;
-            }
-            return;
-        }
-        let _ = self
-            .drive_user_turn_inner(text, ChannelKind::Terminal, None, TurnOrigin::Interactive)
-            .await;
-    }
-
-    async fn drive_channel_turn(&self, req: ChannelTurnRequest) {
-        let _ = self
-            .drive_user_turn_inner(
-                req.text,
-                req.origin,
-                Some(req.response_tx),
-                TurnOrigin::Channel,
-            )
-            .await;
-    }
-
-    async fn drive_user_turn_inner(
-        &self,
-        text: String,
-        origin: ChannelKind,
-        response_tx: Option<tokio::sync::oneshot::Sender<String>>,
-        turn_origin: TurnOrigin,
-    ) -> Result<(), String> {
-        let _turn_guard = self.turn_serial.lock().await;
-        *self.active_channel_origin.lock().await = origin;
-        *self.pending_channel_response_tx.lock().await = response_tx;
-        self.operator_turn_active.store(true, Ordering::Release);
-
-        let rt = match self.core.ensure_runtime().await {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!(error = %e, "daemon: building turn runtime failed");
-                self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
-                    .await;
-                self.operator_turn_active.store(false, Ordering::Release);
-                *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-                return Err(e.to_string());
-            }
-        };
-        self.ensure_approval_gate(rt.approval.clone()).await;
-
-        let turn_complete = self.turn_complete.notified();
-        let handle = {
-            let mut conv = self.conversation.lock().await;
-            rt.drive_turn(
-                text,
-                origin,
-                &mut conv,
-                &self.domain_tx,
-                turn_origin,
-                CancellationToken::new(),
-            )
-            .await
-        };
-
-        if let Err(e) = handle.await {
-            tracing::warn!(error = ?e, "daemon turn task failed");
-            self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
-                .await;
-            self.operator_turn_active.store(false, Ordering::Release);
-            *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-            return Err(e.to_string());
-        }
-        let folded = tokio::time::timeout(std::time::Duration::from_secs(5), turn_complete).await;
-        if folded.is_err() {
-            tracing::warn!(
-                "daemon turn completed but assistant commit was not observed before timeout"
-            );
-        }
-        self.resolve_pending_channel_response(CHANNEL_TURN_FAILED_REPLY)
-            .await;
-        self.operator_turn_active.store(false, Ordering::Release);
-        *self.active_channel_origin.lock().await = ChannelKind::Terminal;
-        Ok(())
-    }
-
-    async fn resolve_pending_channel_response(&self, fallback: &str) {
-        if let Some(tx) = self.pending_channel_response_tx.lock().await.take() {
-            let _ = tx.send(fallback.to_string());
-        }
     }
 
     /// Spawn the headless approval gate exactly once (AC6).
@@ -7863,7 +7767,7 @@ mod tests {
         }
     }
 
-    fn mock_runtime(
+    pub(super) fn mock_runtime(
         provider: Arc<dyn StreamingProvider>,
         storage: Arc<dyn StoragePort>,
         workspace: &Path,
@@ -11872,13 +11776,13 @@ mod tests {
         let mut stream = UnixStream::connect(&socket).await.unwrap();
         // Server issues a challenge first; the version check precedes proof work,
         // so a wrong declared version is rejected before the proof is examined.
-        // Story 19.25: a v14 client cannot decode the retrospective frame and preview.
+        // Story 21.2 A4: a v15 client cannot decode the interrupt/generation frames.
         let signer = test_signer(1);
         let _ = read_attach_challenge(&mut stream).await;
         write_frame(
             &mut stream,
             &ClientFrame::Attach {
-                protocol_version: 14,
+                protocol_version: 15,
                 read_only_ok: false,
                 tier: ConnectionTier::TrustedLocal,
                 challenge_nonce: vec![],
@@ -11891,8 +11795,8 @@ mod tests {
         match read_frame::<_, DaemonFrame>(&mut stream).await.unwrap() {
             Some(DaemonFrame::Error(ProtocolError::VersionMismatch { daemon, client })) => {
                 assert_eq!(daemon, PROTOCOL_VERSION);
-                assert_eq!(client, 14);
-                assert_eq!(daemon, 15);
+                assert_eq!(client, 15);
+                assert_eq!(daemon, 16);
             }
             other => panic!("expected VersionMismatch error, got {other:?}"),
         }
@@ -14283,6 +14187,7 @@ mod tests {
                 tier: ConnectionTier::TrustedLocal,
                 approval_ready: true,
             }],
+            ..Default::default()
         });
 
         let pending_drafts =

@@ -640,6 +640,17 @@ async fn story19_20c_socket_exact_retention_deadline_and_decision_admission() {
     host.stop().await;
 }
 
+/// The queue tests assert the terminal close, not the Story 21.2 A4 projection
+/// of the live turn's generation that may precede it on a writer's queue.
+async fn skipping_turn_projection(stream: &mut UnixStream) -> Option<DaemonFrame> {
+    loop {
+        match read_frame::<_, DaemonFrame>(stream).await.unwrap() {
+            Some(DaemonFrame::ActiveTurn { .. }) => continue,
+            other => return other,
+        }
+    }
+}
+
 #[tokio::test]
 async fn story19_20c_socket_full_queue_and_full_reissue_remain_retained() {
     use crate::domain::services::approval_runtime::ReviewScope;
@@ -672,7 +683,7 @@ async fn story19_20c_socket_full_queue_and_full_reissue_remain_retained() {
         "a full queue must terminal-close, never log-and-drop"
     );
     assert!(matches!(
-        read_frame::<_, DaemonFrame>(&mut writer).await.unwrap(),
+        skipping_turn_projection(&mut writer).await,
         Some(DaemonFrame::Error(ProtocolError::Internal(_)))
     ));
     assert!(
@@ -714,7 +725,7 @@ async fn story19_20c_socket_full_queue_and_full_reissue_remain_retained() {
         "full replay retains instead of resolving or rejecting"
     );
     assert!(matches!(
-        read_frame::<_, DaemonFrame>(&mut retry).await.unwrap(),
+        skipping_turn_projection(&mut retry).await,
         Some(DaemonFrame::Error(ProtocolError::Internal(_)))
     ));
     assert!(

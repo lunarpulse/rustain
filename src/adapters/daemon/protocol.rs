@@ -51,7 +51,9 @@ use crate::infrastructure::runtime::event_bus::RawEvent;
 /// v13 (Story 19.22): ReplyToRecipientItem carries an optional Accept/Discuss verdict
 /// v14 (Story 19.23): TeamSend carries holders_of; PeerRowControl carries the selection line
 /// v15 (Story 19.25): ShareRecipientRetro; PeerRowControl carries the retrospective preview
-pub const PROTOCOL_VERSION: u32 = 15;
+/// v16 (Story 21.2 A4): `ActiveTurn` projects the live terminal-turn generation to the
+/// writer; `InterruptTurn` / `InterruptResult` are the attached stop control and its answer
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// Hard cap on a single frame's JSON body (8 MiB). A length prefix larger than
 /// this is rejected before allocation — a garbled or hostile peer cannot force
@@ -469,6 +471,59 @@ impl std::fmt::Display for ProtocolError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProposalToken(pub u64);
 
+/// Server-minted identity of one terminal-origin daemon turn (Story 21.2 A4).
+/// Projected to the writer in [`DaemonFrame::ActiveTurn`] and echoed back in
+/// [`ClientFrame::InterruptTurn`]. It is a stale-target fence only — never an
+/// authorization token: the daemon still authorizes the sending connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnGeneration(pub u64);
+
+/// Why an [`ClientFrame::InterruptTurn`] cancelled nothing (Story 21.2 A4).
+/// Every refusal leaves every turn, including a newer one, running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InterruptRefusal {
+    /// This connection is not the registered trusted-local writer.
+    NotWriter,
+    /// This attachment was granted read-only.
+    ReadOnly,
+    /// Peer-tier attachments never control the operator's work.
+    PeerTier,
+    /// No turn is running.
+    NoActiveTurn,
+    /// The named turn already ended; a different turn may be running.
+    Stale,
+    /// The named turn was already interrupted and is settling.
+    AlreadyInterrupted,
+    /// The running turn did not originate at the terminal.
+    WrongOrigin,
+}
+
+impl std::fmt::Display for InterruptRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NotWriter => "stop refused: only the attached writer can stop the turn",
+            Self::ReadOnly => "stop refused: this attachment is read-only",
+            Self::PeerTier => "stop refused: peer attachments cannot stop the operator's turn",
+            Self::NoActiveTurn => "stop refused: no turn is running",
+            Self::Stale => "stop refused: that turn already ended",
+            Self::AlreadyInterrupted => "stop already requested: the turn is settling",
+            Self::WrongOrigin => "stop refused: the running turn did not start at this terminal",
+        })
+    }
+}
+
+/// The daemon's answer to one [`ClientFrame::InterruptTurn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InterruptOutcome {
+    /// The matching turn's cancellation token was fired. The turn's normal
+    /// terminal event follows on the event stream.
+    Interrupted,
+    /// Nothing was cancelled.
+    Refused { reason: InterruptRefusal },
+}
+
 /// Human-decided verdict on a received story list, recorded as a reply turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -687,6 +742,11 @@ pub enum ClientFrame {
     /// sender consent durably through the daemon's consent path.
     /// TrustedLocal + ReadWrite only.
     RevokeSenderConsent { request: String, alias: String },
+    /// Story 21.2 A4 — stop the running terminal-origin turn named by
+    /// `generation`. Answered reader-side with [`DaemonFrame::InterruptResult`],
+    /// never queued behind the operator FIFO. Only the current trusted-local
+    /// read-write writer can cancel anything.
+    InterruptTurn { generation: TurnGeneration },
     /// Detach cleanly (the turn continues daemon-side — AC4).
     Detach,
 }
@@ -1054,6 +1114,15 @@ pub enum DaemonFrame {
         request: String,
         alias: String,
         message: String,
+    },
+    /// Story 21.2 A4 — the live terminal-origin turn's generation, sent to the
+    /// trusted-local writer when a turn starts, on attach during an active turn,
+    /// and as `None` when that turn ends.
+    ActiveTurn { generation: Option<TurnGeneration> },
+    /// Story 21.2 A4 — the honest answer to one [`ClientFrame::InterruptTurn`].
+    InterruptResult {
+        generation: TurnGeneration,
+        outcome: InterruptOutcome,
     },
     /// Acknowledge a clean [`ClientFrame::Detach`].
     Detached,
@@ -1490,6 +1559,9 @@ mod tests {
                 request: "untrust-1".into(),
                 alias: "alice".into(),
             },
+            ClientFrame::InterruptTurn {
+                generation: TurnGeneration(7),
+            },
             ClientFrame::Detach,
         ]
     }
@@ -1850,6 +1922,20 @@ mod tests {
                     error: ProtocolError::Internal("append failed".into()),
                 },
             },
+            DaemonFrame::ActiveTurn {
+                generation: Some(TurnGeneration(7)),
+            },
+            DaemonFrame::ActiveTurn { generation: None },
+            DaemonFrame::InterruptResult {
+                generation: TurnGeneration(7),
+                outcome: InterruptOutcome::Interrupted,
+            },
+            DaemonFrame::InterruptResult {
+                generation: TurnGeneration(7),
+                outcome: InterruptOutcome::Refused {
+                    reason: InterruptRefusal::Stale,
+                },
+            },
             DaemonFrame::Detached,
             DaemonFrame::Error(ProtocolError::VersionMismatch {
                 daemon: PROTOCOL_VERSION,
@@ -2017,8 +2103,42 @@ mod tests {
 mod selection_version_tests {
     use super::*;
     #[test]
-    fn story19_25_requires_attach_protocol_fifteen() {
-        assert_eq!(PROTOCOL_VERSION, 15);
+    fn story21_2_attached_interrupt_requires_attach_protocol_sixteen() {
+        assert_eq!(
+            PROTOCOL_VERSION, 16,
+            "ActiveTurn/InterruptTurn/InterruptResult are the v16 frames"
+        );
+    }
+
+    #[test]
+    fn story21_2_interrupt_frames_have_the_pinned_wire_shape() {
+        let interrupt = ClientFrame::InterruptTurn {
+            generation: TurnGeneration(9),
+        };
+        assert_eq!(
+            serde_json::to_value(&interrupt).unwrap(),
+            serde_json::json!({"interruptTurn": {"generation": 9}})
+        );
+        let projection = DaemonFrame::ActiveTurn {
+            generation: Some(TurnGeneration(9)),
+        };
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap(),
+            serde_json::json!({"activeTurn": {"generation": 9}})
+        );
+        let result = DaemonFrame::InterruptResult {
+            generation: TurnGeneration(9),
+            outcome: InterruptOutcome::Refused {
+                reason: InterruptRefusal::PeerTier,
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({"interruptResult": {
+                "generation": 9,
+                "outcome": {"refused": {"reason": "peerTier"}}
+            }})
+        );
     }
 
     #[test]
@@ -2032,8 +2152,8 @@ mod selection_version_tests {
     }
 
     #[test]
-    fn story19_23_selection_requires_current_attach_protocol() {
-        assert_eq!(PROTOCOL_VERSION, 15);
+    fn story19_23_selection_frame_round_trips_under_the_current_attach_protocol() {
+        assert_eq!(PROTOCOL_VERSION, 16);
         let frame = ClientFrame::TeamSend {
             request: "selection".into(),
             recipients: vec![],

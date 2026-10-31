@@ -216,7 +216,8 @@ async fn stored_items(ws: &Path) -> usize {
 #[tokio::test]
 #[serial]
 async fn k02_daemon_persists_once_replays_after_restart_and_never_projects() {
-    assert_eq!(PROTOCOL_VERSION, 15, "replay adds no frame shape");
+    // 21.2 A4 bumped the attach protocol to v16 (interrupt frames); replay itself still adds no frame shape.
+    assert_eq!(PROTOCOL_VERSION, 16, "replay adds no frame shape");
     let server = MockServer::start().await;
     let world = World::new(&server);
     login(&server, "k02-account").await;

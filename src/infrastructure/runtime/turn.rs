@@ -198,6 +198,20 @@ pub async fn run_turn(
     let mut context_tainted =
         context_tainted || turn_origin.provenance() == ProvenanceTag::SelfOriginated;
     loop {
+        // Story 21.2 A4 (integrator-authorized): a cancelled turn must not start
+        // another provider call. A tool that returns an error on cancellation
+        // otherwise lets the loop continue and finish a turn reported Interrupted.
+        // Like every other early exit, it closes the turn with a Cancelled
+        // terminal (no await before `return`, so an abort cannot double it).
+        if iteration > 0 && turn_cancel.is_cancelled() {
+            let _ = event_tx.send(AppEvent::ProviderChunk {
+                conversation_id: conversation_id.clone(),
+                chunk: StreamChunk::TurnComplete {
+                    stop_reason: StopReason::Cancelled,
+                },
+            });
+            return;
+        }
         iteration += 1;
         if iteration > MAX_TOOL_ITERATIONS {
             tracing::warn!(
