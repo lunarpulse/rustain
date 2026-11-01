@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from fixtures.scene_provider import SceneStub  # noqa: E402
 from test_story_20_1c_locked_providers import (  # noqa: E402
-    PROVIDER_ENV, _NativeTUI, _capture, _sensitive_env, _sha256, _wait,
+    PROVIDER_ENV, _NativeTUI, _capture, _sensitive_env, _sha256, _wait, status_ready,
 )
 
 SCENE = Path(__file__).parent / "fixtures" / "scenes" / "markdown_structure.json"
@@ -52,7 +52,7 @@ def _ready(screen):
     """`Ready` on the status bar: the row directly above the composer's top border."""
     rows = screen.split("\n")
     tops = [y for y, row in enumerate(rows) if row.startswith("┌")]
-    return bool(tops) and tops[-1] > 0 and "Ready" in rows[tops[-1] - 1]
+    return bool(tops) and tops[-1] > 0 and status_ready(rows[tops[-1] - 1])
 
 
 def _structure_one(screen):

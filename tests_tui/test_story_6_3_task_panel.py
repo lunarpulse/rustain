@@ -262,7 +262,7 @@ def test_toggle_closes_panel(tui_monitor: RustainTUI):
 def test_switch_from_history_to_tasks(tui_monitor: RustainTUI):
     """Ctrl+X, T while History panel is open switches to Tasks panel."""
     tui = tui_monitor
-    tui.toggle_sidebar()
+    tui.open_history()
     tui.wait(0.5)
     tui.assert_screen_contains("History", msg="History panel should be open")
 

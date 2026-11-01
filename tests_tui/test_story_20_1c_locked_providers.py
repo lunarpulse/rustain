@@ -110,6 +110,16 @@ def _modal_complete(screen):
                for y in range(top + 1, bottom))
 
 
+def status_ready(text):
+    """`Ready` on the status row. At 80 columns a long model segment plus the 8-cell
+    `^X menu` tail (Story 21.3 A10, reserved first) clips the state word, so a
+    prefix `Re`..`Rea`/`Read` directly before the tail still counts (documented clip);
+    a visible `Retry...` state never counts as ready."""
+    if "Retry" in text:
+        return False
+    return "Ready" in text or re.search(r"│ Re(?:a(?:d)?)? \^X menu\s*$", text, re.M) is not None
+
+
 def _chrome_complete(screen):
     """The full 80x24 chat chrome with no selector remnant still being erased."""
     rows = screen.split("\n")
@@ -287,7 +297,7 @@ def _exercise(binary, evidence, root, monkeypatch):
                 with request_lock:
                     paths = {urlsplit(row["path"]).path for row in requests}
                     held = "/api.json" in arrivals
-                return (_chrome_complete(screen) and "Ready" in screen
+                return (_chrome_complete(screen) and status_ready(screen)
                         and "openrouter" in screen.lower()
                         and {"/or/v1/models", "/ds/v1/models"} <= paths and held)
 
@@ -345,7 +355,7 @@ def _exercise(binary, evidence, root, monkeypatch):
             assert not any("▶" in line or "▸" in line for line in screen.splitlines() if "claude-" in line), screen
             _capture(tui, evidence, "05-locked-enter-no-selection", screen)
             tui.send("\x1b")
-            screen = _wait(tui, lambda value: _chrome_complete(value) and "Ready" in value
+            screen = _wait(tui, lambda value: _chrome_complete(value) and status_ready(value)
                            and "openrouter" in value.lower()
                            and "models in catalog" not in value and "not signed in" not in value,
                            "Escape preserves active OpenRouter with the selector fully erased")

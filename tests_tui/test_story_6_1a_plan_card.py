@@ -26,7 +26,7 @@ import stat
 import pytest
 
 from harness import RustainTUI
-from keys import ENTER, ESC
+from keys import CTRL_X, ENTER, ESC
 
 
 # ── Custom Fixtures ─────────────────────────────────────────────────────────
@@ -254,8 +254,12 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
 
     tui.chat_mode()
     # Task panel auto-opens in YOLO mode (sidebar narrows chat). Close it to
-    # restore full-width viewport, then scroll up to bring plan card into view.
-    tui.toggle_sidebar()
+    # restore full-width viewport (Ctrl+X t toggles the Tasks panel it shows; the
+    # old `toggle_sidebar` palette route is gone with Ctrl+H, Story 21.3), then
+    # scroll up to bring plan card into view.
+    tui.send(CTRL_X)
+    tui.wait(0.2)
+    tui.send("t")
     tui.wait(0.5)
     tui.scroll_up(10)
     tui.wait(0.5)

@@ -163,7 +163,8 @@ def test_standalone_reminder_discovers_clears_and_survives_restart(tmp_path, stu
     with RustainTUI(fresh=True, build=False, workspace=workspace, env_overrides=scene_env) as tui:
         # First run: every existing row counts — never "start caught up".
         assert tui.wait_for_screen("log: 3", timeout=10), tui.get_screen_text()
-        assert _status_line(tui).rstrip().endswith("log: 3"), _status_line(tui)
+        # Story 21.3 A10: the reminder keeps the edge beside the `^X menu` tail.
+        assert _status_line(tui).rstrip().endswith("log: 3 ^X menu"), _status_line(tui)
 
         # A retract arrives while the log is closed; no key is pressed.
         appended = time.monotonic()

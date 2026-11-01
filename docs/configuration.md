@@ -327,8 +327,7 @@ first paints and are never replayed. `Esc` defers a decision (`Later`), except
 that it continues on the recovery prompt and cancels a delete. In the
 Notification Log, `K` on a context-warning record raises the Compact decision
 and `n` on a context-warning or compaction-failure record raises the
-carry-over decision. `Ctrl+K` is unbound; the old `[Ctrl+K x]` action chips no
-longer exist.
+carry-over decision. The old keyed action chips no longer exist.
 
 ### Field-level merge
 

@@ -31,6 +31,8 @@ pub struct SlashCommandDef {
     pub description: String,
     pub source: CommandSource,
     pub content: Option<String>,
+    /// Help-overlay usage rows of a built-in (Story 21.3 A11); empty for custom commands.
+    pub usage: &'static [UsageRow],
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +47,90 @@ pub struct CommandRegistry {
     discovered: bool,
     /// Wall-clock budget for one refresh scan; always `COMMAND_SCAN_BUDGET_MS` outside this module's unit tests.
     scan_budget: Duration,
+    /// Custom command names a built-in hides (Story 21.3 A12).
+    shadowed: Vec<String>,
+    shadow_generation: u64,
 }
+
+/// Post one Warning per (shadowed name, discovery generation) through the
+/// notification store (Story 21.3 A12, DF-21-2-CUSTOM-COMMAND-SHADOWED-BY-BUILTIN).
+/// Built-ins keep precedence; the user learns why their file never runs.
+pub fn announce_shadows(
+    state: &mut crate::adapters::tui::state::TuiState,
+    registry: &CommandRegistry,
+) {
+    let generation = registry.shadow_generation();
+    for name in registry.shadowed() {
+        if state.shadows_announced.insert((name.clone(), generation)) {
+            crate::adapters::tui::notifications::warning(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::System,
+                format!(
+                    "Custom command /{name} is hidden by the built-in /{name}; rename the file in .claude/commands to use it"
+                ),
+            );
+        }
+    }
+}
+
+/// One help row of a built-in's usage: (category title, key text, description, available).
+pub type UsageRow = (&'static str, &'static str, &'static str, bool);
+
+const A2A: bool = cfg!(feature = "a2a");
+const COMMANDS: &str = "COMMANDS";
+
+#[rustfmt::skip]
+const EXPORT_USAGE: &[UsageRow] = &[("Search, Bookmarks & Export", "/export", "Export conversation to markdown", true)];
+#[rustfmt::skip]
+const MODE_USAGE: &[UsageRow] = &[("PERMISSIONS", "/mode", "Switch permission mode (plan, normal, autoedit, yolo)", true)];
+#[rustfmt::skip]
+const PLAN_USAGE: &[UsageRow] = &[(COMMANDS, "/plan on|off|toggle", "Toggle Plan mode", true)];
+#[rustfmt::skip]
+const ML_USAGE: &[UsageRow] = &[("INPUT", "/ml", "Toggle multi-line mode via slash command", true)];
+#[rustfmt::skip]
+const NOTIFICATIONS_USAGE: &[UsageRow] = &[("INPUT", "/notifications", "Open the Notification Log (also Ctrl+X, N)", true)];
+#[rustfmt::skip]
+const TEAM_USAGE: &[UsageRow] = &[
+    (COMMANDS, "/team log", "A2A transparency log (also Ctrl+X, L); an unfiltered, displayed visit clears the `log: N` reminder — not an acknowledgement", true),
+    (COMMANDS, "/team board [--last | --actions | --action <action-id> | <peer-id>]", "Daemon-served board/inventory over the composed egress; read-only attachment is allowed, Peer tier is refused; explicit reads only (a2a feature)", A2A),
+    (COMMANDS, "/team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…>", "Daemon-served typed send; trusted-local writer; --subject is local, --stories states story holders (a2a feature)", A2A),
+    (COMMANDS, "/team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…>", "Send to holders named by this host's received and own story lists; refuse disagreement; selection grants nothing (a2a feature)", A2A),
+    (COMMANDS, "/team view <item-id>", "Read this host's bounded received thread without a model turn; offline/read-only is supported", true),
+    (COMMANDS, "/team context [<item-id>] | /team context off <item-id>", "Inspect cached daemon peer context; select/stop an item's body as writer (clears on /clear or restart)", true),
+    (COMMANDS, "/team ack <item-id>", "Record receipt only, not an answer (daemon-attached session)", true),
+    (COMMANDS, "/team reply <item-id> <text…>", "Answer an item that arrived on this host (daemon-attached session)", A2A),
+    (COMMANDS, "/team reply --accept <item-id> [<text…>] | --discuss <item-id> <text…>", "Verdict on an item carrying a story list — accept when it assigns a story to you; discuss concerns on any readable story list (daemon-attached session)", A2A),
+    (COMMANDS, "/team defer <item-id>", "Record Busy — defer 30m without resolving the answer (daemon-attached)", A2A),
+    (COMMANDS, "/team thread <peer-id> <item-id>", "Read one thread on a peer's host; trusted-local read-only attachments are allowed", A2A),
+    (COMMANDS, "/team followup <peer-id> <turn-id> <text…>", "Answer a turn in a peer thread; trusted-local writer attachment only", A2A),
+    (COMMANDS, "/team status", "Daemon-authoritative effective sender-consent status over its composed roster; read-only attachment is allowed, Peer tier is refused", true),
+    (COMMANDS, "/team untrust <peer>", "Durably revoke standing consent; trusted-local writer attachment only, Peer/read-only refused", true),
+];
+#[rustfmt::skip]
+const ROOM_USAGE: &[UsageRow] = &[
+    (COMMANDS, "/room", "Durable room replay, read-only (also Ctrl+X, R)", true),
+    (COMMANDS, "/room role list", "Show journaled room roles (owner/editor/viewer)", true),
+    (COMMANDS, "/room role grant <peer> <role>", "Record a room role for a configured peer (room edits only)", true),
+    (COMMANDS, "/room role revoke <peer>", "Record withdrawal of a peer's room role", true),
+];
+#[rustfmt::skip]
+const ARTIFACTS_USAGE: &[UsageRow] = &[(COMMANDS, "/artifacts", "Durable artifact list with lineage, read-only (also Ctrl+X, E)", true)];
+#[rustfmt::skip]
+const ARTIFACT_USAGE: &[UsageRow] = &[
+    (COMMANDS, "/artifact show <id>", "Drill into one artifact: kind, lineage, apply decision, policy", true),
+    (COMMANDS, "/artifact review <id> <verdict>", "Record approve|request-changes|reject; approval is not apply success", true),
+    (COMMANDS, "/artifact apply <id>", "Preview impact, confirm, then apply an eligible patch", true),
+    (COMMANDS, "/artifact resolve <id> present|absent", "After an interrupted apply: record whether you found its changes in the tree", true),
+];
+// Story 18.4b. ONE section: the COMMANDS category. No CHORDS entry: this story mints no chord.
+#[rustfmt::skip]
+const PEER_USAGE: &[UsageRow] = &[
+    (COMMANDS, "/peer list", "Which peers may reach this host (configuration, not connection status)", true),
+    (COMMANDS, "/peer show <alias>", "Print one peer's pinned key and id in full, for comparing", true),
+    (COMMANDS, "/peer invite", "Mint an expiring ticket for one person; grants reach, not authority", true),
+    (COMMANDS, "/peer add <alias> <ticket>", "Import a ticket: confirm the fingerprint, then pin it. No bypass", true),
+    (COMMANDS, "/peer revoke <peer>", "Remove a peer; their next frame is refused, without restart", true),
+];
 
 impl CommandRegistry {
     pub fn new() -> Self {
@@ -55,30 +140,35 @@ impl CommandRegistry {
                 description: "Start a new conversation".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "clear".to_string(),
                 description: "Start a clean conversation and clear provenance taint".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "export".to_string(),
                 description: "Export conversation to markdown (optional filename arg)".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: EXPORT_USAGE,
             },
             SlashCommandDef {
                 name: "deactivate".to_string(),
                 description: "Deactivate all active skills in this conversation".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "mode".to_string(),
                 description: "Set permission mode (plan, normal, autoedit, yolo)".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: MODE_USAGE,
             },
             SlashCommandDef {
                 name: "plan".to_string(),
@@ -86,6 +176,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: PLAN_USAGE,
             },
             SlashCommandDef {
                 name: "compact".to_string(),
@@ -93,12 +184,14 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "config".to_string(),
                 description: "Manage configuration (reload)".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "persona".to_string(),
@@ -106,6 +199,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "memory".to_string(),
@@ -113,6 +207,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "session".to_string(),
@@ -120,6 +215,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "tools".to_string(),
@@ -127,6 +223,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "channels".to_string(),
@@ -134,6 +231,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "scheduler".to_string(),
@@ -141,6 +239,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "context".to_string(),
@@ -148,12 +247,14 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "fanout".to_string(),
                 description: "Fan out N identical spokes: /fanout <N> <prompt>".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "team".to_string(),
@@ -161,13 +262,15 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: TEAM_USAGE,
             },
             SlashCommandDef {
                 name: "room".to_string(),
-                description: "Durable orchestration room (read-only replay, also Ctrl+X, R): /room | /room role list | /room role grant <alias-or-peer-id> <owner|editor|viewer> | /room role revoke <alias-or-peer-id>"
+                description: "Durable orchestration room (read-only replay): /room | /room role list | /room role grant <alias-or-peer-id> <owner|editor|viewer> | /room role revoke <alias-or-peer-id>"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: ROOM_USAGE,
             },
             // Story 18.4b. The description names EVERY sub-verb: that is a
             // tested convention (`conformance_18_3a_room.rs` asserts the /room
@@ -179,13 +282,15 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: PEER_USAGE,
             },
             SlashCommandDef {
                 name: "artifacts".to_string(),
-                description: "Durable artifact list with depends-on lineage (read-only replay, also Ctrl+X, E): /artifacts"
+                description: "Durable artifact list with depends-on lineage (read-only replay): /artifacts"
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: ARTIFACTS_USAGE,
             },
             SlashCommandDef {
                 name: "artifact".to_string(),
@@ -193,36 +298,42 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: ARTIFACT_USAGE,
             },
             SlashCommandDef {
                 name: "login".to_string(),
                 description: "Sign in to a model provider (optional provider id)".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "models".to_string(),
                 description: "Open the model picker".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "logout".to_string(),
                 description: "Log out of one provider account".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "accounts".to_string(),
                 description: "Choose the active account for a provider".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "ml".to_string(),
-                description: "Toggle multi-line input mode (also Alt+M)".to_string(),
+                description: "Toggle multi-line input mode".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: ML_USAGE,
             },
             SlashCommandDef {
                 name: "quit".to_string(),
@@ -230,12 +341,14 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
             SlashCommandDef {
                 name: "notifications".to_string(),
-                description: "Open the Notification Log (also Ctrl+X, N)".to_string(),
+                description: "Open the Notification Log".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: NOTIFICATIONS_USAGE,
             },
             SlashCommandDef {
                 name: "detach".to_string(),
@@ -243,12 +356,15 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
+                usage: &[],
             },
         ];
         Self {
             commands,
             discovered: false,
             scan_budget: Duration::from_millis(COMMAND_SCAN_BUDGET_MS),
+            shadowed: Vec::new(),
+            shadow_generation: 0,
         }
     }
 
@@ -269,6 +385,7 @@ impl CommandRegistry {
             description,
             source: CommandSource::UserDefined { path },
             content,
+            usage: &[],
         });
     }
 
@@ -280,17 +397,35 @@ impl CommandRegistry {
         let user_commands = scan_commands_dir(&cmd_dir, self.scan_budget);
 
         let builtin_names: HashSet<&str> = self.commands.iter().map(|c| c.name.as_str()).collect();
+        let mut shadowed: Vec<String> = Vec::new();
         for cmd in &user_commands {
             if builtin_names.contains(cmd.name.as_str()) {
                 tracing::warn!(
                     "User command '{}' shadowed by built-in — rename the custom file",
                     cmd.name
                 );
+                shadowed.push(cmd.name.clone());
             }
+        }
+        shadowed.sort();
+        shadowed.dedup();
+        if shadowed != self.shadowed {
+            self.shadowed = shadowed;
+            self.shadow_generation += 1;
         }
 
         self.commands.extend(user_commands);
         self.discovered = true;
+    }
+
+    /// Custom commands hidden behind a built-in of the same name (A12), sorted.
+    pub fn shadowed(&self) -> &[String] {
+        &self.shadowed
+    }
+
+    /// Changes whenever the shadowed set changes; one notice per (name, generation).
+    pub fn shadow_generation(&self) -> u64 {
+        self.shadow_generation
     }
 
     pub fn warn_skill_shadows(
@@ -353,6 +488,14 @@ impl CommandRegistry {
 
     pub fn find(&self, name: &str) -> Option<&SlashCommandDef> {
         self.commands.iter().find(|c| c.name == name)
+    }
+
+    /// Help-overlay usage rows of the built-ins, catalogue order (Story 21.3 A11).
+    pub fn builtin_usage(&self) -> impl Iterator<Item = &'static UsageRow> + '_ {
+        self.commands
+            .iter()
+            .filter(|c| matches!(c.source, CommandSource::BuiltIn))
+            .flat_map(|c| c.usage.iter())
     }
 }
 
@@ -472,6 +615,7 @@ fn parse_command_file(path: &Path, name: &str) -> Option<SlashCommandDef> {
             path: path.to_path_buf(),
         },
         content: Some(body),
+        usage: &[],
     })
 }
 
@@ -748,6 +892,55 @@ mod tests {
             .filter(|c| matches!(c.source, CommandSource::UserDefined { .. }))
             .map(|c| c.name.clone())
             .collect()
+    }
+
+    #[test]
+    fn story21_3_shadowed_custom_command_is_announced_once_per_generation() {
+        use crate::adapters::tui::notifications::NoticeSeverity;
+        use crate::adapters::tui::state::TuiState;
+        let tmp = tempfile::tempdir().unwrap();
+        write_command(tmp.path(), "quit.md", "shadowed");
+        write_command(tmp.path(), "deploy.md", "not shadowed");
+        let mut registry = CommandRegistry::new();
+        registry.refresh(tmp.path());
+        assert_eq!(registry.shadowed(), ["quit".to_string()]);
+        let mut state = TuiState::new(80, 24);
+        announce_shadows(&mut state, &registry);
+        let warnings = |state: &TuiState| {
+            state
+                .notifications
+                .records()
+                .filter(|r| r.severity == NoticeSeverity::Warning)
+                .map(|r| r.message.clone())
+                .collect::<Vec<_>>()
+        };
+        let first = warnings(&state);
+        assert_eq!(
+            first.len(),
+            1,
+            "one Warning for the shadowed name: {first:?}"
+        );
+        assert!(
+            first[0].contains("/quit") && first[0].contains("built-in"),
+            "{first:?}"
+        );
+        assert!(
+            !first[0].contains("deploy"),
+            "a non-shadowed command is silent"
+        );
+        // The same discovery generation never repeats the warning.
+        announce_shadows(&mut state, &registry);
+        registry.refresh(tmp.path());
+        announce_shadows(&mut state, &registry);
+        assert_eq!(warnings(&state).len(), 1, "same generation posts nothing");
+        // A changed shadow set is a new generation and announces again.
+        write_command(tmp.path(), "new.md", "also shadowed");
+        registry.refresh(tmp.path());
+        announce_shadows(&mut state, &registry);
+        // The repeated `/quit` warning coalesces into its existing record (x2); `/new` is new.
+        let after = warnings(&state);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after.iter().any(|m| m.contains("/new")), "{after:?}");
     }
 
     #[test]

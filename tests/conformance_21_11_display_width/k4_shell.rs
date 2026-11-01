@@ -155,12 +155,17 @@ fn k4_status_hint_admission_and_log_edge_follow_cells() {
     for width in WIDTHS {
         for model in ["sonnet", "模型", "界x"] {
             // The left edge is measured from the real bar painted without a
-            // hint, then the hint budget is what remains beside it.
+            // hint (minus the Story 21.3 `^X menu` tail), then the hint budget is
+            // what remains beside it.
             let bare = status(width, model, None, None, LogAwareness::Hidden);
-            let left = cells(&row_text(&bare.buffer, 0));
+            let left = cells(
+                row_text(&bare.buffer, 0)
+                    .trim_end_matches("^X menu")
+                    .trim_end(),
+            );
             for (awareness, tail) in [
-                (LogAwareness::Hidden, ""),
-                (LogAwareness::Unseen(7), " log: 7"),
+                (LogAwareness::Hidden, " ^X menu"),
+                (LogAwareness::Unseen(7), " log: 7 ^X menu"),
             ] {
                 let region = usize::from(width) - tail.len();
                 let budget = region - left - 1;
@@ -204,12 +209,16 @@ fn k4_status_agent_name_is_24_cells_with_the_marker_inside() {
         (A.repeat(24), A.repeat(24)),
         (A.repeat(25), format!("{}…", A.repeat(23))),
     ];
+    // Story 21.3 A10: the `^X menu` tail (8 cells with its gap) is reserved
+    // first, so the bar is painted 8 cells wider to keep the left region at
+    // the width this test is about, and the tail is stripped before reading.
     for width in WIDTHS {
         for (name, shown) in &cases {
-            let painted = status(width, "m", None, Some(name), LogAwareness::Hidden);
+            let painted = status(width + 8, "m", None, Some(name), LogAwareness::Hidden);
             let row = row_text(&painted.buffer, 0);
+            let body = row.trim_end_matches("^X menu").trim_end();
             assert!(
-                row.ends_with(&format!("Agent: {shown}")),
+                body.ends_with(&format!("Agent: {shown}")),
                 "{width} {name:?}: {row:?}"
             );
             assert_whole_clusters(&painted.buffer);

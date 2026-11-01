@@ -112,15 +112,16 @@ async fn keyless_provider_reports_the_cli_line() {
     );
 }
 
-/// Alt+C/L/U outside the login overlay are the plain letters.
+/// Alt+C/L/U outside the login overlay are consumed no-ops (Story 21.3 AC12):
+/// they never type `c`/`l`/`u` into the composer.
 #[tokio::test]
 #[serial]
-async fn alt_keys_outside_the_overlay_type_plain_letters() {
+async fn alt_keys_outside_the_overlay_are_inert() {
     let server = MockServer::start().await;
     let _world = World::new(&server);
     let mut tui = Tui::new(AppConfig::default());
     for key in [DomainKey::AltC, DomainKey::AltL, DomainKey::AltU] {
         tui.key(key);
     }
-    assert_eq!(tui.state.input_buffer, "clu");
+    assert_eq!(tui.state.input_buffer, "");
 }

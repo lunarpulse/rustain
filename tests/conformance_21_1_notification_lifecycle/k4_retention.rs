@@ -60,6 +60,7 @@ pub(super) fn status_row(state: &TuiState, width: u16, hint: Option<&str>) -> St
                 status_bar::NoticeBadges {
                     unseen: state.notifications.unseen(),
                     decisions: state.decisions.len(),
+                    ..Default::default()
                 },
             );
         })

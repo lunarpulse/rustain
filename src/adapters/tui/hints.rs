@@ -1,3 +1,4 @@
+use crate::adapters::tui::keymap::{Context, Host, render_tips};
 use crate::domain::models::FocusState;
 use crate::domain::models::visual::OverlayType;
 
@@ -19,29 +20,15 @@ pub fn contextual_hint(
         return None;
     }
 
+    // Story 21.3 A10: the text is generated from the keymap registry rows; only
+    // the fade rule and the session count live here.
     match focus {
-        FocusState::Input => {
-            if is_vscode {
-                // VS Code terminal: show keybinding alternatives as the primary hint (AC#4, AC#5)
-                Some(
-                    "VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode, [^X Enter] Send"
-                        .to_string(),
-                )
-            } else {
-                // Story 21.2 RU-2: a bare `?` is literal text in Input; help is Ctrl+X ?.
-                Some(
-                    "Tip: Ctrl+X ? for help, Ctrl+P for commands, [^X Enter] Send, /mode to switch permission mode"
-                        .to_string(),
-                )
-            }
-        }
-        FocusState::Chat => Some("Tip: j/k to scroll, i to type, ? for help".to_string()),
+        FocusState::Input => render_tips::tip(Context::Input, Host::Local, is_vscode),
+        FocusState::Chat => render_tips::tip(Context::Chat, Host::Local, is_vscode),
         FocusState::Overlay(OverlayType::WhichKey) => {
-            Some("Tip: Press a key to execute, Esc to cancel".to_string())
+            render_tips::tip(Context::Leader, Host::Local, is_vscode)
         }
-        FocusState::Overlay(OverlayType::CommandPalette) => {
-            Some("Tip: Type to filter, Enter to select".to_string())
-        }
+        FocusState::Overlay(OverlayType::CommandPalette) => Some(render_tips::palette_tip()),
         _ => None,
     }
 }
@@ -210,5 +197,39 @@ mod tests {
     #[test]
     fn test_parse_session_count_missing_key() {
         assert_eq!(parse_session_count("other_key = 5\n"), None);
+    }
+
+    // ── Story 21.3 A10: the text is the registry's tip, the fade stays here ──
+
+    #[test]
+    fn story21_3_contextual_hint_text_is_projected_from_the_registry() {
+        assert_eq!(
+            contextual_hint(&FocusState::Input, 1, 5, false),
+            render_tips::tip(Context::Input, Host::Local, false)
+        );
+        assert_eq!(
+            contextual_hint(&FocusState::Input, 1, 5, true),
+            render_tips::tip(Context::Input, Host::Local, true)
+        );
+        assert_eq!(
+            contextual_hint(&FocusState::Chat, 1, 5, false),
+            render_tips::tip(Context::Chat, Host::Local, false)
+        );
+        let which_key = contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
+        let which_key = which_key.unwrap();
+        assert!(which_key.contains("Press a key") && which_key.contains("Esc"));
+        let palette = contextual_hint(
+            &FocusState::Overlay(OverlayType::CommandPalette),
+            1,
+            5,
+            false,
+        );
+        let palette = palette.unwrap();
+        assert!(palette.contains("Tip:") && palette.contains("filter"));
+        let chat = contextual_hint(&FocusState::Chat, 1, 5, false).unwrap();
+        for key in ["j/k", "J/K", "Tab", "i ", "?"] {
+            assert!(chat.contains(key), "{key}: {chat}");
+        }
+        assert!(!chat.contains("[Enter] Inspect"), "RU-46: {chat}");
     }
 }

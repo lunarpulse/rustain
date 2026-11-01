@@ -352,6 +352,37 @@ pub fn render(
         ));
     }
 
+    // Story 21.3 A10 — the status tail (`^X menu` / pending `^X…`, `z…`, `[…`,
+    // `]…`) is the rightmost segment and is reserved BEFORE every other
+    // right-edge segment (log reminder, `Needs you` cue, badge, hint), so none
+    // of them can cover it and it is never faded. It is dropped only when the
+    // bar is narrower than the tail itself; `StatusTail::Hidden` paints nothing.
+    let area = match badges.tail.text() {
+        Some(tail) if usize::from(area.width) >= geom::cells(&tail) => {
+            let reserved = (geom::cells(&tail) + 1).min(usize::from(area.width)) as u16;
+            let left = Rect {
+                width: area.width - reserved,
+                ..area
+            };
+            let right = Rect {
+                x: area.x + left.width,
+                width: reserved,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    tail,
+                    theme.typography.meta.fg(theme.colors.fg_muted),
+                )))
+                .alignment(Alignment::Right)
+                .style(Style::default().bg(theme.colors.status_bg)),
+                right,
+            );
+            left
+        }
+        _ => area,
+    };
+
     // Story 19.16g — the transparency-log reminder owns the right edge. Its
     // whole display width (plus one separating space when room permits) is
     // reserved BEFORE the optional hint and the left content are laid out,
@@ -473,6 +504,8 @@ pub fn render(
 pub struct NoticeBadges {
     pub unseen: u64,
     pub decisions: usize,
+    /// Story 21.3 A10: the rightmost segment (`^X menu` / pending prefix).
+    pub tail: crate::adapters::tui::keymap::render::StatusTail,
 }
 
 impl From<u64> for NoticeBadges {
@@ -480,6 +513,7 @@ impl From<u64> for NoticeBadges {
         Self {
             unseen,
             decisions: 0,
+            tail: Default::default(),
         }
     }
 }
@@ -1025,6 +1059,9 @@ mod tests {
             .collect()
     }
 
+    /// Story 21.3 A10: the default status tail, one gap cell plus `^X menu`.
+    const TAIL: &str = " ^X menu";
+
     /// The last `segment.len()` cells, read cell by cell.
     fn right_edge(buffer: &ratatui::buffer::Buffer, cells: u16) -> String {
         let width = buffer.area.width;
@@ -1051,8 +1088,8 @@ mod tests {
             match expected {
                 Some(segment) => {
                     assert_eq!(
-                        right_edge(&buffer, segment.len() as u16 + 1),
-                        format!(" {segment}"),
+                        right_edge(&buffer, segment.len() as u16 + 1 + TAIL.len() as u16),
+                        format!(" {segment}{TAIL}"),
                         "{awareness:?}: {row}"
                     );
                     assert_eq!(row.matches("log:").count(), 1, "{row}");
@@ -1081,8 +1118,12 @@ mod tests {
                 density,
                 LogAwareness::Unseen(7),
             );
-            assert_eq!(right_edge(&buffer, 6), "log: 7", "{density:?}");
-            for x in 114..120 {
+            assert_eq!(
+                right_edge(&buffer, 6 + TAIL.len() as u16),
+                format!("log: 7{TAIL}"),
+                "{density:?}"
+            );
+            for x in 106..112 {
                 let cell = buffer.cell((x, 0)).unwrap();
                 assert_eq!(cell.fg, expected.fg.unwrap(), "{density:?}");
                 assert_eq!(cell.bg, theme.colors.status_bg, "{density:?}");
@@ -1116,8 +1157,8 @@ mod tests {
                         awareness,
                     );
                     assert_eq!(
-                        right_edge(&buffer, segment.len() as u16 + 1),
-                        format!(" {segment}"),
+                        right_edge(&buffer, segment.len() as u16 + 1 + TAIL.len() as u16),
+                        format!(" {segment}{TAIL}"),
                         "width {width}, {awareness:?}, {model}: {}",
                         row_text(&buffer)
                     );
@@ -1217,15 +1258,16 @@ mod tests {
 
     #[test]
     fn display_width_status_hint_respects_the_log_reservation_edge() {
-        // 60 columns, `log: 7` reserved with its gap (7 cells): the left
-        // region is 53 cells; beside `模型` (26) that leaves 26 hint cells.
+        // 60 columns, `^X menu` reserved with its gap (8 cells) and `log: 7`
+        // reserved with its gap (7 cells): the left region is 45 cells; beside
+        // `模型` (26) that leaves 18 hint cells.
         let cases: Vec<(String, bool)> = vec![
-            ("h".repeat(26), true),
-            ("h".repeat(27), false),
-            (format!("{G}{}", "h".repeat(24)), true),
-            (format!("{G}{}", "h".repeat(25)), false),
-            (format!("{C}{}", "h".repeat(24)), true),
-            (format!("{C}{}", "h".repeat(25)), false),
+            ("h".repeat(18), true),
+            ("h".repeat(19), false),
+            (format!("{G}{}", "h".repeat(16)), true),
+            (format!("{G}{}", "h".repeat(17)), false),
+            (format!("{C}{}", "h".repeat(16)), true),
+            (format!("{C}{}", "h".repeat(17)), false),
         ];
         for (hint, fits) in cases {
             let buffer = draw_minimal(60, "模型", Some(&hint), None, LogAwareness::Unseen(7));
@@ -1233,12 +1275,12 @@ mod tests {
             let trimmed = row.trim_end();
             assert_eq!(geom::cells(&row), 60, "{hint:?}: {row:?}");
             assert!(
-                trimmed.ends_with(" log: 7"),
+                trimmed.ends_with(" log: 7 ^X menu"),
                 "reserved segment intact: {row:?}"
             );
             if fits {
                 assert!(
-                    trimmed.ends_with(&format!("{hint} log: 7")),
+                    trimmed.ends_with(&format!("{hint} log: 7 ^X menu")),
                     "{hint:?} must end one gap before the segment: {row:?}"
                 );
             } else {
@@ -1361,7 +1403,10 @@ mod tests {
             match expected {
                 Some(segment) => {
                     assert_eq!(row.matches("Log !").count(), 1, "{unseen}: {row}");
-                    assert!(row.trim_end().ends_with(segment), "{unseen}: {row}");
+                    assert!(
+                        row.trim_end().ends_with(&format!("{segment}{TAIL}")),
+                        "{unseen}: {row}"
+                    );
                 }
                 None => assert!(!row.contains("Log !"), "{unseen}: {row}"),
             }
@@ -1381,12 +1426,13 @@ mod tests {
             LogAwareness::Unseen(7),
             3,
         );
-        assert!(row.trim_end().ends_with(" log: 7"), "{row}");
+        assert!(row.trim_end().ends_with(" log: 7 ^X menu"), "{row}");
         assert!(row.contains("Log !3 ^X d detach"), "{row}");
 
-        // 80 columns: the left side is ~23 cells, a 54-cell hint fits alone
-        // (78) but not beside the 6-cell badge (85).
-        let hint = "h".repeat(54);
+        // 80 columns: the `^X menu` tail leaves 72 cells and the left side is
+        // ~23 cells, a 46-cell hint fits alone (70) but not beside the
+        // 6-cell badge (77).
+        let hint = "h".repeat(46);
         let row = draw_notice_bar(
             80,
             &StatusState::Idle,
@@ -1395,7 +1441,135 @@ mod tests {
             LogAwareness::Hidden,
             3,
         );
-        assert!(row.trim_end().ends_with(&hint), "hint stays: {row}");
+        assert!(
+            row.trim_end().ends_with(&format!("{hint}{TAIL}")),
+            "hint stays: {row}"
+        );
         assert!(!row.contains("Log !"), "badge yields first: {row}");
+    }
+
+    // ── Story 21.3 A10 — the status tail ───────────────────────────────────
+
+    fn draw_tail_bar(width: u16, awareness: LogAwareness, badges: NoticeBadges) -> String {
+        let mut t = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "m",
+                None,
+                &StatusState::Idle,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                PermissionMode::Normal,
+                None,
+                0,
+                false,
+                None,
+                false,
+                true,
+                0,
+                None,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                false,
+                None,
+                awareness,
+                badges,
+            );
+        })
+        .unwrap();
+        row_text(t.backend().buffer())
+    }
+
+    #[test]
+    fn story21_3_tail_is_rightmost_and_covers_no_neighbour_at_60_80_130() {
+        let cue = decision_pane::status_cue(2).unwrap();
+        for width in [60u16, 80, 130] {
+            // cue + reminder + tail: the tail owns the edge, the others sit beside it.
+            let badges = NoticeBadges {
+                unseen: 0,
+                decisions: 2,
+                tail: Default::default(),
+            };
+            let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
+            assert!(
+                row.trim_end().ends_with(&format!("{cue} log: 7{TAIL}")),
+                "{width}: {row}"
+            );
+            // badge + reminder + tail.
+            let badges = NoticeBadges {
+                unseen: 3,
+                decisions: 0,
+                tail: Default::default(),
+            };
+            let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
+            assert!(
+                row.trim_end().ends_with(&format!("Log !3 log: 7{TAIL}")),
+                "{width}: {row}"
+            );
+            assert_eq!(row.matches("^X menu").count(), 1, "{width}: {row}");
+        }
+        // All four segments where the row has room for the badge.
+        for width in [80u16, 130] {
+            let badges = NoticeBadges {
+                unseen: 3,
+                decisions: 2,
+                tail: Default::default(),
+            };
+            let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
+            assert!(
+                row.trim_end()
+                    .ends_with(&format!("Log !3 {cue} log: 7{TAIL}")),
+                "{width}: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn story21_3_tail_shows_pending_prefix_and_hides_when_unavailable() {
+        use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
+        for (tail, text) in [
+            (StatusTail::Pending(PendingPrefix::Z), "z…"),
+            (StatusTail::Pending(PendingPrefix::BracketOpen), "[…"),
+            (StatusTail::Pending(PendingPrefix::BracketClose), "]…"),
+            (StatusTail::Pending(PendingPrefix::Leader), "^X…"),
+        ] {
+            let badges = NoticeBadges {
+                tail,
+                ..Default::default()
+            };
+            let row = draw_tail_bar(80, LogAwareness::Hidden, badges);
+            assert!(row.trim_end().ends_with(&format!(" {text}")), "{row}");
+            assert!(!row.contains("^X menu"), "{row}");
+        }
+        let hidden = NoticeBadges {
+            tail: StatusTail::Hidden,
+            ..Default::default()
+        };
+        let row = draw_tail_bar(80, LogAwareness::Unseen(7), hidden);
+        assert!(!row.contains("^X"), "{row}");
+        assert!(row.trim_end().ends_with(" log: 7"), "{row}");
+    }
+
+    #[test]
+    fn story21_3_tail_is_dropped_only_when_it_cannot_fit_at_all() {
+        let fits = draw_tail_bar(7, LogAwareness::Hidden, NoticeBadges::default());
+        assert_eq!(fits, "^X menu");
+        let narrow = draw_tail_bar(6, LogAwareness::Hidden, NoticeBadges::default());
+        assert!(
+            !narrow.contains('^') && !narrow.contains("menu"),
+            "{narrow}"
+        );
     }
 }

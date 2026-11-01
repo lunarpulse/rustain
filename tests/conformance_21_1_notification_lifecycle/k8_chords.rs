@@ -5,12 +5,14 @@
 
 use rustain::adapters::builtin_commands::{self, AttachedRoute, CommandHost};
 use rustain::adapters::tui::app::handle_input;
-use rustain::adapters::tui::chord_menu::{self, ChordHost};
-use rustain::adapters::tui::help_data::help_categories;
+use rustain::adapters::tui::keymap::render::leader_menu;
+use rustain::adapters::tui::keymap::render_help::help_rows;
+use rustain::adapters::tui::keymap::resolve::rows_of;
+use rustain::adapters::tui::keymap::{AvailCtx, Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::notifications::NoticeSeverity;
-use rustain::adapters::tui::state::WhichKeyState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
+use rustain::domain::models::visual::DensityMode;
 
 use super::support::{clocked, notify};
 
@@ -53,47 +55,55 @@ fn k8_ctrl_x_n_opens_the_log_with_the_origin_focus_as_its_caller() {
 
 #[test]
 fn k8_the_menu_paints_n_and_x_in_both_hosts_and_every_painted_chord_routes() {
-    let wk = WhichKeyState::new();
-    for host in [ChordHost::Local, ChordHost::Attached] {
-        let items = chord_menu::menu_items(&wk, host);
+    for (label, avail) in [
+        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Attached", AvailCtx::attached(130, false)),
+    ] {
+        let items = leader_menu(&avail);
         let n = items.iter().find(|i| i.key == "N").expect("[N]");
         let x = items.iter().find(|i| i.key == "X").expect("[X]");
-        assert_eq!(n.name, "Notifications", "{host:?}");
-        assert_eq!(x.name, "Clear toasts", "{host:?}");
+        assert_eq!(n.name, "Notifications", "{label}");
+        assert_eq!(x.name, "Clear toasts", "{label}");
         assert!(
             n.available && x.available,
-            "{host:?}: both routes exist attached"
+            "{label}: both routes exist attached"
         );
         assert_eq!(n.text(), "[N] Notifications");
     }
-    // Every painted chord is a route in the local dispatch table.
-    for spec in chord_menu::RETAINED_CHORDS {
+    // Every painted chord is a registry route in the local host's Leader context.
+    for row in rows_of(Context::Leader, Host::Local).filter(|row| !row.label.is_empty()) {
         assert!(
-            wk.chord_map.contains_key(&spec.key),
+            matches!(
+                resolve(Context::Leader, Host::Local, row.keys),
+                Resolved::Hit(_)
+            ),
             "{} unrouted",
-            spec.key
+            row.long_label()
         );
     }
     for key in ['n', 'x', 'q'] {
-        assert!(chord_menu::spec_for(key).is_some() && wk.chord_map.contains_key(&key));
+        assert!(matches!(
+            resolve(Context::Leader, Host::Local, &[Key::Char(key)]),
+            Resolved::Hit(_)
+        ));
     }
-    for host in [ChordHost::Local, ChordHost::Attached] {
-        let items = chord_menu::menu_items(&wk, host);
+    for (label, avail) in [
+        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Attached", AvailCtx::attached(130, false)),
+    ] {
+        let items = leader_menu(&avail);
         let q = items.iter().find(|i| i.key == "Q").expect("[Q]");
-        assert_eq!(q.name, "Decisions", "{host:?}");
+        assert_eq!(q.name, "Decisions", "{label}");
         assert!(
             q.available,
-            "{host:?}: attached answers honestly instead of n/a"
+            "{label}: attached answers honestly instead of n/a"
         );
     }
 }
 
 #[test]
 fn k8_help_lists_the_new_chords_and_the_slash_command() {
-    let all: Vec<_> = help_categories()
-        .iter()
-        .flat_map(|c| c.bindings.iter())
-        .collect();
+    let all = help_rows();
     for key in ["Ctrl+X, N", "Ctrl+X, X", "Ctrl+X, Q", "/notifications"] {
         assert!(all.iter().any(|b| b.key == key && b.available), "{key}");
     }

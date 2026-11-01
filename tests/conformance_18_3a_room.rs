@@ -548,11 +548,7 @@ fn the_room_surface_is_discoverable_with_its_chord_and_every_subverb() {
         assert!(entry.description.contains(subverb), "{entry:?}");
     }
 
-    let categories = rustain::adapters::tui::help_data::help_categories();
-    let bindings: Vec<_> = categories
-        .iter()
-        .flat_map(|category| category.bindings.iter())
-        .collect();
+    let bindings = rustain::adapters::tui::keymap::render_help::help_rows();
     for key in [
         "/room",
         "/room role list",

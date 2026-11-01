@@ -652,11 +652,7 @@ fn the_artifact_surface_is_discoverable_with_its_chord_and_every_subverb() {
         assert!(verb.description.contains(subverb), "{verb:?}");
     }
 
-    let categories = rustain::adapters::tui::help_data::help_categories();
-    let bindings: Vec<_> = categories
-        .iter()
-        .flat_map(|category| category.bindings.iter())
-        .collect();
+    let bindings = rustain::adapters::tui::keymap::render_help::help_rows();
     for key in [
         "/artifacts",
         "/artifact show <id>",

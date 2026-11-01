@@ -26,8 +26,8 @@ use crate::domain::services::patch_review::{MergeBackPolicy, operator_patch_deci
 /// The valid sub-verb set, named verbatim in every parser refusal.
 ///
 /// ⛔ An advertised verb the operator cannot discover is the 18.3c defect
-/// class: this string, `command_registry.rs`'s palette entry and
-/// `help_data.rs`'s binding all move together.
+/// class: this string, `command_registry.rs`'s palette entry and the
+/// `usage` rows of its `SlashCommandDef` all move together.
 pub const USAGE: &str = "/artifacts | /artifact show <id> | /artifact apply <id> | \
                          /artifact review <id> approve|request-changes|reject | \
                          /artifact resolve <id> present|absent";

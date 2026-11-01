@@ -430,7 +430,8 @@ pub async fn run(
     }
 
     // Cache multiplexer detection once at startup (UX-DR62)
-    state.multiplexer_detected = crate::adapters::tui::help_data::is_multiplexer_session();
+    state.multiplexer_detected =
+        crate::adapters::tui::keymap::render_help::is_multiplexer_session();
 
     // Cache VS Code terminal detection once at startup (Sprint Change Proposal 2026-04-08, AC#4, AC9)
     state.is_vscode = crate::infrastructure::utils::is_vscode_terminal();
@@ -599,6 +600,11 @@ pub async fn run(
         use crate::adapters::tui::widgets::model_selector::humanize_ctx;
         use crate::domain::models::provider::ModelCapability;
         let models = app_state.provider_registry.list_all_models();
+        let model_shortcut = crate::adapters::tui::keymap::render::shortcut_for(
+            crate::adapters::tui::keymap::CommandId::Leader(
+                crate::adapters::tui::keymap::table::LeaderCmd::Model,
+            ),
+        );
         for model in models {
             let mut cap_tags: Vec<&'static str> = Vec::new();
             if model.capabilities.contains(&ModelCapability::Vision) {
@@ -624,7 +630,7 @@ pub async fn run(
             palette_registry.register(crate::domain::models::palette::PaletteEntry {
                 name: format!("{} ({})", model.display_name, model.provider_id),
                 description: format!("{} ctx{}", humanize_ctx(model.context_window), cap_summary),
-                shortcut: Some("Ctrl+X, M".to_string()),
+                shortcut: model_shortcut.clone(),
                 scope: crate::domain::models::palette::PaletteScope::Model,
                 action: crate::domain::models::palette::PaletteAction::SwitchModel {
                     provider_id: model.provider_id.clone(),
@@ -1144,7 +1150,7 @@ pub async fn run(
                                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
-                                                    message: "Change model: open model selector via Ctrl+P :sonnet etc. — Story 10.7 wires direct dispatch".to_string(),
+                                                    message: format!("Change model: close the inspector and press {} to open the model selector", crate::adapters::tui::keymap::render::leader_follow_up_long(crate::adapters::tui::keymap::table::LeaderCmd::Model)),
                                                 });
                                                 state.needs_redraw = true;
                                                 continue;
@@ -1153,7 +1159,7 @@ pub async fn run(
                                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: NoticeLevel::Info,
-                                                    message: "Update tools: requires Story 10.7 child-state read accessor — deferred to Story 10.7 wiring".to_string(),
+                                                    message: "Update tools: not available from the agent inspector yet".to_string(),
                                                 });
                                                 state.needs_redraw = true;
                                                 continue;
@@ -3176,29 +3182,6 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     }
                                 }
-                                InputAction::ToggleSidebar => {
-                                    // P10: Don't toggle sidebar when an overlay is active
-                                    if matches!(state.focus, FocusState::Overlay(_)) {
-                                        // Ignore — overlay has focus priority
-                                    } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
-                                        state.sidebar_visible = !state.sidebar_visible;
-                                        if state.sidebar_visible {
-                                            state.sidebar_panel = Some(crate::domain::models::visual::PanelType::History);
-                                            state.focus = FocusState::Sidebar {
-                                                panel: crate::domain::models::visual::PanelType::History,
-                                                selected: state.sidebar_selected
-                                            };
-                                        } else {
-                                            state.sidebar_panel = None;
-                                            state.focus = FocusState::Chat;
-                                        }
-                                        state.needs_redraw = true;
-                                    } else {
-                                        // Terminal too narrow - show info message
-                                        notifications::info(&mut state, NoticeSource::System, "Terminal too narrow for sidebar. Use Ctrl+P to search history.");
-                                        state.needs_redraw = true;
-                                    }
-                                }
                                 InputAction::SetDensityMode(mode) => {
                                     if state.density_mode == mode {
                                         notifications::info(&mut state, NoticeSource::Density, format!("Already in {} mode", mode.display_label()));
@@ -3216,10 +3199,6 @@ pub async fn run(
                                                 PanelType::Artifacts => artifact_bridge::open_panel(&app_state, &mut state, security.current_mode()).await,
                                                 _ => {}
                                             }
-                                            state.focus = FocusState::Sidebar {
-                                                panel: panel_type,
-                                                selected: state.sidebar_selected,
-                                            };
                                             state.needs_redraw = true;
                                         }
                                         PanelOpenOutcome::Notice(notice) => {
@@ -7901,6 +7880,8 @@ fn render(
 
     let (recipient_blocked, card) = team_proposal_card::frame(state);
     let permission_mode = security.current_mode();
+    let leader_avail = crate::adapters::tui::app::local_avail_ctx(state);
+    let leader_tail = crate::adapters::tui::app::status_tail(state);
 
     // Split borrows: tool_block_states needs &, feedback_blocks needs &
     // height_cache is now in tab_render_states (side-table) and borrowed inside the closure.
@@ -8937,6 +8918,7 @@ fn render(
                     crate::adapters::tui::widgets::status_bar::NoticeBadges {
                         unseen: state.notifications.unseen(),
                         decisions: state.decisions.len(),
+                        tail: leader_tail,
                     },
 );
                 input_box::render(
@@ -8989,7 +8971,7 @@ fn render(
                         above_status,
                         which_key,
                         theme,
-                        crate::adapters::tui::chord_menu::ChordHost::Local,
+                        &leader_avail,
                     );
                 }
 
@@ -9200,6 +9182,7 @@ pub(crate) async fn populate_autocomplete_suggestions(
             // Filter-as-you-type uses the cached registry.
             if state.autocomplete.filter_text.is_empty() {
                 command_registry.refresh(workspace_path);
+                crate::adapters::command_registry::announce_shadows(state, command_registry);
             }
             let filtered = command_registry.filter(&state.autocomplete.filter_text);
             let guard = state.skill_registry.read().await;

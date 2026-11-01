@@ -32,15 +32,30 @@ fn make_summary(id: &str, title: &str, updated_at: i64) -> ConversationSummary {
     }
 }
 
-// ── AC1: Ctrl+H toggles sidebar visibility ──────────────────────────────────
+// ── AC1: Ctrl+X h reveals/toggles the History sidebar (Ctrl+H is inert) ─────
 
 #[test]
-fn test_ctrl_h_toggles_sidebar_visible() {
+fn test_ctrl_x_h_reveals_the_history_sidebar() {
     let mut state = make_state();
     assert!(!state.sidebar_visible);
 
+    // The chord asks the host to open (or, when already showing, close) the
+    // History panel; `panel_bridge::open_panel` toggles it, so a second chord
+    // yields the very same request.
+    for _ in 0..2 {
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
+        assert_eq!(action, InputAction::OpenPanel(PanelType::History));
+        assert!(!state.which_key.active);
+    }
+
+    // Ctrl+H no longer toggles anything (Story 21.3 AC6).
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlH));
-    assert_eq!(action, InputAction::ToggleSidebar);
+    assert!(
+        matches!(action, InputAction::Consumed | InputAction::Ignored),
+        "{action:?}"
+    );
+    assert!(!state.sidebar_visible);
 }
 
 // ── AC2: Sidebar renders conversation list ──────────────────────────────────

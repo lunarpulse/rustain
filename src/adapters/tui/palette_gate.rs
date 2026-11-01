@@ -104,6 +104,7 @@ async fn refresh_entries(
     // Ensure command registry is discovered (one filesystem scan, then cached).
     if !command_registry.is_discovered() {
         command_registry.refresh(workspace_path);
+        crate::adapters::command_registry::announce_shadows(state, command_registry);
         let guard = state.skill_registry.read().await;
         command_registry.warn_skill_shadows(&guard);
     }

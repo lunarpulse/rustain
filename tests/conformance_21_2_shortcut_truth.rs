@@ -9,15 +9,16 @@
 use rustain::adapters::builtin_commands::{self, AttachedRoute, CommandHost};
 use rustain::adapters::command_registry::{CommandRegistry, CommandSource};
 use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
-use rustain::adapters::tui::chord_menu::{self, ChordHost};
-use rustain::adapters::tui::help_data::help_categories;
 use rustain::adapters::tui::hints::contextual_hint;
+use rustain::adapters::tui::keymap::render_help::help_rows;
+use rustain::adapters::tui::keymap::{AvailCtx, render::leader_menu};
 use rustain::adapters::tui::quit_confirm::{
     self, QuitFacts, QuitHost, QuitKey, QuitKeyOutcome, QuitRequest,
 };
-use rustain::adapters::tui::state::{TuiState, WhichKeyState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
+use rustain::domain::models::visual::DensityMode;
 
 fn key(c: char) -> DomainInputEvent {
     DomainInputEvent::KeyPress(c)
@@ -97,10 +98,7 @@ fn k5_help_and_hints_tell_the_truth() {
     handle_input(&mut chat, &key('?'));
     assert!(chat.help_overlay.active, "Chat ? still opens help");
 
-    let all: Vec<_> = help_categories()
-        .iter()
-        .flat_map(|c| c.bindings.iter())
-        .collect();
+    let all = help_rows();
     let braces = all.iter().find(|b| b.key == "{ / }").expect("brace row");
     assert!(
         braces.description.contains("previous / next"),
@@ -141,17 +139,27 @@ fn k5_help_and_hints_tell_the_truth() {
 /// K6 — the leader is untimed and complete; deleted timeout symbols stay deleted.
 #[test]
 fn k6_leader_inventory_is_complete_untimed_and_structurally_clean() {
-    let wk = WhichKeyState::new();
-    for host in [ChordHost::Local, ChordHost::Attached] {
-        let items = chord_menu::menu_items(&wk, host);
-        for retained in "pmiaslretuwfd?nx".chars() {
+    for (label, avail) in [
+        ("Local", AvailCtx::local(130, DensityMode::Focus)),
+        ("Attached", AvailCtx::attached(130, false)),
+    ] {
+        let items = leader_menu(&avail);
+        // `f` (Focus) and `d` (Dashboard) are retired locally; `h` is History.
+        for retained in "pmiaslretuwh?nx".chars() {
             let painted = retained.to_ascii_uppercase().to_string();
             assert!(
                 items.iter().any(|i| i.key == painted),
-                "{host:?} hides retained chord {retained:?}"
+                "{label} hides retained chord {retained:?}"
             );
         }
         assert!(items.iter().any(|i| i.key == "Enter" && i.name == "Send"));
+        assert!(!items.iter().any(|i| i.key == "F"), "{label} paints [F]");
+        // `d` is the attached client's Detach only.
+        assert_eq!(
+            items.iter().any(|i| i.key == "D"),
+            label == "Attached",
+            "{label} Detach/Dashboard chord"
+        );
     }
     let state_src = std::fs::read_to_string("src/adapters/tui/state.rs").unwrap();
     let theme_src = std::fs::read_to_string("src/adapters/tui/theme.rs").unwrap();

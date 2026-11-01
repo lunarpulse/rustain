@@ -12,15 +12,15 @@ Evidence discipline (19.7 A4 / 18.4e): the screen is a WITNESS. What the gate
 asserts on is the stub's request log, the session files and the usage ledger —
 all printed by the shell driver after this script exits. Every pane dump below
 is a reading aid except where `gate J1` slices it for a screen-STATE marker
-(overlay open/closed, `ctx:` meter, sidebar attempt).
+(overlay open/closed, `ctx:` meter, sidebar).
 
 Beats are pinned by the Task-0 discoveries (story Debug Log, 2026-08-26):
 the title call fires at the TurnComplete of the SECOND user exchange, so the
 wait-for-title belongs after the `@file` turn; the fork targets message 1
 (`g` jumps to top) because forking at the tail right after plan execution is
-`DF-19-8-FORK-TAIL-OOB`; the History sidebar is NOT CAPTURED in this tree
-(`DF-19-8-CTRLH-PTY`) — the palette attempt below records that state honestly
-instead of pretending.
+`DF-19-8-FORK-TAIL-OOB`; the History sidebar opens through the `Ctrl+X h` leader
+chord (Story 21.3; the old Ctrl+H/palette attempt, `DF-19-8-CTRLH-PTY`, is
+retired) and the `sidebar` pane dumped after it is the marker gate J1 slices.
 
 Usage (normally invoked by journey-J1-kai.sh):
     RUSTAIN_TUI_BINARY=<bin> python3 journey_j1_kai.py <workspace> <stub-url> <scratch-home>
@@ -193,25 +193,20 @@ def main() -> int:
     require_gone(tui, "Select Model", 10, "model switcher closed")
     pane(tui, "model-switcher-closed")
 
-    # ── Sidebar attempt — NOT CAPTURED in this tree (DF-19-8-CTRLH-PTY) ──────
-    # Raw \x08 is Backspace under a PTY (never opens it, and kills input focus
-    # if sent before the first message); the palette route below is the A5
-    # workaround and IT no-ops in this tree too. Recorded, not hidden.
-    tui.send("\x10")  # Ctrl+P
-    if not tui.wait_for_screen("Command Palette", timeout=3.0):
-        pane(tui, "FAILED-palette-open")
-        print("FAIL: the command palette did not open for the sidebar attempt", flush=True)
-        sys.exit(1)
-    for c in "toggle sidebar":
-        tui.send(c)
-        time.sleep(0.05)
-    time.sleep(0.8)
-    tui.send(ENTER)
+    # ── Sidebar — the `Ctrl+X h` leader chord (Story 21.3; was DF-19-8-CTRLH-PTY) ─
+    # Raw \x08 is Ctrl+H in crossterm 0.29 (never Backspace) and is unbound now;
+    # the History panel opens through the leader chord `Ctrl+X h`, which also
+    # reveals the sidebar column from the default Focus density (harness.open_history).
+    # The pane label `sidebar` is what gate J1 marker 4 slices for the History header.
+    tui.send(CTRL_X)
+    tui.wait_for_screen("[Esc] Cancel", timeout=3.0)
+    tui.send("h")
+    tui.wait_for_screen("┌History", timeout=5.0)  # the panel's own box title, not the menu item
     time.sleep(1.2)
-    pane(tui, "sidebar")  # gate J1 asserts the History header here → RED by design (A1)
+    pane(tui, "sidebar")  # gate J1 asserts the History header here
     print(
-        f"[witness] sidebar after palette 'toggle sidebar': "
-        f"{'History panel PRESENT' if 'History' in tui.get_screen_text() else 'History panel ABSENT — NOT CAPTURED (DF-19-8-CTRLH-PTY)'}",
+        f"[witness] sidebar after Ctrl+X h: "
+        f"{'History panel PRESENT' if 'History' in tui.get_screen_text() else 'History panel ABSENT'}",
         flush=True,
     )
 

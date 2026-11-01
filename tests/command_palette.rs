@@ -3,13 +3,14 @@ use ratatui::backend::TestBackend;
 
 use rustain::adapters::palette_registry::PaletteRegistry;
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::keymap::{AvailCtx, Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::state::{CommandPaletteState, Direction, TuiState, WhichKeyState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{command_palette, which_key_bar};
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-use rustain::domain::models::visual::OverlayType;
+use rustain::domain::models::visual::{DensityMode, OverlayType};
 
 // ============================================================
 // Unit: PaletteRegistry (Task 9.1)
@@ -237,38 +238,44 @@ fn test_which_key_open_dismiss() {
 
 #[test]
 fn test_which_key_valid_chord_lookup() {
-    let wk = WhichKeyState::new();
-
-    // All 10 chords should be registered
-    assert!(wk.lookup_chord('p').is_some());
-    assert!(wk.lookup_chord('m').is_some());
-    assert!(wk.lookup_chord('a').is_some());
-    assert!(wk.lookup_chord('s').is_some());
-    assert!(wk.lookup_chord('l').is_some());
-    assert!(wk.lookup_chord('t').is_some());
-    assert!(wk.lookup_chord('u').is_some());
-    assert!(wk.lookup_chord('w').is_some());
-    assert!(wk.lookup_chord('d').is_some());
-    assert!(wk.lookup_chord('?').is_some());
+    // Every shipped local chord resolves in the registry's Leader context.
+    // (`d` is retired locally; `h` is History — Story 21.3 AC2.)
+    for c in ['p', 'm', 'a', 's', 'l', 't', 'u', 'w', 'h', '?'] {
+        assert!(
+            matches!(
+                resolve(Context::Leader, Host::Local, &[Key::Char(c)]),
+                Resolved::Hit(_)
+            ),
+            "Ctrl+X {c} must resolve locally"
+        );
+    }
 }
 
 #[test]
 fn test_which_key_invalid_chord_lookup() {
-    let wk = WhichKeyState::new();
-    assert!(wk.lookup_chord('z').is_none());
-    assert!(wk.lookup_chord('j').is_none());
+    let hit = |c: char| {
+        matches!(
+            resolve(Context::Leader, Host::Local, &[Key::Char(c)]),
+            Resolved::Hit(_)
+        )
+    };
+    assert!(!hit('z'));
+    assert!(!hit('j'));
     // Story 21.1 slice S2: `Ctrl+X q` brings the oldest decision back, so `q`
     // is a bound chord now (it was the invalid-key probe before).
-    assert!(wk.lookup_chord('q').is_some());
-    assert!(wk.lookup_chord('1').is_none());
+    assert!(hit('q'));
+    assert!(!hit('1'));
 }
 
 #[test]
 fn test_which_key_case_insensitive_lookup() {
-    let wk = WhichKeyState::new();
     // Uppercase should work too
-    assert!(wk.lookup_chord('P').is_some());
-    assert!(wk.lookup_chord('M').is_some());
+    for c in ['P', 'M'] {
+        assert!(matches!(
+            resolve(Context::Leader, Host::Local, &[Key::Char(c)]),
+            Resolved::Hit(_)
+        ));
+    }
 }
 
 // ============================================================
@@ -396,18 +403,21 @@ fn test_ctrl_x_invalid_key_dismisses() {
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(state.which_key.active);
 
-    // Press an invalid key
+    // Press an unbound key: consumed, dismissed, and the miss is announced once
+    // (Story 21.3 AC2: no silent swallow).
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('z'));
     assert_eq!(action, InputAction::Consumed);
     assert!(!state.which_key.active); // Dismissed
-    // No notice for invalid keys (a `Noop` chord would record a Chord notice)
-    assert!(
-        state
-            .notifications
-            .records()
-            .all(|record| record.source
-                != rustain::adapters::tui::notifications::NoticeSource::Chord)
-    );
+    assert_eq!(state.focus, FocusState::Input);
+    let notices: Vec<_> = state
+        .notifications
+        .records()
+        .filter(|record| {
+            record.source == rustain::adapters::tui::notifications::NoticeSource::Chord
+        })
+        .map(|record| record.message.clone())
+        .collect();
+    assert_eq!(notices, ["No binding for Ctrl+X z in Input"]);
 }
 
 // ============================================================
@@ -571,7 +581,7 @@ fn test_which_key_bar_renders_chord_labels() {
                 area,
                 &state,
                 &theme,
-                rustain::adapters::tui::chord_menu::ChordHost::Local,
+                &AvailCtx::local(120, DensityMode::Focus),
             );
         })
         .unwrap();

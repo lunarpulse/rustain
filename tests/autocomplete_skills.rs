@@ -68,6 +68,7 @@ fn test_autocomplete_order_builtins_then_skills_then_custom() {
             path: PathBuf::from("/tmp/zz-custom.md"),
         },
         content: None,
+        usage: &[],
     };
     let mut merged: Vec<&SlashCommandDef> = command_results.clone();
     merged.push(&custom);

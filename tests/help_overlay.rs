@@ -1,6 +1,6 @@
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::help_data;
 use rustain::adapters::tui::hints;
+use rustain::adapters::tui::keymap::render_help;
 use rustain::adapters::tui::state::{HelpOverlayState, TuiState};
 use rustain::adapters::tui::version_info;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
@@ -39,25 +39,25 @@ fn test_help_overlay_state_open_resets_scroll() {
 }
 
 // ============================================================
-// Unit: help_data (Task 7.1, 7.2, 7.3)
+// Unit: render_help (Task 7.1, 7.2, 7.3)
 // ============================================================
 
 #[test]
 fn test_help_categories_non_empty() {
-    let cats = help_data::help_categories();
-    assert!(!cats.is_empty());
-    for cat in cats {
+    let groups = render_help::help_groups();
+    assert!(!groups.is_empty());
+    for group in &groups {
         assert!(
-            !cat.bindings.is_empty(),
+            !group.rows.is_empty(),
             "Category '{}' has no bindings",
-            cat.name
+            group.name
         );
     }
 }
 
 #[test]
 fn test_tmux_conflicts_contains_known() {
-    let conflicts = help_data::tmux_conflicts();
+    let conflicts = render_help::tmux_conflicts();
     assert!(conflicts.len() >= 2);
     assert!(conflicts.iter().any(|c| c.key == "Ctrl+B"));
     assert!(conflicts.iter().any(|c| c.key == "Ctrl+A"));
@@ -67,7 +67,7 @@ fn test_tmux_conflicts_contains_known() {
 fn test_is_multiplexer_session_false_when_unset() {
     unsafe { std::env::remove_var("TMUX") };
     unsafe { std::env::remove_var("STY") };
-    assert!(!help_data::is_multiplexer_session());
+    assert!(!render_help::is_multiplexer_session());
 }
 
 // ============================================================

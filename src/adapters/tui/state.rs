@@ -1104,34 +1104,6 @@ pub enum ContextWarnLevel {
     Crit,
 }
 
-/// Action dispatched by a which-key chord.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChordAction {
-    /// Open a panel.
-    OpenPanel(crate::domain::models::visual::PanelType),
-    /// Show help overlay.
-    #[allow(dead_code)]
-    ShowHelp,
-    /// Open the model/provider selector overlay (Story 7.2 AC1).
-    OpenModelSelector,
-    /// Open the sign-in provider picker (`/login`).
-    OpenLogin,
-    /// Open the profile switcher overlay (Story 8.4 AC-1).
-    OpenProfileSwitcher,
-    /// Open the usage/cost panel overlay (Story 7.5 AC3).
-    OpenUsagePanel,
-    /// Set the information density mode (Story 8.4b AC-1).
-    SetDensityMode(crate::domain::models::visual::DensityMode),
-    /// Open S-LOG, the Notification Log (Story 21.1 AC5).
-    OpenNotificationLog,
-    /// Archive every visible toast (Story 21.1 AC5); sources are untouched.
-    ClearToasts,
-    /// Focus the oldest waiting decision (Story 21.1 S2 AC10).
-    FocusDecisions,
-    /// Not yet implemented — show feedback.
-    Noop(String),
-}
-
 /// A provider column in the model selector dialog (Story 7.2 AC2).
 /// TUI render state — lives in adapters/tui/, NOT domain/.
 #[derive(Debug, Clone)]
@@ -2483,67 +2455,13 @@ pub struct WhichKeyState {
     // Untimed leader (Story 21.2 AC6): no clock, no timeout method, no tick.
     /// Previous focus state to restore on dismiss.
     pub previous_focus: Option<FocusState>,
-    /// Chord map: key → action.
-    pub chord_map: HashMap<char, ChordAction>,
 }
 
 impl WhichKeyState {
     pub fn new() -> Self {
-        let mut chord_map = HashMap::new();
-        chord_map.insert('p', ChordAction::OpenProfileSwitcher);
-        chord_map.insert('m', ChordAction::OpenModelSelector);
-        chord_map.insert('i', ChordAction::OpenLogin);
-        chord_map.insert(
-            'a',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Adapters),
-        );
-        chord_map.insert(
-            's',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents),
-        );
-        chord_map.insert(
-            'l',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::TransparencyLog),
-        );
-        // Lower-case on purpose: `lookup_chord` lowercases the key, so an
-        // uppercase `'R'` entry would be unreachable.
-        chord_map.insert(
-            'r',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Room),
-        );
-        // `e` for **E**vidence — FR149's own term, and the type is
-        // `EvidenceArtifact`. `a` was already Adapters. Lower-case for the same
-        // reason as `r` above.
-        chord_map.insert(
-            'e',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Artifacts),
-        );
-        chord_map.insert(
-            't',
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Tasks),
-        );
-        chord_map.insert('u', ChordAction::OpenUsagePanel);
-        chord_map.insert(
-            'w',
-            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Monitor),
-        );
-        chord_map.insert(
-            'f',
-            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Focus),
-        );
-        chord_map.insert(
-            'd',
-            ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Dashboard),
-        );
-        chord_map.insert('?', ChordAction::ShowHelp);
-        chord_map.insert('n', ChordAction::OpenNotificationLog);
-        chord_map.insert('x', ChordAction::ClearToasts);
-        chord_map.insert('q', ChordAction::FocusDecisions);
-
         Self {
             active: false,
             previous_focus: None,
-            chord_map,
         }
     }
 
@@ -2561,11 +2479,6 @@ impl WhichKeyState {
 
     // Story 21.2 AC6: the Ctrl+X leader is untimed — it stays active until a
     // follow-up key or Esc, so there is no timeout field, method or tick.
-
-    /// Look up a chord key. Returns Some(action) for valid keys, None for invalid.
-    pub fn lookup_chord(&self, key: char) -> Option<&ChordAction> {
-        self.chord_map.get(&key.to_ascii_lowercase())
-    }
 }
 
 impl Default for WhichKeyState {
@@ -2888,6 +2801,8 @@ pub struct TuiState {
     /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
     /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
     pub density_user_overridden: bool,
+    /// Story 21.3 A12: (custom command name, discovery generation) already announced.
+    pub shadows_announced: std::collections::BTreeSet<(String, u64)>,
     /// Whether the history sidebar is visible.
     // Covers: FR107, UX-DR20
     pub sidebar_visible: bool,
@@ -3341,6 +3256,7 @@ impl TuiState {
             density_mode: Default::default(),
             session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
+            shadows_announced: std::collections::BTreeSet::new(),
             sidebar_visible: false,
             sidebar_panel: None,
             sidebar_selected: 0,
@@ -4309,12 +4225,16 @@ mod tests {
 
     #[test]
     fn which_key_chord_s_maps_to_panel_agents() {
-        let wk = WhichKeyState::new();
-        let action = wk.chord_map.get(&'s').expect("'s' chord missing");
-        assert!(matches!(
-            action,
-            ChordAction::OpenPanel(crate::domain::models::visual::PanelType::Agents)
-        ));
+        use crate::adapters::tui::keymap::{
+            AvailCtx, CommandId, Host, Key, LeaderStep, leader_step, table::LeaderCmd,
+        };
+        let avail = AvailCtx::local(130, crate::domain::models::visual::DensityMode::Monitor);
+        match leader_step(Host::Local, Key::Char('s'), &avail, "Input") {
+            LeaderStep::Run(row) => {
+                assert_eq!(row.command, CommandId::Leader(LeaderCmd::Agents));
+            }
+            other => panic!("'s' must run the Agents row, got {other:?}"),
+        }
     }
 
     // ─── PATCH-2 (14-3b review): wave-lifecycle handler keystones ──────────

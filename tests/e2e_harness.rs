@@ -318,6 +318,7 @@ impl TestHarness {
                         rustain::adapters::tui::widgets::status_bar::NoticeBadges {
                             unseen: unseen_notices,
                             decisions: decisions.len(),
+                            ..Default::default()
                         },
                     );
 

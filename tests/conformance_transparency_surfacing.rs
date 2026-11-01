@@ -48,10 +48,8 @@ fn ctrl_x_l_dispatches_the_transparency_log_panel() {
 
 #[test]
 fn the_help_screen_advertises_the_panel_by_its_real_name() {
-    let categories = rustain::adapters::tui::help_data::help_categories();
-    let binding = categories
-        .iter()
-        .flat_map(|category| category.bindings.iter())
+    let binding = rustain::adapters::tui::keymap::render_help::help_rows()
+        .into_iter()
         .find(|binding| binding.key == "Ctrl+X, L")
         .expect("Ctrl+X, L is documented");
     assert!(binding.available, "the binding is real, so it is available");

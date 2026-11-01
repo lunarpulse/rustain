@@ -19,6 +19,8 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::adapters::tui::app::InputAction;
+use crate::adapters::tui::keymap::render::leader_follow_up_compact;
+use crate::adapters::tui::keymap::table::LeaderCmd;
 use crate::adapters::tui::notification_log::{LogFacts, footer_lines};
 use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
@@ -36,8 +38,16 @@ pub const TYPING_GRACE: Duration = Duration::from_secs(1);
 pub const DEFER_COOLDOWN: Duration = Duration::from_secs(60);
 /// One item's detail is bounded before it is stored (a title can be long).
 const MAX_DETAIL_CHARS: usize = 2_048;
-/// The toast raised when an arrival could not take focus.
-pub const WAITING_TOAST: &str = "Decision waiting — Ctrl+X q";
+/// The toast raised when an arrival could not take focus; the key text
+/// (`Ctrl+X q`) is generated from the registry's `Ctrl+X, Q` row (Story 21.3 A10).
+#[must_use]
+pub fn waiting_toast() -> String {
+    let compact = leader_follow_up_compact(LeaderCmd::Decisions);
+    format!(
+        "Decision waiting — Ctrl+{}",
+        compact.strip_prefix('^').unwrap_or(&compact)
+    )
+}
 
 /// The six interim decision kinds (A9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -378,7 +388,7 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
         return Raised::Focused;
     }
     if is_new {
-        notifications::info(state, NoticeSource::System, WAITING_TOAST);
+        notifications::info(state, NoticeSource::System, waiting_toast());
     }
     Raised::Waiting
 }
@@ -492,7 +502,12 @@ pub fn waiting(state: &TuiState) -> usize {
 /// The status-row cue while decisions wait.
 #[must_use]
 pub fn status_cue(waiting: usize) -> Option<String> {
-    (waiting > 0).then(|| format!("Needs you ({waiting}) ^X q"))
+    (waiting > 0).then(|| {
+        format!(
+            "Needs you ({waiting}) {}",
+            leader_follow_up_compact(LeaderCmd::Decisions)
+        )
+    })
 }
 
 /// Host-neutral key classes the pane understands.
@@ -1218,7 +1233,7 @@ mod tests {
         let toasts = state
             .notifications
             .visible()
-            .filter(|r| r.message == WAITING_TOAST)
+            .filter(|r| r.message == waiting_toast())
             .count();
         assert_eq!(
             toasts, 1,

@@ -614,6 +614,17 @@ pub enum DomainKey {
     CtrlT,
     CtrlU,
     CtrlX,
+    /// Ctrl+A / Ctrl+W: decoded so they never type their letter (Story 21.3 AC12).
+    CtrlA,
+    CtrlW,
+    /// Any other Ctrl/Alt-modified character: a consumed no-op key that never
+    /// types its letter (Story 21.3 AC12). The lower-case letter is kept so the
+    /// leader's "No binding" notice can name the key.
+    UnboundCtrl(char),
+    UnboundAlt(char),
+    /// A function key: no binding anywhere, but the leader's "No binding" notice
+    /// can name it (Story 21.3 AC2).
+    UnboundFn(u8),
 }
 
 /// A reply channel whose `Debug` never shows what crosses it (a typed key or code).

@@ -3633,7 +3633,8 @@ async fn story_19_16g_a_served_retract_reaches_a_closed_log_reminder() {
         .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
         .collect();
     assert!(
-        row.trim_end().ends_with(&format!("log: {}", before + 1)),
+        row.trim_end()
+            .ends_with(&format!("log: {} ^X menu", before + 1)),
         "{row}"
     );
 

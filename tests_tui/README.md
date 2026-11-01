@@ -353,7 +353,8 @@ class TestMyFeature:
 | `fork_cancel()` | Chat | Press f then n |
 | `open_help()` | Chat | Press ? |
 | `open_search()` | Any | Press Ctrl+F |
-| `toggle_sidebar()` | Any | Press Ctrl+H |
+| `open_history()` | Any | Press Ctrl+X h |
+| `close_history()` | Any | Press Ctrl+X h (toggles the open History panel closed) |
 | `new_tab()` | Any | Press Ctrl+T |
 | `switch_tab(n)` | Chat | Press 1-9 |
 | `toggle_bookmark()` | Chat | Press m |

@@ -86,7 +86,7 @@ def test_toggle_closes_agents_panel(tui_monitor: RustainTUI):
 def test_switch_from_history_to_agents(tui_monitor: RustainTUI):
     """Ctrl+X, S while the History panel is open switches to the Agents panel."""
     tui = tui_monitor
-    tui.toggle_sidebar()
+    tui.open_history()
     tui.wait(0.5)
     tui.assert_screen_contains("History", msg="History panel should be open")
 

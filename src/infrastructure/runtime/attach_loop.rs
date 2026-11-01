@@ -1968,7 +1968,7 @@ fn attached_composer_key(
     )
 }
 
-use crate::adapters::tui::chord_menu::ATTACHED_SIGN_IN;
+use crate::adapters::tui::keymap::table::ATTACHED_SIGN_IN;
 
 fn attached_sign_in_command(input: &str) -> bool {
     matches!(
@@ -3362,7 +3362,7 @@ pub async fn run_attached(
                 false,
                 true,
                 0,
-                attach_keys::status_hint(&state),
+                attach_keys::status_hint(&state).as_deref(),
                 0,
                 None,
                 None,
@@ -3374,7 +3374,11 @@ pub async fn run_attached(
                 false,
                 Some(&attach_info),
                 state.log_awareness.display,
-                state.notifications.unseen(),
+                crate::adapters::tui::widgets::status_bar::NoticeBadges {
+                    unseen: state.notifications.unseen(),
+                    decisions: 0,
+                    tail: attach_keys::status_tail(&state),
+                },
             );
             let display_input = attached_display_input(&state, &input);
             render_attached_composer(

@@ -1,13 +1,9 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::adapters::tui::help_data::{help_categories, tmux_conflicts};
+use crate::adapters::tui::keymap::render_help::{help_groups, intro, tmux_conflicts};
 use crate::adapters::tui::state::HelpOverlayState;
 use crate::adapters::tui::theme::Theme;
-
-/// Prose introduction shown at the top of the help overlay.
-const INTRO: &str = "Rustain is a composable AI agent platform. Navigate with j/k, type with i, \
-     search with Ctrl+P, extend with Ctrl+X chords. Press ? or Esc to close.";
 
 /// Render the help overlay as a large centered popup.
 // Covers: FR108, UX-DR94
@@ -65,7 +61,7 @@ fn build_content_lines<'a>(
 
     // Prose introduction
     all_lines.push(Line::default());
-    for intro_line in wrap_text(INTRO, area.width.saturating_sub(4) as usize) {
+    for intro_line in wrap_text(&intro(), area.width.saturating_sub(4) as usize) {
         all_lines.push(Line::from(Span::styled(
             intro_line,
             Style::default().fg(theme.colors.fg_secondary),
@@ -74,15 +70,14 @@ fn build_content_lines<'a>(
     all_lines.push(Line::default());
 
     // Keybinding categories
-    let categories = help_categories();
-    for category in categories {
+    for group in help_groups() {
         // Category header
         all_lines.push(Line::from(Span::styled(
-            category.name,
+            group.name,
             theme.typography.heading.fg(theme.colors.accent),
         )));
 
-        for binding in &category.bindings {
+        for binding in &group.rows {
             let key_style = if binding.available {
                 Style::default()
                     .fg(theme.colors.accent)
@@ -103,7 +98,7 @@ fn build_content_lines<'a>(
             all_lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(format!("{:<14}", binding.key), key_style),
-                Span::styled(binding.description, desc_style),
+                Span::styled(binding.description.clone(), desc_style),
             ]));
         }
         all_lines.push(Line::default());

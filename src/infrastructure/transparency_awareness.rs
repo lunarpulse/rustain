@@ -931,7 +931,10 @@ mod tests {
                 .map(|x| terminal.backend().buffer().cell((x, 0)).unwrap().symbol())
                 .collect();
             match expected {
-                Some(segment) => assert!(row.trim_end().ends_with(segment), "{rows}: {row}"),
+                Some(segment) => assert!(
+                    row.trim_end().ends_with(&format!("{segment} ^X menu")),
+                    "{rows}: {row}"
+                ),
                 None => assert!(!row.contains("log:"), "{rows}: {row}"),
             }
         }

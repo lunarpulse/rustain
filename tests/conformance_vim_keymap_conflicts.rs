@@ -1,6 +1,8 @@
 #![allow(clippy::type_complexity)] // AI-12.1: test fixture tuple types
 //! Story 16.6 AC9 + Story 16.8 AC8 — No keymap conflicts.
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::keymap::resolve::rows_of;
+use rustain::adapters::tui::keymap::{Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
@@ -110,8 +112,20 @@ fn chord_cancellation_absorbs_legacy() {
 
 #[test]
 fn vim_not_in_which_key() {
-    let s = make_state();
-    assert!(s.which_key.lookup_chord('z').is_none());
+    // The leader menu is generated from the registry's Leader rows (Story
+    // 21.3 K1): no vim sequence prefix is one of them, in either host.
+    for host in [Host::Local, Host::Attached] {
+        for prefix in ['z', '[', ']', 'g'] {
+            assert!(
+                rows_of(Context::Leader, host).all(|row| row.keys[0] != Key::Char(prefix)),
+                "{host:?}: Leader row for vim prefix {prefix:?}"
+            );
+            assert!(matches!(
+                resolve(Context::Leader, host, &[Key::Char(prefix)]),
+                Resolved::Miss
+            ));
+        }
+    }
 }
 
 #[test]

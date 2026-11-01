@@ -28,6 +28,9 @@ mod slash_argument_parsing;
 #[path = "../conformance_21_2_shortcut_truth.rs"]
 mod conformance_21_2_shortcut_truth;
 
+#[path = "../conformance_21_3_keymap.rs"]
+mod conformance_21_3_keymap;
+
 #[path = "../conformance_21_1_notification_lifecycle.rs"]
 mod conformance_21_1_notification_lifecycle;
 

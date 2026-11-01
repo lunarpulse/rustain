@@ -239,6 +239,15 @@ fn test_e2e_which_key_invalid_dismisses() {
     // Invalid key
     h.type_char('z');
     assert!(!h.state.which_key.active);
+    // Story 21.3 AC2: the miss is announced once instead of swallowed silently.
+    assert_eq!(
+        h.state
+            .notifications
+            .records()
+            .filter(|record| record.message == "No binding for Ctrl+X z in Input")
+            .count(),
+        1
+    );
 }
 
 /// Covers: AC6 (Story 21.2) — the Ctrl+X leader is untimed: only a follow-up key

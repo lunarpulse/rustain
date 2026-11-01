@@ -18,11 +18,10 @@
 #
 # # Honest limits, printed in the receipt's final block
 #
-# * The History sidebar is NOT CAPTURED in this tree: raw Ctrl+H (\x08) is
-#   Backspace under a PTY, the palette "toggle sidebar" route no-ops, and the
-#   Ctrl+X chord map has no History entry — `DF-19-8-CTRLH-PTY`. The gate
-#   asserts the marker anyway and reads FAILED (executed) until that DF lands
-#   (Story 19.8 ruling A1).
+# * The History sidebar opens through the `Ctrl+X h` leader chord (Story 21.3):
+#   raw Ctrl+H (\x08) is unbound outside text fields and the old palette
+#   "toggle sidebar" route is gone (`DF-19-8-CTRLH-PTY`, retired). The gate
+#   asserts the `sidebar` pane shows the History header (Story 19.8 marker 4).
 # * Plan execution is recorded up to its first post-approval POST (exactly 1
 #   for this one-task scene), not asserted (A6).
 # * The model switcher is an overlay-open/overlay-closed screen-state marker
@@ -149,9 +148,9 @@ cat "$STUB_LOG"
 cat <<'LIMITS'
 
 --- what this run did not prove ---
-Ctrl+H: palette route attempted ("toggle sidebar"); raw \x08 is Backspace under
-  a PTY and the palette route no-ops in this tree — the History sidebar did
-  NOT open: NOT CAPTURED (DF-19-8-CTRLH-PTY)
+Ctrl+X h: the History sidebar opened through the leader chord (Story 21.3);
+  the `sidebar` pane is the screen-state marker, nothing else was proven
+  about its entries
 plan execution: 1 post-approval POST recorded, not asserted (A6)
 model switcher: overlay only, no model asserted (A7)
 title: served fixed "Scene capture" by the 19.7 stub — the quote-strip

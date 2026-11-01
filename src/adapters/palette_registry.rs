@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
 use crate::adapters::command_registry::CommandRegistry;
+use crate::adapters::tui::keymap::CommandId;
+use crate::adapters::tui::keymap::render::{shortcut_for, shortcut_for_slash};
+use crate::adapters::tui::keymap::table::LeaderCmd;
+use crate::adapters::tui::keymap::table_input::InputCmd;
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
 const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
@@ -9,15 +13,6 @@ const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
     (':', PaletteScope::Model),
     ('>', PaletteScope::Profile),
     ('!', PaletteScope::Adapter),
-];
-
-/// Slash commands that have *graduated* to a direct chord. The palette row
-/// must name it (`ux-design-specification.md` graduation convention): a
-/// discoverable command that hides its faster path teaches the slow one.
-const SLASH_SHORTCUTS: &[(&str, &str)] = &[
-    ("team", "Ctrl+X, L"),
-    ("room", "Ctrl+X, R"),
-    ("artifacts", "Ctrl+X, E"),
 ];
 
 /// Registry of command palette entries.
@@ -85,10 +80,7 @@ impl PaletteRegistry {
             self.slash_entries.push(PaletteEntry {
                 name: format!("/{}", cmd.name),
                 description: cmd.description.clone(),
-                shortcut: SLASH_SHORTCUTS
-                    .iter()
-                    .find(|(name, _)| *name == cmd.name)
-                    .map(|(_, chord)| (*chord).to_owned()),
+                shortcut: shortcut_for_slash(&cmd.name),
                 scope: PaletteScope::SlashCommand,
                 action: PaletteAction::ExecuteCommand(cmd.name.clone(), None),
             });
@@ -105,7 +97,7 @@ impl PaletteRegistry {
         self.slash_entries.push(PaletteEntry {
             name: "new tab".to_string(),
             description: "Open a new conversation tab".to_string(),
-            shortcut: Some("Ctrl+T".to_string()),
+            shortcut: shortcut_for(CommandId::Input(InputCmd::NewTab)),
             scope: PaletteScope::All,
             action: PaletteAction::NewTab,
         });
@@ -117,11 +109,11 @@ impl PaletteRegistry {
             action: PaletteAction::CloseTab,
         });
         self.slash_entries.push(PaletteEntry {
-            name: "toggle sidebar".to_string(),
-            description: "Toggle conversation history sidebar".to_string(),
-            shortcut: Some("Ctrl+H".to_string()),
+            name: "history".to_string(),
+            description: "Open the conversation history panel".to_string(),
+            shortcut: shortcut_for(CommandId::Leader(LeaderCmd::History)),
             scope: PaletteScope::All,
-            action: PaletteAction::ToggleSidebar,
+            action: PaletteAction::OpenPanel(crate::domain::models::visual::PanelType::History),
         });
         self.slash_entries.push(PaletteEntry {
             name: "delete all conversations".to_string(),
@@ -135,7 +127,7 @@ impl PaletteRegistry {
             name: "paste image from clipboard".to_string(),
             description: "Paste an image from the OS clipboard into the current message"
                 .to_string(),
-            shortcut: Some("Alt+V".to_string()),
+            shortcut: shortcut_for(CommandId::Input(InputCmd::PasteClipboard)),
             scope: PaletteScope::All,
             action: PaletteAction::PasteImageFromClipboard,
         });
@@ -169,7 +161,7 @@ impl PaletteRegistry {
         self.slash_entries.push(PaletteEntry {
             name: "!cancel-plan".into(),
             description: "Cancel the current executing plan".into(),
-            shortcut: Some("Ctrl+X, T then x".into()),
+            shortcut: None,
             scope: PaletteScope::All,
             action: PaletteAction::ExecuteCommand("cancel-plan".into(), None),
         });
@@ -565,5 +557,52 @@ mod tests {
 
         reg.populate_from_command_registry(&cr);
         assert_eq!(reg.all_entries().len(), 50);
+    }
+
+    fn populated() -> PaletteRegistry {
+        let mut reg = PaletteRegistry::new();
+        reg.populate_from_command_registry(&CommandRegistry::new());
+        reg
+    }
+
+    fn shortcut_of(reg: &PaletteRegistry, name: &str) -> Option<String> {
+        reg.all_entries()
+            .into_iter()
+            .find(|e| e.name == name)
+            .unwrap_or_else(|| panic!("palette entry {name:?} missing"))
+            .shortcut
+            .clone()
+    }
+
+    #[test]
+    fn story21_3_graduated_slash_commands_show_the_registry_label() {
+        let reg = populated();
+        assert_eq!(shortcut_of(&reg, "/team").as_deref(), Some("Ctrl+X, L"));
+        assert_eq!(shortcut_of(&reg, "/room").as_deref(), Some("Ctrl+X, R"));
+        assert_eq!(
+            shortcut_of(&reg, "/artifacts").as_deref(),
+            Some("Ctrl+X, E")
+        );
+        assert_eq!(
+            shortcut_of(&reg, "/notifications").as_deref(),
+            Some("Ctrl+X, N")
+        );
+        assert_eq!(shortcut_of(&reg, "/ml").as_deref(), Some("Alt+M"));
+    }
+
+    #[test]
+    fn story21_3_history_new_tab_and_paste_show_the_registry_label() {
+        let reg = populated();
+        assert_eq!(
+            shortcut_of(&reg, "history"),
+            shortcut_for(CommandId::Leader(LeaderCmd::History))
+        );
+        assert_eq!(shortcut_of(&reg, "history").as_deref(), Some("Ctrl+X, H"));
+        assert_eq!(shortcut_of(&reg, "new tab").as_deref(), Some("Ctrl+T"));
+        assert_eq!(
+            shortcut_of(&reg, "paste image from clipboard").as_deref(),
+            Some("Alt+V")
+        );
+        assert_eq!(shortcut_of(&reg, "!cancel-plan"), None);
     }
 }

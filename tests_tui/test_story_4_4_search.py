@@ -97,11 +97,11 @@ class TestCrossSearch:
     """AC5: Cross-conversation search from sidebar."""
 
     def test_cross_search_shows_overlay_on_slash(self, tui: RustainTUI):
-        """Ctrl+H opens sidebar; / triggers cross-search overlay — 'Cross-Search' visible."""
+        """Ctrl+X h opens sidebar; / triggers cross-search overlay — 'Cross-Search' visible."""
         tui.send_message("Reply with exactly: OK")
         tui.wait_for_idle()
 
-        tui.toggle_sidebar()
+        tui.open_history()
         tui.wait_for_screen("History")
         tui.assert_screen_contains("History", "Sidebar should be visible")
 
@@ -112,4 +112,4 @@ class TestCrossSearch:
         tui.send("hello")
         tui.wait(1.0)
         tui.close_overlay()
-        tui.toggle_sidebar()  # Close sidebar
+        tui.close_history()  # Close sidebar

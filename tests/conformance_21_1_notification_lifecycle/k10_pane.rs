@@ -18,7 +18,7 @@ use ratatui::widgets::Paragraph;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::decision_pane::{
     self, Arrival, DecisionDraft, DecisionEffect, DecisionKind, INERT_AFTER_PAINT, PaneOutcome,
-    Raised, WAITING_TOAST,
+    Raised, waiting_toast,
 };
 use rustain::adapters::tui::handlers::context_warning::handle_upsert_context_warning;
 use rustain::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
@@ -75,7 +75,7 @@ fn waiting_toasts(state: &TuiState) -> usize {
     state
         .notifications
         .visible()
-        .filter(|r| r.message == WAITING_TOAST)
+        .filter(|r| r.message == waiting_toast())
         .count()
 }
 
@@ -523,6 +523,7 @@ fn long_status_row(state: &TuiState, width: u16, long: bool) -> String {
                 status_bar::NoticeBadges {
                     unseen: state.notifications.unseen(),
                     decisions: state.decisions.len(),
+                    ..Default::default()
                 },
             );
         })
@@ -549,9 +550,10 @@ fn k10_the_cue_survives_beside_the_log_badge_at_sixty_and_eighty_columns() {
             let row = long_status_row(&state, width, long);
             let case = format!("{width} cols, long={long}: {row:?}");
             assert_eq!(row.matches(cue).count(), 1, "the cue is whole: {case}");
+            // Story 21.3 A10: the `^X menu` tail owns the edge; the cue is next to it.
             assert!(
-                row.trim_end().ends_with(cue),
-                "the cue owns the right edge: {case}"
+                row.trim_end().ends_with(&format!("{cue} ^X menu")),
+                "the cue sits beside the tail at the right edge: {case}"
             );
             assert!(row.width() <= usize::from(width), "{case}");
             let badge_at = row.find("Log !1");

@@ -826,21 +826,37 @@ class RustainTUI:
         self.send(CTRL_F)
         time.sleep(0.5)
 
-    def toggle_sidebar(self) -> None:
-        """Toggle sidebar via command palette.
+    def open_history(self) -> None:
+        """Open the History sidebar panel with the leader chord ``Ctrl+X h``.
 
-        Uses the palette route ("toggle sidebar" → Enter) instead of the raw
-        Ctrl+H byte (\x08) which crossterm decodes as KeyCode::Backspace in a
-        standard PTY — preventing the ToggleSidebar action from firing.
+        Story 21.3: the chord is the portable route (``Ctrl+X`` = ``0x18``, then
+        ``h``). Raw ``0x08`` is **Ctrl+H** in crossterm 0.29 (Backspace is
+        ``0x7F``), and Ctrl+H is unbound outside text fields now, so it never
+        opens a panel. The panel needs >= 120 columns (the harness default is
+        ``TERM_COLS`` = 130); the default density hides the sidebar column, so
+        the open moves to Monitor density (the ``tui_monitor`` fixture starts
+        there).
+
+        Both waits are structural: the leader menu's ``[Esc] Cancel`` item, then
+        the panel's own box title ``┌History`` (the menu paints a ``[H] History``
+        item with no ``┌`` before it, so the menu alone never satisfies it). The
+        same chord toggles a showing History panel closed (``close_history``).
         """
-        self.send(CTRL_P)
-        self.wait_for_screen("Command Palette", timeout=3.0)
-        for c in "toggle sidebar":
-            self.send(c)
-            time.sleep(0.05)
-        self.wait_for_screen("toggle sidebar", timeout=2.0)
-        self.send(ENTER)
-        time.sleep(0.5)
+        self.send(CTRL_X)
+        self.wait_for_screen("[Esc] Cancel", timeout=3.0)
+        self.send("h")
+        assert self.wait_for_screen("┌History", timeout=5.0), (
+            f"History panel did not open after Ctrl+X h. Screen:\n{self.get_screen_text()}"
+        )
+
+    def close_history(self) -> None:
+        """Close the History sidebar panel: ``Ctrl+X h`` toggles it off."""
+        self.send(CTRL_X)
+        self.wait_for_screen("[Esc] Cancel", timeout=3.0)
+        self.send("h")
+        assert self.wait_for_screen_not_contains("┌History", timeout=5.0), (
+            f"History panel did not close after Ctrl+X h. Screen:\n{self.get_screen_text()}"
+        )
 
     def new_tab(self) -> None:
         """Open a new tab (Ctrl+T)."""

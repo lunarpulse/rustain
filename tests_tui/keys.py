@@ -115,7 +115,7 @@ class Vim:
 
 class Sidebar:
     """Keys for sidebar history panel."""
-    TOGGLE = CTRL_H
+    HISTORY = (CTRL_X, "h")  # leader chord Ctrl+X h; raw CTRL_H is unbound outside text fields
     DOWN = "j"
     UP = "k"
     DELETE = "d"

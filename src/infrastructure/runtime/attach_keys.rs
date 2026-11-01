@@ -43,7 +43,10 @@ use crate::adapters::command_registry::{CommandRegistry, CommandSource};
 use crate::adapters::daemon::protocol::{ClientFrame, ProposalToken};
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::tui::app::{cancel_autocomplete_popup, convert_crossterm_event, handle_input};
-use crate::adapters::tui::chord_menu::{self, AttachedRoute, ChordHost};
+use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
+use crate::adapters::tui::keymap::resolve::no_binding_text;
+use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, LeaderCmd};
+use crate::adapters::tui::keymap::{AvailCtx, CommandId, Host, Key, LeaderStep, leader_step};
 use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
@@ -111,13 +114,7 @@ impl AttachedChrome {
             palette.register(PaletteEntry {
                 name: format!("/{name}"),
                 description: attached_description(&self.commands, name),
-                shortcut: match name {
-                    "ml" => Some("Alt+M".to_owned()),
-                    "quit" => Some("Ctrl+Q".to_owned()),
-                    "notifications" => Some("Ctrl+X, N".to_owned()),
-                    "detach" => Some("Ctrl+X, D".to_owned()),
-                    _ => None,
-                },
+                shortcut: crate::adapters::tui::keymap::render::shortcut_for_slash(name),
                 scope: PaletteScope::SlashCommand,
                 action: PaletteAction::ExecuteCommand(name.to_owned(), None),
             });
@@ -190,6 +187,7 @@ impl AttachedChrome {
         }
         if state.autocomplete.filter_text.is_empty() {
             self.commands.refresh(workspace);
+            crate::adapters::command_registry::announce_shadows(state, &self.commands);
         }
         self.last_slash_filter = Some(state.autocomplete.filter_text.clone());
         state.autocomplete.suggestions =
@@ -207,7 +205,7 @@ fn attached_description(commands: &CommandRegistry, name: &str) -> String {
         .map(|command| command.description.clone())
         .unwrap_or_else(|| {
             match name {
-                "ml" => "Toggle multi-line input (Alt+M)",
+                "ml" => "Toggle multi-line input",
                 "quit" => "Leave this client (asks first when work is in flight)",
                 "notifications" => "Open the notification log",
                 "detach" => "Detach this client; the daemon and its work keep running",
@@ -362,17 +360,18 @@ pub(super) fn paste_blocked(state: &TuiState) -> bool {
         || state.help_overlay.active
 }
 
-/// The status-row hint for the attached client (no key here detaches except
-/// the leader chord).
-pub(super) fn status_hint(state: &TuiState) -> Option<&'static str> {
-    state
-        .recipient_surface
-        .is_none()
-        .then_some(if state.multiline_mode {
-            "^X d detach · [^X Enter] Send"
-        } else {
-            "^X d detach"
-        })
+/// The status-row hint for the attached client, generated from the registry
+/// (Story 21.3 A10): the Detach leader row, `i` to type while Chat has focus
+/// and `[^X Enter] Send` while multi-line. The `^X menu` tail is painted by the
+/// status row itself, so it is not repeated here.
+pub(super) fn status_hint(state: &TuiState) -> Option<String> {
+    if state.recipient_surface.is_some() {
+        return None;
+    }
+    crate::adapters::tui::keymap::render_tips::attached_status_tip(
+        state.focus == FocusState::Chat,
+        state.multiline_mode,
+    )
 }
 
 /// The S-LOG facts of the attached client: the one conversation it shows, no
@@ -417,7 +416,7 @@ pub(super) fn paint_overlays(
             above_status,
             &state.which_key,
             &state.theme,
-            ChordHost::Attached,
+            &AvailCtx::attached(area.width, false),
         );
     }
     if state.command_palette.active {
@@ -739,7 +738,10 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                 ctx.auto_scroll,
             );
         }
-        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+        // Ctrl/Alt-modified characters are consumed no-ops, never text (Story 21.3
+        // AC12): Alt+M (above) is the only Alt letter with a meaning here.
+        (KeyCode::Char(_), m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
+        (KeyCode::Char(c), m) => {
             if ctx.state.recipient_surface.is_some() {
                 return KeyFlow::Continue;
             }
@@ -784,10 +786,7 @@ fn chat_char(ctx: &mut KeyCtx<'_>, c: char, m: KeyModifiers) -> KeyFlow {
 
 /// A printable key in Input focus: text, or the slash trigger.
 fn input_char(ctx: &mut KeyCtx<'_>, c: char, m: KeyModifiers) -> KeyFlow {
-    // Alt+V is the clipboard paste key locally; the attached host has none.
-    if m.contains(KeyModifiers::ALT) && c.eq_ignore_ascii_case(&'v') {
-        return KeyFlow::Continue;
-    }
+    // Alt-modified characters never reach this fn (the arm above consumes them).
     if c == '/' && !m.contains(KeyModifiers::ALT) && ctx.input.is_empty() && !ctx.composer_locked()
     {
         // The shared composer owns the slash trigger: it saves the pre-trigger
@@ -896,59 +895,72 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 
 // ── Ctrl+X leader ────────────────────────────────────────────────────────────
 
-/// A follow-up to the open leader. Esc and every non-character key cancel;
-/// an unknown character is consumed once. The origin focus is always restored.
+/// A follow-up to the open leader, resolved through the keymap registry (AC2):
+/// `Esc`/`Ctrl+C` cancel silently, a key without a row posts one info notice,
+/// a row this host cannot run answers with its remedy. The origin focus is
+/// always restored.
 async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     let origin = ctx.state.which_key.dismiss().unwrap_or(FocusState::Input);
     ctx.state.focus = origin.clone();
     ctx.state.needs_redraw = true;
-    match (key.code, key.modifiers) {
-        // Portable multiline send: the same path as Enter, exactly once.
-        (KeyCode::Enter, m) if m.is_empty() => {
-            if origin == FocusState::Input && !ctx.input.is_empty() {
-                return submit_enter(ctx).await;
-            }
-            KeyFlow::Continue
+    let key = Key::from_crossterm(&key);
+    let origin_name = match origin {
+        FocusState::Input => "Input",
+        _ => "Chat",
+    };
+    let avail = attached_avail_ctx(ctx.state, ctx.read_only);
+    let row = match leader_step(Host::Attached, key, &avail, origin_name) {
+        LeaderStep::Cancel => return KeyFlow::Continue,
+        LeaderStep::NoBinding(text) => {
+            notifications::info(ctx.state, NoticeSource::Chord, text);
+            return KeyFlow::Continue;
         }
-        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => chord(ctx, c, origin).await,
-        _ => KeyFlow::Continue,
-    }
-}
-
-async fn chord(ctx: &mut KeyCtx<'_>, c: char, origin: FocusState) -> KeyFlow {
-    let Some(spec) = chord_menu::spec_for(c) else {
+        LeaderStep::Unavailable(_, remedy) => {
+            show_unavailable(ctx, remedy);
+            return KeyFlow::Continue;
+        }
+        LeaderStep::Run(row) => row,
+    };
+    let CommandId::Leader(command) = row.command else {
         return KeyFlow::Continue;
     };
-    // The dispatch table (what the menu paints) must contain the chord too.
-    if ctx.state.which_key.lookup_chord(c).is_none() {
-        return KeyFlow::Continue;
-    }
-    match spec.attached {
-        AttachedRoute::Same => {
+    match command {
+        LeaderCmd::Help => {
             ctx.state.help_overlay.open(origin);
             ctx.state.focus = FocusState::Overlay(OverlayType::Help);
             ctx.state.needs_redraw = true;
         }
-        AttachedRoute::Source => {
+        LeaderCmd::A2aLog => {
             // The existing attached `/team log` local read.
             let args = crate::adapters::tui::handlers::team_command::TeamLogArgs::default();
             run_team_log(ctx, &args).await;
         }
-        AttachedRoute::Unavailable(remedy) => show_unavailable(ctx, remedy),
-        AttachedRoute::NotificationLog => {
+        LeaderCmd::Notifications => {
             // The leader restored the origin focus; S-LOG saves it as its caller.
             notification_log::open(ctx.state);
         }
-        AttachedRoute::ClearToasts => {
+        LeaderCmd::ClearToasts => {
             let _ = ctx.state.notifications.clear_toasts();
             ctx.state.needs_redraw = true;
         }
-        AttachedRoute::Decisions => {
+        LeaderCmd::Decisions => {
             // The attached client has no decision producers: every permission,
             // plan and question card stays inline (21-6 migrates them).
             ctx.info("No decisions waiting in this client");
         }
-        AttachedRoute::Detach => return KeyFlow::Detach,
+        LeaderCmd::Detach => return KeyFlow::Detach,
+        // Portable multiline send: the same path as Enter, exactly once.
+        LeaderCmd::Send if origin == FocusState::Input => {
+            if !ctx.input.is_empty() {
+                return submit_enter(ctx).await;
+            }
+        }
+        LeaderCmd::Send => {
+            let text = no_binding_text(key, origin_name);
+            notifications::info(ctx.state, NoticeSource::Chord, text);
+        }
+        // Every other row is unavailable in this host (answered above).
+        _ => {}
     }
     KeyFlow::Continue
 }
@@ -956,12 +968,26 @@ async fn chord(ctx: &mut KeyCtx<'_>, c: char, origin: FocusState) -> KeyFlow {
 /// The capability-qualified unavailable result of one retained chord.
 fn show_unavailable(ctx: &mut KeyCtx<'_>, remedy: &str) {
     // `i`/`m` reuse the existing sign-in refusal (same notice as typed `/login`).
-    let source = if remedy == chord_menu::ATTACHED_SIGN_IN {
+    let source = if remedy == ATTACHED_SIGN_IN {
         NoticeSource::Login
     } else {
         NoticeSource::Chord
     };
     notifications::info(ctx.state, source, remedy);
+}
+
+/// Facts the registry's availability rows read in the attached host.
+pub(super) fn attached_avail_ctx(state: &TuiState, read_only: bool) -> AvailCtx {
+    AvailCtx::attached(state.terminal_width, read_only)
+}
+
+/// The attached status row's rightmost tail (A10).
+pub(super) fn status_tail(state: &TuiState) -> StatusTail {
+    if state.which_key.active {
+        StatusTail::Pending(PendingPrefix::Leader)
+    } else {
+        StatusTail::Menu
+    }
 }
 
 /// One key while S-LOG is open: the shared handler decides; a copy goes through
@@ -1317,7 +1343,12 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 mod tests {
     use super::*;
     use crate::adapters::daemon::protocol::{DaemonFrame, InterruptRefusal, TurnGeneration};
-    use crate::adapters::tui::chord_menu::menu_items;
+    use crate::adapters::tui::keymap::render::leader_menu;
+    use crate::adapters::tui::keymap::resolve::{Resolved, resolve, rows_of};
+    use crate::adapters::tui::keymap::table::GlobalCmd;
+    use crate::adapters::tui::keymap::table_chat::ChatCmd;
+    use crate::adapters::tui::keymap::table_input::InputCmd;
+    use crate::adapters::tui::keymap::{self, Availability, Context};
     use crate::domain::models::SendAuthorization;
     use crate::domain::models::session::SessionState;
     use std::collections::BTreeSet;
@@ -1509,7 +1540,7 @@ mod tests {
             ('t', NoticeSource::Chord, "/team status"),
             ('u', NoticeSource::Chord, "/team status"),
             ('w', NoticeSource::Chord, "single layout"),
-            ('f', NoticeSource::Chord, "single layout"),
+            ('h', NoticeSource::Chord, "/team status"),
         ];
         for (key, source, remedy) in unavailable {
             let mut rig = Rig::new(false);
@@ -1528,10 +1559,20 @@ mod tests {
                 .notice(source)
                 .unwrap_or_else(|| panic!("{key}: no {source:?} notice"));
             assert!(message.contains(remedy), "{key}: {message}");
-            let spec = chord_menu::spec_for(key).unwrap();
+            let row = keymap::table()
+                .iter()
+                .find(|row| {
+                    row.context == Context::Leader
+                        && row.hosts.includes(Host::Attached)
+                        && row.keys == [Key::Char(key)].as_slice()
+                })
+                .unwrap();
             assert!(
-                matches!(spec.attached, AttachedRoute::Unavailable(r) if r == message),
-                "{key}: result is the spec's remedy verbatim"
+                matches!(
+                    row.availability(&AvailCtx::attached(80, false)),
+                    Availability::Unavailable(r) if r == message
+                ),
+                "{key}: result is the registry row's remedy verbatim"
             );
             assert!(
                 rig.frames().is_empty(),
@@ -1545,10 +1586,7 @@ mod tests {
         typed.type_text("/login").await;
         typed.state.autocomplete.dismiss();
         typed.enter().await;
-        assert_eq!(
-            typed.notice(NoticeSource::Login),
-            Some(chord_menu::ATTACHED_SIGN_IN)
-        );
+        assert_eq!(typed.notice(NoticeSource::Login), Some(ATTACHED_SIGN_IN));
 
         // `l`: the same attached `/team log` local read as the typed command.
         let mut leader = Rig::new(false);
@@ -1646,11 +1684,10 @@ mod tests {
 
         // The painted menu inventory equals the exercised routes, so hiding an
         // attached chord (or painting one without a caller) fails here.
-        let painted: BTreeSet<String> =
-            menu_items(&TuiState::new(80, 24).which_key, ChordHost::Attached)
-                .into_iter()
-                .map(|item| item.key)
-                .collect();
+        let painted: BTreeSet<String> = leader_menu(&AvailCtx::attached(80, false))
+            .into_iter()
+            .map(|item| item.key)
+            .collect();
         assert_eq!(painted, exercised);
     }
 
@@ -1679,6 +1716,12 @@ mod tests {
         assert!(!rig.state.which_key.active);
         assert_eq!(rig.state.focus, FocusState::Chat);
         assert!(rig.state.feedback_blocks.is_empty());
+        // Story 21.3 AC2: consumed aloud, with exactly one info record.
+        assert_eq!(rig.state.notifications.records().len(), 1);
+        assert_eq!(
+            rig.notice(NoticeSource::Chord),
+            Some("No binding for Ctrl+X z in Chat")
+        );
         // …exactly once: the next `i` is the Chat command, not a second follow-up.
         rig.ch('i').await;
         assert_eq!(rig.state.focus, FocusState::Input);
@@ -2327,7 +2370,7 @@ mod tests {
             rig.ctrl('x').await;
             let rows = paint(&rig.state, width);
             let painted = rows.join("\n");
-            for item in menu_items(&rig.state.which_key, ChordHost::Attached) {
+            for item in leader_menu(&AvailCtx::attached(width, false)) {
                 assert!(
                     painted.contains(&item.text()),
                     "{width} cols: `{}` missing/clipped in\n{painted}",
@@ -2375,6 +2418,17 @@ mod tests {
             input_box::tail_scroll(&"x\n".repeat(20), area),
             21 - input_box::MAX_INPUT_LINES
         );
+    }
+
+    #[test]
+    fn story21_3_attached_chat_hint_names_i_and_never_repeats_the_menu_tail() {
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Chat;
+        let hint = status_hint(&state).unwrap();
+        assert!(hint.starts_with("^X d detach · i "), "{hint}");
+        assert!(!hint.contains("menu"), "{hint}");
+        state.focus = FocusState::Input;
+        assert_eq!(status_hint(&state).as_deref(), Some("^X d detach"));
     }
 
     // ── Story 21.1 AC5/AC6: S-LOG and toasts in the attached host ────────────
@@ -2494,5 +2548,581 @@ mod tests {
         assert_eq!(dead.severity, NoticeSeverity::Error);
         assert_eq!(rig.state.status, StatusState::Idle, "no sticky status");
         assert!(rig.conversation.messages.is_empty());
+    }
+
+    // ── Story 21.3 (3-A): the attached leader and KG-2 truth from the registry ──
+
+    /// The crossterm event a terminal sends for one registry `Key`.
+    fn key_event(key: Key) -> (KeyCode, KeyModifiers) {
+        use KeyModifiers as M;
+        match key {
+            Key::Char(c) if c.is_ascii_uppercase() => (KeyCode::Char(c), M::SHIFT),
+            Key::Char(c) => (KeyCode::Char(c), M::NONE),
+            Key::Ctrl(c) => (KeyCode::Char(c), M::CONTROL),
+            Key::Alt(c) => (KeyCode::Char(c), M::ALT),
+            Key::Enter => (KeyCode::Enter, M::NONE),
+            Key::ShiftEnter => (KeyCode::Enter, M::SHIFT),
+            Key::CtrlEnter => (KeyCode::Enter, M::CONTROL),
+            Key::AltEnter => (KeyCode::Enter, M::ALT),
+            Key::Esc => (KeyCode::Esc, M::NONE),
+            Key::Tab => (KeyCode::Tab, M::NONE),
+            Key::ShiftTab => (KeyCode::BackTab, M::SHIFT),
+            Key::Backspace => (KeyCode::Backspace, M::NONE),
+            Key::Delete => (KeyCode::Delete, M::NONE),
+            Key::Up => (KeyCode::Up, M::NONE),
+            Key::Down => (KeyCode::Down, M::NONE),
+            Key::Left => (KeyCode::Left, M::NONE),
+            Key::Right => (KeyCode::Right, M::NONE),
+            Key::Home => (KeyCode::Home, M::NONE),
+            Key::End => (KeyCode::End, M::NONE),
+            Key::PageUp => (KeyCode::PageUp, M::NONE),
+            Key::PageDown => (KeyCode::PageDown, M::NONE),
+            Key::F(n) => (KeyCode::F(n), M::NONE),
+            Key::Other => (KeyCode::Insert, M::NONE),
+        }
+    }
+
+    impl Rig {
+        /// A writer rig with `focus` current and `draft` in the composer.
+        fn at(focus: FocusState, draft: &str) -> Self {
+            let mut rig = Self::new(false);
+            rig.state.focus = focus;
+            rig.input = draft.to_owned();
+            rig
+        }
+
+        async fn key(&mut self, key: Key) -> KeyFlow {
+            let (code, modifiers) = key_event(key);
+            self.press(code, modifiers).await
+        }
+
+        /// A transcript with room to scroll both ways, so a scroll key moves it.
+        fn scrollable(mut self) -> Self {
+            self.state.viewport_height = 20;
+            self.scroll_offset = 12;
+            self.auto_scroll = false;
+            self
+        }
+    }
+
+    /// Everything a key with no row must leave alone.
+    #[derive(Debug, PartialEq)]
+    struct Salient {
+        focus: FocusState,
+        input: String,
+        multiline: bool,
+        /// which-key, help, palette, S-LOG, S-QUIT, popup, recipient surface.
+        surfaces: [bool; 7],
+        scroll: (usize, bool),
+        notices: usize,
+        feedback: usize,
+    }
+
+    fn salient(rig: &Rig) -> Salient {
+        let state = &rig.state;
+        Salient {
+            focus: state.focus.clone(),
+            input: rig.input.clone(),
+            multiline: state.multiline_mode,
+            surfaces: [
+                state.which_key.active,
+                state.help_overlay.active,
+                state.command_palette.active,
+                state.notification_log.is_some(),
+                state.quit_confirm.is_some(),
+                state.autocomplete.active,
+                state.recipient_surface.is_some(),
+            ],
+            scroll: (rig.scroll_offset, rig.auto_scroll),
+            notices: state.notifications.records().len(),
+            feedback: state.feedback_blocks.len(),
+        }
+    }
+
+    fn single_key(row: &keymap::Binding) -> Key {
+        match row.keys {
+            [key] => *key,
+            other => panic!("{row:?}: an attached row is one key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn story21_3_attached_truth_key_helper_round_trips_the_universe() {
+        for key in Key::universe() {
+            let (code, modifiers) = key_event(key);
+            assert_eq!(
+                Key::from_crossterm(&KeyEvent::new(code, modifiers)),
+                key,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// K2 (attached): an unknown follow-up is consumed once, aloud — one info
+    /// record, the leader closed, the origin focus and the composer untouched,
+    /// nothing forwarded to the daemon.
+    #[tokio::test]
+    async fn story21_3_attached_unknown_follow_up_posts_no_binding_toast() {
+        let unknown = [
+            (Key::Char('j'), "j"),
+            (Key::Char('5'), "5"),
+            (Key::Char('f'), "f"),
+            (Key::Tab, "Tab"),
+            (Key::Left, "Left"),
+            (Key::F(2), "F2"),
+            (Key::Ctrl('a'), "Ctrl+A"),
+            (Key::Alt('z'), "Alt+Z"),
+            (Key::Ctrl('j'), "Ctrl+J"),
+        ];
+        for (key, label) in unknown {
+            let mut rig = Rig::at(FocusState::Input, "draft");
+            rig.ctrl('x').await;
+            assert!(rig.state.which_key.active, "{label}: leader open");
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{label}");
+            assert!(!rig.state.which_key.active, "{label}: leader closed");
+            assert_eq!(rig.state.focus, FocusState::Input, "{label}: origin");
+            assert_eq!(rig.input, "draft", "{label}: composer unchanged");
+            assert!(rig.frames().is_empty(), "{label}: nothing forwarded");
+            assert_eq!(rig.state.notifications.records().len(), 1, "{label}");
+            let expected = format!("No binding for Ctrl+X {label} in Input");
+            assert_eq!(rig.notice(NoticeSource::Chord), Some(expected.as_str()));
+            assert_eq!(
+                rig.state.notifications.records().last().map(|r| r.severity),
+                Some(NoticeSeverity::Info),
+                "{label}: an info record"
+            );
+            // Consumed exactly once: the next key is composer text again.
+            rig.ch('x').await;
+            assert_eq!(rig.input, "draftx", "{label}: not a second follow-up");
+        }
+
+        // Enter is a send only from Input; from Chat it has no binding.
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        rig.ctrl('x').await;
+        assert_eq!(rig.enter().await, KeyFlow::Continue);
+        assert_eq!(rig.state.notifications.records().len(), 1);
+        assert_eq!(
+            rig.notice(NoticeSource::Chord),
+            Some("No binding for Ctrl+X Enter in Chat")
+        );
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        assert_eq!(rig.input, "draft");
+        assert!(rig.frames().is_empty(), "no send from Chat");
+
+        // Positive control: a bound follow-up posts no no-binding record.
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('x').await;
+        assert_eq!(rig.ch('?').await, KeyFlow::Continue);
+        assert!(rig.state.help_overlay.active);
+        assert_eq!(rig.state.notifications.records().len(), 0);
+
+        // Esc and Ctrl+C cancel silently and never reach the interrupt path,
+        // even with a live projected turn.
+        for key in [Key::Esc, Key::Ctrl('c')] {
+            let mut rig = Rig::at(FocusState::Chat, "draft");
+            rig.interrupt.apply(&DaemonFrame::ActiveTurn {
+                generation: Some(TurnGeneration(7)),
+            });
+            rig.streaming.is_streaming = true;
+            rig.ctrl('x').await;
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
+            assert!(!rig.state.which_key.active, "{key:?}: closed");
+            assert_eq!(rig.state.focus, FocusState::Chat, "{key:?}: origin");
+            assert_eq!(rig.state.notifications.records().len(), 0, "{key:?}");
+            assert!(rig.state.quit_confirm.is_none(), "{key:?}");
+            assert!(rig.frames().is_empty(), "{key:?}: no InterruptTurn");
+        }
+    }
+
+    /// K2 (attached): every Leader row the attached host sees runs its command
+    /// by value through the key front door. The `match` is exhaustive, so a new
+    /// `LeaderCmd` forces a witness here.
+    #[tokio::test]
+    async fn story21_3_attached_leader_runs_every_registry_row() {
+        let avail = AvailCtx::attached(80, false);
+        let mut ran = 0;
+        for row in rows_of(Context::Leader, Host::Attached) {
+            let CommandId::Leader(cmd) = row.command else {
+                panic!("{row:?}: a Leader row carries a LeaderCmd");
+            };
+            let [key] = row.keys else {
+                panic!("{row:?}: a follow-up is one key");
+            };
+            let key = *key;
+            let label = row.long_label();
+            let mut rig = Rig::at(FocusState::Input, "draft");
+            if cmd == LeaderCmd::ClearToasts {
+                notifications::info(&mut rig.state, NoticeSource::Attached, "one");
+            }
+            let seeded = rig.state.notifications.records().len();
+            rig.ctrl('x').await;
+            assert!(rig.state.which_key.active, "{label}: leader open");
+            let flow = rig.key(key).await;
+            let posted = rig.state.notifications.records().len() - seeded;
+            assert!(!rig.state.which_key.active, "{label}: leader closed");
+            let expected_flow = if cmd == LeaderCmd::Detach {
+                KeyFlow::Detach
+            } else {
+                KeyFlow::Continue
+            };
+            assert_eq!(flow, expected_flow, "{label}");
+            match cmd {
+                LeaderCmd::Profile
+                | LeaderCmd::Model
+                | LeaderCmd::SignIn
+                | LeaderCmd::Adapters
+                | LeaderCmd::Agents
+                | LeaderCmd::Room
+                | LeaderCmd::Artifacts
+                | LeaderCmd::Tasks
+                | LeaderCmd::Usage
+                | LeaderCmd::History
+                | LeaderCmd::Monitor => {
+                    let Availability::Unavailable(remedy) = row.availability(&avail) else {
+                        panic!("{label}: unavailable in the attached host");
+                    };
+                    let source = if remedy == ATTACHED_SIGN_IN {
+                        NoticeSource::Login
+                    } else {
+                        NoticeSource::Chord
+                    };
+                    assert_eq!(rig.notice(source), Some(remedy), "{label}");
+                    assert_eq!(posted, 1, "{label}: exactly the remedy");
+                    assert!(rig.frames().is_empty(), "{label}: sends nothing");
+                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.focus, FocusState::Input, "{label}");
+                }
+                LeaderCmd::A2aLog => {
+                    assert!(rig.feedback("team-log").is_some(), "{label}");
+                    assert!(rig.frames().is_empty(), "{label}: a local read");
+                    assert_eq!(rig.input, "draft", "{label}");
+                }
+                LeaderCmd::Detach => {
+                    assert!(rig.frames().is_empty(), "{label}: the loop sends Detach");
+                    // Follow-up letters are case-insensitive.
+                    let mut upper = Rig::at(FocusState::Input, "draft");
+                    upper.ctrl('x').await;
+                    assert_eq!(upper.ch('D').await, KeyFlow::Detach);
+                }
+                LeaderCmd::Help => {
+                    assert!(rig.state.help_overlay.active, "{label}");
+                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+                    assert_eq!(posted, 0, "{label}");
+                }
+                LeaderCmd::Notifications => {
+                    assert!(rig.state.notification_log.is_some(), "{label}");
+                    assert_eq!(rig.state.focus, FocusState::Input, "{label}: caller");
+                    assert_eq!(rig.input, "draft", "{label}");
+                }
+                LeaderCmd::ClearToasts => {
+                    assert_eq!(rig.state.notifications.visible().count(), 0, "{label}");
+                    assert_eq!(rig.state.notifications.records().len(), 1, "log keeps it");
+                }
+                LeaderCmd::Decisions => {
+                    let toast = rig.state.notifications.visible().next().expect("a toast");
+                    assert_eq!(toast.message, "No decisions waiting in this client");
+                    assert_eq!(toast.severity, NoticeSeverity::Info);
+                    assert_eq!(posted, 1, "{label}");
+                    assert!(rig.frames().is_empty(), "{label}: a local answer");
+                }
+                LeaderCmd::Send => {
+                    let frames = rig.frames();
+                    assert_eq!(frames.len(), 1, "{label}: one user frame");
+                    assert_eq!(user_text(&frames[0]), Some("draft"));
+                    assert!(rig.input.is_empty(), "{label}: composer sent");
+                    assert_eq!(posted, 0, "{label}");
+                }
+                LeaderCmd::Cancel => {
+                    assert_eq!(posted, 0, "{label}: cancels silently");
+                    assert!(rig.frames().is_empty(), "{label}");
+                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.focus, FocusState::Input, "{label}");
+                }
+            }
+            ran += 1;
+        }
+        assert!(
+            ran >= 19,
+            "the attached leader table was walked ({ran} rows)"
+        );
+    }
+
+    /// K4 (attached): for the Global, Input and Chat rows visible to the
+    /// attached host, each row's key produces its command's effect by value.
+    /// A row without a witness fails the test (the wildcard arms panic), so a
+    /// new attached command forces one.
+    #[tokio::test]
+    async fn story21_3_attached_truth_rows_produce_their_commands_effect() {
+        let mut checked = 0;
+
+        for focus in [FocusState::Input, FocusState::Chat] {
+            for row in rows_of(Context::Global, Host::Attached) {
+                let CommandId::Global(cmd) = row.command else {
+                    panic!("{row:?}: a Global row carries a GlobalCmd");
+                };
+                let key = single_key(row);
+                match cmd {
+                    GlobalCmd::OpenLeader => {
+                        let mut rig = Rig::at(focus.clone(), "draft");
+                        assert_eq!(rig.key(key).await, KeyFlow::Continue);
+                        assert!(rig.state.which_key.active, "{focus:?}");
+                        assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::WhichKey));
+                        assert_eq!(rig.input, "draft");
+                    }
+                    GlobalCmd::QuitRequest => {
+                        let mut rig = Rig::at(focus.clone(), "draft");
+                        assert_eq!(rig.key(key).await, KeyFlow::Continue);
+                        assert!(rig.state.quit_confirm.is_some(), "{focus:?}: asks first");
+                        assert_eq!(rig.input, "draft");
+                        let mut idle = Rig::at(focus.clone(), "");
+                        assert_eq!(idle.key(key).await, KeyFlow::Quit, "{focus:?}: idle");
+                    }
+                }
+                checked += 1;
+            }
+        }
+
+        for row in rows_of(Context::Input, Host::Attached) {
+            let CommandId::Input(cmd) = row.command else {
+                panic!("{row:?}: an Input row carries an InputCmd");
+            };
+            let key = single_key(row);
+            let draft = if cmd == InputCmd::OpenSlashPopup {
+                ""
+            } else {
+                "hi"
+            };
+            let mut rig = Rig::at(FocusState::Input, draft).scrollable();
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{row:?}");
+            let frames = rig.frames();
+            let no_frames = |what: &str| assert!(frames.is_empty(), "{what}: {frames:?}");
+            match cmd {
+                InputCmd::SubmitOrNewline => {
+                    assert_eq!(frames.len(), 1, "{row:?}");
+                    assert_eq!(user_text(&frames[0]), Some("hi"));
+                    assert!(rig.input.is_empty());
+                    let mut multiline = Rig::at(FocusState::Input, "hi");
+                    multiline.state.multiline_mode = true;
+                    multiline.key(key).await;
+                    assert_eq!(multiline.input, "hi\n", "multi-line: a newline");
+                    assert!(multiline.frames().is_empty());
+                }
+                InputCmd::Send => {
+                    assert_eq!(frames.len(), 1, "{row:?}");
+                    assert_eq!(user_text(&frames[0]), Some("hi"));
+                    assert!(rig.input.is_empty());
+                }
+                InputCmd::InsertNewline => {
+                    no_frames("newline");
+                    assert_eq!(rig.input, "hi\n", "{row:?}");
+                }
+                InputCmd::LineEnd => {
+                    no_frames("Ctrl+E");
+                    assert_eq!(rig.input, "hi");
+                    assert!(!rig.state.multiline_mode, "end-of-line, never the toggle");
+                }
+                InputCmd::ToggleMultiline => {
+                    no_frames("Alt+M");
+                    assert!(rig.state.multiline_mode);
+                    assert_eq!(rig.input, "hi", "Alt+M is not typed");
+                }
+                InputCmd::ReturnToChat => {
+                    no_frames("Esc");
+                    assert_eq!(rig.state.focus, FocusState::Chat);
+                    assert_eq!(rig.input, "hi", "unsent text kept");
+                }
+                InputCmd::OpenPalette => {
+                    assert!(rig.state.command_palette.active);
+                    assert_eq!(rig.input, "hi");
+                }
+                InputCmd::CancelOrQuit => {
+                    no_frames("Ctrl+C");
+                    assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+                    assert_eq!(rig.input, "hi");
+                }
+                InputCmd::DeleteBack => {
+                    no_frames("Backspace");
+                    assert_eq!(rig.input, "h");
+                }
+                InputCmd::OpenSlashPopup => {
+                    no_frames("/");
+                    assert_eq!(rig.input, "/");
+                    assert!(rig.state.autocomplete.active);
+                    assert_eq!(rig.state.autocomplete.kind, AutocompleteKind::SlashCommand);
+                }
+                InputCmd::TranscriptPageUp => {
+                    no_frames("PgUp");
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (17, false));
+                }
+                InputCmd::TranscriptPageDown => {
+                    no_frames("PgDn");
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (7, false));
+                }
+                // Any other command is local-only: it must not be an attached row.
+                _ => panic!("{row:?}: an attached Input row has no witness"),
+            }
+            checked += 1;
+        }
+
+        for row in rows_of(Context::Chat, Host::Attached) {
+            let CommandId::Chat(cmd) = row.command else {
+                panic!("{row:?}: a Chat row carries a ChatCmd");
+            };
+            let key = single_key(row);
+            let mut rig = Rig::at(FocusState::Chat, "hi").scrollable();
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{row:?}");
+            assert!(rig.frames().is_empty(), "{row:?}: a Chat key sends nothing");
+            match cmd {
+                ChatCmd::FocusToggle | ChatCmd::FocusInput => {
+                    assert_eq!(rig.state.focus, FocusState::Input, "{row:?}");
+                    assert_eq!(rig.input, "hi");
+                }
+                ChatCmd::Quit | ChatCmd::CancelOrQuit => {
+                    assert!(
+                        rig.state.quit_confirm.is_some(),
+                        "{row:?}: a draft asks first"
+                    );
+                    assert_eq!(rig.input, "hi");
+                    let mut idle = Rig::at(FocusState::Chat, "");
+                    assert_eq!(idle.key(key).await, KeyFlow::Quit, "{row:?}: idle");
+                }
+                ChatCmd::OpenHelp => {
+                    assert!(rig.state.help_overlay.active);
+                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+                }
+                ChatCmd::OpenPalette => assert!(rig.state.command_palette.active),
+                ChatCmd::ScrollHalfPageDown | ChatCmd::ScrollPageDown => {
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (7, false), "{row:?}");
+                }
+                ChatCmd::ScrollPageUp => {
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (17, false), "{row:?}");
+                }
+                // Any other command is local-only: it must not be an attached row.
+                _ => panic!("{row:?}: an attached Chat row has no witness"),
+            }
+            checked += 1;
+        }
+        assert!(checked >= 20, "the attached rows were walked ({checked})");
+    }
+
+    /// K4 (attached): every universe key with no row in the context (own,
+    /// inherited or Global) is inert; printable keys in Input append exactly
+    /// themselves. Local-only rows are "no row" for this host.
+    #[tokio::test]
+    async fn story21_3_attached_truth_keys_without_a_row_are_inert_or_plain_typing() {
+        let mut swept = 0;
+        for (context, focus) in [
+            (Context::Input, FocusState::Input),
+            (Context::Chat, FocusState::Chat),
+        ] {
+            for key in Key::universe() {
+                let has_row = !matches!(resolve(context, Host::Attached, &[key]), Resolved::Miss)
+                    || matches!(
+                        resolve(Context::Global, Host::Attached, &[key]),
+                        Resolved::Hit(_)
+                    );
+                if has_row {
+                    continue;
+                }
+                let mut rig = Rig::at(focus.clone(), "abc").scrollable();
+                let mut expected = salient(&rig);
+                assert_eq!(rig.key(key).await, KeyFlow::Continue, "{context:?} {key:?}");
+                assert!(rig.frames().is_empty(), "{context:?} {key:?}: sent a frame");
+                if let (Context::Input, Key::Char(c)) = (context, key) {
+                    expected.input.push(c);
+                }
+                assert_eq!(
+                    salient(&rig),
+                    expected,
+                    "{context:?} {key:?} has no row and must not act"
+                );
+                swept += 1;
+            }
+        }
+        assert!(swept > 250, "the sweep covered the universe ({swept} keys)");
+
+        // Positive control: keys WITH a row visibly change the same snapshot.
+        for (focus, key) in [
+            (FocusState::Input, Key::Esc),
+            (FocusState::Chat, Key::Char('i')),
+            (FocusState::Input, Key::Alt('m')),
+            (FocusState::Chat, Key::PageUp),
+            (FocusState::Input, Key::Backspace),
+        ] {
+            let mut rig = Rig::at(focus, "abc").scrollable();
+            let before = salient(&rig);
+            rig.key(key).await;
+            assert_ne!(salient(&rig), before, "{key:?} has a row and changes state");
+        }
+    }
+
+    /// AC12 (attached): a Ctrl/Alt-modified character is a consumed no-op in
+    /// both foci: never typed, never a command (Ctrl+J does not scroll, Ctrl+Y
+    /// approves nothing, Alt+C/L/U type no letters).
+    #[tokio::test]
+    async fn story21_3_attached_truth_modified_characters_are_consumed_never_typed() {
+        let mut events = Vec::new();
+        for c in ['a', 'w', 'k', 'u', 'h', 'j', 'y'] {
+            events.push((KeyCode::Char(c), KeyModifiers::CONTROL));
+        }
+        for c in ['c', 'l', 'u', 'x', '/', '1'] {
+            events.push((KeyCode::Char(c), KeyModifiers::ALT));
+        }
+        events.push((KeyCode::Char('C'), KeyModifiers::ALT | KeyModifiers::SHIFT));
+        for focus in [FocusState::Input, FocusState::Chat] {
+            for (code, modifiers) in &events {
+                let mut rig = Rig::at(focus.clone(), "abc").scrollable();
+                let before = salient(&rig);
+                assert_eq!(rig.press(*code, *modifiers).await, KeyFlow::Continue);
+                assert!(rig.frames().is_empty(), "{code:?}+{modifiers:?}");
+                assert_eq!(
+                    salient(&rig),
+                    before,
+                    "{focus:?}: {code:?}+{modifiers:?} must be consumed"
+                );
+            }
+        }
+        // Control: the same letter unmodified is typed in Input.
+        let mut rig = Rig::at(FocusState::Input, "abc");
+        rig.ch('a').await;
+        assert_eq!(rig.input, "abca");
+    }
+
+    /// A12 (attached): opening the slash popup runs discovery (`sync_slash`)
+    /// and announces each shadowed custom command once per generation.
+    #[tokio::test]
+    async fn story21_3_attached_announces_shadows_after_sync() {
+        let mut rig = Rig::new(false);
+        let commands = rig.workspace.path().join(".claude").join("commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("quit.md"), "shadowed").unwrap();
+        std::fs::write(commands.join("deploy.md"), "not shadowed").unwrap();
+        let warnings = |rig: &Rig| -> Vec<String> {
+            rig.state
+                .notifications
+                .records()
+                .filter(|r| r.severity == NoticeSeverity::Warning)
+                .map(|r| r.message.clone())
+                .collect()
+        };
+        assert!(warnings(&rig).is_empty(), "nothing before discovery");
+
+        rig.ch('/').await;
+        assert!(rig.state.autocomplete.active);
+        let first = warnings(&rig);
+        assert_eq!(
+            first.len(),
+            1,
+            "one Warning, for the shadowed name: {first:?}"
+        );
+        assert!(first[0].contains("/quit"), "{first:?}");
+        assert!(!first[0].contains("deploy"), "a free name stays silent");
+
+        // Same discovery generation: closing and reopening the popup is silent.
+        assert_eq!(rig.esc().await, KeyFlow::Continue);
+        assert!(!rig.state.autocomplete.active);
+        rig.ch('/').await;
+        assert!(rig.state.autocomplete.active);
+        assert_eq!(warnings(&rig), first, "no repeat in the same generation");
     }
 }

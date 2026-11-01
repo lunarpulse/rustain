@@ -1902,7 +1902,9 @@ fn the_resolve_subverb_parses_exactly_one_id_and_one_finding() {
         artifact_entry.description
     );
     assert!(
-        source("src/adapters/tui/help_data.rs").contains("/artifact resolve <id> present|absent"),
+        rustain::adapters::tui::keymap::render_help::help_rows()
+            .iter()
+            .any(|row| row.key == "/artifact resolve <id> present|absent"),
         "the help overlay must advertise the verb"
     );
     // Positive control that `parse_finding` is not a constant function.
