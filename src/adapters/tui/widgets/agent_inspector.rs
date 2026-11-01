@@ -6,6 +6,9 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
+use crate::adapters::tui::keymap::resolve::rows_of;
+use crate::adapters::tui::keymap::table_inspector::InspectorCmd;
+use crate::adapters::tui::keymap::{CommandId, Context, Host};
 use crate::domain::models::subagent_view::AgentRowView;
 
 pub fn render(
@@ -219,19 +222,28 @@ pub fn render(
 
     if pending_kill_confirm == Some(&entry.agent_id) {
         // Double-bordered kill confirmation card per AC-10-4-7
+        let (confirm_key, confirm) = row_text(InspectorCmd::ConfirmKill);
+        let (cancel_key, cancel) = row_text(InspectorCmd::CancelKill);
+        let (back_key, _) = row_text(InspectorCmd::Close);
+        let kill = format!(
+            "\u{26A0} Kill {} and its subtree?",
+            entry.subagent_type.replace('{', "{{").replace('}', "}}")
+        );
         lines.push(Line::from(Span::raw("")));
         lines.push(Line::from(Span::styled(
-            format!(
-                "\u{26A0} Kill {} and its subtree?  [y] Confirm   [n/Esc] Cancel",
-                entry.subagent_type.replace('{', "{{").replace('}', "}}")
-            ),
+            format!("{kill}  [{confirm_key}] {confirm}   [{cancel_key}/{back_key}] {cancel}"),
             Style::default()
                 .fg(theme.colors.tool_status_error)
                 .add_modifier(Modifier::BOLD),
         )));
     } else {
+        use InspectorCmd::{Close, Conversation, Kill, Model, Pause, Tools};
+        let rail = [Pause, Kill, Model, Tools, Conversation, Close].map(|cmd| {
+            let (key, label) = row_text(cmd);
+            format!("[{key}] {label}")
+        });
         lines.push(Line::from(Span::styled(
-            "[p] Pause/Resume   [x] Kill (cascade)   [m] Change model   [t] Update tools   [c] Conversation tab   [Esc] Back",
+            rail.join("   "),
             Style::default().fg(theme.colors.fg_secondary),
         )));
     }
@@ -248,6 +260,13 @@ pub fn render(
 
     let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     para.render(inner, buf);
+}
+
+/// The key and rail label of an inspector command, read from its registry row.
+fn row_text(command: InspectorCmd) -> (String, &'static str) {
+    rows_of(Context::SidebarAgentInspector, Host::Local)
+        .find(|row| row.command == CommandId::Inspector(command))
+        .map_or_else(Default::default, |row| (row.keys[0].label(), row.label))
 }
 
 #[cfg(test)]

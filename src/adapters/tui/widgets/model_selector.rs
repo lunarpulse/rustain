@@ -80,12 +80,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
                 lines: rows,
                 selected,
             });
-            let keys = if state.sign_in.contains_key(&col.provider_id) {
-                "Enter sign in · ←→ provider · Esc close"
-            } else {
-                "←→ provider · Esc close"
+            let keys = {
+                use crate::adapters::tui::keymap::{render::key_text, table_overlay::OverlayCmd};
+                let close = key_text(OverlayCmd::ModelBack);
+                if state.sign_in.contains_key(&col.provider_id) {
+                    format!(
+                        "{} sign in · ←→ provider · {close} close",
+                        key_text(OverlayCmd::ModelSelect)
+                    )
+                } else {
+                    format!("←→ provider · {close} close")
+                }
             };
-            footer = wrapped(keys, muted, width);
+            footer = wrapped(&keys, muted, width);
         } else {
             if state.search_active && col.models.len() > 10 {
                 header.extend(wrapped(
@@ -217,12 +224,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
             {
                 parts.push(ModalPart::Notice(wrapped(line, muted, width)));
             }
+            let (esc, enter) = {
+                use crate::adapters::tui::keymap::{render::key_text, table_overlay::OverlayCmd};
+                (
+                    key_text(OverlayCmd::ModelBack),
+                    key_text(OverlayCmd::ModelSelect),
+                )
+            };
             let mut keys = if filtered {
-                "Esc clear · Esc Esc close".to_string()
+                format!("{esc} clear · {esc} {esc} close")
             } else if col.models.is_empty() {
-                "←→ provider · Esc close".to_string()
+                format!("←→ provider · {esc} close")
             } else {
-                "↑↓ navigate · Enter select · Esc close".to_string()
+                format!("↑↓ navigate · {enter} select · {esc} close")
             };
             if !filtered && col.models.len() > 10 {
                 keys.push_str(" · / search");
@@ -249,10 +263,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
         // or drop it while the picker waits for the answer.
         let mut prompt = wrapped(
             &format!(
-                "⚠ Current context ({} tokens) exceeds {} limit ({}). Compact context? [y/n]",
+                "⚠ Current context ({} tokens) exceeds {} limit ({}). Compact context? [{}/{}]",
                 humanize_ctx(warning.current_tokens),
                 warning.model_display_name,
-                humanize_ctx(warning.context_window)
+                humanize_ctx(warning.context_window),
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnYes
+                ),
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnNo
+                )
             ),
             Style::default().fg(theme.colors.warning),
             width,

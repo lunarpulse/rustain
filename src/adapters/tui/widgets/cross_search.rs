@@ -142,7 +142,15 @@ pub fn render(frame: &mut Frame, area: Rect, state: &CrossSearchState, theme: &T
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " [Enter] open  [Esc] close ",
+            format!(
+                " [{}] open  [{}] close ",
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::CrossOpen
+                ),
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::CrossClose
+                )
+            ),
             Style::default().fg(theme.colors.fg_muted),
         ));
 

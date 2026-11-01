@@ -133,7 +133,10 @@ pub fn unknown_command_notice(host: CommandHost, name: &str) -> String {
                 format!("/{name} is only available in an attached client (rustain daemon attach).")
             }
             CommandHost::Attached => format!(
-                "/{name} is not available in an attached session. Detach (Ctrl+X d) and use it from a standalone `rustain` session."
+                "/{name} is not available in an attached session. Detach ({detach}) and use it from a standalone `rustain` session.",
+                detach = crate::adapters::tui::keymap::render::leader_follow_up_long(
+                    crate::adapters::tui::keymap::table::LeaderCmd::Detach
+                )
             ),
         },
         _ => format!("Unknown command: /{name} — not a built-in or a custom command."),

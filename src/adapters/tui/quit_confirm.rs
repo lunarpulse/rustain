@@ -10,6 +10,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::{ModalPart, fit_modal, modal_area};
@@ -205,25 +207,47 @@ pub enum QuitKeyOutcome {
     Consumed,
 }
 
+impl QuitKey {
+    fn key(self) -> Key {
+        match self {
+            QuitKey::Char(c) => Key::Char(c),
+            QuitKey::Enter => Key::Enter,
+            QuitKey::Esc => Key::Esc,
+            QuitKey::CtrlC => Key::Ctrl('c'),
+            QuitKey::Other => Key::Other,
+        }
+    }
+}
+
 /// Apply one key to the open frame. Without an open frame it returns
 /// `Consumed` and changes nothing (callers gate on `quit_confirm.is_some()`).
 pub fn handle_key(state: &mut TuiState, key: QuitKey) -> QuitKeyOutcome {
+    execute(state, Host::Local, key.key())
+}
+
+/// Resolve the key in `QuitConfirm` and run its command: `y` quits, every other
+/// bound key stays, an unbound key is swallowed.
+fn execute(state: &mut TuiState, host: Host, key: Key) -> QuitKeyOutcome {
     if state.quit_confirm.is_none() {
         return QuitKeyOutcome::Consumed;
     }
     state.needs_redraw = true;
-    match key {
-        QuitKey::Char('y' | 'Y') => {
+    let command = match keymap::resolve(Context::QuitConfirm, host, &[key]) {
+        Resolved::Hit(row) => Some(row.command),
+        _ => None,
+    };
+    match command {
+        Some(CommandId::Overlay(OverlayCmd::QuitYes)) => {
             state.quit_confirm = None;
             QuitKeyOutcome::Confirmed
         }
-        QuitKey::Char('n' | 'N') | QuitKey::Esc | QuitKey::CtrlC | QuitKey::Enter => {
+        Some(CommandId::Overlay(OverlayCmd::QuitNo)) => {
             if let Some(frame) = state.quit_confirm.take() {
                 state.focus = frame.caller_focus;
             }
             QuitKeyOutcome::Cancelled
         }
-        QuitKey::Char(_) | QuitKey::Other => QuitKeyOutcome::Consumed,
+        _ => QuitKeyOutcome::Consumed,
     }
 }
 
@@ -234,33 +258,20 @@ pub fn handle_domain_event(
     state: &mut TuiState,
     event: &crate::domain::events::DomainInputEvent,
 ) -> Option<QuitKeyOutcome> {
-    use crate::domain::events::{DomainInputEvent, DomainKey};
-    let key = match event {
-        DomainInputEvent::Resize(..)
-        | DomainInputEvent::FocusGained
-        | DomainInputEvent::FocusLost => return None,
-        DomainInputEvent::KeyPress(c) => QuitKey::Char(*c),
-        DomainInputEvent::SpecialKey(DomainKey::Enter) => QuitKey::Enter,
-        DomainInputEvent::SpecialKey(DomainKey::Esc) => QuitKey::Esc,
-        DomainInputEvent::SpecialKey(DomainKey::CtrlC) => QuitKey::CtrlC,
-        _ => QuitKey::Other,
-    };
-    Some(handle_key(state, key))
+    use crate::domain::events::DomainInputEvent;
+    if matches!(
+        event,
+        DomainInputEvent::Resize(..) | DomainInputEvent::FocusGained | DomainInputEvent::FocusLost
+    ) {
+        return None;
+    }
+    let key = Key::from_domain(event).unwrap_or(Key::Other);
+    Some(execute(state, Host::Local, key))
 }
 
 /// Apply a raw crossterm key to the open frame (the attached client's ingress).
 pub fn handle_raw_key(state: &mut TuiState, key: crossterm::event::KeyEvent) -> QuitKeyOutcome {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT);
-    let quit_key = match key.code {
-        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => QuitKey::CtrlC,
-        KeyCode::Char(c) if plain => QuitKey::Char(c),
-        KeyCode::Enter if key.modifiers.is_empty() => QuitKey::Enter,
-        KeyCode::Esc => QuitKey::Esc,
-        _ => QuitKey::Other,
-    };
-    handle_key(state, quit_key)
+    execute(state, Host::Attached, Key::from_crossterm(&key))
 }
 
 /// Paint the decision frame on top of every other overlay: a System/Quit title,

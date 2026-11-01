@@ -90,6 +90,7 @@ const PALETTE: &[W] = &[
     w(&[Key::Esc], "Consumed | active=false filter= sel=0 focus=Input"),
     w(&[Key::Ctrl('c')], "Consumed | active=false filter= sel=0 focus=Input"),
     w(&[Key::Backspace], "Consumed | active=true filter=a sel=0 focus=Overlay(CommandPalette)"),
+    w(&[Key::Ctrl('q')], "Quit | active=false filter= sel=0 focus=Input"),
 ];
 
 /// Catches a palette row that runs the wrong entry, keeps the palette open, or moves the wrong way.
@@ -190,6 +191,9 @@ const SELECTOR_OFF: &[W] = &[
     wp(&[Key::Enter], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Overlay(ModelSelector)", warning),
     wp(&[Key::Char('j')], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Overlay(ModelSelector)", warning),
     wp(&[Key::Char('Y')], "CompactThenSwitchModel { provider_id: \"b\", model_id: \"b-3\" } | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)", warning),
+    // FieldEdit parent (DF-21-3-TEXTFIELD-CTRL-H-GAPS): `Ctrl+H` edits the search like `Backspace`, and is inert without one.
+    wp(&[Key::Ctrl('h')], "Consumed | p=1 m=0 active=true search=true q=b warn=false focus=Overlay(ModelSelector)", searching),
+    w(&[Key::Ctrl('h')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
 ];
 
 /// Three columns of three models; the middle model of the middle column is selected.
@@ -678,6 +682,7 @@ fn select_warn(s: &mut TuiState) {
 const LOG: &[W] = &[
     w(&[Key::Esc], "Closed | sel=None detail=None vis=3 dec=[] focus=Chat"),
     w(&[Key::Ctrl('c')], "Closed | sel=None detail=None vis=3 dec=[] focus=Chat"),
+    w(&[Key::Ctrl('q')], "Quit | sel=None detail=None vis=3 dec=[] focus=Chat"),
     w(&[Key::Char('j')], "Consumed | sel=Some((1, Some(2))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     w(&[Key::Down], "Consumed | sel=Some((1, Some(2))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     wp(&[Key::Char('k')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat", select_warn),

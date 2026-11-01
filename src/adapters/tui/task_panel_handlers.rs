@@ -156,7 +156,12 @@ pub fn handle_plan_execution_started(
         {
             out.notices.push(PendingNotice {
                 level: NoticeLevel::Info,
-                message: "Tasks panel hidden for this session — Ctrl+X, T to reopen.".to_string(),
+                message: format!(
+                    "Tasks panel hidden for this session — {} to reopen.",
+                    crate::adapters::tui::keymap::render::leader_follow_up_long(
+                        crate::adapters::tui::keymap::table::LeaderCmd::Tasks
+                    )
+                ),
                 conversation_id: conversation.id.clone(),
             });
         }
@@ -176,7 +181,12 @@ pub fn handle_plan_execution_started(
         if was_closed {
             out.notices.push(PendingNotice {
                 level: NoticeLevel::Info,
-                message: "Task panel opened. Press Esc to dismiss.".to_string(),
+                message: format!(
+                    "Task panel opened. Press {} to dismiss.",
+                    crate::adapters::tui::keymap::render::key_text(
+                        crate::adapters::tui::keymap::table_nav::SidebarCmd::FocusChat
+                    )
+                ),
                 conversation_id: conversation.id.clone(),
             });
         }
@@ -187,9 +197,13 @@ pub fn handle_plan_execution_started(
         out.narrow_skipped = true;
         out.notices.push(PendingNotice {
             level: NoticeLevel::Info,
-            message: "Task panel auto-open skipped \u{2014} terminal too narrow (<120 cols). \
-                 Press Ctrl+X, T after resize."
-                .to_string(),
+            message: format!(
+                "Task panel auto-open skipped \u{2014} terminal too narrow (<120 cols). \
+                 Press {} after resize.",
+                crate::adapters::tui::keymap::render::leader_follow_up_long(
+                    crate::adapters::tui::keymap::table::LeaderCmd::Tasks
+                )
+            ),
             conversation_id: conversation.id.clone(),
         });
     }

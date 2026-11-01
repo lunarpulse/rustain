@@ -158,10 +158,10 @@ pub enum Violation {
     EmptyKeys { context: Context },
 }
 
-/// Contexts whose bare `c` is a named exception to RU-21 (PC-14). Empty in
-/// 3-A: the spawn gate and skip-cascade (owner 21-6) and the agent inspector
-/// (owner 21-7) join the registry with their contexts.
-const BARE_C_EXCEPTIONS: &[Context] = &[];
+/// Contexts whose bare `c` is a named exception to RU-21 (PC-14): the agent
+/// inspector (owner 21-7). The spawn gate and skip-cascade (owner 21-6) join the
+/// registry with their contexts.
+const BARE_C_EXCEPTIONS: &[Context] = &[Context::SidebarAgentInspector];
 
 /// Governance of a table: duplicate normalized keys per context (host-aware),
 /// the parent graph, declared reachability, portable alternatives, PTY bytes,

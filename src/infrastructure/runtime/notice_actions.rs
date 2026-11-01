@@ -206,7 +206,7 @@ pub(crate) fn execute_log_outcome(
     router: &crate::adapters::provider::ProviderRouter,
 ) {
     match outcome {
-        LogOutcome::Consumed | LogOutcome::Closed => {}
+        LogOutcome::Consumed | LogOutcome::Closed | LogOutcome::Quit => {}
         LogOutcome::Copy(text) => handlers::clipboard::notify_copy(
             state,
             &text,

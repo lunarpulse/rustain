@@ -278,8 +278,11 @@ impl LiveProviders {
                         catalogue.retain(|t| t.provider_id != entry.id);
                         if entry.id == active {
                             notices.push(format!(
-                                "{} is now locked — choose another model (Ctrl+X, M).",
-                                locked.display_name
+                                "{} is now locked — choose another model ({}).",
+                                locked.display_name,
+                                crate::adapters::tui::keymap::render::leader_follow_up_long(
+                                    crate::adapters::tui::keymap::table::LeaderCmd::Model
+                                )
                             ));
                         }
                     }

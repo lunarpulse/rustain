@@ -190,11 +190,16 @@ pub fn render(
             } else {
                 String::new()
             };
-            let keys = if expanded {
-                "[Enter] collapse  [j/k] scroll"
-            } else {
-                "[Enter] expand  [j/k] scroll"
+            let k = |cmd: crate::adapters::tui::keymap::table_panels::PanelCmd| {
+                crate::adapters::tui::keymap::render::key_text(cmd)
             };
+            let keys = format!(
+                "[{}] {}  [{}/{}] scroll",
+                k(crate::adapters::tui::keymap::table_panels::PanelCmd::DrillToggleExpand),
+                if expanded { "collapse" } else { "expand" },
+                k(crate::adapters::tui::keymap::table_panels::PanelCmd::DrillScrollDown),
+                k(crate::adapters::tui::keymap::table_panels::PanelCmd::DrillScrollUp),
+            );
             buf.set_string(
                 inner.x,
                 y,
@@ -258,13 +263,24 @@ pub fn render(
     }
 
     if y < max_y || inner.height >= 2 {
+        use crate::adapters::tui::keymap::table_panels::PanelCmd as P;
+        let k = |cmd: P| crate::adapters::tui::keymap::render::key_text(cmd);
+        let (copy, back) = (k(P::DrillCopy), k(P::DrillClose));
         let action_text = match task.status {
-            PlanTaskStatus::Completed => "[c] Copy result   [Esc] Back".to_string(),
-            PlanTaskStatus::Failed => {
-                "[c] Copy error   [r] Retry   [s] Skip   [e] Edit task   [Esc] Back".to_string()
+            PlanTaskStatus::Completed => format!("[{copy}] Copy result   [{back}] Back"),
+            PlanTaskStatus::Failed => format!(
+                "[{copy}] Copy error   [{}] Retry   [{}] Skip   [{}] Edit task   [{back}] Back",
+                k(P::DrillRetry),
+                k(P::DrillSkip),
+                k(P::DrillEdit)
+            ),
+            PlanTaskStatus::Paused => {
+                format!(
+                    "[{copy}] Copy info   [{}] Resume   [{back}] Back",
+                    k(P::DrillPause)
+                )
             }
-            PlanTaskStatus::Paused => "[c] Copy info   [p] Resume   [Esc] Back".to_string(),
-            _ => "[c] Copy info   [Esc] Back".to_string(),
+            _ => format!("[{copy}] Copy info   [{back}] Back"),
         };
         let action_y = max_y.saturating_sub(1);
         if action_y >= inner.y {

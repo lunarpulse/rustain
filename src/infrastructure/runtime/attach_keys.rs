@@ -45,9 +45,14 @@ use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::tui::app::{cancel_autocomplete_popup, convert_crossterm_event, handle_input};
 use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
 use crate::adapters::tui::keymap::resolve::no_binding_text;
-use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, LeaderCmd};
+use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, GlobalCmd, LeaderCmd};
+use crate::adapters::tui::keymap::table_chat::ChatCmd;
+use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::text_edit;
-use crate::adapters::tui::keymap::{AvailCtx, CommandId, Host, Key, LeaderStep, leader_step};
+use crate::adapters::tui::keymap::{
+    self, AvailCtx, CommandId, Context, Host, Key, LeaderStep, Resolved, leader_step,
+};
 use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
@@ -479,11 +484,11 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         return palette_key(ctx, key).await;
     }
     if ctx.state.help_overlay.active {
-        return help_key(ctx, key);
+        return help_key(ctx, key).await;
     }
     if ctx.state.autocomplete.active
         && ctx.state.focus == FocusState::Input
-        && let Some(flow) = popup_key(ctx, key)
+        && let Some(flow) = popup_key(ctx, key).await
     {
         return flow;
     }
@@ -672,104 +677,31 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             *ctx.retract_confirm = None;
             ctx.state.needs_redraw = true;
         }
-        // Ctrl+X opens the untimed leader (RU-3); it is never a retract.
-        (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
-            let origin = ctx.state.focus.clone();
-            ctx.state.which_key.open(origin);
-            ctx.state.focus = FocusState::Overlay(OverlayType::WhichKey);
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Char('p'), KeyModifiers::CONTROL) => open_palette(ctx).await,
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return ctrl_c(ctx),
-        // Ctrl+D keeps its local focus-specific meaning: Chat half-page down,
-        // inert in Input — never a detach.
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            if ctx.state.focus == FocusState::Chat {
-                scroll_attached_transcript(
-                    false,
-                    ctx.state.viewport_height / 2,
-                    ctx.streaming.is_streaming,
-                    ctx.scroll_offset,
-                    ctx.auto_scroll,
-                );
-                ctx.state.needs_redraw = true;
-            }
-        }
-        // Ctrl+E is end-of-line; the attached cursor is always at the end, so it
-        // is a no-op — never the multiline toggle.
-        (KeyCode::Char('e'), KeyModifiers::CONTROL) => {}
-        // Alt+M toggles multiline (Input focus, like the local host).
-        (KeyCode::Char('m'), KeyModifiers::ALT) => {
-            if ctx.state.focus == FocusState::Input {
-                ctx.state.multiline_mode = !ctx.state.multiline_mode;
-                ctx.state.needs_redraw = true;
-            }
-        }
-        // Esc never detaches, quits or submits: with no popup/overlay open it
-        // moves focus between Input and Chat and preserves the unsent text.
-        (KeyCode::Esc, _) => {
-            let next = match ctx.state.focus {
-                FocusState::Input => Some(FocusState::Chat),
-                FocusState::Chat => Some(FocusState::Input),
-                _ => None,
-            };
-            if let Some(next) = next {
-                ctx.state.focus = next;
-            }
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Enter, m) => return enter_key(ctx, m).await,
-        (KeyCode::Backspace, _) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
-            if ctx.state.recipient_surface.is_some() || ctx.state.focus != FocusState::Input {
+        _ => {
+            let pressed = Key::from_crossterm(&key);
+            // An open peer surface owns every printable key.
+            if matches!(pressed, Key::Char(_)) && ctx.state.recipient_surface.is_some() {
                 return KeyFlow::Continue;
             }
-            let _ = attached_composer_key_with_team_requests(
-                KeyCode::Backspace,
-                ctx.read_only,
-                ctx.input,
-                ctx.state,
-                ctx.frame_tx,
-                ctx.team_requests,
-            );
-        }
-        (KeyCode::PageUp | KeyCode::PageDown, _) => {
-            scroll_attached_transcript(
-                key.code == KeyCode::PageUp,
-                ctx.state.viewport_height,
-                ctx.streaming.is_streaming,
-                ctx.scroll_offset,
-                ctx.auto_scroll,
-            );
-        }
-        // TextEntry (Story 21.3 AC11): the attached composer is append-only (its cursor
-        // stays at the end), so Ctrl+W / Ctrl+U edit its tail and Ctrl+H is Backspace;
-        // Ctrl+A / Ctrl+E / Ctrl+K stay consumed no-ops.
-        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-            edit_composer(ctx, text_edit::kill_word_back);
-        }
-        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-            edit_composer(ctx, text_edit::kill_to_line_start);
-        }
-        // Ctrl/Alt-modified characters are consumed no-ops, never text (Story 21.3
-        // AC12): Alt+M (above) is the only Alt letter with a meaning here.
-        (KeyCode::Char(_), m) if m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
-        (KeyCode::Char(c), m) => {
-            if ctx.state.recipient_surface.is_some() {
-                return KeyFlow::Continue;
-            }
-            // Same case rule as the local converter: shift-folded letters.
-            let c = if m.contains(KeyModifiers::SHIFT) && !m.contains(KeyModifiers::ALT) {
-                c.to_ascii_uppercase()
+            let context = if ctx.state.focus == FocusState::Input {
+                Context::Input
             } else {
-                c
+                Context::Chat
             };
-            return match ctx.state.focus {
-                FocusState::Chat => chat_char(ctx, c, m),
-                FocusState::Input => input_char(ctx, c, m),
-                _ => KeyFlow::Continue,
+            return match command_in(context, pressed) {
+                Some(command) => execute_attached(ctx, command, key).await,
+                None => {
+                    // No row: a printable key types into the Input composer; every other
+                    // key (a Ctrl/Alt letter included) is a consumed no-op (Story 21.3 AC12).
+                    if let Key::Char(c) = pressed
+                        && ctx.state.focus == FocusState::Input
+                    {
+                        type_char(ctx, c);
+                    }
+                    KeyFlow::Continue
+                }
             };
         }
-        _ => {}
     }
     KeyFlow::Continue
 }
@@ -787,43 +719,27 @@ fn edit_composer(ctx: &mut KeyCtx<'_>, edit: fn(&mut String, usize) -> usize) {
     ctx.state.needs_redraw = true;
 }
 
-/// Plain `q` / `i` / `?` are commands only in Chat focus.
-fn chat_char(ctx: &mut KeyCtx<'_>, c: char, m: KeyModifiers) -> KeyFlow {
-    if !(m.is_empty() || m == KeyModifiers::SHIFT) {
-        return KeyFlow::Continue;
+/// The registry key behind a press as an overlay reads it: a navigation key held
+/// with any modifier (Shift+Up, Alt+Enter) is unbound there.
+fn overlay_key(key: &KeyEvent) -> Key {
+    if matches!(key.code, KeyCode::Char(_)) || key.modifiers.is_empty() {
+        Key::from_crossterm(key)
+    } else {
+        Key::Other
     }
-    match c {
-        'q' => return request_quit(ctx),
-        'i' => {
-            ctx.state.focus = FocusState::Input;
-            ctx.state.needs_redraw = true;
-        }
-        '?' => {
-            let prior = ctx.state.focus.clone();
-            ctx.state.help_overlay.open(prior);
-            ctx.state.focus = FocusState::Overlay(OverlayType::Help);
-            ctx.state.needs_redraw = true;
-        }
-        _ => {}
-    }
-    KeyFlow::Continue
 }
 
-/// A printable key in Input focus: text, or the slash trigger.
-fn input_char(ctx: &mut KeyCtx<'_>, c: char, m: KeyModifiers) -> KeyFlow {
-    // Alt-modified characters never reach this fn (the arm above consumes them).
-    if c == '/' && !m.contains(KeyModifiers::ALT) && ctx.input.is_empty() && !ctx.composer_locked()
-    {
-        // The shared composer owns the slash trigger: it saves the pre-trigger
-        // composer so Esc can restore it exactly.
-        let event = crate::domain::events::DomainInputEvent::KeyPress('/');
-        with_lent_input(ctx.state, ctx.input, |state| {
-            let _ = handle_input(state, &event);
-        });
-        ctx.chrome.sync_slash(ctx.state, ctx.workspace);
-        return KeyFlow::Continue;
+/// The command `key` is bound to in `context` for the attached host.
+fn command_in(context: Context, key: Key) -> Option<CommandId> {
+    match keymap::resolve(context, Host::Attached, &[key]) {
+        Resolved::Hit(row) => Some(row.command),
+        _ => None,
     }
-    // Story 19.16g: read-only composers edit too; only submission is refused.
+}
+
+/// Type one printable character into the composer (Story 19.16g: read-only
+/// composers edit too; only submission is refused).
+fn type_char(ctx: &mut KeyCtx<'_>, c: char) {
     let _ = attached_composer_key_with_team_requests(
         KeyCode::Char(c),
         ctx.read_only,
@@ -832,36 +748,201 @@ fn input_char(ctx: &mut KeyCtx<'_>, c: char, m: KeyModifiers) -> KeyFlow {
         ctx.frame_tx,
         ctx.team_requests,
     );
+}
+
+/// Run one command the registry resolved for this host. Each arm is the effect
+/// the key's hand-written arm ran before; the overlays' own edits (palette
+/// filter, popup filter) stay with the shared local handlers they delegate to.
+async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEvent) -> KeyFlow {
+    match command {
+        // `i`, `q` and `?` are commands only in Chat focus.
+        CommandId::Chat(ChatCmd::FocusInput | ChatCmd::Quit | ChatCmd::OpenHelp)
+            if ctx.state.focus != FocusState::Chat => {}
+        // Ctrl+X opens the untimed leader (RU-3); it is never a retract.
+        CommandId::Global(GlobalCmd::OpenLeader) => {
+            let origin = ctx.state.focus.clone();
+            ctx.state.which_key.open(origin);
+            ctx.state.focus = FocusState::Overlay(OverlayType::WhichKey);
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Global(GlobalCmd::QuitRequest) | CommandId::Overlay(OverlayCmd::QuitRequest) => {
+            close_surfaces(ctx.state);
+            return request_quit(ctx);
+        }
+        CommandId::Input(InputCmd::OpenPalette) | CommandId::Chat(ChatCmd::OpenPalette) => {
+            open_palette(ctx).await;
+        }
+        CommandId::Input(InputCmd::CancelOrQuit) | CommandId::Chat(ChatCmd::CancelOrQuit) => {
+            return ctrl_c(ctx);
+        }
+        CommandId::Chat(ChatCmd::Quit) => return request_quit(ctx),
+        CommandId::Chat(ChatCmd::FocusInput) => {
+            ctx.state.focus = FocusState::Input;
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Chat(ChatCmd::OpenHelp) => {
+            let prior = ctx.state.focus.clone();
+            ctx.state.help_overlay.open(prior);
+            ctx.state.focus = FocusState::Overlay(OverlayType::Help);
+            ctx.state.needs_redraw = true;
+        }
+        // Esc never detaches, quits or submits: with no popup/overlay open it
+        // moves focus between Input and Chat and preserves the unsent text.
+        CommandId::Input(InputCmd::ReturnToChat) | CommandId::Chat(ChatCmd::FocusToggle) => {
+            match ctx.state.focus {
+                FocusState::Input => ctx.state.focus = FocusState::Chat,
+                FocusState::Chat => ctx.state.focus = FocusState::Input,
+                _ => {}
+            }
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Input(InputCmd::ToggleMultiline) => {
+            ctx.state.multiline_mode = !ctx.state.multiline_mode;
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Input(
+            cmd @ (InputCmd::SubmitOrNewline | InputCmd::InsertNewline | InputCmd::Send),
+        ) => return enter_key(ctx, cmd).await,
+        CommandId::Input(InputCmd::DeleteBack) => {
+            if ctx.state.recipient_surface.is_none() {
+                let _ = attached_composer_key_with_team_requests(
+                    KeyCode::Backspace,
+                    ctx.read_only,
+                    ctx.input,
+                    ctx.state,
+                    ctx.frame_tx,
+                    ctx.team_requests,
+                );
+            }
+        }
+        // TextEntry (Story 21.3 AC11): the attached composer is append-only (its cursor
+        // stays at the end), so Ctrl+W / Ctrl+U edit its tail and Ctrl+H is Backspace;
+        // Ctrl+A / Ctrl+E / Ctrl+K are consumed no-ops.
+        CommandId::Input(InputCmd::DeleteWordBack) => edit_composer(ctx, text_edit::kill_word_back),
+        CommandId::Input(InputCmd::KillToLineStart) => {
+            edit_composer(ctx, text_edit::kill_to_line_start);
+        }
+        CommandId::Input(InputCmd::OpenSlashPopup) => {
+            if ctx.input.is_empty() && !ctx.composer_locked() {
+                // The shared composer owns the slash trigger: it saves the pre-trigger
+                // composer so Esc can restore it exactly.
+                let event = crate::domain::events::DomainInputEvent::KeyPress('/');
+                with_lent_input(ctx.state, ctx.input, |state| {
+                    let _ = handle_input(state, &event);
+                });
+                ctx.chrome.sync_slash(ctx.state, ctx.workspace);
+            } else {
+                type_char(ctx, '/');
+            }
+        }
+        // Ctrl+D / Ctrl+U scroll half a page (Chat only, never a detach); PgUp/PgDn a page.
+        CommandId::Input(InputCmd::TranscriptPageUp | InputCmd::TranscriptPageDown)
+        | CommandId::Chat(
+            ChatCmd::ScrollPageUp
+            | ChatCmd::ScrollPageDown
+            | ChatCmd::ScrollHalfPageUp
+            | ChatCmd::ScrollHalfPageDown,
+        ) => {
+            let half = matches!(
+                command,
+                CommandId::Chat(ChatCmd::ScrollHalfPageUp | ChatCmd::ScrollHalfPageDown)
+            );
+            if half && ctx.state.focus != FocusState::Chat {
+                return KeyFlow::Continue;
+            }
+            let earlier = matches!(
+                command,
+                CommandId::Input(InputCmd::TranscriptPageUp)
+                    | CommandId::Chat(ChatCmd::ScrollPageUp | ChatCmd::ScrollHalfPageUp)
+            );
+            let rows = ctx.state.viewport_height / if half { 2 } else { 1 };
+            scroll_attached_transcript(
+                earlier,
+                rows,
+                ctx.streaming.is_streaming,
+                ctx.scroll_offset,
+                ctx.auto_scroll,
+            );
+            ctx.state.needs_redraw |= half;
+        }
+        CommandId::Overlay(
+            cmd @ (OverlayCmd::HelpDown
+            | OverlayCmd::HelpUp
+            | OverlayCmd::HelpBottom
+            | OverlayCmd::HelpTop),
+        ) => {
+            let help = &mut ctx.state.help_overlay;
+            help.scroll_offset = match cmd {
+                OverlayCmd::HelpDown => help.scroll_offset.saturating_add(1),
+                OverlayCmd::HelpUp => help.scroll_offset.saturating_sub(1),
+                OverlayCmd::HelpBottom => usize::MAX / 2,
+                _ => 0,
+            };
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Overlay(OverlayCmd::HelpClose) => {
+            ctx.state.focus = ctx.state.help_overlay.close();
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Overlay(OverlayCmd::PaletteClose) => {
+            ctx.state.focus = ctx
+                .state
+                .command_palette
+                .dismiss()
+                .unwrap_or(FocusState::Input);
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Overlay(
+            OverlayCmd::PaletteUp
+            | OverlayCmd::PaletteDown
+            | OverlayCmd::PaletteRun
+            | OverlayCmd::PaletteBackspace,
+        )
+        | CommandId::Field(FieldCmd::DeleteWordBack | FieldCmd::Clear | FieldCmd::DeleteBack) => {
+            return palette_delegate(ctx, key).await;
+        }
+        CommandId::Overlay(OverlayCmd::AutoCancel) => {
+            with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);
+            ctx.chrome.sync_slash(ctx.state, ctx.workspace);
+            ctx.state.needs_redraw = true;
+        }
+        CommandId::Overlay(
+            OverlayCmd::AutoPrev
+            | OverlayCmd::AutoNext
+            | OverlayCmd::AutoAccept
+            | OverlayCmd::AutoBackspace,
+        ) => popup_delegate(ctx, key),
+        // Ctrl+A / Ctrl+E / Ctrl+K have no cursor to move; local-only rows never resolve here.
+        _ => {}
+    }
     KeyFlow::Continue
 }
 
 /// Enter and its modified forms. Plain Enter is never mistaken for Ctrl+Enter.
-async fn enter_key(ctx: &mut KeyCtx<'_>, m: KeyModifiers) -> KeyFlow {
-    if ctx.state.recipient_surface.is_some() || ctx.state.focus != FocusState::Input {
+async fn enter_key(ctx: &mut KeyCtx<'_>, command: InputCmd) -> KeyFlow {
+    if ctx.state.recipient_surface.is_some() {
         return KeyFlow::Continue;
     }
-    if m.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) {
-        if !ctx.composer_locked() {
-            ctx.input.push('\n');
-            ctx.state.needs_redraw = true;
+    match command {
+        InputCmd::InsertNewline => {
+            if !ctx.composer_locked() {
+                ctx.input.push('\n');
+                ctx.state.needs_redraw = true;
+            }
+            KeyFlow::Continue
         }
-        return KeyFlow::Continue;
-    }
-    if m.contains(KeyModifiers::CONTROL) {
         // Ctrl+Enter (where the terminal distinguishes it) sends.
-        if ctx.input.is_empty() {
-            return KeyFlow::Continue;
+        InputCmd::Send if ctx.input.is_empty() => KeyFlow::Continue,
+        InputCmd::Send => submit_enter(ctx).await,
+        _ if ctx.state.multiline_mode => {
+            if !ctx.input.is_empty() && !ctx.composer_locked() {
+                ctx.input.push('\n');
+                ctx.state.needs_redraw = true;
+            }
+            KeyFlow::Continue
         }
-        return submit_enter(ctx).await;
+        _ => submit_enter(ctx).await,
     }
-    if ctx.state.multiline_mode {
-        if !ctx.input.is_empty() && !ctx.composer_locked() {
-            ctx.input.push('\n');
-            ctx.state.needs_redraw = true;
-        }
-        return KeyFlow::Continue;
-    }
-    submit_enter(ctx).await
 }
 
 /// `Ctrl+C`, after every modal/popup/overlay/card had its chance to own it.
@@ -1032,6 +1113,7 @@ fn log_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             );
         }
         LogOutcome::Closed | LogOutcome::Consumed | LogOutcome::Retry { .. } => {}
+        LogOutcome::Quit => return request_quit(ctx),
     }
     ctx.state.needs_redraw = true;
     KeyFlow::Continue
@@ -1055,63 +1137,44 @@ async fn run_team_log(
 
 // ── help overlay ─────────────────────────────────────────────────────────────
 
-/// Help is passive: Esc / `?` close it and restore the origin (Input text is
-/// untouched); scroll keys move it. Everything else is consumed.
-fn help_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    if is_ctrl(&key, 'c') {
-        ctx.state.focus = ctx.state.help_overlay.close();
-        ctx.state.needs_redraw = true;
-        return KeyFlow::Continue;
+/// Help is passive: Esc / `?` / Ctrl+C close it and restore the origin (Input
+/// text is untouched); scroll keys move it. Everything else is consumed.
+async fn help_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    match command_in(Context::Help, overlay_key(&key)) {
+        Some(command) => execute_attached(ctx, command, key).await,
+        None => KeyFlow::Continue,
     }
-    let delegated = match key.code {
-        KeyCode::Esc | KeyCode::Up | KeyCode::Down => key.modifiers.is_empty(),
-        KeyCode::Char(_) => !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-        _ => false,
-    };
-    if delegated
-        && let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default())
-    {
-        let _ = handle_input(ctx.state, &event);
-    }
-    KeyFlow::Continue
 }
 
 // ── slash popup ──────────────────────────────────────────────────────────────
 
 /// A key while the slash popup is open. `Some` = consumed; `None` = the popup
 /// was dismissed by an unrelated key which then continues as a normal key.
-fn popup_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> Option<KeyFlow> {
-    if is_ctrl(&key, 'c') {
-        with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);
-        ctx.chrome.sync_slash(ctx.state, ctx.workspace);
-        return Some(KeyFlow::Continue);
+async fn popup_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> Option<KeyFlow> {
+    let k = overlay_key(&key);
+    match command_in(Context::Autocomplete, k) {
+        Some(command) => Some(execute_attached(ctx, command, key).await),
+        // A printable key edits the popup's filter.
+        None if matches!(k, Key::Char(_)) => {
+            popup_delegate(ctx, key);
+            Some(KeyFlow::Continue)
+        }
+        None => {
+            ctx.state.autocomplete.dismiss();
+            ctx.state.needs_redraw = true;
+            None
+        }
     }
-    let delegated = match key.code {
-        KeyCode::Up
-        | KeyCode::Down
-        | KeyCode::Tab
-        | KeyCode::Backspace
-        | KeyCode::Esc
-        | KeyCode::Enter => key.modifiers.is_empty(),
-        KeyCode::Char(_) => !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-        _ => false,
-    };
-    if !delegated {
-        ctx.state.autocomplete.dismiss();
-        ctx.state.needs_redraw = true;
-        return None;
-    }
+}
+
+/// Hand a popup key to the shared autocomplete handler (the composer is lent to it).
+fn popup_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
     if let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) {
         with_lent_input(ctx.state, ctx.input, |state| {
             let _ = handle_input(state, &event);
         });
     }
     ctx.chrome.sync_slash(ctx.state, ctx.workspace);
-    Some(KeyFlow::Continue)
 }
 
 // ── command palette ──────────────────────────────────────────────────────────
@@ -1126,35 +1189,19 @@ async fn open_palette(ctx: &mut KeyCtx<'_>) {
 }
 
 async fn palette_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    let k = overlay_key(&key);
+    match command_in(Context::CommandPalette, k) {
+        Some(command) => execute_attached(ctx, command, key).await,
+        // A printable key types into the filter; every other rowless key is inert.
+        None if matches!(k, Key::Char(_)) => palette_delegate(ctx, key).await,
+        None => KeyFlow::Continue,
+    }
+}
+
+/// Hand a palette key to the shared palette handler (the composer is lent to
+/// it) and run the entry it selected, if any.
+async fn palette_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crate::adapters::tui::app::InputAction;
-    if is_ctrl(&key, 'c') {
-        ctx.state.focus = ctx
-            .state
-            .command_palette
-            .dismiss()
-            .unwrap_or(FocusState::Input);
-        ctx.state.needs_redraw = true;
-        return KeyFlow::Continue;
-    }
-    let delegated = match key.code {
-        KeyCode::Up
-        | KeyCode::Down
-        | KeyCode::Enter
-        | KeyCode::Esc
-        | KeyCode::Backspace
-        | KeyCode::Tab => key.modifiers.is_empty(),
-        KeyCode::Char(c) if key.modifiers == KeyModifiers::CONTROL => {
-            // The FIELD readline rows the palette filter inherits (Ctrl+W/U/H).
-            matches!(c, 'w' | 'u' | 'h')
-        }
-        KeyCode::Char(_) => !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
-        _ => false,
-    };
-    if !delegated {
-        return KeyFlow::Continue;
-    }
     let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) else {
         return KeyFlow::Continue;
     };
@@ -1269,7 +1316,10 @@ fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
                 ctx.state,
                 NoticeSource::Attached,
                 format!(
-                    "/{name} is not available in an attached session. Detach (Ctrl+X d) and use it from a standalone `rustain` session."
+                    "/{name} is not available in an attached session. Detach ({detach}) and use it from a standalone `rustain` session.",
+                    detach = crate::adapters::tui::keymap::render::leader_follow_up_long(
+                        crate::adapters::tui::keymap::table::LeaderCmd::Detach
+                    )
                 ),
             );
             KeyFlow::Continue
@@ -3020,7 +3070,9 @@ mod tests {
                 panic!("{row:?}: a Chat row carries a ChatCmd");
             };
             let key = single_key(row);
+            // Viewport 6: a half page is 3 rows and a full page is 6, capped to 5 per step.
             let mut rig = Rig::at(FocusState::Chat, "hi").scrollable();
+            rig.state.viewport_height = 6;
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{row:?}");
             assert!(rig.frames().is_empty(), "{row:?}: a Chat key sends nothing");
             match cmd {
@@ -3042,8 +3094,14 @@ mod tests {
                     assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
                 }
                 ChatCmd::OpenPalette => assert!(rig.state.command_palette.active),
-                ChatCmd::ScrollHalfPageDown | ChatCmd::ScrollPageDown => {
+                ChatCmd::ScrollHalfPageDown => {
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (9, false), "{row:?}");
+                }
+                ChatCmd::ScrollPageDown => {
                     assert_eq!((rig.scroll_offset, rig.auto_scroll), (7, false), "{row:?}");
+                }
+                ChatCmd::ScrollHalfPageUp => {
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (15, false), "{row:?}");
                 }
                 ChatCmd::ScrollPageUp => {
                     assert_eq!((rig.scroll_offset, rig.auto_scroll), (17, false), "{row:?}");
@@ -3661,6 +3719,137 @@ mod tests {
         assert!(
             rig.state.recipient_surface.is_some(),
             "the surface stays open while the daemon answers"
+        );
+    }
+
+    /// K9 (attached twin): in Chat `q` is the guarded quit request, `i` and `?` act, an
+    /// unbound printable is inert and Ctrl+U scrolls half a page up, mirroring Ctrl+D
+    /// (the registry row is `Both`; it was inert here before 3-B2).
+    #[tokio::test]
+    async fn story21_3_attached_k9_chat_keys_act_by_value() {
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        assert_eq!(rig.key(Key::Char('q')).await, KeyFlow::Continue);
+        assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+        assert_eq!(rig.input, "draft");
+        let mut idle = Rig::at(FocusState::Chat, "");
+        assert_eq!(idle.key(Key::Char('q')).await, KeyFlow::Quit);
+
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        rig.key(Key::Char('i')).await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        rig.key(Key::Char('?')).await;
+        assert!(rig.state.help_overlay.active);
+        assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+
+        let mut rig = Rig::at(FocusState::Chat, "draft").scrollable();
+        let before = salient(&rig);
+        rig.key(Key::Char('z')).await;
+        assert_eq!(
+            salient(&rig),
+            before,
+            "an unbound printable is inert in Chat"
+        );
+
+        let mut rig = Rig::at(FocusState::Chat, "draft").scrollable();
+        rig.state.viewport_height = 6;
+        assert_eq!(rig.key(Key::Ctrl('u')).await, KeyFlow::Continue);
+        assert_eq!((rig.scroll_offset, rig.auto_scroll), (15, false));
+        assert_eq!(rig.input, "draft", "Ctrl+U in Chat never edits the draft");
+        assert_eq!(rig.key(Key::Ctrl('d')).await, KeyFlow::Continue);
+        assert_eq!((rig.scroll_offset, rig.auto_scroll), (12, false));
+        assert!(rig.frames().is_empty());
+    }
+
+    /// K9 (attached twin): Input types printables (shifted letters keep their case), the `/`
+    /// trigger needs an empty composer, Alt+M toggles multi-line without typing, Ctrl+Enter
+    /// sends a non-empty draft and PgUp/PgDn page the transcript in both foci.
+    #[tokio::test]
+    async fn story21_3_attached_k9_input_keys_act_by_value() {
+        let mut rig = Rig::at(FocusState::Input, "");
+        for key in [
+            Key::Char('h'),
+            Key::Char('I'),
+            Key::Char('?'),
+            Key::Char('@'),
+        ] {
+            rig.key(key).await;
+        }
+        assert_eq!(rig.input, "hI?@");
+        assert!(!rig.state.autocomplete.active);
+
+        let mut rig = Rig::at(FocusState::Input, "");
+        rig.key(Key::Char('/')).await;
+        assert!(rig.state.autocomplete.active);
+        assert_eq!(rig.input, "/");
+        let mut rig = Rig::at(FocusState::Input, "a");
+        rig.key(Key::Char('/')).await;
+        assert!(
+            !rig.state.autocomplete.active,
+            "only an empty composer triggers"
+        );
+        assert_eq!(rig.input, "a/");
+
+        let mut rig = Rig::at(FocusState::Input, "hi");
+        rig.key(Key::Alt('m')).await;
+        assert!(rig.state.multiline_mode);
+        assert_eq!(rig.input, "hi", "Alt+M is not typed");
+
+        let mut rig = Rig::at(FocusState::Input, "hi");
+        assert_eq!(rig.key(Key::CtrlEnter).await, KeyFlow::Continue);
+        let frames = rig.frames();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(user_text(&frames[0]), Some("hi"));
+        assert!(rig.input.is_empty());
+        let mut empty = Rig::at(FocusState::Input, "");
+        empty.key(Key::CtrlEnter).await;
+        assert!(empty.frames().is_empty(), "an empty composer sends nothing");
+
+        for focus in [FocusState::Input, FocusState::Chat] {
+            let mut rig = Rig::at(focus.clone(), "hi").scrollable();
+            rig.key(Key::PageUp).await;
+            assert_eq!(
+                (rig.scroll_offset, rig.auto_scroll),
+                (17, false),
+                "{focus:?}"
+            );
+            rig.key(Key::PageDown).await;
+            rig.key(Key::PageDown).await;
+            assert_eq!(
+                (rig.scroll_offset, rig.auto_scroll),
+                (7, false),
+                "{focus:?}"
+            );
+            assert_eq!(rig.input, "hi");
+        }
+    }
+
+    /// K9 (attached twin): Ctrl+Q in the open palette and in S-LOG closes it and asks the
+    /// guarded quit question (the rows are `Both`; the log handler itself answers `Quit`).
+    #[tokio::test]
+    async fn story21_3_attached_k9_ctrl_q_in_palette_and_log_asks_to_quit() {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('p').await;
+        assert!(rig.state.command_palette.active);
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+        assert!(!rig.state.command_palette.active);
+        assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+        let mut idle = Rig::at(FocusState::Input, "");
+        idle.ctrl('p').await;
+        assert_eq!(idle.ctrl('q').await, KeyFlow::Quit);
+
+        let mut rig = log_rig(Key::Ctrl('q')).await;
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+        assert!(rig.state.notification_log.is_none());
+        assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+
+        let mut rig = log_rig(Key::Ctrl('q')).await;
+        let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        let outcome = notification_log::handle_raw_key(&mut rig.state, ctrl_q, &log_facts("c"));
+        assert_eq!(outcome, LogOutcome::Quit);
+        assert!(
+            rig.state.notification_log.is_none(),
+            "the handler closes the log"
         );
     }
 }

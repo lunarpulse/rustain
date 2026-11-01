@@ -52,8 +52,14 @@ pub fn validate_image_size(base64_len: usize) -> Option<String> {
     if base64_len > LARGE_IMAGE_THRESHOLD {
         let size_mb = base64_len as f64 / (1024.0 * 1024.0);
         Some(format!(
-            "Large image ({:.1}MB). This will consume significant context. Attach anyway? [y/n]",
-            size_mb
+            "Large image ({:.1}MB). This will consume significant context. Attach anyway? [{}/{}]",
+            size_mb,
+            crate::adapters::tui::keymap::render::key_text(
+                crate::adapters::tui::keymap::table_overlay::OverlayCmd::PaneYes
+            ),
+            crate::adapters::tui::keymap::render::key_text(
+                crate::adapters::tui::keymap::table_overlay::OverlayCmd::PaneNo
+            )
         ))
     } else {
         None

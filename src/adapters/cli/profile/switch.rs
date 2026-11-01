@@ -17,9 +17,14 @@ pub async fn run_profile_switch(name: String, start: bool) -> Result<()> {
 
     println!(
         "No running rustain instance found. To switch profiles in the running TUI, \
-         press Ctrl+X, P and pick '{}' from the modal, or type '> {}' in the command palette. \
+         press {} and pick '{}' from the modal, or type '> {}' in the command palette. \
          To inspect the profile without launching the TUI, run 'rustain profile show {}'.",
-        name, name, name
+        crate::adapters::tui::keymap::render::leader_follow_up_long(
+            crate::adapters::tui::keymap::table::LeaderCmd::Profile
+        ),
+        name,
+        name,
+        name
     );
     Ok(())
 }

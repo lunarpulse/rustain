@@ -202,8 +202,14 @@ fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, t
     // Footer
     lines.push(Line::from(Span::styled(
         format!(
-            "Estimated time: ~{}ms  |  [y] confirm  [Esc] cancel",
-            plan.estimated_ms
+            "Estimated time: ~{}ms  |  [{}] confirm  [{}] cancel",
+            plan.estimated_ms,
+            crate::adapters::tui::keymap::render::key_text(
+                crate::adapters::tui::keymap::table_overlay::OverlayCmd::ProfileYes
+            ),
+            crate::adapters::tui::keymap::render::key_text(
+                crate::adapters::tui::keymap::table_overlay::OverlayCmd::ProfileBack
+            )
         ),
         Style::default().fg(theme.colors.fg_muted),
     )));

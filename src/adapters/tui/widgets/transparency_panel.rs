@@ -134,7 +134,21 @@ pub fn render(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title_bottom(Span::styled(
-            " j/k move · Enter drill · / search · e export · G newest · Ctrl+X L close ",
+            {
+                use crate::adapters::tui::keymap::render::{key_text, leader_follow_up_long};
+                use crate::adapters::tui::keymap::table::LeaderCmd;
+                use crate::adapters::tui::keymap::table_panels::PanelCmd as P;
+                format!(
+                    " {}/{} move · {} drill · {} search · {} export · {} newest · {} close ",
+                    key_text(P::LogNext),
+                    key_text(P::LogPrev),
+                    key_text(P::LogDrill),
+                    key_text(P::LogSearch),
+                    key_text(P::LogExport),
+                    key_text(P::LogTail),
+                    leader_follow_up_long(LeaderCmd::A2aLog)
+                )
+            },
             Style::default().fg(theme.colors.fg_muted),
         ));
     let inner = block.inner(area);

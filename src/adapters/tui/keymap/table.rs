@@ -43,7 +43,16 @@ pub enum LeaderCmd {
 /// Attached refusal for sign-in/model chords: the existing CLI remedy.
 pub const ATTACHED_SIGN_IN: &str = "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.";
 pub const ATTACHED_PROFILE: &str = "Profile switching is not available in an attached session. Run `rustain profile list` or `rustain profile show <name>` in a terminal.";
-pub const ATTACHED_PANEL: &str = "This panel is local to a standalone session and is not projected to an attached client. Detach (Ctrl+X d) and run `rustain` for the panels, or use `/team status`, `/team board` and `/team log` here.";
+/// Attached refusal for local sidebar panels; the detach chord is the registry's own.
+pub fn attached_panel_remedy() -> &'static str {
+    static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "This panel is local to a standalone session and is not projected to an attached client. Detach ({}) and run `rustain` for the panels, or use `/team status`, `/team board` and `/team log` here.",
+            super::render::leader_follow_up_long(LeaderCmd::Detach)
+        )
+    });
+    TEXT.as_str()
+}
 pub const ATTACHED_DENSITY: &str =
     "Density modes are local to a standalone session; the attached view has a single layout.";
 /// Local sidebar panels need the sidebar column (`layout::SIDEBAR_MIN_WIDTH`).
@@ -64,14 +73,14 @@ fn attached_density(c: &AvailCtx) -> Availability {
 /// A sidebar panel: local only, and only where the sidebar column fits.
 fn panel(c: &AvailCtx) -> Availability {
     match c.host {
-        Host::Attached => Availability::Unavailable(ATTACHED_PANEL),
+        Host::Attached => Availability::Unavailable(attached_panel_remedy()),
         Host::Local if c.width < SIDEBAR_MIN_WIDTH => Availability::Unavailable(PANEL_NARROW),
         Host::Local => Availability::Available,
     }
 }
 /// Overlays that are local only but do not need the sidebar column (Usage).
 fn attached_panel(c: &AvailCtx) -> Availability {
-    host_gate(c, ATTACHED_PANEL)
+    host_gate(c, attached_panel_remedy())
 }
 fn host_gate(c: &AvailCtx, remedy: &'static str) -> Availability {
     match c.host {
@@ -145,6 +154,7 @@ pub fn all_rows() -> Vec<Binding> {
         super::table_chat::ROWS,
         super::table_nav::ROWS,
         super::table_panels::ROWS,
+        super::table_inspector::ROWS,
         super::table_overlay::ROWS,
         super::table_permission::ROWS,
     ]

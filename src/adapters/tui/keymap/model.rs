@@ -11,6 +11,7 @@ use crate::domain::models::visual::DensityMode;
 use super::table::{GlobalCmd, LeaderCmd};
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
+use super::table_inspector::InspectorCmd;
 use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use super::table_overlay::OverlayCmd;
 use super::table_panels::PanelCmd;
@@ -364,6 +365,9 @@ pub enum Context {
     SidebarTasks,
     TasksReorder,
     SidebarAgents,
+    /// The agent inspector (the drill-down on one agent): its own keys, then the
+    /// Sidebar rows.
+    SidebarAgentInspector,
     SidebarA2aLog,
     SidebarRoom,
     SidebarArtifacts,
@@ -384,7 +388,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 35] = [
+    pub const ALL: [Context; 36] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -403,6 +407,7 @@ impl Context {
         Context::SidebarTasks,
         Context::TasksReorder,
         Context::SidebarAgents,
+        Context::SidebarAgentInspector,
         Context::SidebarA2aLog,
         Context::SidebarRoom,
         Context::SidebarArtifacts,
@@ -443,6 +448,7 @@ impl Context {
             Context::SidebarTasks => "Tasks",
             Context::TasksReorder => "Tasks (reorder)",
             Context::SidebarAgents => "Agents",
+            Context::SidebarAgentInspector => "Agent inspector",
             Context::SidebarA2aLog => "A2A log",
             Context::SidebarRoom => "Room",
             Context::SidebarArtifacts => "Artifacts",
@@ -475,7 +481,6 @@ impl Context {
             | Context::FieldEdit
             | Context::WaveOverlay
             | Context::Help
-            | Context::ModelSelector
             | Context::ProfileSwitcher
             | Context::UsagePanel
             | Context::Autocomplete
@@ -488,6 +493,7 @@ impl Context {
             Context::Input => &[Context::TextEntry],
             Context::SidebarHistory
             | Context::SidebarAgents
+            | Context::SidebarAgentInspector
             | Context::SidebarA2aLog
             | Context::SidebarRoom
             | Context::SidebarArtifacts
@@ -497,6 +503,7 @@ impl Context {
             Context::ChatDrill | Context::ChatWave | Context::ChatReorder => &[Context::Chat],
             // Fields that edit append-only text inherit the shared edit rows.
             Context::CommandPalette
+            | Context::ModelSelector
             | Context::SearchTyping
             | Context::SearchNavigating
             | Context::CrossSearch
@@ -618,6 +625,7 @@ pub enum CommandId {
     Permission(PermissionCmd),
     Field(FieldCmd),
     Panel(PanelCmd),
+    Inspector(InspectorCmd),
     Overlay(OverlayCmd),
 }
 
@@ -641,6 +649,7 @@ command_from!(
     Permission(PermissionCmd),
     Field(FieldCmd),
     Panel(PanelCmd),
+    Inspector(InspectorCmd),
     Overlay(OverlayCmd),
 );
 

@@ -244,7 +244,18 @@ pub fn render(
         .borders(Borders::ALL)
         .border_style(border_style)
         .title_bottom(Span::styled(
-            " read-only replay · j/k move · Ctrl+X R close ",
+            format!(
+                " read-only replay · {}/{} move · {} close ",
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectNext
+                ),
+                crate::adapters::tui::keymap::render::key_text(
+                    crate::adapters::tui::keymap::table_nav::SidebarCmd::SelectPrev
+                ),
+                crate::adapters::tui::keymap::render::leader_follow_up_long(
+                    crate::adapters::tui::keymap::table::LeaderCmd::Room
+                )
+            ),
             Style::default().fg(theme.colors.fg_muted),
         ));
     let inner = block.inner(area);

@@ -124,7 +124,7 @@ const CHAT: &[Binding] = &[
     // ── scrolling (local) ──
     c(&[Key::Char('j')], ChatCmd::ScrollLineDown, "scroll").hint().local().help(N, "j / k", "Scroll down / up"),
     c(&[Key::Char('k')], ChatCmd::ScrollLineUp, "scroll").hint().local().does("Scroll up one line"),
-    c(&[Key::Ctrl('u')], ChatCmd::ScrollHalfPageUp, "").local().help(S, "Ctrl+u", "Scroll half page up"),
+    c(&[Key::Ctrl('u')], ChatCmd::ScrollHalfPageUp, "").help(S, "Ctrl+u", "Scroll half page up"),
     c(&[Key::Ctrl('f')], ChatCmd::ScrollPageDown, "").local().help(S, "Ctrl+f", "Scroll full page down (Chat focus — search elsewhere)"),
     c(&[Key::Ctrl('b')], ChatCmd::ScrollPageUp, "").local().help(S, "Ctrl+b", "Scroll full page up"),
     c(&[Key::Char('G')], ChatCmd::ScrollToBottom, "").local().help(V, "G", "Jump to newest message — no effect if already at the bottom"),

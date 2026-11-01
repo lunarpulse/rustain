@@ -7,7 +7,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use rustain::adapters::tui::keymap::table::{
-    ATTACHED_PANEL, ATTACHED_PROFILE, ATTACHED_SIGN_IN, PANEL_NARROW,
+    ATTACHED_PROFILE, ATTACHED_SIGN_IN, PANEL_NARROW, attached_panel_remedy,
 };
 use rustain::adapters::tui::keymap::{AvailCtx, Key};
 use rustain::adapters::tui::notifications::NoticeSeverity;
@@ -134,7 +134,8 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         ATTACHED_PROFILE.contains("rustain profile")
             && ATTACHED_SIGN_IN.contains("rustain auth login")
     );
-    assert!(ATTACHED_PANEL.contains("/team status"));
+    assert!(attached_panel_remedy().contains("/team status"));
+    assert!(attached_panel_remedy().contains("Detach (Ctrl+X, D)"));
 }
 
 #[test]
@@ -216,5 +217,64 @@ fn chat_tip_is_at_most_60_cells() {
             tip.width()
         );
         assert!(tip.contains("i type"), "{host:?}: the tip names `i`");
+    }
+}
+
+/// KG-1: `key_text` answers `?` for a command with no row, so every command a generated
+/// footer, title or notice names must have one.
+#[test]
+fn every_command_a_generated_hint_names_has_a_row() {
+    use rustain::adapters::tui::keymap::CommandId;
+    use rustain::adapters::tui::keymap::render::{key_text, key_text_at};
+    use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SidebarCmd};
+    use rustain::adapters::tui::keymap::table_overlay::OverlayCmd as O;
+    use rustain::adapters::tui::keymap::table_panels::PanelCmd as P;
+    let commands: Vec<CommandId> = vec![
+        O::PaneYes.into(),
+        O::PaneNo.into(),
+        O::CrossOpen.into(),
+        O::CrossClose.into(),
+        O::ModelBack.into(),
+        O::ModelSelect.into(),
+        O::ModelWarnYes.into(),
+        O::ModelWarnNo.into(),
+        O::ProfileYes.into(),
+        O::ProfileBack.into(),
+        SidebarCmd::FocusChat.into(),
+        SidebarCmd::SelectNext.into(),
+        SidebarCmd::SelectPrev.into(),
+        BookmarkCmd::Jump.into(),
+        BookmarkCmd::Undo.into(),
+        BookmarkCmd::Close.into(),
+        P::LogNext.into(),
+        P::LogPrev.into(),
+        P::LogDrill.into(),
+        P::LogSearch.into(),
+        P::LogExport.into(),
+        P::LogTail.into(),
+        P::WaveNext.into(),
+        P::WavePrev.into(),
+        P::WaveRerun.into(),
+        P::WaveDiverge.into(),
+        P::WaveClose.into(),
+        P::DrillToggleExpand.into(),
+        P::DrillScrollDown.into(),
+        P::DrillScrollUp.into(),
+        P::DrillCopy.into(),
+        P::DrillClose.into(),
+        P::DrillRetry.into(),
+        P::DrillSkip.into(),
+        P::DrillEdit.into(),
+        P::DrillPause.into(),
+    ];
+    for command in commands {
+        assert_ne!(key_text(command), "?", "{command:?} has no row");
+    }
+    for index in 0..2 {
+        assert_ne!(
+            key_text_at(BookmarkCmd::Delete, index),
+            "?",
+            "Delete #{index}"
+        );
     }
 }

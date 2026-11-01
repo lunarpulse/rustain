@@ -98,8 +98,17 @@ fn position_line(total: usize, selected: usize) -> Line<'static> {
 
 /// The keybinding-hint footer line (muted, monochrome-safe).
 fn hint_footer() -> Line<'static> {
+    use crate::adapters::tui::keymap::render::key_text;
+    use crate::adapters::tui::keymap::table_panels::PanelCmd as P;
     Line::styled(
-        "[j/k scroll \u{00B7} \u{21B5} drill \u{00B7} r re-run \u{00B7} d diverge \u{00B7} Esc close]",
+        format!(
+            "[{}/{} scroll \u{00B7} \u{21B5} drill \u{00B7} {} re-run \u{00B7} {} diverge \u{00B7} {} close]",
+            key_text(P::WaveNext),
+            key_text(P::WavePrev),
+            key_text(P::WaveRerun),
+            key_text(P::WaveDiverge),
+            key_text(P::WaveClose)
+        ),
         Style::default().fg(Color::DarkGray),
     )
 }

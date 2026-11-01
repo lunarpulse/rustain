@@ -110,7 +110,18 @@ pub fn render(
     }
 
     lines.push(Line::from(Span::styled(
-        "[Enter] Jump  [d/Del] Delete  [u] Undo  [Esc] Close".to_string(),
+        {
+            use crate::adapters::tui::keymap::table_nav::BookmarkCmd;
+            use crate::adapters::tui::keymap::{render::key_text, render::key_text_at};
+            format!(
+                "[{}] Jump  [{}/{}] Delete  [{}] Undo  [{}] Close",
+                key_text(BookmarkCmd::Jump),
+                key_text_at(BookmarkCmd::Delete, 0),
+                key_text_at(BookmarkCmd::Delete, 1),
+                key_text(BookmarkCmd::Undo),
+                key_text(BookmarkCmd::Close)
+            )
+        },
         Style::default().fg(theme.colors.fg_muted),
     )));
 

@@ -145,6 +145,24 @@ pub fn shortcut_for(command: CommandId) -> Option<String> {
         .map(|row| row.long_label())
 }
 
+/// The key a hint names for `command`: the long label of its first row, `?` when the
+/// command has no row. Every key a footer, notice or title paints comes from here, so no
+/// hint can name a key the table does not bind (KG-1).
+pub fn key_text(command: impl Into<CommandId>) -> String {
+    shortcut_for(command.into()).unwrap_or_else(|| "?".to_owned())
+}
+
+/// Long label of the `index`-th row bound to `command` (`d`, then `Del` for the bookmark
+/// delete): a hint that names two keys of one command.
+pub fn key_text_at(command: impl Into<CommandId>, index: usize) -> String {
+    let command = command.into();
+    table()
+        .iter()
+        .filter(|row| row.command == command)
+        .nth(index)
+        .map_or_else(|| "?".to_owned(), |row| row.long_label())
+}
+
 /// A shortcut that is a leader chord followed by a panel key (`Ctrl+X, T then x`):
 /// the palette shortcut column of the Tasks panel commands (AC20c).
 pub fn shortcut_then(first: CommandId, then: CommandId) -> Option<String> {

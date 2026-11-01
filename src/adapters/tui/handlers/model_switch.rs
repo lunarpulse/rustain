@@ -363,10 +363,20 @@ pub async fn handle_apply_startup_provider_fallback(
             conversation_id: None,
             level: NoticeLevel::Warning,
             message: if info.list_locked_providers().is_empty() {
-                "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with Ctrl+X, M."
+                format!(
+                    "No provider is reachable. Start a provider (e.g. `ollama serve`) or open the model selector with {}.",
+                    crate::adapters::tui::keymap::render::leader_follow_up_long(
+                        crate::adapters::tui::keymap::table::LeaderCmd::Model
+                    )
+                )
             } else {
-                "No provider is reachable. Sign in with /login or `rustain auth login <provider>`, or open the model selector (Ctrl+X, M) to see locked providers."
-            }.to_string(),
+                format!(
+                    "No provider is reachable. Sign in with /login or `rustain auth login <provider>`, or open the model selector ({}) to see locked providers.",
+                    crate::adapters::tui::keymap::render::leader_follow_up_long(
+                        crate::adapters::tui::keymap::table::LeaderCmd::Model
+                    )
+                )
+            },
         })
     }
 }

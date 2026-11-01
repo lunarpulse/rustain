@@ -1,5 +1,13 @@
 use crate::adapters::tui::handlers::login::LoginAction;
+use crate::adapters::tui::keymap::table::GlobalCmd;
+use crate::adapters::tui::keymap::table_chat::ChatCmd;
+use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
+use crate::adapters::tui::keymap::table_inspector::InspectorCmd;
+use crate::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::adapters::tui::keymap::text_edit;
+use crate::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
@@ -835,48 +843,15 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
         && !recipient_higher_confirmation_active(state)
         && !matches!(event, DomainInputEvent::Resize(_, _))
     {
-        match event {
-            DomainInputEvent::KeyPress('p')
-                if state
-                    .recipient_surface
-                    .as_ref()
-                    .is_some_and(|surface| surface.omitted_before > 0) =>
-            {
-                return InputAction::RecipientThreadPage { earlier: true };
+        let resolved = Key::from_domain(event)
+            .map(|key| resolve(Context::RecipientSurface, Host::Local, &[key]));
+        return match resolved {
+            Some(Resolved::Hit(row)) => exec_recipient(state, row.command),
+            _ => {
+                state.needs_redraw = true;
+                InputAction::Consumed
             }
-            DomainInputEvent::KeyPress('l')
-                if state
-                    .recipient_surface
-                    .as_ref()
-                    .is_some_and(|surface| surface.omitted_after > 0) =>
-            {
-                return InputAction::RecipientThreadPage { earlier: false };
-            }
-            DomainInputEvent::SpecialKey(DomainKey::Esc | DomainKey::CtrlC) => {
-                if let Some(surface) = state.recipient_surface.take() {
-                    state.focus = surface.prior_focus;
-                }
-            }
-            DomainInputEvent::SpecialKey(DomainKey::PageUp | DomainKey::PageDown) => {
-                if let Some(surface) = state.recipient_surface.as_mut() {
-                    surface.scroll_offset =
-                        if matches!(event, DomainInputEvent::SpecialKey(DomainKey::PageUp)) {
-                            surface
-                                .scroll_offset
-                                .saturating_sub(surface.viewport_rows.saturating_sub(1).max(1))
-                        } else {
-                            surface
-                                .scroll_offset
-                                .saturating_add(surface.viewport_rows.saturating_sub(1).max(1))
-                        };
-                }
-            }
-            // Ctrl+C is back one frame like Esc (RU-20, 21-3 AC13): never CancelOrQuit.
-            DomainInputEvent::SpecialKey(DomainKey::CtrlQ) => return InputAction::Quit,
-            _ => {}
-        }
-        state.needs_redraw = true;
-        return InputAction::Consumed;
+        };
     }
     // Cancel pending vim chords on any event that isn't a character key.
     if !matches!(event, DomainInputEvent::KeyPress(_)) {
@@ -1002,6 +977,1385 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
     }
 }
 
+// ── registry dispatch (Story 21.3 AC10) ───────────────────────────────────────
+// Every non-card key of the local host resolves through `keymap::resolve` and runs
+// through one `execute`. The inline cards (FR-21-3-b / A9) and the login overlay keep
+// their own arms.
+
+/// The overlays that own the character keys before any card: the palette, the focus
+/// overlays (help, model selector, usage, profile switcher) and reverse search.
+fn char_overlay_context(state: &TuiState) -> Option<Context> {
+    if state.command_palette.active {
+        return Some(Context::CommandPalette);
+    }
+    match overlay_focus_context(state) {
+        Some(
+            context @ (Context::Help
+            | Context::ModelSelector
+            | Context::UsagePanel
+            | Context::ProfileSwitcher),
+        ) => Some(context),
+        _ if state.reverse_search.active => Some(Context::ReverseSearch),
+        _ => None,
+    }
+}
+
+/// The overlay context the focus names, if any.
+fn overlay_focus_context(state: &TuiState) -> Option<Context> {
+    use crate::adapters::tui::state::SearchSubstate;
+    let FocusState::Overlay(overlay) = &state.focus else {
+        return None;
+    };
+    Some(match overlay {
+        OverlayType::Help => Context::Help,
+        OverlayType::ModelSelector => Context::ModelSelector,
+        OverlayType::UsagePanel => Context::UsagePanel,
+        OverlayType::ProfileSwitcher => Context::ProfileSwitcher,
+        OverlayType::Search => match state.search_state.substate {
+            SearchSubstate::Typing => Context::SearchTyping,
+            SearchSubstate::Navigating => Context::SearchNavigating,
+        },
+        OverlayType::CrossSearch => Context::CrossSearch,
+        OverlayType::BookmarkList => Context::BookmarkList,
+        OverlayType::WaveOverlay => Context::WaveOverlay,
+        _ => return None,
+    })
+}
+
+/// The context of the key target once no card owns it, top surface first.
+fn focus_context(state: &TuiState) -> Option<Context> {
+    use crate::domain::models::visual::PanelType;
+    let tasks = &state.task_panel_state;
+    Some(match &state.focus {
+        FocusState::Input => Context::Input,
+        FocusState::Chat if tasks.drill_down_task.is_some() => Context::ChatDrill,
+        FocusState::Chat if tasks.reorder_mode_for.is_some() => Context::ChatReorder,
+        FocusState::Chat if state.wave_run.is_some() => Context::ChatWave,
+        FocusState::Chat => Context::Chat,
+        FocusState::Sidebar { panel, .. } => match panel {
+            PanelType::Tasks if tasks.reorder_mode_for.is_some() => Context::TasksReorder,
+            PanelType::Tasks => Context::SidebarTasks,
+            PanelType::Agents if state.agent_panel_state.drill_down_agent.is_some() => {
+                Context::SidebarAgentInspector
+            }
+            PanelType::Agents => Context::SidebarAgents,
+            PanelType::TransparencyLog => Context::SidebarA2aLog,
+            PanelType::Room => Context::SidebarRoom,
+            PanelType::Artifacts => Context::SidebarArtifacts,
+            PanelType::History => Context::SidebarHistory,
+            _ => Context::Sidebar,
+        },
+        FocusState::Overlay(_) => return overlay_focus_context(state),
+    })
+}
+
+/// One key in `context`: its row's command runs through `execute`; a command that
+/// declines in the current state hands the key to its row's parent context; a key
+/// without a row takes the context's typing or default arm.
+fn dispatch(state: &mut TuiState, context: Context, key: Key) -> InputAction {
+    if let Some(done) = typed_before_rows(state, context, key) {
+        return done;
+    }
+    if matches!(
+        context,
+        Context::Chat | Context::ChatWave | Context::ChatReorder
+    ) && let Key::Char(c) = key
+    {
+        if let Some(done) = chat_sequence(state, context, c) {
+            return done;
+        }
+        if state.pending_g && c != 'g' {
+            state.pending_g = false;
+        }
+    }
+    let mut from = context;
+    loop {
+        match resolve(from, Host::Local, &[key]) {
+            Resolved::Hit(row) => {
+                if let Some(action) = execute(state, context, row.command, &[key]) {
+                    return action;
+                }
+                match row.context.parents().first() {
+                    Some(parent) => from = *parent,
+                    None => return rowless(state, context, key),
+                }
+            }
+            // `z`, `[` and `]` open a Chat sequence.
+            Resolved::Pending => {
+                match key {
+                    Key::Char('z') => state.pending_z = true,
+                    Key::Char(leader) => state.pending_bracket = Some(leader),
+                    _ => {}
+                }
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            Resolved::Miss => return rowless(state, context, key),
+        }
+    }
+}
+
+/// The second key of a vim `z` / `[` / `]` sequence: the row of both keys runs, any
+/// other key cancels the sequence.
+fn chat_sequence(state: &mut TuiState, context: Context, c: char) -> Option<InputAction> {
+    let first = if state.pending_z {
+        state.pending_z = false;
+        'z'
+    } else {
+        state.pending_bracket.take()?
+    };
+    state.needs_redraw = true;
+    let keys = [Key::Char(first), Key::Char(c)];
+    Some(match resolve(context, Host::Local, &keys) {
+        Resolved::Hit(row) => {
+            execute(state, context, row.command, &keys).unwrap_or(InputAction::Consumed)
+        }
+        _ => InputAction::Consumed,
+    })
+}
+
+/// Sub-states where a character is text before it is a command: the A2A log search.
+fn typed_before_rows(state: &mut TuiState, context: Context, key: Key) -> Option<InputAction> {
+    match (context, key) {
+        (Context::SidebarA2aLog, Key::Char(c)) if state.transparency_panel.search_active => {
+            crate::adapters::tui::handlers::transparency::panel_key(state, c);
+            state.needs_redraw = true;
+            Some(InputAction::Consumed)
+        }
+        _ => None,
+    }
+}
+
+/// A key without a row: typing where the context is a text field, else its default
+/// (overlays consume every other key, the other contexts ignore it).
+fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
+    use crate::adapters::tui::state::SearchSubstate;
+    let ignores = matches!(
+        context,
+        Context::Global
+            | Context::Input
+            | Context::Chat
+            | Context::ChatDrill
+            | Context::ChatWave
+            | Context::ChatReorder
+            | Context::Sidebar
+            | Context::SidebarHistory
+            | Context::SidebarTasks
+            | Context::TasksReorder
+            | Context::SidebarAgents
+            | Context::SidebarAgentInspector
+            | Context::SidebarA2aLog
+            | Context::SidebarRoom
+            | Context::SidebarArtifacts
+    );
+    let Key::Char(c) = key else {
+        if context == Context::Autocomplete {
+            // Any other special key dismisses the popup and then acts normally.
+            state.autocomplete.dismiss();
+            state.needs_redraw = true;
+            return dispatch(state, Context::Input, key);
+        }
+        return if ignores {
+            InputAction::Ignored
+        } else {
+            InputAction::Consumed
+        };
+    };
+    match context {
+        Context::CommandPalette => {
+            if state.command_palette.filter_text.is_empty()
+                && let Some(scope) =
+                    crate::adapters::palette_registry::PaletteRegistry::scope_for_prefix(c)
+            {
+                state.command_palette.current_scope = Some(scope);
+            }
+            state.command_palette.filter_text.push(c);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        Context::ReverseSearch => {
+            state.reverse_search.query.push(c);
+            update_reverse_search_matches(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        Context::SearchTyping => {
+            state.search_state.query.push(c);
+            state.needs_redraw = true;
+            InputAction::SearchQueryChanged
+        }
+        Context::SearchNavigating => {
+            // Any other printable returns to typing and appends itself.
+            state.search_state.substate = SearchSubstate::Typing;
+            state.search_state.query.push(c);
+            state.needs_redraw = true;
+            InputAction::SearchReturnToTyping
+        }
+        Context::CrossSearch => {
+            state.cross_search.query.push(c);
+            state.needs_redraw = true;
+            InputAction::CrossSearchQueryChanged
+        }
+        Context::ModelSelector => model_char(state, None, c).unwrap_or(InputAction::Consumed),
+        Context::Input | Context::Autocomplete => type_char(state, c, None),
+        Context::TasksReorder => {
+            state.needs_redraw = true;
+            InputAction::Ignored
+        }
+        _ if ignores => InputAction::Ignored,
+        _ => InputAction::Consumed,
+    }
+}
+
+/// The one local executor (AC10): a resolved command runs against the state. `None`:
+/// the command declines in the current state and the key goes to the row's parent.
+fn execute(
+    state: &mut TuiState,
+    context: Context,
+    command: CommandId,
+    keys: &[Key],
+) -> Option<InputAction> {
+    let key = keys[keys.len() - 1];
+    Some(match command {
+        CommandId::Global(cmd) => exec_global(state, cmd),
+        CommandId::Input(cmd) => exec_input(state, cmd, key),
+        CommandId::Field(cmd) => exec_field(state, context, cmd),
+        CommandId::Chat(cmd) => exec_chat(state, cmd, keys),
+        CommandId::Sidebar(cmd) => exec_sidebar(state, cmd),
+        CommandId::Search(cmd) => exec_search(state, cmd),
+        CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
+        CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
+        CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key),
+        CommandId::Inspector(cmd) => exec_inspector(state, cmd),
+        CommandId::Leader(_) | CommandId::Permission(_) => InputAction::Consumed,
+    })
+}
+
+/// Agents-panel inspector keys that reach `handle_input`: the event loop runs
+/// `agent_inspector_keys::on_key` first and owns every effect, so only the pure state
+/// changes happen here.
+fn exec_inspector(state: &mut TuiState, cmd: InspectorCmd) -> InputAction {
+    use crate::adapters::tui::agent_inspector_keys as inspector;
+    match cmd {
+        InspectorCmd::Close => {
+            inspector::close(state);
+            InputAction::Consumed
+        }
+        // Only a read-only tab passes `j`/`k` through (the inspector scrolls them
+        // itself otherwise): there they move the Agents list, as they always did.
+        InspectorCmd::ScrollDown | InspectorCmd::ScrollUp => {
+            sidebar_move(state, cmd == InspectorCmd::ScrollDown)
+        }
+        InspectorCmd::Kill => InputAction::Ignored,
+        _ => InputAction::Consumed,
+    }
+}
+
+fn exec_global(state: &mut TuiState, cmd: GlobalCmd) -> InputAction {
+    match cmd {
+        GlobalCmd::OpenLeader if ctrl_x_opens_leader(state) => open_leader(state),
+        GlobalCmd::OpenLeader => InputAction::Ignored,
+        GlobalCmd::QuitRequest => InputAction::Quit,
+    }
+}
+
+/// `Ctrl+X`: open the which-key menu, closing the popup or reverse search first.
+fn open_leader(state: &mut TuiState) -> InputAction {
+    if state.autocomplete.active {
+        state.autocomplete.dismiss();
+    }
+    state.reverse_search.active = false;
+    let prior_focus = match &state.focus {
+        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
+            FocusState::Input
+        }
+        other => other.clone(),
+    };
+    state.which_key.open(prior_focus);
+    state.focus = FocusState::Overlay(OverlayType::WhichKey);
+    state.needs_redraw = true;
+    InputAction::Consumed
+}
+
+/// `Ctrl+P`: open the command palette, closing the popup or reverse search first.
+fn open_palette(state: &mut TuiState) -> InputAction {
+    if state.autocomplete.active {
+        state.autocomplete.dismiss();
+    }
+    state.reverse_search.active = false;
+    let prior_focus = match &state.focus {
+        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
+            FocusState::Input
+        }
+        other => other.clone(),
+    };
+    state.command_palette.open(prior_focus);
+    state.focus = FocusState::Overlay(OverlayType::CommandPalette);
+    state.needs_redraw = true;
+    InputAction::Consumed
+}
+
+/// `Esc` on the inline cards: still each card's own decision (3-C changes it, A8).
+fn card_esc(state: &mut TuiState) -> Option<InputAction> {
+    let at = |state: &TuiState, card: ConfirmationType| {
+        state.focus == FocusState::Overlay(OverlayType::Confirmation(card))
+    };
+    if state.pending_consolidation_card.is_some() {
+        return Some(InputAction::ConsolidateDeclineAll);
+    }
+    if state.pending_forget_card.is_some() {
+        return Some(InputAction::ForgetDeclineAll);
+    }
+    if state.pending_artifact_card.is_some() && at(state, ConfirmationType::ArtifactApply) {
+        return Some(InputAction::ApplyCardDecline);
+    }
+    if state.pending_peer_add.is_some() && at(state, ConfirmationType::PeerAdd) {
+        return Some(InputAction::PeerAddDecline);
+    }
+    if state.pending_team_retract.is_some() && at(state, ConfirmationType::TeamRetract) {
+        return Some(InputAction::TeamRetractDecline);
+    }
+    if state.pending_delegation_card.is_some() {
+        return Some(InputAction::DelegationCardCancel);
+    }
+    None
+}
+
+fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
+    match cmd {
+        InputCmd::ReturnToChat => {
+            // Esc never submits: unsent text (a recalled history entry included) is kept.
+            state.focus = FocusState::Chat;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::SubmitOrNewline => {
+            if state.multiline_mode {
+                if !state.input_buffer.is_empty() {
+                    insert_newline(state);
+                }
+                InputAction::Consumed
+            } else if !state.input_buffer.is_empty() {
+                submit_message(state)
+            } else {
+                InputAction::Consumed
+            }
+        }
+        InputCmd::Send if !state.input_buffer.is_empty() => submit_message(state),
+        InputCmd::Send => InputAction::Consumed,
+        InputCmd::InsertNewline => {
+            insert_newline(state);
+            InputAction::Consumed
+        }
+        InputCmd::ToggleMultiline => {
+            state.multiline_mode = !state.multiline_mode;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::PasteClipboard => InputAction::RequestClipboardPaste,
+        InputCmd::OpenPalette => open_palette(state),
+        InputCmd::ReverseSearch => {
+            if state.autocomplete.active {
+                state.autocomplete.dismiss();
+            }
+            state.reverse_search.active = true;
+            state.reverse_search.query.clear();
+            state.reverse_search.matches.clear();
+            state.reverse_search.selected_match = 0;
+            state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::OpenSearch if state.input_buffer.is_empty() => {
+            let prior = state.focus.clone();
+            state.search_state = crate::adapters::tui::state::SearchState::new();
+            state.search_state.active = true;
+            state.search_state.prior_focus = Some(prior);
+            state.focus = FocusState::Overlay(OverlayType::Search);
+            state.needs_redraw = true;
+            InputAction::OpenSearch
+        }
+        InputCmd::OpenSearch => {
+            // Feedback instead of a silent no-op: the search needs an empty composer.
+            crate::adapters::tui::notifications::info(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::Input,
+                format!(
+                    "Search needs an empty input: clear it, then press {}",
+                    crate::adapters::tui::keymap::render::shortcut_for(CommandId::Input(
+                        InputCmd::OpenSearch
+                    ))
+                    .unwrap_or_default()
+                ),
+            );
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::NewTab => InputAction::NewTab,
+        InputCmd::CancelOrQuit => InputAction::CancelOrQuit,
+        InputCmd::LineEnd => {
+            // Logical line (unbounded width), not the wrapped visual row End uses.
+            let geometry = input_box::InputGeometry::new(&state.input_buffer, usize::MAX);
+            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, usize::MAX);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::LineStart => {
+            state.cursor_position =
+                text_edit::line_start(&state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::DeleteBack
+        | InputCmd::DeleteWordBack
+        | InputCmd::KillToLineStart
+        | InputCmd::KillToLineEnd => {
+            let edit = match cmd {
+                InputCmd::DeleteWordBack => text_edit::kill_word_back,
+                InputCmd::KillToLineStart => text_edit::kill_to_line_start,
+                InputCmd::KillToLineEnd => text_edit::kill_to_line_end,
+                _ => text_edit::delete_back,
+            };
+            state.cursor_position = edit(&mut state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::DeleteForward => {
+            let total_chars = state.input_buffer.chars().count();
+            if state.cursor_position < total_chars {
+                let from = geom::snap_boundary(&state.input_buffer, state.cursor_position);
+                let to = geom::next_boundary(&state.input_buffer, from);
+                let (start, end) = (
+                    char_to_byte(&state.input_buffer, from),
+                    char_to_byte(&state.input_buffer, to),
+                );
+                state.input_buffer.replace_range(start..end, "");
+                state.cursor_position = from;
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        InputCmd::CursorLeft => {
+            state.cursor_position = geom::prev_boundary(&state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::CursorRight => {
+            if state.cursor_position < state.input_buffer.chars().count() {
+                state.cursor_position =
+                    geom::next_boundary(&state.input_buffer, state.cursor_position);
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        InputCmd::CursorHome | InputCmd::CursorEnd => {
+            // Start / end of the current visual row.
+            let geometry = composer_geometry(state);
+            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+            let col = if cmd == InputCmd::CursorHome {
+                0
+            } else {
+                usize::MAX
+            };
+            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, col);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        InputCmd::UpOrHistoryPrev => {
+            let geometry = composer_geometry(state);
+            let has_newline = state.input_buffer.contains('\n');
+            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+
+            if row > 0 && !state.input_history.is_navigating() {
+                // Move cursor up one visual row (only if not already navigating history)
+                state.cursor_position = geometry.cursor_at(&state.input_buffer, row - 1, col);
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            } else if state.input_buffer.is_empty()
+                || state.input_history.is_navigating()
+                || !has_newline
+            {
+                // Navigate history
+                let current = state.input_buffer.clone();
+                if let Some(entry) = state.input_history.navigate_up(&current) {
+                    state.input_buffer = entry.to_string();
+                    state.cursor_position = state.input_buffer.chars().count();
+                    state.input_scroll_offset = 0;
+                    ensure_cursor_visible(state);
+                    state.needs_redraw = true;
+                }
+            }
+            InputAction::Consumed
+        }
+        InputCmd::DownOrHistoryNext => {
+            let geometry = composer_geometry(state);
+            let has_multiline_content = geometry.row_count() > 1;
+            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
+
+            if has_multiline_content
+                && row + 1 < geometry.row_count()
+                && !state.input_history.is_navigating()
+            {
+                // Move cursor down one visual row (only if not already navigating history)
+                state.cursor_position = geometry.cursor_at(&state.input_buffer, row + 1, col);
+                ensure_cursor_visible(state);
+                state.needs_redraw = true;
+            } else if state.input_history.is_navigating() {
+                // Navigate history forward
+                if let Some(entry) = state.input_history.navigate_down() {
+                    state.input_buffer = entry.to_string();
+                    state.cursor_position = state.input_buffer.chars().count();
+                    state.input_scroll_offset = 0;
+                    ensure_cursor_visible(state);
+                    state.needs_redraw = true;
+                }
+            }
+            InputAction::Consumed
+        }
+        InputCmd::CycleMode => InputAction::CycleMode,
+        InputCmd::OpenSlashPopup | InputCmd::OpenMentionPopup => match key {
+            Key::Char(c) => type_char(state, c, Some(cmd)),
+            _ => InputAction::Consumed,
+        },
+        // Attached-only rows: the local host has none of them.
+        InputCmd::TranscriptPageUp | InputCmd::TranscriptPageDown | InputCmd::NoCursor => {
+            InputAction::Consumed
+        }
+    }
+}
+
+/// Editing keys of an append-only text field (A4): `context` names the field.
+fn exec_field(state: &mut TuiState, context: Context, cmd: FieldCmd) -> InputAction {
+    let key = match cmd {
+        FieldCmd::DeleteWordBack => DomainKey::CtrlW,
+        FieldCmd::Clear => DomainKey::CtrlU,
+        FieldCmd::DeleteBack => DomainKey::CtrlH,
+        FieldCmd::NoCursor => return InputAction::Consumed,
+    };
+    match context {
+        Context::CommandPalette => palette_edit(state, key),
+        Context::SearchTyping | Context::SearchNavigating => search_edit(state, key),
+        Context::CrossSearch => cross_search_edit(state, key),
+        Context::ReverseSearch => {
+            edit_field(&mut state.reverse_search.query, key);
+            update_reverse_search_matches(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        Context::ModelSelector => {
+            if state.model_selector.search_active {
+                edit_field(&mut state.model_selector.search_query, key);
+                state.model_selector.recompute_filter();
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+fn exec_chat(state: &mut TuiState, cmd: ChatCmd, keys: &[Key]) -> InputAction {
+    match cmd {
+        ChatCmd::FocusToggle | ChatCmd::FocusInput => {
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        ChatCmd::Quit => InputAction::Quit,
+        ChatCmd::OpenHelp => {
+            let prior = state.focus.clone();
+            state.help_overlay.open(prior);
+            state.focus = FocusState::Overlay(OverlayType::Help);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        ChatCmd::OpenPalette => open_palette(state),
+        ChatCmd::CancelOrQuit => InputAction::CancelOrQuit,
+        ChatCmd::ScrollHalfPageDown => InputAction::ScrollHalfPageDown,
+        ChatCmd::ScrollHalfPageUp => InputAction::ScrollHalfPageUp,
+        ChatCmd::ScrollPageDown => InputAction::ScrollFullPageDown,
+        ChatCmd::ScrollPageUp => InputAction::ScrollFullPageUp,
+        ChatCmd::ScrollLineDown => {
+            state.needs_redraw = true;
+            InputAction::ScrollLineDown
+        }
+        ChatCmd::ScrollLineUp => {
+            state.needs_redraw = true;
+            InputAction::ScrollLineUp
+        }
+        ChatCmd::ScrollToBottom => {
+            state.needs_redraw = true;
+            InputAction::ScrollToBottom
+        }
+        // A single `g` jumps to the top and arms `gg`; the second `g` is idempotent.
+        ChatCmd::ScrollToTop if keys.len() == 1 => {
+            let was_gg = state.pending_g;
+            state.pending_g = !was_gg;
+            state.needs_redraw = true;
+            if was_gg {
+                InputAction::Consumed
+            } else {
+                InputAction::ScrollToTop
+            }
+        }
+        ChatCmd::ScrollToTop => InputAction::ScrollToTop,
+        ChatCmd::BlockJumpNext => block_jump(state, false, Direction::Down),
+        ChatCmd::BlockJumpPrev => block_jump(state, false, Direction::Up),
+        ChatCmd::UserMessagePrev => block_jump(state, true, Direction::Up),
+        ChatCmd::UserMessageNext => block_jump(state, true, Direction::Down),
+        ChatCmd::CycleInvocation => InputAction::CycleInvocationInFocusedTurn,
+        ChatCmd::PrevTab => InputAction::SwitchToPrevTab,
+        ChatCmd::NewTab => InputAction::NewTab,
+        ChatCmd::SwitchToTab(n) => InputAction::SwitchToTab(usize::from(n)),
+        ChatCmd::PasteClipboard => InputAction::RequestClipboardPaste,
+        ChatCmd::ToggleToolBlock => {
+            // Toggle collapse/expand on the focused tool block.
+            if let Some(tool_id) = &state.focused_tool_id {
+                // Acting on a block is choosing it: `c` copies THIS block (story 19.9).
+                state.selected_tool_id = Some(tool_id.clone());
+                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
+                entry.collapsed = !entry.collapsed;
+                entry.peek_active = false;
+                let tab_id = state.active_tab_id;
+                state.tab_render_state(tab_id).height_cache.invalidate_all();
+                state.tab_render_state(tab_id).tool_block_states_version = state
+                    .tab_render_state(tab_id)
+                    .tool_block_states_version
+                    .wrapping_add(1);
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        ChatCmd::Copy => InputAction::CopyToClipboard(String::new()),
+        ChatCmd::PeekToolBlock => {
+            if let Some(tool_id) = &state.focused_tool_id {
+                // Peeking a block is choosing it (story 19.9 review patch).
+                state.selected_tool_id = Some(tool_id.clone());
+                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
+                if entry.collapsed {
+                    entry.peek_active = !entry.peek_active;
+                    let tab_id = state.active_tab_id;
+                    state.tab_render_state(tab_id).tool_block_states_version = state
+                        .tab_render_state(tab_id)
+                        .tool_block_states_version
+                        .wrapping_add(1);
+                    state.needs_redraw = true;
+                }
+            }
+            InputAction::Consumed
+        }
+        ChatCmd::ForkAtMessage => InputAction::ForkAtMessage,
+        ChatCmd::RewindAtMessage => InputAction::RewindAtMessage,
+        ChatCmd::ToggleBookmark => InputAction::ToggleBookmark,
+        ChatCmd::OpenBookmarkList => InputAction::OpenBookmarkList,
+        ChatCmd::FoldToggle => InputAction::FoldToggleAtFocus,
+        ChatCmd::FoldCollapse => InputAction::CollapseFocus,
+        ChatCmd::FoldExpand => InputAction::ExpandFocus,
+        ChatCmd::CollapseAllTurns => InputAction::CollapseAllTurns,
+        ChatCmd::ExpandAllTurns => InputAction::ExpandAllTurns,
+        ChatCmd::ToggleSummaryTier => InputAction::ToggleSummaryTier,
+        ChatCmd::RecenterAnchor => InputAction::RecenterAnchor,
+        ChatCmd::NextProseAnchor => InputAction::JumpProseAnchor(Direction::Down),
+        ChatCmd::PrevProseAnchor => InputAction::JumpProseAnchor(Direction::Up),
+        ChatCmd::LatestProseAnchor => InputAction::JumpToLatestProseAnchor,
+    }
+}
+
+/// `J` `K` `{` `}`: jump to the next or previous content block or user message.
+fn block_jump(state: &mut TuiState, user_messages: bool, dir: Direction) -> InputAction {
+    let boundaries = if user_messages {
+        &state.user_message_boundaries
+    } else {
+        &state.block_boundaries
+    };
+    let down = matches!(dir, Direction::Down);
+    match find_next_boundary(
+        state.scroll_snapshot,
+        boundaries,
+        dir,
+        state.total_content_height,
+        state.viewport_height as usize,
+    ) {
+        Some(offset) => {
+            state.needs_redraw = true;
+            InputAction::BlockJump {
+                offset,
+                auto_scroll: down && offset == 0,
+            }
+        }
+        None => InputAction::Consumed,
+    }
+}
+
+fn exec_sidebar(state: &mut TuiState, cmd: SidebarCmd) -> InputAction {
+    match cmd {
+        SidebarCmd::SelectNext => sidebar_move(state, true),
+        SidebarCmd::SelectPrev => sidebar_move(state, false),
+        SidebarCmd::Quit => InputAction::Quit,
+        SidebarCmd::FocusChat => {
+            state.focus = FocusState::Chat;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        SidebarCmd::FocusInput => {
+            state.focus = FocusState::Input;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        SidebarCmd::PrevTab => InputAction::SwitchToPrevTab,
+        SidebarCmd::NewTab => InputAction::NewTab,
+        SidebarCmd::OpenPalette => open_palette(state),
+        SidebarCmd::CancelOrQuit => InputAction::CancelOrQuit,
+        SidebarCmd::PasteClipboard => InputAction::RequestClipboardPaste,
+        // Open selected conversation: the event loop resolves the id from the session index.
+        SidebarCmd::OpenConversation => InputAction::OpenSidebarConversation,
+        SidebarCmd::DeleteConversation => InputAction::DeleteSidebarConversation,
+        SidebarCmd::OpenCrossSearch => {
+            state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
+            state.cross_search.active = true;
+            state.focus = FocusState::Overlay(OverlayType::CrossSearch);
+            state.needs_redraw = true;
+            InputAction::OpenCrossSearch
+        }
+    }
+}
+
+/// Move the selection of the focused sidebar panel one entry (`j` / `k`, `Down` / `Up`).
+fn sidebar_move(state: &mut TuiState, down: bool) -> InputAction {
+    use crate::domain::models::visual::PanelType;
+    let FocusState::Sidebar { panel, .. } = state.focus else {
+        return InputAction::Ignored;
+    };
+    let tasks = panel == PanelType::Tasks;
+    let (current, limit) = if tasks {
+        (
+            state.task_panel_state.selected_index,
+            state.task_panel_max_index(),
+        )
+    } else {
+        (
+            state.sidebar_selected,
+            state.sidebar_entry_count.saturating_sub(1),
+        )
+    };
+    let target = if down {
+        (current < limit).then_some(current + 1)
+    } else {
+        current.checked_sub(1)
+    };
+    if let Some(index) = target {
+        if tasks {
+            state.task_panel_state.selected_index = index;
+        }
+        state.sidebar_selected = index;
+        state.focus = FocusState::Sidebar {
+            panel,
+            selected: index,
+        };
+        state.needs_redraw = true;
+    }
+    InputAction::Consumed
+}
+
+fn exec_search(state: &mut TuiState, cmd: SearchCmd) -> InputAction {
+    match cmd {
+        SearchCmd::Close => InputAction::CloseSearch,
+        SearchCmd::Commit => InputAction::SearchCommit,
+        SearchCmd::DeleteBack | SearchCmd::DeleteBackToTyping => {
+            search_edit(state, DomainKey::Backspace)
+        }
+        SearchCmd::ClearQuery => {
+            state.search_state.query.clear();
+            state.search_state.matches.clear();
+            state.search_state.focused_match_index = 0;
+            state.search_state.substate = crate::adapters::tui::state::SearchSubstate::Typing;
+            state.needs_redraw = true;
+            InputAction::SearchClear
+        }
+        SearchCmd::NextMatch => InputAction::SearchNext,
+        SearchCmd::PrevMatch => InputAction::SearchPrev,
+    }
+}
+
+/// Edit the search query tail; in the navigating sub-state the edit returns to typing.
+fn search_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
+    use crate::adapters::tui::state::SearchSubstate;
+    let navigating = matches!(state.search_state.substate, SearchSubstate::Navigating);
+    state.search_state.substate = SearchSubstate::Typing;
+    edit_field(&mut state.search_state.query, key);
+    state.needs_redraw = true;
+    if navigating {
+        InputAction::SearchReturnToTyping
+    } else {
+        InputAction::SearchQueryChanged
+    }
+}
+
+fn cross_search_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
+    edit_field(&mut state.cross_search.query, key);
+    state.needs_redraw = true;
+    InputAction::CrossSearchQueryChanged
+}
+
+fn exec_bookmark(state: &mut TuiState, cmd: BookmarkCmd) -> InputAction {
+    match cmd {
+        BookmarkCmd::SelectNext => {
+            let last = state.bookmark_list_count.saturating_sub(1);
+            state.bookmark_list_selected = state.bookmark_list_selected.saturating_add(1).min(last);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        BookmarkCmd::SelectPrev => {
+            state.bookmark_list_selected = state.bookmark_list_selected.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        BookmarkCmd::Delete => InputAction::DeleteBookmark,
+        BookmarkCmd::Undo => InputAction::UndoBookmarkDelete,
+        BookmarkCmd::Jump => InputAction::JumpToBookmark,
+        BookmarkCmd::Close => InputAction::CloseBookmarkList,
+    }
+}
+
+/// Commands of the task drill-down, the Chat sub-states, the sidebar panels and the wave
+/// overlay. `None`: the command declines in the current state (the key goes to the parent).
+fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputAction> {
+    use crate::adapters::tui::handlers::transparency::{self, PanelKeyAction};
+    let tasks = &mut state.task_panel_state;
+    Some(match cmd {
+        PanelCmd::DrillCopy
+        | PanelCmd::DrillRetry
+        | PanelCmd::DrillSkip
+        | PanelCmd::DrillEdit
+        | PanelCmd::DrillPause => {
+            let n = tasks.drill_down_task?;
+            match cmd {
+                PanelCmd::DrillCopy => InputAction::CopyTaskResult {
+                    plan_id: tasks.last_executed_plan_id.clone(),
+                    task_number: n,
+                },
+                // Story 6.4: status-conditional dispatch: gating is in event_loop.rs.
+                PanelCmd::DrillRetry => InputAction::TaskRetry(n),
+                PanelCmd::DrillSkip => InputAction::TaskSkip(n),
+                PanelCmd::DrillEdit => InputAction::TaskEdit(n),
+                _ => InputAction::TaskPause(n),
+            }
+        }
+        // 6-3 AC7: scroll the result body within the drill-down view (the widget clamps).
+        PanelCmd::DrillScrollDown => {
+            tasks.detail_scroll_offset = tasks.detail_scroll_offset.saturating_add(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::DrillScrollUp => {
+            tasks.detail_scroll_offset = tasks.detail_scroll_offset.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::DrillTop => {
+            tasks.detail_scroll_offset = 0;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::DrillBottom => {
+            tasks.detail_scroll_offset = u16::MAX;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::DrillToggleExpand => {
+            tasks.expanded_detail = !tasks.expanded_detail;
+            tasks.detail_scroll_offset = 0;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::DrillClose if tasks.reorder_mode_for.is_some() => {
+            state.needs_redraw = true;
+            InputAction::TaskReorderCancel
+        }
+        PanelCmd::DrillClose => {
+            tasks.drill_down_task = None;
+            tasks.expanded_detail = false;
+            tasks.detail_scroll_offset = 0;
+            state.focus = FocusState::Sidebar {
+                panel: crate::domain::models::visual::PanelType::Tasks,
+                selected: tasks.selected_index,
+            };
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // Esc unwinds the fan-out wave: the divergence view first, then the wave itself.
+        PanelCmd::WaveBack if state.wave_diverge_open => InputAction::CloseDivergeView,
+        PanelCmd::WaveBack => InputAction::DismissWave,
+        PanelCmd::WaveOpenOverlay => {
+            state.needs_redraw = true;
+            InputAction::OpenWaveOverlay
+        }
+        PanelCmd::WaveOpenDiverge => {
+            state.needs_redraw = true;
+            InputAction::OpenDivergeView
+        }
+        PanelCmd::WaveCloseDiverge => {
+            state.needs_redraw = true;
+            InputAction::CloseDivergeView
+        }
+        // From Chat focus open the wave overlay so a slot can be selected first (P3).
+        PanelCmd::WaveOpenFromChat => {
+            state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+            state.wave_overlay_selected = 0;
+            state.needs_redraw = true;
+            InputAction::OpenWaveOverlay
+        }
+        PanelCmd::ReorderCancel => {
+            state.needs_redraw = true;
+            InputAction::TaskReorderCancel
+        }
+        PanelCmd::TasksPrev => sidebar_move(state, false),
+        PanelCmd::TasksNext => sidebar_move(state, true),
+        PanelCmd::TasksCancelPlan => {
+            state.needs_redraw = true;
+            InputAction::TaskCancelPlan
+        }
+        // Panel `p` / `s`: 0-based selected index; the event loop resolves the task number.
+        PanelCmd::TasksPause => {
+            state.needs_redraw = true;
+            InputAction::TaskPause(tasks.selected_index as u32)
+        }
+        PanelCmd::TasksSkip => {
+            state.needs_redraw = true;
+            InputAction::TaskSkip(tasks.selected_index as u32)
+        }
+        PanelCmd::TasksDrill if tasks.task_count > 0 => {
+            tasks.drill_down_task = Some((tasks.selected_index + 1) as u32);
+            tasks.expanded_detail = false;
+            tasks.detail_scroll_offset = 0;
+            state.focus = FocusState::Chat;
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // With no task `Enter` is the sidebar's open-entry key (DF-256).
+        PanelCmd::TasksDrill => return None,
+        PanelCmd::ReorderDown | PanelCmd::ReorderUp => {
+            state.needs_redraw = true;
+            InputAction::TaskReorderMove(if cmd == PanelCmd::ReorderDown {
+                Direction::Down
+            } else {
+                Direction::Up
+            })
+        }
+        PanelCmd::ReorderCommit => {
+            state.needs_redraw = true;
+            InputAction::TaskReorderCommit
+        }
+        PanelCmd::AgentPauseToggle => {
+            state.needs_redraw = true;
+            InputAction::AgentPauseToggle
+        }
+        PanelCmd::LogSearch
+        | PanelCmd::LogTail
+        | PanelCmd::LogExport
+        | PanelCmd::LogNext
+        | PanelCmd::LogPrev => {
+            let Key::Char(c) = key else { return None };
+            match transparency::panel_key(state, c) {
+                PanelKeyAction::Consumed => {
+                    state.needs_redraw = true;
+                    InputAction::Consumed
+                }
+                PanelKeyAction::Export => InputAction::ExportTransparency,
+                PanelKeyAction::Ignored => return None,
+            }
+        }
+        PanelCmd::LogBackspace | PanelCmd::LogDrill | PanelCmd::LogClear => {
+            let special = match cmd {
+                PanelCmd::LogBackspace => DomainKey::Backspace,
+                PanelCmd::LogDrill => DomainKey::Enter,
+                _ => DomainKey::Esc,
+            };
+            if !transparency::panel_special_key(state, special) {
+                return None;
+            }
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        // The durable Room is a read-only replay: `Enter` does nothing there.
+        PanelCmd::RoomEnter => InputAction::Consumed,
+        // `Enter` drills into the selected artifact through the `/artifact show` arm.
+        PanelCmd::ArtifactShow => match state
+            .artifacts_panel
+            .selected_id_prefix(state.sidebar_selected)
+        {
+            Some(prefix) => InputAction::ExecuteCommand {
+                name: "artifact".to_owned(),
+                args: Some(format!("show {prefix}")),
+            },
+            // A zero-state panel still consumes the key (it must not reach the history).
+            None => InputAction::Consumed,
+        },
+        PanelCmd::WaveNext => {
+            if let Some(handle) = &state.wave_run {
+                let max = handle.snapshot().spoke_count.saturating_sub(1);
+                state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
+                state.needs_redraw = true;
+            }
+            InputAction::Consumed
+        }
+        PanelCmd::WavePrev => {
+            state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        PanelCmd::WaveDrill => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
+        PanelCmd::WaveClose => InputAction::CloseWaveOverlay,
+        PanelCmd::WaveRerun => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
+        PanelCmd::WaveDiverge => InputAction::OpenDivergeView,
+        PanelCmd::WaveDivergeClose => InputAction::CloseDivergeView,
+    })
+}
+
+fn exec_overlay(state: &mut TuiState, context: Context, cmd: OverlayCmd, key: Key) -> InputAction {
+    match context {
+        Context::Help => exec_help(state, cmd),
+        Context::CommandPalette => exec_palette(state, cmd),
+        Context::ModelSelector => exec_model_selector(state, cmd, key),
+        Context::ProfileSwitcher => exec_profile(state, cmd),
+        Context::UsagePanel => exec_usage(state, cmd),
+        Context::CrossSearch => exec_cross_search(state, cmd),
+        Context::ReverseSearch => exec_reverse_search(state, cmd),
+        Context::Autocomplete => exec_autocomplete(state, cmd),
+        // The host-neutral frames (S-QUIT, S-LOG, decisions), the recipient surface and
+        // the login overlay have their own owners.
+        _ => InputAction::Consumed,
+    }
+}
+
+/// The recipient surface (local): thread paging, scrolling and back; every other key
+/// is consumed.
+fn exec_recipient(state: &mut TuiState, command: CommandId) -> InputAction {
+    let CommandId::Overlay(cmd) = command else {
+        return InputAction::Consumed;
+    };
+    match cmd {
+        OverlayCmd::RecipientPrev
+            if state
+                .recipient_surface
+                .as_ref()
+                .is_some_and(|surface| surface.omitted_before > 0) =>
+        {
+            return InputAction::RecipientThreadPage { earlier: true };
+        }
+        OverlayCmd::RecipientNext
+            if state
+                .recipient_surface
+                .as_ref()
+                .is_some_and(|surface| surface.omitted_after > 0) =>
+        {
+            return InputAction::RecipientThreadPage { earlier: false };
+        }
+        OverlayCmd::RecipientClose => {
+            if let Some(surface) = state.recipient_surface.take() {
+                state.focus = surface.prior_focus;
+            }
+        }
+        OverlayCmd::RecipientPageUp | OverlayCmd::RecipientPageDown => {
+            if let Some(surface) = state.recipient_surface.as_mut() {
+                let page = surface.viewport_rows.saturating_sub(1).max(1);
+                surface.scroll_offset = if cmd == OverlayCmd::RecipientPageUp {
+                    surface.scroll_offset.saturating_sub(page)
+                } else {
+                    surface.scroll_offset.saturating_add(page)
+                };
+            }
+        }
+        OverlayCmd::QuitRequest => return InputAction::Quit,
+        _ => {}
+    }
+    state.needs_redraw = true;
+    InputAction::Consumed
+}
+
+fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::HelpDown => {
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
+        }
+        OverlayCmd::HelpUp => {
+            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
+        }
+        // A large sentinel: the render fn clamps to the maximum.
+        OverlayCmd::HelpBottom => state.help_overlay.scroll_offset = usize::MAX / 2,
+        OverlayCmd::HelpTop => state.help_overlay.scroll_offset = 0,
+        OverlayCmd::HelpClose => state.focus = state.help_overlay.close(),
+        // Ctrl+Q passes through to quit: the overlay itself lists `Ctrl+Q - Quit`.
+        OverlayCmd::QuitRequest => {
+            state.focus = state.help_overlay.close();
+            state.needs_redraw = true;
+            return InputAction::Quit;
+        }
+        _ => {}
+    }
+    state.needs_redraw = true;
+    InputAction::Consumed
+}
+
+/// Edit the palette filter (A4); the scope resets when the prefix character is deleted.
+fn palette_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
+    if !state.command_palette.filter_text.is_empty() {
+        edit_field(&mut state.command_palette.filter_text, key);
+        if state.command_palette.filter_text.is_empty() {
+            state.command_palette.current_scope = None;
+        }
+        state.needs_redraw = true;
+    }
+    InputAction::Consumed
+}
+
+fn exec_cross_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::CrossClose => InputAction::CloseCrossSearch,
+        OverlayCmd::CrossOpen if !state.cross_search.results.is_empty() => {
+            InputAction::OpenCrossSearchResult
+        }
+        OverlayCmd::CrossBackspace => cross_search_edit(state, DomainKey::Backspace),
+        OverlayCmd::CrossPrev => {
+            state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::CrossNext => {
+            if !state.cross_search.results.is_empty() {
+                let last = state.cross_search.results.len() - 1;
+                state.cross_search.selected = (state.cross_search.selected + 1).min(last);
+            }
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+fn exec_profile(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    let previewing = state.profile_switcher.preview.is_some();
+    let confirm = |state: &mut TuiState| {
+        let profile_name = state
+            .profile_switcher
+            .selected_profile()
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        state.needs_redraw = true;
+        InputAction::ConfirmProfileSwitch(profile_name)
+    };
+    match cmd {
+        OverlayCmd::ProfileEnter | OverlayCmd::ProfileYes if previewing => return confirm(state),
+        OverlayCmd::ProfileBack | OverlayCmd::ProfileNo if previewing => {
+            state.profile_switcher.exit_preview();
+            state.needs_redraw = true;
+        }
+        _ if previewing => {}
+        OverlayCmd::ProfilePrev => {
+            state.profile_switcher.navigate(-1);
+            state.needs_redraw = true;
+        }
+        OverlayCmd::ProfileNext => {
+            state.profile_switcher.navigate(1);
+            state.needs_redraw = true;
+        }
+        OverlayCmd::ProfileEnter => {
+            if let Some(selected) = state.profile_switcher.selected_profile().cloned()
+                && let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected)
+            {
+                state.profile_switcher.enter_preview(plan);
+                state.needs_redraw = true;
+            }
+        }
+        OverlayCmd::ProfileBack => {
+            if let Some(prev) = state.profile_switcher.dismiss() {
+                state.focus = prev;
+            }
+            state.needs_redraw = true;
+        }
+        _ => {}
+    }
+    InputAction::Consumed
+}
+
+/// Characters of the model selector (Story 7.2, 7.6): a pending context warning answers
+/// only `y` / `n`, an active search types, `/` starts the search on a sendable
+/// catalogue. `None`: the key is a navigation row.
+fn model_char(state: &mut TuiState, command: Option<OverlayCmd>, c: char) -> Option<InputAction> {
+    let selector = &mut state.model_selector;
+    if selector.pending_context_warning.is_some() {
+        return Some(match command {
+            Some(OverlayCmd::ModelWarnYes) => match selector.pending_context_warning.take() {
+                Some(w) => InputAction::CompactThenSwitchModel {
+                    provider_id: w.provider_id,
+                    model_id: w.model_id,
+                },
+                None => InputAction::Consumed,
+            },
+            Some(OverlayCmd::ModelWarnNo) => {
+                selector.pending_context_warning = None;
+                state.needs_redraw = true;
+                InputAction::Consumed
+            }
+            _ => InputAction::Consumed,
+        });
+    }
+    if selector.search_active {
+        if c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | ' ' | ':' | '+') {
+            selector.search_query.push(c);
+            selector.recompute_filter();
+            state.needs_redraw = true;
+        }
+        return Some(InputAction::Consumed);
+    }
+    // A locked catalogue advertises only the arrows and Esc: typing starts no hidden search.
+    let locked = selector
+        .columns
+        .get(selector.selected_provider)
+        .is_some_and(|column| column.locked_hint.is_some());
+    match command {
+        Some(OverlayCmd::ModelSearch) => {
+            if !locked {
+                selector.search_active = true;
+                selector.search_query.clear();
+                selector.recompute_filter();
+                state.needs_redraw = true;
+            }
+            Some(InputAction::Consumed)
+        }
+        Some(OverlayCmd::ModelWarnYes | OverlayCmd::ModelWarnNo) | None => {
+            Some(InputAction::Consumed)
+        }
+        Some(_) => None,
+    }
+}
+
+fn exec_model_selector(state: &mut TuiState, cmd: OverlayCmd, key: Key) -> InputAction {
+    let typed = matches!(key, Key::Char(_));
+    if let Key::Char(c) = key
+        && let Some(done) = model_char(state, Some(cmd), c)
+    {
+        return done;
+    }
+    match cmd {
+        OverlayCmd::ModelProviderPrev => {
+            state.model_selector.navigate_provider(Direction::Left);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelProviderNext => {
+            state.model_selector.navigate_provider(Direction::Right);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelPrev if typed => {
+            state.model_selector.navigate_model(Direction::Up);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelPrev => {
+            if state.model_selector.search_active
+                && !state.model_selector.filtered_indices.is_empty()
+            {
+                if state.model_selector.selected_model == 0 {
+                    state.model_selector.selected_model =
+                        state.model_selector.filtered_indices.len() - 1;
+                } else {
+                    state.model_selector.selected_model -= 1;
+                }
+            } else if !state.model_selector.search_active {
+                state.model_selector.navigate_model(Direction::Up);
+            }
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelNext if typed => {
+            state.model_selector.navigate_model(Direction::Down);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelNext => {
+            if state.model_selector.search_active
+                && !state.model_selector.filtered_indices.is_empty()
+            {
+                state.model_selector.selected_model = (state.model_selector.selected_model + 1)
+                    % state.model_selector.filtered_indices.len();
+            } else if !state.model_selector.search_active {
+                state.model_selector.navigate_model(Direction::Down);
+            }
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelSelect => {
+            if state.model_selector.pending_context_warning.is_some() {
+                return InputAction::Consumed;
+            }
+            if let Some((provider_id, model)) = state.model_selector.selected() {
+                return InputAction::SwitchModelProvider {
+                    provider_id: Some(provider_id.to_string()),
+                    model_id: model.model_id.clone(),
+                };
+            }
+            // A locked column that a sign-in can unlock starts that login; a
+            // hint-only column (env/config) stays open.
+            let column = state
+                .model_selector
+                .columns
+                .get(state.model_selector.selected_provider)
+                .filter(|column| column.locked_hint.is_some());
+            if let Some(column) = column
+                && let Some(provider) = state.model_selector.sign_in.get(&column.provider_id)
+            {
+                return InputAction::Login(LoginAction::Open {
+                    provider: Some(provider.clone()),
+                    origin: crate::adapters::tui::state::LoginOrigin::Picker {
+                        column: column.provider_id.clone(),
+                    },
+                });
+            }
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelBack => {
+            if state.model_selector.search_active {
+                state.model_selector.search_active = false;
+                state.model_selector.search_query.clear();
+                state.model_selector.filtered_indices.clear();
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+        OverlayCmd::ModelBackspace => {
+            if state.model_selector.search_active {
+                state.model_selector.search_query.pop();
+                state.model_selector.recompute_filter();
+                state.needs_redraw = true;
+                return InputAction::Consumed;
+            }
+            InputAction::Ignored
+        }
+        _ => InputAction::Consumed,
+    }
+}
+
+fn exec_reverse_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::RevPalette => open_palette(state),
+        OverlayCmd::RevLeader => open_leader(state),
+        _ => exec_reverse_search_keys(state, cmd),
+    }
+}
+
 /// Convert a char-index to a byte-index in the string.
 fn char_to_byte(s: &str, char_idx: usize) -> usize {
     s.char_indices()
@@ -1018,56 +2372,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         };
     }
 
-    // Command palette: typing updates filter text
-    // Covers: UX-DR18
-    if state.command_palette.active {
-        // Detect scope prefix on first char
-        if state.command_palette.filter_text.is_empty() {
-            if let Some(scope) =
-                crate::adapters::palette_registry::PaletteRegistry::scope_for_prefix(c)
-            {
-                state.command_palette.current_scope = Some(scope);
-                state.command_palette.filter_text.push(c);
-                state.needs_redraw = true;
-                return InputAction::Consumed;
-            }
-        }
-        state.command_palette.filter_text.push(c);
-        state.needs_redraw = true;
-        return InputAction::Consumed;
-    }
-
-    // Help overlay: handle char keys (j/k/g/G scrolling and ? dismiss)
-    // Covers: FR108, UX-DR94
-    if state.focus == FocusState::Overlay(OverlayType::Help) {
-        return handle_help_overlay_char(state, c);
-    }
-
-    // Model selector overlay: handle vim-style navigation (h/l/j/k) and y/n confirmation
-    // Story 7.2 AC1, AC5
-    if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
-        return handle_model_selector_char(state, c);
-    }
-
-    // Usage panel overlay (Story 7.5 AC3): all chars consumed; arrows handled in key path.
-    if state.focus == FocusState::Overlay(OverlayType::UsagePanel) {
-        // No char-action mappings yet — just consume.
-        let _ = c;
-        return InputAction::Consumed;
-    }
-
-    // Profile switcher overlay (Story 8.4 AC-1, AC-3): y/n/Enter/Esc handling
-    if state.focus == FocusState::Overlay(OverlayType::ProfileSwitcher) {
-        return handle_profile_switcher_char(state, c);
-    }
-
-    // Reverse search: typing adds to query
-    // Covers: UX-DR74
-    if state.reverse_search.active {
-        state.reverse_search.query.push(c);
-        update_reverse_search_matches(state);
-        state.needs_redraw = true;
-        return InputAction::Consumed;
+    // The palette, help, model selector, usage panel, profile switcher and reverse
+    // search own the character keys (registry contexts, AC10).
+    if let Some(context) = char_overlay_context(state) {
+        return dispatch(state, context, Key::Char(c));
     }
 
     // Inline PlanCard keys belong to Chat focus only (Story 21.2 AC10): in Input y/e/n
@@ -1368,6 +2676,36 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     }
 
     match state.focus {
+        // Fork / Rewind / Export-overwrite confirmations: cards, hand-written (FR-21-3-b).
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) => match c {
+            'y' => InputAction::ForkConfirm,
+            'n' => InputAction::ForkCancel,
+            _ => InputAction::Consumed,
+        },
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) => match c {
+            'y' => InputAction::RewindConfirm,
+            'f' => InputAction::RewindForkInstead,
+            'n' => InputAction::RewindCancel,
+            _ => InputAction::Consumed,
+        },
+        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ExportOverwrite(_))) => {
+            match c {
+                'y' | 'Y' => InputAction::ConfirmExportOverwrite,
+                'n' | 'N' => InputAction::CancelExportOverwrite,
+                _ => InputAction::Consumed,
+            }
+        }
+        _ => match focus_context(state) {
+            Some(context) => dispatch(state, context, Key::Char(c)),
+            None => InputAction::Ignored,
+        },
+    }
+}
+
+/// A printable character typed into the composer. `command` is the popup-trigger row
+/// (`/` or `@`) the key resolved to, if any; every other character is plain text.
+fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputAction {
+    match state.focus {
         FocusState::Input => {
             // When autocomplete is active, intercept characters to update filter.
             // Exception: a space in SlashCommand mode terminates the command name
@@ -1434,7 +2772,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             // Detect '/' at position 0 → trigger slash command autocomplete.
             // The popup owns this provisional edit: save the pre-trigger
             // composer so Esc can restore it (Story 21-2 A2).
-            if c == '/' && state.cursor_position == 0 && state.input_buffer.is_empty() {
+            if command == Some(InputCmd::OpenSlashPopup)
+                && state.cursor_position == 0
+                && state.input_buffer.is_empty()
+            {
                 state.autocomplete.own_slash_edit(
                     &state.input_buffer,
                     state.cursor_position,
@@ -1455,7 +2796,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
 
             // Detect '@' anywhere → trigger file mention autocomplete
-            if c == '@' {
+            if command == Some(InputCmd::OpenMentionPopup) {
                 let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
                 state.input_buffer.insert(byte_pos, c);
                 let trigger_pos = state.cursor_position;
@@ -1478,578 +2819,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        FocusState::Chat if state.task_panel_state.drill_down_task.is_some() => {
-            let n = state.task_panel_state.drill_down_task.unwrap();
-            match c {
-                'c' => {
-                    let plan_id = state.task_panel_state.last_executed_plan_id.clone();
-                    InputAction::CopyTaskResult {
-                        plan_id,
-                        task_number: n,
-                    }
-                }
-                // Story 6.4: status-conditional dispatch — gating in event_loop.rs
-                'r' => InputAction::TaskRetry(n),
-                's' => InputAction::TaskSkip(n),
-                'e' => InputAction::TaskEdit(n),
-                'p' => InputAction::TaskPause(n),
-                // 6-3 AC7: scroll the result body within the drill-down view.
-                // Widget clamps the offset against actual content height.
-                'j' => {
-                    state.task_panel_state.detail_scroll_offset = state
-                        .task_panel_state
-                        .detail_scroll_offset
-                        .saturating_add(1);
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'k' => {
-                    state.task_panel_state.detail_scroll_offset = state
-                        .task_panel_state
-                        .detail_scroll_offset
-                        .saturating_sub(1);
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'g' => {
-                    state.task_panel_state.detail_scroll_offset = 0;
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'G' => {
-                    state.task_panel_state.detail_scroll_offset = u16::MAX;
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                _ => InputAction::Ignored,
-            }
-        }
-        FocusState::Chat => {
-            // Story 16.8 AC2: reset pending_g on any non-`g` key (falls through
-            // to normal handler — unlike z/bracket prefixes which discard non-matching keys).
-            if state.pending_g && c != 'g' {
-                state.pending_g = false;
-            }
-            match c {
-                'd' if state.wave_run.is_some() => {
-                    state.needs_redraw = true;
-                    InputAction::OpenDivergeView
-                }
-                's' if state.wave_run.is_some() => {
-                    state.needs_redraw = true;
-                    InputAction::CloseDivergeView
-                }
-                'r' if state.wave_run.is_some() => {
-                    // P3 (review): from Chat focus, open the wave overlay so
-                    // the user can select a slot before pressing r again.
-                    // Re-running slot 0 blindly has no selection affordance.
-                    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
-                    state.wave_overlay_selected = 0;
-                    state.needs_redraw = true;
-                    InputAction::OpenWaveOverlay
-                }
-                // --- Story 16.6: vim z-prefix chord state machine (AC10) ---
-                _z if state.pending_z => {
-                    state.pending_z = false;
-                    // P8: Let 'g' through — user intended jump-to-top, not a cancelled z-chord.
-                    // 'g' is also reserved for future z-g chord expansion; consume it
-                    // as ScrollToTop rather than as a discarded cancelled-chord keystroke.
-                    state.needs_redraw = true;
-                    tracing::debug!("vim z-prefix chord: z + '{}'", c);
-                    return match c {
-                        'a' => InputAction::FoldToggleAtFocus,
-                        'c' => InputAction::CollapseFocus,
-                        'o' => InputAction::ExpandFocus,
-                        'M' => InputAction::CollapseAllTurns,
-                        'R' => InputAction::ExpandAllTurns,
-                        's' => InputAction::ToggleSummaryTier,
-                        'z' => InputAction::RecenterAnchor,
-                        'g' => InputAction::ScrollToTop,
-                        _ => {
-                            tracing::debug!("z-prefix chord cancelled with '{}'", c);
-                            InputAction::Consumed
-                        }
-                    };
-                }
-                // --- Story 16.6: vim bracket-prefix chord state machine (AC10) ---
-                // S16.8 preflight rebinding (2026-05-03): added `]P` arm — the new home
-                // for `JumpToLatestProseAnchor` (relocated from S16.6's `G` binding so
-                // S16.8 can return `G` to vim-bottom semantic per ADR-16-03). Bracket
-                // leader has no first-key side effect, so `]P` produces no flicker
-                // unlike a hypothetical `gp` chord (single-`g` would jump to top first).
-                // Mnemonic: `]` family for "forward to last X"; capital `P` = "Prose".
-                _b if state.pending_bracket.is_some() => {
-                    let leader = state.pending_bracket.take().unwrap();
-                    state.needs_redraw = true;
-                    tracing::debug!("vim bracket chord: {} + '{}'", leader, c);
-                    return match (leader, c) {
-                        (']', ']') => InputAction::JumpProseAnchor(Direction::Down),
-                        ('[', '[') => InputAction::JumpProseAnchor(Direction::Up),
-                        (']', 'P') => InputAction::JumpToLatestProseAnchor,
-                        _ => {
-                            tracing::debug!(
-                                "bracket-prefix chord cancelled with '{}{}'",
-                                leader,
-                                c
-                            );
-                            InputAction::Consumed
-                        }
-                    };
-                }
-                // --- Story 16.6: z / [ / ] chord leaders (AC10) ---
-                'z' => {
-                    state.pending_z = true;
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                ']' => {
-                    state.pending_bracket = Some(']');
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                '[' => {
-                    state.pending_bracket = Some('[');
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'i' => {
-                    state.focus = FocusState::Input;
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'q' => InputAction::Quit,
-                // j = scroll down (toward newer content). Story 16.8, AC7:
-                // migrated from direct mutation to InputAction emission;
-                // event-loop dispatcher calls dispatch_view_scroll(LineDown).
-                'j' => {
-                    state.needs_redraw = true;
-                    InputAction::ScrollLineDown
-                }
-                // k = scroll up (toward older content). Story 16.8, AC7:
-                // migrated from direct mutation to InputAction emission;
-                // event-loop dispatcher calls dispatch_view_scroll(LineUp).
-                'k' => {
-                    state.needs_redraw = true;
-                    InputAction::ScrollLineUp
-                }
-                // G = jump to bottom (vim-native semantic restored).
-                // Story 16.6 had bound G to JumpToLatestProseAnchor (AC6 override);
-                // S16.8 preflight rebinding (2026-05-03) returned G to vim-bottom per
-                // ADR-16-03 (Anchor as Explicit User Investment). The displaced
-                // S16.8 binding moved to the `]P` bracket chord.
-                // Mode-aware dispatcher: Pinned → no-op + teaching toast; else ScrollToBottom.
-                // See event_loop.rs dispatcher for the mode check (AC3 + AC15).
-                'G' => {
-                    state.needs_redraw = true;
-                    InputAction::ScrollToBottom
-                }
-                // g = jump to top (mirror of G). Single-`g` immediately fires
-                // ScrollToTop (legacy alias preserved from Story 1.4) AND sets
-                // pending_g so a follow-up `g` is detected as `gg` chord.
-                // Idempotent: if already at top, ScrollToTop is a no-op.
-                // S16.8 Task 6, AC2.
-                'g' => {
-                    let was_gg = state.pending_g;
-                    // P6: On gg chord, the first g already jumped to top — second g
-                    // is idempotent, so skip the redundant dispatch.
-                    state.pending_g = !was_gg;
-                    state.needs_redraw = true;
-                    if was_gg {
-                        tracing::debug!("gg chord: second g, idempotent skip");
-                        InputAction::Consumed
-                    } else {
-                        InputAction::ScrollToTop
-                    }
-                }
-                // J = jump to next content block boundary. S16.8, AC7: migrated to BlockJump.
-                'J' => {
-                    if let Some(new_offset) = find_next_boundary(
-                        state.scroll_snapshot,
-                        &state.block_boundaries,
-                        Direction::Down,
-                        state.total_content_height,
-                        state.viewport_height as usize,
-                    ) {
-                        state.needs_redraw = true;
-                        InputAction::BlockJump {
-                            offset: new_offset,
-                            auto_scroll: new_offset == 0,
-                        }
-                    } else {
-                        InputAction::Consumed
-                    }
-                }
-                // K = jump to previous content block boundary
-                'K' => {
-                    if let Some(new_offset) = find_next_boundary(
-                        state.scroll_snapshot,
-                        &state.block_boundaries,
-                        Direction::Up,
-                        state.total_content_height,
-                        state.viewport_height as usize,
-                    ) {
-                        state.needs_redraw = true;
-                        InputAction::BlockJump {
-                            offset: new_offset,
-                            auto_scroll: false,
-                        }
-                    } else {
-                        InputAction::Consumed
-                    }
-                }
-                // { = jump to previous user message
-                '{' => {
-                    if let Some(new_offset) = find_next_boundary(
-                        state.scroll_snapshot,
-                        &state.user_message_boundaries,
-                        Direction::Up,
-                        state.total_content_height,
-                        state.viewport_height as usize,
-                    ) {
-                        state.needs_redraw = true;
-                        InputAction::BlockJump {
-                            offset: new_offset,
-                            auto_scroll: false,
-                        }
-                    } else {
-                        InputAction::Consumed
-                    }
-                }
-                // } = jump to next user message
-                '}' => {
-                    if let Some(new_offset) = find_next_boundary(
-                        state.scroll_snapshot,
-                        &state.user_message_boundaries,
-                        Direction::Down,
-                        state.total_content_height,
-                        state.viewport_height as usize,
-                    ) {
-                        state.needs_redraw = true;
-                        InputAction::BlockJump {
-                            offset: new_offset,
-                            auto_scroll: new_offset == 0,
-                        }
-                    } else {
-                        InputAction::Consumed
-                    }
-                }
-                // ? = toggle help overlay
-                // Covers: FR108, UX-DR94 (AC1: ? opens help from any non-Input focus)
-                '?' => {
-                    let prior = state.focus.clone();
-                    state.help_overlay.open(prior);
-                    state.focus = FocusState::Overlay(OverlayType::Help);
-                    state.needs_redraw = true;
-                    return InputAction::Consumed;
-                }
-                // c = copy focused content to clipboard
-                // Covers: FR116, UX-DR68 (AC6, AC7, AC8, AC9)
-                'c' => {
-                    return InputAction::CopyToClipboard(String::new());
-                }
-                // p = peek preview on focused collapsed tool block
-                'p' => {
-                    if let Some(ref tool_id) = state.focused_tool_id {
-                        // Peeking a block is choosing it — record the
-                        // explicit selection so `c` copies THIS block (story
-                        // 19.9 review patch: copy decoupled from
-                        // render-derived focus, which the render pass
-                        // overwrites every frame).
-                        state.selected_tool_id = Some(tool_id.clone());
-                        let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
-                        if entry.collapsed {
-                            entry.peek_active = !entry.peek_active;
-                            let tab_id = state.active_tab_id;
-                            state.tab_render_state(tab_id).tool_block_states_version = state
-                                .tab_render_state(tab_id)
-                                .tool_block_states_version
-                                .wrapping_add(1);
-                            state.needs_redraw = true;
-                        }
-                    }
-                    InputAction::Consumed
-                }
-                // 1-9 = direct tab switch (AC2: number key direct switch)
-                '1'..='9' => {
-                    let n = (c as u8 - b'0') as usize;
-                    InputAction::SwitchToTab(n)
-                }
-                // f = fork conversation at the currently focused message (Story 4-3a, AC1)
-                'f' => InputAction::ForkAtMessage,
-                // R = rewind conversation to the currently focused message (Story 4-3b, AC1; UX-DR90)
-                'R' => InputAction::RewindAtMessage,
-                // m = toggle bookmark on the focused message (Story 4-4, AC8; UX-DR91)
-                'm' => InputAction::ToggleBookmark,
-                // ' = open the bookmark list panel (Story 4-4, AC10; UX-DR91)
-                '\'' => InputAction::OpenBookmarkList,
-                _ => InputAction::Ignored,
-            }
-        }
-        FocusState::Sidebar {
-            panel: _panel,
-            selected: _selected,
-        } => {
-            // Story 6.4: reorder-mode intercept — override j/k/↑/↓/Enter/Esc when reorder active
-            if state.task_panel_state.reorder_mode_for.is_some()
-                && _panel == crate::domain::models::visual::PanelType::Tasks
-            {
-                state.needs_redraw = true;
-                return match c {
-                    'j' | '\u{2193}' => InputAction::TaskReorderMove(Direction::Down),
-                    'k' | '\u{2191}' => InputAction::TaskReorderMove(Direction::Up),
-                    '\r' => InputAction::TaskReorderCommit,
-                    '\u{1b}' => InputAction::TaskReorderCancel,
-                    _ => InputAction::Ignored,
-                };
-            }
-            if _panel == crate::domain::models::visual::PanelType::TransparencyLog && c != '\u{1b}'
-            {
-                match crate::adapters::tui::handlers::transparency::panel_key(state, c) {
-                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Consumed => {
-                        state.needs_redraw = true;
-                        return InputAction::Consumed;
-                    }
-                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Export => {
-                        return InputAction::ExportTransparency;
-                    }
-                    crate::adapters::tui::handlers::transparency::PanelKeyAction::Ignored => {}
-                }
-            }
-            match c {
-                'j' => {
-                    let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
-                        let max = state.task_panel_max_index();
-                        if state.task_panel_state.selected_index < max {
-                            state.task_panel_state.selected_index += 1;
-                            state.sidebar_selected = state.task_panel_state.selected_index;
-                            true
-                        } else {
-                            false
-                        }
-                    } else if state.sidebar_entry_count > 0 {
-                        let max = state.sidebar_entry_count - 1;
-                        if state.sidebar_selected < max {
-                            state.sidebar_selected += 1;
-                            true
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-                    if moved {
-                        state.focus = FocusState::Sidebar {
-                            panel: _panel,
-                            selected: state.sidebar_selected,
-                        };
-                        state.needs_redraw = true;
-                    }
-                    InputAction::Consumed
-                }
-                'k' => {
-                    let moved = if _panel == crate::domain::models::visual::PanelType::Tasks {
-                        if state.task_panel_state.selected_index > 0 {
-                            state.task_panel_state.selected_index -= 1;
-                            state.sidebar_selected = state.task_panel_state.selected_index;
-                            true
-                        } else {
-                            false
-                        }
-                    } else if state.sidebar_selected > 0 {
-                        state.sidebar_selected -= 1;
-                        true
-                    } else {
-                        false
-                    };
-                    if moved {
-                        state.focus = FocusState::Sidebar {
-                            panel: _panel,
-                            selected: state.sidebar_selected,
-                        };
-                        state.needs_redraw = true;
-                    }
-                    InputAction::Consumed
-                }
-                'x' if _panel == crate::domain::models::visual::PanelType::Tasks => {
-                    state.needs_redraw = true;
-                    InputAction::TaskCancelPlan
-                }
-                'p' if _panel == crate::domain::models::visual::PanelType::Tasks => {
-                    state.needs_redraw = true;
-                    // Panel `p`: dispatch with selected_index (0-based); event_loop resolves to task number
-                    InputAction::TaskPause(state.task_panel_state.selected_index as u32)
-                }
-                'p' if _panel == crate::domain::models::visual::PanelType::Agents
-                    && state.agent_panel_state.drill_down_agent.is_none() =>
-                {
-                    state.needs_redraw = true;
-                    InputAction::AgentPauseToggle
-                }
-                's' if _panel == crate::domain::models::visual::PanelType::Tasks => {
-                    state.needs_redraw = true;
-                    // Panel `s`: dispatch with selected_index (0-based); event_loop resolves to task number
-                    InputAction::TaskSkip(state.task_panel_state.selected_index as u32)
-                }
-                'd' if _panel == crate::domain::models::visual::PanelType::History => {
-                    InputAction::DeleteSidebarConversation
-                }
-                '/' if _panel == crate::domain::models::visual::PanelType::History => {
-                    state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
-                    state.cross_search.active = true;
-                    state.focus = FocusState::Overlay(OverlayType::CrossSearch);
-                    state.needs_redraw = true;
-                    InputAction::OpenCrossSearch
-                }
-                '\u{1b}'
-                    if _panel == crate::domain::models::visual::PanelType::Agents
-                        && state.agent_panel_state.drill_down_agent.is_some() =>
-                {
-                    state.agent_panel_state.drill_down_agent = None;
-                    state.agent_panel_state.inspector_scroll_offset = 0;
-                    state.agent_panel_state.pending_kill_confirm = None;
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'p' | 'm' | 't' | 'c' | 'y' | 'n'
-                    if _panel == crate::domain::models::visual::PanelType::Agents
-                        && state.agent_panel_state.drill_down_agent.is_some() =>
-                {
-                    InputAction::Consumed
-                }
-                '\u{1b}'
-                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog
-                        && crate::adapters::tui::handlers::transparency::clear_transient(state) =>
-                {
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                '\n' | '\r'
-                    if _panel == crate::domain::models::visual::PanelType::TransparencyLog =>
-                {
-                    crate::adapters::tui::handlers::transparency::toggle_drill(
-                        state,
-                        state.sidebar_selected,
-                    );
-                    state.needs_redraw = true;
-                    InputAction::Consumed
-                }
-                'q' => InputAction::Quit,
-                _ => InputAction::Ignored,
-            }
-        }
-        // Fork confirmation: y = confirm, n = cancel (Story 4-3a, AC1)
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) => match c {
-            'y' => InputAction::ForkConfirm,
-            'n' => InputAction::ForkCancel,
-            _ => InputAction::Consumed,
-        },
-        // Rewind confirmation: y = confirm, f = fork instead, n = cancel (Story 4-3b, AC1)
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) => match c {
-            'y' => InputAction::RewindConfirm,
-            'f' => InputAction::RewindForkInstead,
-            'n' => InputAction::RewindCancel,
-            _ => InputAction::Consumed,
-        },
-        // Export-overwrite confirmation: y = overwrite, n = cancel (Story 4-4 AC12).
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ExportOverwrite(_))) => {
-            match c {
-                'y' | 'Y' => InputAction::ConfirmExportOverwrite,
-                'n' | 'N' => InputAction::CancelExportOverwrite,
-                _ => InputAction::Consumed,
-            }
-        }
-        // Search overlay printable-key handling (Story 4-4 AC2, AC3).
-        //
-        // Dispatches on `search_state.substate`:
-        // - Typing: append char to query, signal re-scan via SearchQueryChanged
-        // - Navigating: `n` / `N` navigate, any other printable returns to
-        //   Typing AND applies the char so the user can refine without Esc
-        FocusState::Overlay(OverlayType::Search) => {
-            use crate::adapters::tui::state::SearchSubstate;
-            match state.search_state.substate {
-                SearchSubstate::Typing => {
-                    state.search_state.query.push(c);
-                    state.needs_redraw = true;
-                    InputAction::SearchQueryChanged
-                }
-                SearchSubstate::Navigating => match c {
-                    'n' => InputAction::SearchNext,
-                    'N' => InputAction::SearchPrev,
-                    other => {
-                        // Return to Typing and apply the char.
-                        state.search_state.substate = SearchSubstate::Typing;
-                        state.search_state.query.push(other);
-                        state.needs_redraw = true;
-                        InputAction::SearchReturnToTyping
-                    }
-                },
-            }
-        }
-        // Cross-search overlay printable-key handling (Story 4-4 AC5).
-        // j/k navigate results; every other printable char extends the query.
-        FocusState::Overlay(OverlayType::CrossSearch) => match c {
-            'j' => {
-                if !state.cross_search.results.is_empty() {
-                    let last = state.cross_search.results.len() - 1;
-                    state.cross_search.selected = (state.cross_search.selected + 1).min(last);
-                }
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            'k' => {
-                state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            other => {
-                state.cross_search.query.push(other);
-                state.needs_redraw = true;
-                InputAction::CrossSearchQueryChanged
-            }
-        },
-        // Bookmark list panel printable-key handling (Story 4-4 AC10).
-        // j/k navigate, d deletes, u undoes (within 5 s), Enter jumps, Esc closes.
-        FocusState::Overlay(OverlayType::BookmarkList) => match c {
-            'j' => {
-                let last = state.bookmark_list_count.saturating_sub(1);
-                state.bookmark_list_selected =
-                    state.bookmark_list_selected.saturating_add(1).min(last);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            'k' => {
-                state.bookmark_list_selected = state.bookmark_list_selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            'd' => InputAction::DeleteBookmark,
-            'u' => InputAction::UndoBookmarkDelete,
-            _ => InputAction::Consumed,
-        },
-        // Story 14.3a: WaveOverlay char handling — intercept BEFORE the
-        // generic `Overlay(_) => Ignored` catch-all so j/k/r/d/s own these
-        // keys instead of falling through to chat/input handlers.
-        FocusState::Overlay(OverlayType::WaveOverlay) => match c {
-            'j' => {
-                if let Some(ref handle) = state.wave_run {
-                    let snap = handle.snapshot();
-                    let max = snap.spoke_count.saturating_sub(1);
-                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
-                    state.needs_redraw = true;
-                }
-                InputAction::Consumed
-            }
-            'k' => {
-                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            'r' => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
-            'd' => InputAction::OpenDivergeView,
-            's' => InputAction::CloseDivergeView,
-            _ => InputAction::Consumed,
-        },
-        FocusState::Overlay(_) => InputAction::Ignored,
+        _ => InputAction::Ignored,
     }
 }
 
@@ -2147,7 +2917,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         return match key {
             DomainKey::Enter => InputAction::FeedbackInputSubmit,
             DomainKey::Backspace => InputAction::FeedbackInputBackspace,
-            DomainKey::CtrlW | DomainKey::CtrlU | DomainKey::CtrlH => {
+            _ if matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h')) => {
                 if let Some(fi) = state.pending_feedback_input.as_mut() {
                     edit_field(&mut fi.buffer, key);
                     fi.cursor = fi.buffer.chars().count();
@@ -2177,7 +2947,9 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                     InputAction::Consumed
                 }
             }
-            DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
+            _ if key == DomainKey::Backspace
+                || matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h')) =>
+            {
                 if let Some(aq) = state.ask_user_question.as_mut() {
                     edit_field(&mut aq.input_buffer, key);
                     aq.cursor_position = aq.input_buffer.chars().count();
@@ -2250,21 +3022,12 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
     }
 
-    // Help overlay: route all special keys when active
-    // Covers: FR108, UX-DR94
-    if state.focus == FocusState::Overlay(OverlayType::Help) {
-        return handle_help_overlay_key(state, key);
-    }
-
-    // Model selector overlay: route arrow keys, Enter, Esc
-    // Story 7.2 AC1, AC3
-    if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
-        return handle_model_selector_key(state, key);
-    }
-
-    // Usage panel overlay (Story 7.5 AC3): Esc / Ctrl+C dismisses, arrows cycle sections.
-    if state.focus == FocusState::Overlay(OverlayType::UsagePanel) {
-        return handle_usage_panel_key(state, key);
+    // Help, the model selector and the usage panel own every special key (AC10).
+    let overlay = overlay_focus_context(state);
+    let k = Key::from_domain_key(key);
+    if let Some(context @ (Context::Help | Context::ModelSelector | Context::UsagePanel)) = overlay
+    {
+        return dispatch(state, context, k);
     }
 
     // Story 11.4a: `/memory forget` card navigation (Up/Down arrows).
@@ -2289,40 +3052,24 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         };
     }
 
-    // Profile switcher overlay (Story 8.4 AC-1): Up/Down navigate, Esc dismisses
-    if state.focus == FocusState::Overlay(OverlayType::ProfileSwitcher) {
-        return handle_profile_switcher_key(state, key);
-    }
-
-    // Command palette overlay handling — intercept keys when palette is active
-    // Covers: UX-DR18
-    if state.command_palette.active {
-        return handle_command_palette_key(state, key);
-    }
-
-    // Autocomplete overlay handling — intercept keys when autocomplete is active
-    // Covers: UX-DR75 (autocomplete)
-    if state.autocomplete.active && state.focus == FocusState::Input {
-        let result = handle_autocomplete_key(state, key);
-        if result != InputAction::Ignored {
-            return result;
-        }
-        // Ignored = autocomplete dismissed, fall through to normal key handling
-    }
-
-    // Reverse search overlay handling
-    // Covers: UX-DR74 (reverse search)
-    // P16: Allow Ctrl+P and Ctrl+X to dismiss reverse search and open their overlays (Tier-2).
-    if state.reverse_search.active && !matches!(key, DomainKey::CtrlP | DomainKey::CtrlX) {
-        return handle_reverse_search_key(state, key);
-    }
-
-    // Within-conversation search overlay handling (Story 4-4 AC3, AC4).
-    // Tier-1 overlay: consumes ALL special keys (including Ctrl+P / Ctrl+X)
-    // while active, matching the fork/rewind/delete confirmation pattern.
-    // Users must Esc first before opening the palette or which-key chords.
-    if state.focus == FocusState::Overlay(OverlayType::Search) {
-        return handle_search_overlay_key(state, key);
+    // The profile switcher, palette, autocomplete popup, reverse search and the
+    // conversation search own every special key (AC10).
+    let early = if matches!(
+        overlay,
+        Some(Context::ProfileSwitcher | Context::SearchTyping | Context::SearchNavigating)
+    ) {
+        overlay
+    } else if state.command_palette.active {
+        Some(Context::CommandPalette)
+    } else if state.autocomplete.active && state.focus == FocusState::Input {
+        Some(Context::Autocomplete)
+    } else if state.reverse_search.active {
+        Some(Context::ReverseSearch)
+    } else {
+        None
+    };
+    if let Some(context) = early {
+        return dispatch(state, context, k);
     }
 
     // Cross-search overlay special-key handling (Story 4-4 AC5, AC6).
@@ -2336,719 +3083,41 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         };
     }
 
-    if state.focus == FocusState::Overlay(OverlayType::CrossSearch) {
-        return match key {
-            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseCrossSearch,
-            DomainKey::Enter => {
-                if !state.cross_search.results.is_empty() {
-                    InputAction::OpenCrossSearchResult
-                } else {
-                    InputAction::Consumed
-                }
-            }
-            DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
-                edit_field(&mut state.cross_search.query, key);
-                state.needs_redraw = true;
-                InputAction::CrossSearchQueryChanged
-            }
-            DomainKey::Up => {
-                state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            DomainKey::Down => {
-                if !state.cross_search.results.is_empty() {
-                    let last = state.cross_search.results.len() - 1;
-                    state.cross_search.selected = (state.cross_search.selected + 1).min(last);
-                }
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            _ => InputAction::Consumed,
-        };
-    }
-
-    // Bookmark list panel special-key handling (Story 4-4 AC10).
-    if state.focus == FocusState::Overlay(OverlayType::BookmarkList) {
-        return match key {
-            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseBookmarkList,
-            DomainKey::Enter => InputAction::JumpToBookmark,
-            DomainKey::Delete | DomainKey::Backspace => InputAction::DeleteBookmark,
-            DomainKey::Up => {
-                state.bookmark_list_selected = state.bookmark_list_selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            DomainKey::Down => {
-                let last = state.bookmark_list_count.saturating_sub(1);
-                state.bookmark_list_selected =
-                    state.bookmark_list_selected.saturating_add(1).min(last);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            _ => InputAction::Consumed,
-        };
-    }
-    // Story 14.3a: WaveOverlay special-key handling — intercept BEFORE the
-    // generic `match key {}` dispatch (Esc/Enter/Up/Down) so the overlay owns
-    // them instead of the chat/input handlers.
-    if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
-        return match key {
-            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseWaveOverlay,
-            DomainKey::Enter => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
-            DomainKey::Down => {
-                if let Some(ref handle) = state.wave_run {
-                    let snap = handle.snapshot();
-                    let max = snap.spoke_count.saturating_sub(1);
-                    state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
-                    state.needs_redraw = true;
-                }
-                InputAction::Consumed
-            }
-            DomainKey::Up => {
-                state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            _ => InputAction::Consumed,
-        };
-    }
-
-    if matches!(
-        state.focus,
-        FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::TransparencyLog,
-            ..
-        }
-    ) && crate::adapters::tui::handlers::transparency::panel_special_key(state, key)
+    let context = focus_context(state);
+    // `Esc` on an inline card is still the card's own decision (3-C); the reorder, the
+    // drill-down and the overlays go first.
+    if key == DomainKey::Esc
+        && !matches!(
+            context,
+            Some(
+                Context::ChatReorder
+                    | Context::ChatDrill
+                    | Context::CrossSearch
+                    | Context::BookmarkList
+                    | Context::WaveOverlay
+            )
+        )
+        && let Some(action) = card_esc(state)
     {
-        state.needs_redraw = true;
-        return InputAction::Consumed;
+        return action;
     }
-
-    match key {
-        DomainKey::Esc => {
-            // Story 21.2 AC12 / RU-19: Esc NEVER submits. In Input it falls through
-            // to the safe focus return below (unsent text, incl. a recalled
-            // history entry, is preserved); Ctrl+Enter / Ctrl+X Enter send.
-            // Story 6.4: reorder-mode Esc — cancel and restore
-            if state.focus == FocusState::Chat && state.task_panel_state.reorder_mode_for.is_some()
-            {
-                state.needs_redraw = true;
-                return InputAction::TaskReorderCancel;
-            }
-            if state.focus == FocusState::Chat && state.task_panel_state.drill_down_task.is_some() {
-                state.task_panel_state.drill_down_task = None;
-                state.task_panel_state.expanded_detail = false;
-                state.task_panel_state.detail_scroll_offset = 0;
-                state.task_panel_state.detail_scroll_offset = 0;
-                state.focus = FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    selected: state.task_panel_state.selected_index,
-                };
+    // The four inline cards (PlanApproval, ArtifactApply, PeerAdd, TeamRetract) own no
+    // context row: keep the generic arms they always answered until 3-C Task 9.
+    if context.is_none() && matches!(state.focus, FocusState::Overlay(_)) {
+        match key {
+            DomainKey::CtrlC => return InputAction::CancelOrQuit,
+            DomainKey::CtrlT => return InputAction::NewTab,
+            DomainKey::ShiftTab => return InputAction::SwitchToPrevTab,
+            DomainKey::AltV => return InputAction::RequestClipboardPaste,
+            DomainKey::Esc => {
+                state.focus = FocusState::Input;
                 state.needs_redraw = true;
                 return InputAction::Consumed;
             }
-            // Story 11.2a: Esc on consolidation card → decline all.
-            if state.pending_consolidation_card.is_some() {
-                return InputAction::ConsolidateDeclineAll;
-            }
-            // Story 11.4a: Esc on forget card → cancel (purge nothing).
-            if state.pending_forget_card.is_some() {
-                return InputAction::ForgetDeclineAll;
-            }
-            if state.pending_artifact_card.is_some()
-                && state.focus
-                    == FocusState::Overlay(OverlayType::Confirmation(
-                        ConfirmationType::ArtifactApply,
-                    ))
-            {
-                return InputAction::ApplyCardDecline;
-            }
-            // Story 18.4b (AC3): Esc on the `/peer add` confirm → cancel. Nothing
-            // is written, and the card paints `[n] Cancel (Esc)` to say so.
-            if state.pending_peer_add.is_some()
-                && state.focus
-                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
-            {
-                return InputAction::PeerAddDecline;
-            }
-            // Story 19.16f (AC4): Esc on the `/team retract` card → cancel,
-            // armed or not. The card paints `[n] Cancel (Esc)`.
-            if state.pending_team_retract.is_some()
-                && state.focus
-                    == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
-            {
-                return InputAction::TeamRetractDecline;
-            }
-            // Story 10.5: Esc on delegation card → cancel plan at this task
-            if state.pending_delegation_card.is_some() {
-                return InputAction::DelegationCardCancel;
-            }
-            // Story 14.3c: Esc unwinds the fan-out wave. With the DivergeView
-            // open, close it first (back to synthesis/rows); otherwise dismiss
-            // the whole wave display. Tightly gated on Chat focus + a present
-            // wave, AFTER every modal-card check and BEFORE the default focus
-            // toggle — so when no wave is shown, all existing Esc behavior is
-            // unchanged.
-            if state.focus == FocusState::Chat && state.wave_run.is_some() {
-                if state.wave_diverge_open {
-                    return InputAction::CloseDivergeView;
-                }
-                return InputAction::DismissWave;
-            }
-            state.focus = match state.focus {
-                FocusState::Input => FocusState::Chat,
-                FocusState::Chat => FocusState::Input,
-                // AC11: Esc from Sidebar → Chat
-                FocusState::Sidebar { .. } => FocusState::Chat,
-                FocusState::Overlay(_) => FocusState::Input,
-            };
-            state.needs_redraw = true;
-            InputAction::Consumed
+            _ => {}
         }
-
-        // Shift+Enter: always insert newline (when terminal supports it)
-        // Covers: UX-DR76 (Shift+Enter)
-        DomainKey::ShiftEnter if state.focus == FocusState::Input => {
-            insert_newline(state);
-            InputAction::Consumed
-        }
-
-        // Alt+Enter: insert newline (VS Code terminal alternative to Shift+Enter)
-        // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#1
-        DomainKey::AltEnter if state.focus == FocusState::Input => {
-            insert_newline(state);
-            InputAction::Consumed
-        }
-
-        // Alt+M: toggle multi-line mode (VS Code terminal alternative to Ctrl+E)
-        // Covers: Sprint Change Proposal 2026-04-08, UX-DR76 amendment, AC#2
-        DomainKey::AltM if state.focus == FocusState::Input => {
-            state.multiline_mode = !state.multiline_mode;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Alt+V: paste image (or text) from the system clipboard.
-        // The event loop receives RequestClipboardPaste and handles it async
-        // via ClipboardPort, then re-enters handle_input with ImagePaste/Paste.
-        DomainKey::AltV => InputAction::RequestClipboardPaste,
-
-        // Ctrl+Enter: submit in multiline mode
-        // Covers: UX-DR76
-        DomainKey::CtrlEnter if state.focus == FocusState::Input => {
-            if !state.input_buffer.is_empty() {
-                submit_message(state)
-            } else {
-                InputAction::Consumed
-            }
-        }
-
-        // Ctrl+P: open command palette (Tier-1 overlays blocked, Tier-2 overlays allowed)
-        // P16: ReverseSearch is Tier-2 — Ctrl+P dismisses it and opens palette.
-        // Covers: UX-DR18
-        DomainKey::CtrlP
-            if !matches!(
-                state.focus,
-                FocusState::Overlay(
-                    OverlayType::CommandPalette
-                        | OverlayType::WhichKey
-                        | OverlayType::ModelSelector
-                        | OverlayType::Help
-                        | OverlayType::ProfileSwitcher
-                        | OverlayType::Confirmation(_)
-                )
-            ) =>
-        {
-            // Dismiss autocomplete if active — only one overlay at a time
-            if state.autocomplete.active {
-                state.autocomplete.dismiss();
-            }
-            // Dismiss reverse search (Tier-2) before opening palette
-            if state.reverse_search.active {
-                state.reverse_search.active = false;
-            }
-            // Determine prior focus for restoration: if coming from ReverseSearch overlay, restore Input
-            let prior_focus = match &state.focus {
-                FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
-                FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
-                other => other.clone(),
-            };
-            state.command_palette.open(prior_focus);
-            state.focus = FocusState::Overlay(OverlayType::CommandPalette);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Ctrl+X: open which-key (Tier-1 overlays blocked, Tier-2 overlays allowed)
-        // P16: ReverseSearch is Tier-2 — Ctrl+X dismisses it and opens which-key.
-        // Covers: UX-DR19, UX-DR60
-        DomainKey::CtrlX if ctrl_x_opens_leader(state) => {
-            // Dismiss autocomplete if active — only one overlay at a time
-            if state.autocomplete.active {
-                state.autocomplete.dismiss();
-            }
-            // Dismiss reverse search (Tier-2) before opening which-key
-            if state.reverse_search.active {
-                state.reverse_search.active = false;
-            }
-            // Determine prior focus for restoration
-            let prior_focus = match &state.focus {
-                FocusState::Overlay(OverlayType::ReverseSearch) => FocusState::Input,
-                FocusState::Overlay(OverlayType::Autocomplete(_)) => FocusState::Input,
-                other => other.clone(),
-            };
-            state.which_key.open(prior_focus);
-            state.focus = FocusState::Overlay(OverlayType::WhichKey);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Ctrl+E: end of the current logical line (Story 21.2 AC12, RU-19). It no
-        // longer toggles multiline — Alt+M and `/ml` own the toggle.
-        DomainKey::CtrlE if state.focus == FocusState::Input => {
-            // Logical line (unbounded width), not the wrapped visual row End uses.
-            let geometry = input_box::InputGeometry::new(&state.input_buffer, usize::MAX);
-            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
-            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, usize::MAX);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // TextEntry editing (Story 21.3 AC11, A4): readline keys of the composer; every
-        // step lands on a grapheme boundary (`keymap::text_edit`).
-        DomainKey::CtrlA if state.focus == FocusState::Input => {
-            state.cursor_position =
-                text_edit::line_start(&state.input_buffer, state.cursor_position);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Ctrl+R: activate reverse search
-        // Covers: UX-DR74
-        DomainKey::CtrlR if state.focus == FocusState::Input => {
-            // P16: Dismiss autocomplete if active — only one overlay at a time
-            if state.autocomplete.active {
-                state.autocomplete.dismiss();
-            }
-            state.reverse_search.active = true;
-            state.reverse_search.query.clear();
-            state.reverse_search.matches.clear();
-            state.reverse_search.selected_match = 0;
-            state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        DomainKey::Backspace
-        | DomainKey::CtrlH
-        | DomainKey::CtrlW
-        | DomainKey::CtrlU
-        | DomainKey::CtrlK
-            if state.focus == FocusState::Input =>
-        {
-            let edit = match key {
-                DomainKey::CtrlW => text_edit::kill_word_back,
-                DomainKey::CtrlU => text_edit::kill_to_line_start,
-                DomainKey::CtrlK => text_edit::kill_to_line_end,
-                _ => text_edit::delete_back,
-            };
-            state.cursor_position = edit(&mut state.input_buffer, state.cursor_position);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Delete key: remove the grapheme cluster at the cursor
-        DomainKey::Delete if state.focus == FocusState::Input => {
-            let total_chars = state.input_buffer.chars().count();
-            if state.cursor_position < total_chars {
-                let from = geom::snap_boundary(&state.input_buffer, state.cursor_position);
-                let to = geom::next_boundary(&state.input_buffer, from);
-                let (start, end) = (
-                    char_to_byte(&state.input_buffer, from),
-                    char_to_byte(&state.input_buffer, to),
-                );
-                state.input_buffer.replace_range(start..end, "");
-                state.cursor_position = from;
-                ensure_cursor_visible(state);
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-
-        DomainKey::Left if state.focus == FocusState::Input => {
-            state.cursor_position = geom::prev_boundary(&state.input_buffer, state.cursor_position);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Right if state.focus == FocusState::Input => {
-            if state.cursor_position < state.input_buffer.chars().count() {
-                state.cursor_position =
-                    geom::next_boundary(&state.input_buffer, state.cursor_position);
-                ensure_cursor_visible(state);
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-
-        // Home: move to start of the current visual row
-        DomainKey::Home if state.focus == FocusState::Input => {
-            let geometry = composer_geometry(state);
-            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
-            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, 0);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // End: move to end of the current visual row
-        DomainKey::End if state.focus == FocusState::Input => {
-            let geometry = composer_geometry(state);
-            let (row, _col) = geometry.cursor(&state.input_buffer, state.cursor_position);
-            state.cursor_position = geometry.cursor_at(&state.input_buffer, row, usize::MAX);
-            ensure_cursor_visible(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        // Up/Down in Input focus: multi-row navigation or history
-        // Covers: UX-DR74, UX-DR76
-        DomainKey::Up if state.focus == FocusState::Input => {
-            let geometry = composer_geometry(state);
-            let has_newline = state.input_buffer.contains('\n');
-            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
-
-            if row > 0 && !state.input_history.is_navigating() {
-                // Move cursor up one visual row (only if not already navigating history)
-                state.cursor_position = geometry.cursor_at(&state.input_buffer, row - 1, col);
-                ensure_cursor_visible(state);
-                state.needs_redraw = true;
-            } else if state.input_buffer.is_empty()
-                || state.input_history.is_navigating()
-                || !has_newline
-            {
-                // Navigate history
-                let current = state.input_buffer.clone();
-                if let Some(entry) = state.input_history.navigate_up(&current) {
-                    state.input_buffer = entry.to_string();
-                    state.cursor_position = state.input_buffer.chars().count();
-                    state.input_scroll_offset = 0;
-                    ensure_cursor_visible(state);
-                    state.needs_redraw = true;
-                }
-            }
-            InputAction::Consumed
-        }
-
-        DomainKey::Down if state.focus == FocusState::Input => {
-            let geometry = composer_geometry(state);
-            let has_multiline_content = geometry.row_count() > 1;
-            let (row, col) = geometry.cursor(&state.input_buffer, state.cursor_position);
-
-            if has_multiline_content
-                && row + 1 < geometry.row_count()
-                && !state.input_history.is_navigating()
-            {
-                // Move cursor down one visual row (only if not already navigating history)
-                state.cursor_position = geometry.cursor_at(&state.input_buffer, row + 1, col);
-                ensure_cursor_visible(state);
-                state.needs_redraw = true;
-            } else if state.input_history.is_navigating() {
-                // Navigate history forward
-                if let Some(entry) = state.input_history.navigate_down() {
-                    state.input_buffer = entry.to_string();
-                    state.cursor_position = state.input_buffer.chars().count();
-                    state.input_scroll_offset = 0;
-                    ensure_cursor_visible(state);
-                    state.needs_redraw = true;
-                }
-            }
-            InputAction::Consumed
-        }
-
-        DomainKey::Enter
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    ..
-                }
-            ) && state.task_panel_state.reorder_mode_for.is_some() =>
-        {
-            state.needs_redraw = true;
-            InputAction::TaskReorderCommit
-        }
-
-        DomainKey::Enter
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    ..
-                }
-            ) && state.task_panel_state.task_count > 0 =>
-        {
-            let task_number = (state.task_panel_state.selected_index + 1) as u32;
-            state.task_panel_state.drill_down_task = Some(task_number);
-            state.task_panel_state.expanded_detail = false;
-            state.task_panel_state.detail_scroll_offset = 0;
-            state.focus = FocusState::Chat;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        DomainKey::Enter
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Room,
-                    ..
-                }
-            ) =>
-        {
-            // The durable Room is a read-only replay. It has no Enter action;
-            // falling through would route this index into conversation history.
-            InputAction::Consumed
-        }
-
-        DomainKey::Enter
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Artifacts,
-                    ..
-                }
-            ) =>
-        {
-            // ⛔ NOT the Room panel's inert-`Enter` rule. This surface has write
-            // verbs, and a focused row whose `Enter` does nothing teaches the
-            // operator that the panel is dead. `Enter` drills into the selected
-            // artifact through the SAME `/artifact show` dispatch arm the typed
-            // command uses — one path, not a second one.
-            match state
-                .artifacts_panel
-                .selected_id_prefix(state.sidebar_selected)
-            {
-                Some(prefix) => InputAction::ExecuteCommand {
-                    name: "artifact".to_owned(),
-                    args: Some(format!("show {prefix}")),
-                },
-                // An empty or zero-state panel still consumes the key: falling
-                // through would route this index into conversation history.
-                None => InputAction::Consumed,
-            }
-        }
-
-        DomainKey::Enter if matches!(state.focus, FocusState::Sidebar { .. }) => {
-            // Open selected conversation — event loop resolves ID from session_index
-            InputAction::OpenSidebarConversation
-        }
-
-        // 6-3 AC7: inside the task drill-down view, Enter toggles the
-        // result body between half-viewport and full-viewport rendering.
-        // Must precede the chat tool-block arm below so the drill-down
-        // doesn't fall through to it (focus is still `Chat` post-drill-in).
-        DomainKey::Enter
-            if state.focus == FocusState::Chat
-                && state.task_panel_state.drill_down_task.is_some() =>
-        {
-            state.task_panel_state.expanded_detail = !state.task_panel_state.expanded_detail;
-            state.task_panel_state.detail_scroll_offset = 0;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        DomainKey::Enter if state.focus == FocusState::Chat && state.wave_run.is_some() => {
-            state.needs_redraw = true;
-            InputAction::OpenWaveOverlay
-        }
-
-        DomainKey::Enter if state.focus == FocusState::Chat => {
-            // Toggle collapse/expand on focused tool block
-            if let Some(ref tool_id) = state.focused_tool_id {
-                // Acting on a block is choosing it — record the explicit
-                // selection so `c` copies THIS block (story 19.9 review
-                // patch: copy decoupled from render-derived focus).
-                state.selected_tool_id = Some(tool_id.clone());
-                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
-                entry.collapsed = !entry.collapsed;
-                entry.peek_active = false;
-                let tab_id = state.active_tab_id;
-                state.tab_render_state(tab_id).height_cache.invalidate_all();
-                state.tab_render_state(tab_id).tool_block_states_version = state
-                    .tab_render_state(tab_id)
-                    .tool_block_states_version
-                    .wrapping_add(1);
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-
-        // Enter in Input: behavior depends on multiline_mode
-        // Covers: UX-DR76
-        DomainKey::Enter if state.focus == FocusState::Input => {
-            if state.multiline_mode {
-                // In multiline mode, Enter inserts newline (only if buffer has content)
-                if !state.input_buffer.is_empty() {
-                    insert_newline(state);
-                }
-                InputAction::Consumed
-            } else if !state.input_buffer.is_empty() {
-                submit_message(state)
-            } else {
-                InputAction::Consumed
-            }
-        }
-
-        DomainKey::CtrlC => InputAction::CancelOrQuit,
-        // Ctrl+F — narrow-override per S16.8: page-down in Chat focus, search elsewhere
-        // (Story 4-4 AC1, UX-DR86 preserved for non-Chat focus).
-        DomainKey::CtrlF if state.focus == FocusState::Chat => InputAction::ScrollFullPageDown,
-        DomainKey::CtrlF if state.focus == FocusState::Input && state.input_buffer.is_empty() => {
-            let prior = state.focus.clone();
-            state.search_state = crate::adapters::tui::state::SearchState::new();
-            state.search_state.active = true;
-            state.search_state.prior_focus = Some(prior);
-            state.focus = FocusState::Overlay(OverlayType::Search);
-            state.needs_redraw = true;
-            InputAction::OpenSearch
-        }
-        // P11: Ctrl+F in Input with non-empty buffer — give user feedback
-        // instead of silently consuming.
-        DomainKey::CtrlF if state.focus == FocusState::Input && !state.input_buffer.is_empty() => {
-            crate::adapters::tui::notifications::info(
-                state,
-                crate::adapters::tui::notifications::NoticeSource::Input,
-                format!(
-                    "Search needs an empty input: clear it, then press {}",
-                    crate::adapters::tui::keymap::render::shortcut_for(
-                        crate::adapters::tui::keymap::CommandId::Input(
-                            crate::adapters::tui::keymap::table_input::InputCmd::OpenSearch
-                        )
-                    )
-                    .unwrap_or_default()
-                ),
-            );
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // Ctrl+D — scroll half page down (Chat focus only). Story 16.8, AC1.
-        DomainKey::CtrlD if state.focus == FocusState::Chat => InputAction::ScrollHalfPageDown,
-        // Ctrl+U scrolls half a page up in Chat focus (Story 16.8, AC1); in Input it
-        // deletes to the start of the line (the editing arm above, Story 21.3 AC11).
-        DomainKey::CtrlU if state.focus == FocusState::Chat => InputAction::ScrollHalfPageUp,
-        // Ctrl+B — scroll full page up (Chat focus only). Story 16.8, AC1.
-        DomainKey::CtrlB if state.focus == FocusState::Chat => InputAction::ScrollFullPageUp,
-        DomainKey::CtrlT => InputAction::NewTab,
-        // Ctrl+Q — quit from any focus (Journey 0's own key). Story 19.3.
-        // Deliberately NOT CtrlC's CancelOrQuit: Ctrl+C cancels a running
-        // stream/wave first (:1491-1494); Ctrl+Q means quit, exactly like
-        // plain `q` from chat focus (:1227).
-        DomainKey::CtrlQ => InputAction::Quit,
-        // Tab/focus cycling (AC11):
-        // Story 16.6 AC5: Chat Tab now emits CycleInvocationInFocusedTurn first.
-        // The event-loop dispatcher checks the guard (focused turn + expanded + >= 2 invocations)
-        // and falls through to the legacy sidebar/tab-switch behavior when guard fails.
-        DomainKey::Tab if state.focus == FocusState::Chat => {
-            InputAction::CycleInvocationInFocusedTurn
-        }
-        DomainKey::Tab if matches!(state.focus, FocusState::Sidebar { .. }) => {
-            state.focus = FocusState::Input;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::ShiftTab if state.focus != FocusState::Input => InputAction::SwitchToPrevTab,
-        DomainKey::ShiftTab if state.focus == FocusState::Input => InputAction::CycleMode,
-
-        // Up/Down arrow keys for task panel navigation (mirror j/k behavior)
-        // 6-3 AC7: arrow-key scroll inside the task drill-down result body.
-        // Mirrors the j/k char handlers above; widget clamps the offset.
-        DomainKey::Down
-            if state.focus == FocusState::Chat
-                && state.task_panel_state.drill_down_task.is_some() =>
-        {
-            state.task_panel_state.detail_scroll_offset = state
-                .task_panel_state
-                .detail_scroll_offset
-                .saturating_add(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Up
-            if state.focus == FocusState::Chat
-                && state.task_panel_state.drill_down_task.is_some() =>
-        {
-            state.task_panel_state.detail_scroll_offset = state
-                .task_panel_state
-                .detail_scroll_offset
-                .saturating_sub(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-
-        DomainKey::Up
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    ..
-                }
-            ) =>
-        {
-            let moved = if state.task_panel_state.selected_index > 0 {
-                state.task_panel_state.selected_index -= 1;
-                state.sidebar_selected = state.task_panel_state.selected_index;
-                true
-            } else {
-                false
-            };
-            if moved {
-                state.focus = FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    selected: state.sidebar_selected,
-                };
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-        DomainKey::Down
-            if matches!(
-                state.focus,
-                FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    ..
-                }
-            ) =>
-        {
-            let moved = if state.task_panel_state.task_count > 0 {
-                let max = state.task_panel_state.task_count.saturating_sub(1);
-                if state.task_panel_state.selected_index < max {
-                    state.task_panel_state.selected_index += 1;
-                    state.sidebar_selected = state.task_panel_state.selected_index;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if moved {
-                state.focus = FocusState::Sidebar {
-                    panel: crate::domain::models::visual::PanelType::Tasks,
-                    selected: state.sidebar_selected,
-                };
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-
-        _ => InputAction::Ignored,
     }
+    dispatch(state, context.unwrap_or(Context::Global), k)
 }
 
 /// Insert a newline at cursor position.
@@ -3220,21 +3289,21 @@ pub(crate) fn cancel_autocomplete_popup(state: &mut TuiState) {
 
 /// Handle keys while autocomplete popup is active.
 // Covers: UX-DR75
-fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
+fn exec_autocomplete(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
         // Up/Down navigate the suggestion list
-        DomainKey::Up => {
+        OverlayCmd::AutoPrev => {
             state.autocomplete.navigate(Direction::Up);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Down => {
+        OverlayCmd::AutoNext => {
             state.autocomplete.navigate(Direction::Down);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         // Tab or Enter selects the current suggestion
-        DomainKey::Tab | DomainKey::Enter => {
+        OverlayCmd::AutoAccept => {
             let action = if let Some(suggestion) = state.autocomplete.selected().cloned() {
                 apply_autocomplete_selection(state, &suggestion)
             } else {
@@ -3247,13 +3316,13 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
         // Esc closes only the popup. A slash popup that still owns its
         // provisional edit also restores the exact pre-trigger composer
         // (Story 21-2 A2/AC4); accepted/authored text is never erased.
-        DomainKey::Esc => {
+        OverlayCmd::AutoCancel => {
             cancel_autocomplete_popup(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         // Backspace: if cursor goes back to/before trigger position, dismiss
-        DomainKey::Backspace | DomainKey::CtrlH => {
+        OverlayCmd::AutoBackspace => {
             if state.cursor_position == state.autocomplete.trigger_position.saturating_add(1) {
                 // Cursor is exactly one past trigger — remove the trigger character and dismiss
                 if state.cursor_position > 0 {
@@ -3320,19 +3389,13 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                 InputAction::Consumed
             }
         }
-        // Ctrl+C is back one frame like Esc: closes only the popup and restores the
-        // slash rollback (21-3 AC13); it never stops a turn or asks to quit.
-        DomainKey::CtrlC => {
-            cancel_autocomplete_popup(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // All other special keys dismiss autocomplete and fall through to normal handling
-        _ => {
+        // Ctrl+Q closes the popup, then asks to quit (guarded by S-QUIT).
+        OverlayCmd::QuitRequest => {
             state.autocomplete.dismiss();
             state.needs_redraw = true;
-            InputAction::Ignored
+            InputAction::Quit
         }
+        _ => InputAction::Consumed,
     }
 }
 
@@ -3446,19 +3509,19 @@ fn edit_field(text: &mut String, key: DomainKey) {
 
 /// Handle special keys while command palette is active.
 // Covers: UX-DR18
-fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
-        DomainKey::Up => {
+fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::PaletteUp => {
             state.command_palette.navigate(Direction::Up);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Down => {
+        OverlayCmd::PaletteDown => {
             state.command_palette.navigate(Direction::Down);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Enter => {
+        OverlayCmd::PaletteRun => {
             // Execute selected entry's action
             let action = state.command_palette.execute_selected();
             let prev = state.command_palette.dismiss();
@@ -3471,103 +3534,15 @@ fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputActi
             }
             InputAction::Consumed
         }
-        DomainKey::Esc => {
+        OverlayCmd::PaletteClose => {
             state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
-            if !state.command_palette.filter_text.is_empty() {
-                edit_field(&mut state.command_palette.filter_text, key);
-                // Reset scope if prefix character was deleted
-                if state.command_palette.filter_text.is_empty() {
-                    state.command_palette.current_scope = None;
-                }
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-        DomainKey::Tab => InputAction::Consumed, // No-op
-        DomainKey::CtrlC => {
-            let prev = state.command_palette.dismiss();
-            state.focus = prev.unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        _ => InputAction::Consumed,
-    }
-}
-
-/// Handle character keys while the help overlay is active.
-// Covers: FR108, UX-DR94
-fn handle_help_overlay_char(state: &mut TuiState, c: char) -> InputAction {
-    match c {
-        // j / Down → scroll toward bottom (increment offset)
-        'j' => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // k / Up → scroll toward top (decrement offset)
-        'k' => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // G → scroll to bottom (large sentinel; render fn clamps to max)
-        'G' => {
-            state.help_overlay.scroll_offset = usize::MAX / 2;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // g → scroll to top
-        'g' => {
-            state.help_overlay.scroll_offset = 0;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // ? → toggle off (dismiss)
-        '?' => {
-            state.focus = state.help_overlay.close();
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        _ => InputAction::Consumed,
-    }
-}
-
-/// Handle special keys while the help overlay is active.
-// Covers: FR108, UX-DR94
-fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
-        DomainKey::Esc => {
-            state.focus = state.help_overlay.close();
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Down => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Up => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // Ctrl+C: back one frame (RU-20, 21-3 AC13): closes the overlay, never stops a
-        // turn or asks to quit.
-        DomainKey::CtrlC => {
-            state.focus = state.help_overlay.close();
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        // Ctrl+Q: pass through to quit — same reasoning as Ctrl+C above, and the
-        // overlay itself renders the `Ctrl+Q — Quit (any focus)` binding, so
-        // swallowing it here would make the help text lie about itself.
-        // Story 19.3 (Journey 0), code review D2.
-        DomainKey::CtrlQ => {
-            state.focus = state.help_overlay.close();
+        OverlayCmd::PaletteBackspace => palette_edit(state, DomainKey::Backspace),
+        // Ctrl+Q closes the palette, then asks to quit (guarded by S-QUIT).
+        OverlayCmd::QuitRequest => {
+            state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
             state.needs_redraw = true;
             InputAction::Quit
         }
@@ -3575,112 +3550,16 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
     }
 }
 
-/// Handle special keys while the model selector overlay is active.
-/// Story 7.2 AC1, AC3, AC5.
-fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
-        DomainKey::Left => {
-            state.model_selector.navigate_provider(Direction::Left);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Right => {
-            state.model_selector.navigate_provider(Direction::Right);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Up => {
-            if state.model_selector.search_active
-                && !state.model_selector.filtered_indices.is_empty()
-            {
-                if state.model_selector.selected_model == 0 {
-                    state.model_selector.selected_model =
-                        state.model_selector.filtered_indices.len() - 1;
-                } else {
-                    state.model_selector.selected_model -= 1;
-                }
-            } else if !state.model_selector.search_active {
-                state.model_selector.navigate_model(Direction::Up);
-            }
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Down => {
-            if state.model_selector.search_active
-                && !state.model_selector.filtered_indices.is_empty()
-            {
-                state.model_selector.selected_model = (state.model_selector.selected_model + 1)
-                    % state.model_selector.filtered_indices.len();
-            } else if !state.model_selector.search_active {
-                state.model_selector.navigate_model(Direction::Down);
-            }
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Enter => {
-            if state.model_selector.pending_context_warning.is_some() {
-                return InputAction::Consumed;
-            }
-            if let Some((provider_id, model)) = state.model_selector.selected() {
-                return InputAction::SwitchModelProvider {
-                    provider_id: Some(provider_id.to_string()),
-                    model_id: model.model_id.clone(),
-                };
-            }
-            // A locked column that a sign-in can unlock starts that login; a
-            // hint-only column (env/config) stays open.
-            let column = state
-                .model_selector
-                .columns
-                .get(state.model_selector.selected_provider)
-                .filter(|column| column.locked_hint.is_some());
-            if let Some(column) = column
-                && let Some(provider) = state.model_selector.sign_in.get(&column.provider_id)
-            {
-                return InputAction::Login(LoginAction::Open {
-                    provider: Some(provider.clone()),
-                    origin: crate::adapters::tui::state::LoginOrigin::Picker {
-                        column: column.provider_id.clone(),
-                    },
-                });
-            }
-            InputAction::Consumed
-        }
-        DomainKey::Esc | DomainKey::CtrlC => {
-            if state.model_selector.search_active {
-                state.model_selector.search_active = false;
-                state.model_selector.search_query.clear();
-                state.model_selector.filtered_indices.clear();
-                state.needs_redraw = true;
-                return InputAction::Consumed;
-            }
-            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        DomainKey::Backspace => {
-            if state.model_selector.search_active {
-                state.model_selector.search_query.pop();
-                state.model_selector.recompute_filter();
-                state.needs_redraw = true;
-                return InputAction::Consumed;
-            }
-            InputAction::Ignored
-        }
-        _ => InputAction::Consumed,
-    }
-}
-
 /// Handle special keys while the usage panel overlay is active (Story 7.5 AC3).
 /// Esc/Ctrl+C dismisses; Up/Down cycles the visual `selected_section` highlight.
-fn handle_usage_panel_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
-        DomainKey::Esc | DomainKey::CtrlC => {
+fn exec_usage(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::UsageClose => {
             state.focus = state.usage_panel.dismiss().unwrap_or(FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Up => {
+        OverlayCmd::UsagePrev => {
             if state.usage_panel.selected_section > 0 {
                 state.usage_panel.selected_section -= 1;
             } else {
@@ -3689,84 +3568,8 @@ fn handle_usage_panel_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Down => {
+        OverlayCmd::UsageNext => {
             state.usage_panel.selected_section = (state.usage_panel.selected_section + 1) % 4;
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        _ => InputAction::Consumed,
-    }
-}
-
-/// Handle char keys while the model selector overlay is active.
-/// Story 7.2 AC1 (vim-style h/l/j/k), AC5 (y/n context-warning confirmation),
-/// Story 7.6 AC9 (keyword search).
-fn handle_model_selector_char(state: &mut TuiState, c: char) -> InputAction {
-    if state.model_selector.pending_context_warning.is_some() {
-        return match c.to_ascii_lowercase() {
-            'y' => {
-                let warning = state.model_selector.pending_context_warning.take();
-                if let Some(w) = warning {
-                    return InputAction::CompactThenSwitchModel {
-                        provider_id: w.provider_id,
-                        model_id: w.model_id,
-                    };
-                }
-                InputAction::Consumed
-            }
-            'n' => {
-                state.model_selector.pending_context_warning = None;
-                state.needs_redraw = true;
-                InputAction::Consumed
-            }
-            _ => InputAction::Consumed,
-        };
-    }
-
-    // A locked catalogue advertises only ←→ and Esc: typing starts no hidden search.
-    let locked = state
-        .model_selector
-        .columns
-        .get(state.model_selector.selected_provider)
-        .is_some_and(|column| column.locked_hint.is_some());
-    // '/' activates search mode on sendable catalogues (Preflight Consensus #7)
-    if c == '/' && !locked && !state.model_selector.search_active {
-        state.model_selector.search_active = true;
-        state.model_selector.search_query.clear();
-        state.model_selector.recompute_filter();
-        state.needs_redraw = true;
-        return InputAction::Consumed;
-    }
-
-    if state.model_selector.search_active {
-        if c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | ' ' | ':' | '+') {
-            state.model_selector.search_query.push(c);
-            state.model_selector.recompute_filter();
-            state.needs_redraw = true;
-            return InputAction::Consumed;
-        }
-        // Ignore other chars while searching
-        return InputAction::Consumed;
-    }
-
-    match c.to_ascii_lowercase() {
-        'h' => {
-            state.model_selector.navigate_provider(Direction::Left);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        'l' => {
-            state.model_selector.navigate_provider(Direction::Right);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        'j' => {
-            state.model_selector.navigate_model(Direction::Down);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        'k' => {
-            state.model_selector.navigate_model(Direction::Up);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -3848,9 +3651,9 @@ pub(crate) fn dispatch_palette_action(
 
 /// Handle keys while reverse search overlay is active.
 // Covers: UX-DR74
-fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    match key {
-        DomainKey::Enter => {
+fn exec_reverse_search_keys(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    match cmd {
+        OverlayCmd::RevAccept => {
             // Select current match and populate input
             if let Some(selected) = state
                 .reverse_search
@@ -3865,13 +3668,13 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Esc | DomainKey::CtrlC => {
+        OverlayCmd::RevClose => {
             state.reverse_search.active = false;
             state.focus = FocusState::Input;
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Up | DomainKey::CtrlR => {
+        OverlayCmd::RevOlder => {
             // Cycle to next match
             if !state.reverse_search.matches.is_empty() {
                 state.reverse_search.selected_match =
@@ -3880,7 +3683,7 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
             }
             InputAction::Consumed
         }
-        DomainKey::Down => {
+        OverlayCmd::RevNewer => {
             // Cycle to previous match
             if !state.reverse_search.matches.is_empty() {
                 if state.reverse_search.selected_match == 0 {
@@ -3892,8 +3695,8 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
             }
             InputAction::Consumed
         }
-        DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
-            edit_field(&mut state.reverse_search.query, key);
+        OverlayCmd::RevBackspace => {
+            edit_field(&mut state.reverse_search.query, DomainKey::Backspace);
             update_reverse_search_matches(state);
             state.needs_redraw = true;
             InputAction::Consumed
@@ -3912,57 +3715,6 @@ fn update_reverse_search_matches(state: &mut TuiState) {
         .collect();
     let new_len = state.reverse_search.matches.len();
     state.reverse_search.selected_match = old_selected.min(new_len.saturating_sub(1));
-}
-
-/// Handle special keys while the within-conversation search overlay is active.
-///
-/// Sub-state aware (Story 4-4 AC3):
-/// - `Typing`: Enter commits (if matches > 0), Backspace pops query,
-///   Ctrl+U clears, Esc closes.
-/// - `Navigating`: Backspace returns to Typing (and pops), Ctrl+U clears and
-///   returns to Typing, Enter is a no-op, Esc closes.
-///
-/// The printable-char path is in `handle_char`'s `FocusState::Overlay(Search)`
-/// arm — that's where `n` / `N` navigation and "return to Typing on any
-/// printable" live.
-// Covers: Story 4-4 AC3, AC4 (UX-DR86)
-fn handle_search_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    use crate::adapters::tui::state::SearchSubstate;
-    match (state.search_state.substate, key) {
-        // Esc closes the overlay regardless of sub-state (AC4).
-        (_, DomainKey::Esc | DomainKey::CtrlC) => InputAction::CloseSearch,
-
-        // Enter in Typing: commit query → Navigating (if matches exist).
-        // Enter in Navigating: no-op (already committed).
-        (SearchSubstate::Typing, DomainKey::Enter) => InputAction::SearchCommit,
-        (SearchSubstate::Navigating, DomainKey::Enter) => InputAction::Consumed,
-
-        // Backspace / Ctrl+H / Ctrl+W in Typing: edit the query tail, re-scan.
-        // The same keys in Navigating: return to Typing and edit (refine).
-        (substate, DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW) => {
-            state.search_state.substate = SearchSubstate::Typing;
-            edit_field(&mut state.search_state.query, key);
-            state.needs_redraw = true;
-            if substate == SearchSubstate::Navigating {
-                InputAction::SearchReturnToTyping
-            } else {
-                InputAction::SearchQueryChanged
-            }
-        }
-
-        // Ctrl+U clears query in either sub-state, returns to Typing.
-        (_, DomainKey::CtrlU) => {
-            state.search_state.query.clear();
-            state.search_state.matches.clear();
-            state.search_state.focused_match_index = 0;
-            state.search_state.substate = SearchSubstate::Typing;
-            state.needs_redraw = true;
-            InputAction::SearchClear
-        }
-
-        // All other keys consumed as no-ops while the overlay is active.
-        _ => InputAction::Consumed,
-    }
 }
 
 /// Convert a crossterm key event into a domain input event.
@@ -4178,96 +3930,6 @@ pub fn convert_crossterm_event(
     }
 }
 
-fn handle_profile_switcher_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    if state.profile_switcher.preview.is_some() {
-        match key {
-            DomainKey::Enter => {
-                let profile_name = state
-                    .profile_switcher
-                    .selected_profile()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                state.needs_redraw = true;
-                return InputAction::ConfirmProfileSwitch(profile_name);
-            }
-            DomainKey::Esc | DomainKey::CtrlC => {
-                state.profile_switcher.exit_preview();
-                state.needs_redraw = true;
-            }
-            _ => {}
-        }
-        return InputAction::Consumed;
-    }
-
-    match key {
-        DomainKey::Up => {
-            state.profile_switcher.navigate(-1);
-            state.needs_redraw = true;
-        }
-        DomainKey::Down => {
-            state.profile_switcher.navigate(1);
-            state.needs_redraw = true;
-        }
-        DomainKey::Enter => {
-            if let Some(selected) = state.profile_switcher.selected_profile().cloned() {
-                if let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected) {
-                    state.profile_switcher.enter_preview(plan);
-                    state.needs_redraw = true;
-                }
-            }
-        }
-        DomainKey::Esc | DomainKey::CtrlC => {
-            if let Some(prev) = state.profile_switcher.dismiss() {
-                state.focus = prev;
-            }
-            state.needs_redraw = true;
-        }
-        _ => {}
-    }
-    InputAction::Consumed
-}
-
-fn handle_profile_switcher_char(state: &mut TuiState, c: char) -> InputAction {
-    if state.profile_switcher.preview.is_some() {
-        match c.to_ascii_lowercase() {
-            'y' | '\n' => {
-                let profile_name = state
-                    .profile_switcher
-                    .selected_profile()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                state.needs_redraw = true;
-                return InputAction::ConfirmProfileSwitch(profile_name);
-            }
-            '\x1b' | 'n' => {
-                state.profile_switcher.exit_preview();
-                state.needs_redraw = true;
-            }
-            _ => {}
-        }
-        return InputAction::Consumed;
-    }
-
-    match c {
-        '\n' => {
-            if let Some(selected) = state.profile_switcher.selected_profile().cloned() {
-                if let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected) {
-                    state.profile_switcher.enter_preview(plan);
-                    state.needs_redraw = true;
-                }
-            }
-        }
-        '\x1b' => {
-            if let Some(prev) = state.profile_switcher.dismiss() {
-                state.focus = prev;
-            }
-            state.needs_redraw = true;
-        }
-        _ => {}
-    }
-    InputAction::Consumed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4399,7 +4061,7 @@ mod tests {
         state.focus = FocusState::Overlay(OverlayType::ModelSelector);
         assert!(state.model_selector.selected().is_none());
         assert_eq!(
-            handle_model_selector_key(&mut state, DomainKey::Enter),
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::Consumed
         );
         assert!(state.model_selector.active);
@@ -4407,7 +4069,7 @@ mod tests {
 
         state.model_selector.navigate_provider(Direction::Left);
         assert_eq!(
-            handle_model_selector_key(&mut state, DomainKey::Enter),
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::SwitchModelProvider {
                 provider_id: Some("anthropic".into()),
                 model_id: available.model_id,
@@ -4442,7 +4104,7 @@ mod tests {
         );
         assert!(state.model_selector.selected().is_none());
         assert_eq!(
-            handle_model_selector_key(&mut state, DomainKey::Enter),
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::Consumed
         );
         assert!(state.model_selector.active);
@@ -4457,12 +4119,12 @@ mod tests {
         );
         for c in ['/', 'x'] {
             assert_eq!(
-                handle_model_selector_char(&mut state, c),
+                handle_input(&mut state, &DomainInputEvent::KeyPress(c)),
                 InputAction::Consumed
             );
         }
         assert!(!state.model_selector.search_active);
-        let _ = handle_model_selector_key(&mut state, DomainKey::Esc);
+        let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
         assert!(!state.model_selector.active);
     }
 
@@ -4910,18 +4572,15 @@ mod tests {
                 setup: confirmation(ConfirmationType::TeamRetract),
                 expect: CtrlQRowExpectation::Quit,
             },
-            // ── Documented Skips: the overlay handler owns the keyboard and
-            // consumes the key (same Tier-1 posture Ctrl+T/Ctrl+H already
-            // have). Reasons repeat verbatim in Completion Notes.
+            // ── Overlays and cards that own the keyboard and consume the key (the
+            // Skip reasons below), plus the surfaces whose own row quits.
             Row {
                 label: "Overlay(CommandPalette) with palette open",
                 setup: Box::new(|s| {
                     s.command_palette.open(FocusState::Input);
                     s.focus = FocusState::Overlay(OverlayType::CommandPalette);
                 }),
-                expect: CtrlQRowExpectation::Skip(
-                    "CommandPalette: consumes all special keys; Esc closes first",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(WhichKey) with which-key open",
@@ -5080,6 +4739,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// 21-3 R1: the four inline cards own no context row, so the keys the pre-registry
+    /// generic arms answered stay hand-written until 3-C Task 9 retires them.
+    #[test]
+    fn story21_3_card_overlays_keep_their_generic_special_keys() {
+        let cards = [
+            ConfirmationType::PlanApproval,
+            ConfirmationType::ArtifactApply,
+            ConfirmationType::PeerAdd,
+            ConfirmationType::TeamRetract,
+        ];
+        let keys = [
+            (DomainKey::CtrlC, InputAction::CancelOrQuit),
+            (DomainKey::CtrlT, InputAction::NewTab),
+            (DomainKey::ShiftTab, InputAction::SwitchToPrevTab),
+            (DomainKey::AltV, InputAction::RequestClipboardPaste),
+        ];
+        for card in cards {
+            for (key, want) in &keys {
+                let mut state = make_state();
+                state.focus = FocusState::Overlay(OverlayType::Confirmation(card.clone()));
+                let got = handle_input(&mut state, &DomainInputEvent::SpecialKey(*key));
+                assert_eq!(&got, want, "{card:?} {key:?}");
+            }
+        }
+        let mut state = make_state();
+        state.focus =
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
+        let got = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert_eq!(got, InputAction::Consumed);
+        assert_eq!(state.focus, FocusState::Input);
     }
 
     // ── handle_special_key via handle_input ─────────────────────────────────

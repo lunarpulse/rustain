@@ -115,7 +115,7 @@ pub const ROWS: &[Binding] = &[
     p(&[Key::Esc], OverlayCmd::PaletteClose).does("Close the palette"),
     p(&[Key::Ctrl('c')], OverlayCmd::PaletteClose).does("Close the palette (back one frame)"),
     p(&[Key::Backspace], OverlayCmd::PaletteBackspace).does("Delete the last filter character"),
-    p(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).attached().does("Close the palette, then ask to quit (the local palette swallows Ctrl+Q)"),
+    p(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Close the palette, then ask to quit (guarded by the quit confirmation)"),
     // ── Model selector ──
     m(&[Key::Left], OverlayCmd::ModelProviderPrev).does("Select the previous provider column"),
     m(&[Key::Char('h')], OverlayCmd::ModelProviderPrev).does("Select the previous provider column"),
@@ -187,7 +187,7 @@ pub const ROWS: &[Binding] = &[
     n(&[Key::Char('r')], OverlayCmd::NotifRetry).local().does("Retry the selected record's action (when it has one)"),
     n(&[Key::Char('K')], OverlayCmd::NotifCompact).local().does("Compact the conversation (context warnings)"),
     n(&[Key::Char('n')], OverlayCmd::NotifFresh).local().does("Start fresh with a summary (context warnings)"),
-    n(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).attached().does("Ask to quit (the local log swallows Ctrl+Q)"),
+    n(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit (guarded by the quit confirmation)"),
     // ── Quit confirmation ──
     q(&[Key::Char('y')], OverlayCmd::QuitYes).does("Quit now"),
     q(&[Key::Char('Y')], OverlayCmd::QuitYes).does("Quit now"),

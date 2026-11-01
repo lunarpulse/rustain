@@ -21,13 +21,15 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::keymap::render::leader_follow_up_compact;
 use crate::adapters::tui::keymap::table::LeaderCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
 use crate::adapters::tui::notification_log::{LogFacts, footer_lines};
 use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::modal::wrapped;
 use crate::adapters::tui::widgets::{ModalPart, fit_modal};
-use crate::domain::events::{DomainInputEvent, DomainKey};
+use crate::domain::events::DomainInputEvent;
 use crate::domain::models::FocusState;
 
 /// Rail keys are inert this long after the pane's first paint.
@@ -541,11 +543,37 @@ fn inert(state: &TuiState) -> bool {
         .is_some_and(|at| now.saturating_duration_since(at) >= INERT_AFTER_PAINT)
 }
 
+impl PaneKey {
+    fn key(self) -> Key {
+        match self {
+            PaneKey::Char(c) => Key::Char(c),
+            PaneKey::Enter => Key::Enter,
+            PaneKey::Esc => Key::Esc,
+            PaneKey::CtrlC => Key::Ctrl('c'),
+            PaneKey::CtrlQ => Key::Ctrl('q'),
+            PaneKey::Other => Key::Other,
+        }
+    }
+}
+
 /// Apply one key to the focused pane. Without a decidable focused item it
 /// consumes the key and heals the focus.
 pub fn handle_key(state: &mut TuiState, key: PaneKey, facts: &LogFacts) -> PaneOutcome {
+    execute(state, key.key(), facts)
+}
+
+/// Resolve the key in `DecisionPane` (letters fold case) and run its command
+/// against the focused item's kind; a command the kind does not offer is swallowed.
+fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
     state.needs_redraw = true;
-    if matches!(key, PaneKey::CtrlC | PaneKey::CtrlQ) {
+    let command = match keymap::resolve(Context::DecisionPane, Host::Local, &[key]) {
+        Resolved::Hit(row) => match row.command {
+            CommandId::Overlay(command) => Some(command),
+            _ => None,
+        },
+        _ => None,
+    };
+    if command == Some(OverlayCmd::PaneQuit) {
         return PaneOutcome::Quit;
     }
     let Some(item) = state.decisions.current(facts) else {
@@ -556,6 +584,9 @@ pub fn handle_key(state: &mut TuiState, key: PaneKey, facts: &LogFacts) -> PaneO
         // Dropped, never replayed once the window passes.
         return PaneOutcome::Consumed;
     }
+    let Some(command) = command else {
+        return PaneOutcome::Consumed;
+    };
     let (kind, conversation_id) = (item.kind, item.conversation_id.clone());
     let item_key = item.key();
     let resolve = |state: &mut TuiState, effect: DecisionEffect| {
@@ -577,57 +608,50 @@ pub fn handle_key(state: &mut TuiState, key: PaneKey, facts: &LogFacts) -> PaneO
         state.decisions.unfocus();
         PaneOutcome::Consumed
     };
-    let ch = match key {
-        PaneKey::Char(c) => Some(c.to_ascii_lowercase()),
-        _ => None,
-    };
-    match (kind, key) {
-        (DecisionKind::Recovery, PaneKey::Enter | PaneKey::Esc) => {
+    match (kind, command) {
+        (DecisionKind::Recovery, OverlayCmd::PaneEnter | OverlayCmd::PaneEsc) => {
             resolve(state, DecisionEffect::RecoveryContinue)
         }
-        (DecisionKind::Recovery, PaneKey::Char(_)) if ch == Some('n') => {
+        (DecisionKind::Recovery, OverlayCmd::PaneNo) => {
             resolve(state, DecisionEffect::RecoveryNewSession)
         }
-        (DecisionKind::Carryover, PaneKey::Char(_)) if ch == Some('y') => {
+        (DecisionKind::Carryover, OverlayCmd::PaneYes) => {
             resolve(state, DecisionEffect::CarryoverAccept)
         }
-        (DecisionKind::Carryover, PaneKey::Char(_)) if ch == Some('n') => {
+        (DecisionKind::Carryover, OverlayCmd::PaneNo) => {
             resolve(state, DecisionEffect::CarryoverDecline)
         }
-        (DecisionKind::Budget, PaneKey::Char(_)) if ch == Some('y') => {
+        (DecisionKind::Budget, OverlayCmd::PaneYes) => {
             resolve(state, DecisionEffect::BudgetContinue)
         }
-        (DecisionKind::Budget, PaneKey::Char(_)) if ch == Some('s') => {
+        (DecisionKind::Budget, OverlayCmd::PaneSwitch) => {
             resolve(state, DecisionEffect::BudgetSwitchCheaper)
         }
-        (DecisionKind::Budget, PaneKey::Char(_)) if ch == Some('p') => {
+        (DecisionKind::Budget, OverlayCmd::PanePause) => {
             resolve(state, DecisionEffect::BudgetPause)
         }
-        (DecisionKind::ContextWarning, PaneKey::Char(_)) if ch == Some('k') => {
+        (DecisionKind::ContextWarning, OverlayCmd::PaneCompact) => {
             resolve(state, DecisionEffect::ContextCompact)
         }
-        (DecisionKind::ContextWarning, PaneKey::Char(_)) if ch == Some('n') => {
+        (DecisionKind::ContextWarning, OverlayCmd::PaneNo) => {
             // "Start fresh" asks about the carried summary first (RU-21: never `c`).
             state.decisions.remove(&item_key);
             request_carryover(state, conversation_id);
             PaneOutcome::Consumed
         }
-        (DecisionKind::LargeImage, PaneKey::Char(_)) if ch == Some('y') => {
+        (DecisionKind::LargeImage, OverlayCmd::PaneYes) => {
             resolve(state, DecisionEffect::AttachLargeImage)
         }
-        (DecisionKind::LargeImage, PaneKey::Char(_)) if ch == Some('n') => {
+        (DecisionKind::LargeImage, OverlayCmd::PaneNo) => {
             resolve(state, DecisionEffect::CancelLargeImage)
         }
-        (DecisionKind::DeleteConversations, PaneKey::Char(_)) if ch == Some('y') => {
+        (DecisionKind::DeleteConversations, OverlayCmd::PaneYes) => {
             resolve(state, DecisionEffect::ConfirmDelete)
         }
-        (DecisionKind::DeleteConversations, PaneKey::Char(_)) if ch == Some('n') => {
+        (DecisionKind::DeleteConversations, OverlayCmd::PaneNo | OverlayCmd::PaneEsc) => {
             resolve(state, DecisionEffect::CancelDelete)
         }
-        (DecisionKind::DeleteConversations, PaneKey::Esc) => {
-            resolve(state, DecisionEffect::CancelDelete)
-        }
-        (kind, PaneKey::Esc) if kind.deferrable() => defer(state),
+        (kind, OverlayCmd::PaneEsc) if kind.deferrable() => defer(state),
         _ => PaneOutcome::Consumed,
     }
 }
@@ -649,20 +673,14 @@ pub fn handle_domain_event(
         state.decisions.unfocus();
         return None;
     }
-    let key = match event {
-        DomainInputEvent::Resize(..)
-        | DomainInputEvent::FocusGained
-        | DomainInputEvent::FocusLost => {
-            return None;
-        }
-        DomainInputEvent::KeyPress(c) => PaneKey::Char(*c),
-        DomainInputEvent::SpecialKey(DomainKey::Enter) => PaneKey::Enter,
-        DomainInputEvent::SpecialKey(DomainKey::Esc) => PaneKey::Esc,
-        DomainInputEvent::SpecialKey(DomainKey::CtrlC) => PaneKey::CtrlC,
-        DomainInputEvent::SpecialKey(DomainKey::CtrlQ) => PaneKey::CtrlQ,
-        _ => PaneKey::Other,
-    };
-    Some(handle_key(state, key, facts))
+    if matches!(
+        event,
+        DomainInputEvent::Resize(..) | DomainInputEvent::FocusGained | DomainInputEvent::FocusLost
+    ) {
+        return None;
+    }
+    let key = Key::from_domain(event).unwrap_or(Key::Other);
+    Some(execute(state, key, facts))
 }
 
 /// Paint the focused item bottom-anchored over `area` (the chat pane): `Clear`,

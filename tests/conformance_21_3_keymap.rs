@@ -55,3 +55,9 @@ mod k20_review_items;
 
 #[path = "conformance_21_3_keymap/k12_gate.rs"]
 mod k12_gate;
+
+#[path = "conformance_21_3_keymap/k9_inspector.rs"]
+mod k9_inspector;
+
+#[path = "conformance_21_3_keymap/k9_dispatch.rs"]
+mod k9_dispatch;

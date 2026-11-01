@@ -6,7 +6,7 @@
 //!   arm outside `src/adapters/tui/keymap/` are ABSENT from every production part under `src/`;
 //! * no string literal in a production part outside `src/adapters/tui/keymap/` matches the
 //!   hard-coded key-hint grammar P1/P2 of AC18 unless its file is on the allowlist with an exact
-//!   hit count and a named owner (3-B, 3-C, 21-4, or the permanent AC18 set).
+//!   hit count and a named owner (3-C, 21-4, or the permanent AC18 set).
 //!
 //! Gate hygiene (21-1 K11 / 21-11 K7 pattern): production part only (an item gated by a
 //! column-0 `#[cfg(test)]` item is blanked, so test modules neither hide nor add hits and
@@ -62,14 +62,13 @@ const P2_RUNTIME_FILES: &[&str] = &[
     "src/infrastructure/runtime/attach_keys.rs",
 ];
 
-const OWNER_3B: &str = "21-3 slice 3-B";
 const OWNER_3C: &str = "21-3 slice 3-C";
 const OWNER_21_4: &str = "21-4";
 const OWNER_PERMANENT: &str = "AC18 permanent";
-const OWNERS: &[&str] = &[OWNER_3B, OWNER_3C, OWNER_21_4, OWNER_PERMANENT];
+const OWNERS: &[&str] = &[OWNER_3C, OWNER_21_4, OWNER_PERMANENT];
 
-/// `(file, exact literal-hit-line count, owner, reason)`. Final for slice 3-A: 3-B removes its
-/// rows at AC14, 3-C empties everything but the permanent and 21-4 rows at AC19.
+/// `(file, exact literal-hit-line count, owner, reason)`. 3-B2 burned down every 3-B row
+/// (the footers and notices are generated from the registry); 3-C empties the card rows.
 type Allow = (&'static str, usize, &'static str, &'static str);
 
 #[rustfmt::skip]
@@ -88,25 +87,10 @@ const ALLOWLIST: &[Allow] = &[
     ("src/domain/services/team_policy.rs", 1, OWNER_PERMANENT, "standing-trust doctrine text, truth-checked against the consent card"),
     // 21-4
     ("src/adapters/tui/widgets/login_dialog.rs", 12, OWNER_21_4, "login overlay literals"),
-    // 3-B: overlay footers, inspector/notice and leader-chord toasts
-    ("src/adapters/builtin_commands.rs", 1, OWNER_3B, "`Ctrl+X d` in the unavailable-in-attached notice"),
-    ("src/adapters/cli/profile/switch.rs", 1, OWNER_3B, "`Ctrl+X, P` pointer to the profile switcher"),
-    ("src/adapters/tui/handlers/model_switch.rs", 2, OWNER_3B, "`Ctrl+X, M` pointers to the model selector"),
-    ("src/adapters/tui/image.rs", 1, OWNER_3B, "`[y/n]` in the large-image warning raised by app.rs"),
-    ("src/adapters/tui/task_panel_handlers.rs", 3, OWNER_3B, "`Ctrl+X, T` / `Esc` task-panel toasts"),
-    ("src/adapters/tui/widgets/agent_inspector.rs", 2, OWNER_3B, "agent inspector footers"),
-    ("src/adapters/tui/widgets/artifacts_panel.rs", 1, OWNER_3B, "artifacts overlay footer"),
-    ("src/adapters/tui/widgets/bookmark_list.rs", 1, OWNER_3B, "bookmark list footer"),
-    ("src/adapters/tui/widgets/cross_search.rs", 1, OWNER_3B, "cross-search footer"),
-    ("src/adapters/tui/widgets/model_selector.rs", 6, OWNER_3B, "model selector footers and compact prompt"),
-    ("src/adapters/tui/widgets/profile_switcher.rs", 1, OWNER_3B, "profile switcher footer"),
-    ("src/adapters/tui/widgets/room_panel.rs", 1, OWNER_3B, "room replay footer"),
-    ("src/adapters/tui/widgets/task_detail.rs", 6, OWNER_3B, "task detail footers"),
-    ("src/adapters/tui/widgets/transparency_panel.rs", 1, OWNER_3B, "transparency log footer"),
-    ("src/adapters/tui/widgets/wave_overlay.rs", 1, OWNER_3B, "wave overlay footer"),
-    ("src/infrastructure/live_providers.rs", 1, OWNER_3B, "`Ctrl+X, M` pointer in the locked-model notice"),
-    ("src/infrastructure/runtime/event_loop.rs", 5, OWNER_3B, "inspector/panel notices (the line-2805 `[n]` deviation hint is a 3-C card string)"),
     // 3-C: cards, decision surfaces, catalogue usage rows, attach card arms
+    // `Tab` here is a browser-style tab (P2 matches the word): read-only subagent tabs, tab saves
+    ("src/adapters/tui/agent_inspector_keys.rs", 1, OWNER_PERMANENT, "read-only subagent tab warning, not a key"),
+    ("src/infrastructure/runtime/event_loop.rs", 3, OWNER_3C, "two tab warnings (permanent, not keys) and the `[n]` deviation card string (3-C)"),
     ("src/adapters/cli/peer/rows.rs", 2, OWNER_3C, "peer add / team retract prompt rows"),
     ("src/adapters/command_registry.rs", 4, OWNER_3C, "catalogue usage rows kept verbatim (A11); 3-C generates their key text"),
     ("src/adapters/tui/decision_pane.rs", 15, OWNER_3C, "decision pane rails"),
@@ -129,7 +113,6 @@ const ALLOWLIST: &[Allow] = &[
     ("src/adapters/tui/widgets/skill_trust_prompt.rs", 4, OWNER_3C, "skill trust prompt"),
     ("src/adapters/tui/widgets/task_skip_cascade_card.rs", 1, OWNER_3C, "skip-cascade card"),
     ("src/adapters/tui/widgets/team_proposal_card.rs", 2, OWNER_3C, "team proposal card (`MORE` repeats the domain marker)"),
-    ("src/infrastructure/runtime/attach_keys.rs", 1, OWNER_3C, "`Ctrl+X d` in the unavailable-in-attached notice (attach card arms)"),
     ("src/infrastructure/runtime/attach_loop.rs", 5, OWNER_3C, "recipient tab labels and team-retract prompt"),
     ("src/infrastructure/runtime/recipient_view.rs", 1, OWNER_3C, "recipient view `[p]` hint"),
     ("src/infrastructure/runtime/transparency_bridge.rs", 6, OWNER_3C, "consent / retract card text"),
@@ -344,9 +327,6 @@ fn literal_violations(files: &[(String, String)], allow: &[Allow]) -> Vec<String
     violations
 }
 
-/// Files whose `CtrlH`/`CtrlK` arms are the TextEntry editing dispatch (path, arm count).
-const TEXT_ENTRY_ARMS: (&str, usize) = ("src/adapters/tui/app.rs", 8);
-
 /// PC-3 violations over `files`: a banned symbol anywhere in a production part, or a
 /// `DomainKey::CtrlH`/`CtrlK` match arm outside `src/adapters/tui/keymap/`.
 fn symbol_violations(files: &[(String, String)]) -> Vec<String> {
@@ -367,17 +347,7 @@ fn symbol_violations(files: &[(String, String)]) -> Vec<String> {
                 ));
             }
         }
-        let arms = arm.find_iter(&production).count();
-        if path == TEXT_ENTRY_ARMS.0 {
-            // The hand-written TextEntry editing arms (21-3 AC11); 3-B2 moves them under
-            // the resolver. The exact count means a new arm cannot hide among them.
-            if arms != TEXT_ENTRY_ARMS.1 {
-                violations.push(format!(
-                    "{path}: {arms} `DomainKey::CtrlH`/`CtrlK` arms, expected {}",
-                    TEXT_ENTRY_ARMS.1
-                ));
-            }
-        } else if !path.starts_with(KEYMAP_DIR) {
+        if !path.starts_with(KEYMAP_DIR) {
             for m in arm.find_iter(&production) {
                 violations.push(format!(
                     "{path}:{}: `DomainKey::CtrlH`/`CtrlK` match arm outside the keymap",
@@ -542,8 +512,11 @@ fn k12_positive_control_symbol_scanner() {
         symbol_violations(&[src("src/adapters/tui/state.rs", arm)]).len(),
         1
     );
-    // The TextEntry editing file may hold exactly its pinned arm count, no more or less.
-    assert_eq!(symbol_violations(&[src(TEXT_ENTRY_ARMS.0, arm)]).len(), 1);
+    // No file is exempt any more: app.rs resolves its editing keys through the registry.
+    assert_eq!(
+        symbol_violations(&[src("src/adapters/tui/app.rs", arm)]).len(),
+        1
+    );
     assert_eq!(
         symbol_violations(&[src("src/infrastructure/runtime/attach_keys.rs", both)]).len(),
         1
@@ -614,7 +587,7 @@ fn k12_positive_control_literal_scanner_production_part_and_allowlist() {
     let hit = "fn f() { s(\"Press Ctrl+B\"); }";
     let two = "fn f() { s(\"Press Ctrl+B\"); }\nfn g() { s(\"Alt+Q\"); }";
     let allow: &[Allow] = &[
-        ("src/a.rs", 1, OWNER_3B, "listed, exact"),
+        ("src/a.rs", 1, OWNER_PERMANENT, "listed, exact"),
         ("src/b.rs", 1, OWNER_3C, "listed, but the count changed"),
         ("src/c.rs", 1, OWNER_3C, "listed, but now clean"),
         ("src/gone.rs", 1, OWNER_21_4, "listed, file vanished"),

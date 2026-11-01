@@ -34,6 +34,7 @@ use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
+use crate::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
 use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
@@ -1027,7 +1028,7 @@ pub async fn run(
                             if state.notification_log.is_some() {
                                 let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
                                 if let Some(outcome) = notification_log::handle_domain_event(&mut state, &domain_event, &facts) {
-                                    notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
+                                    if outcome == notification_log::LogOutcome::Quit { quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue); } else { notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router); }
                                     continue;
                                 }
                             }
@@ -1051,179 +1052,72 @@ pub async fn run(
                                 }
                             }
 
-                            if pane_action.is_none()
-                                && state.sidebar_visible
-                                && matches!(state.focus, FocusState::Sidebar { .. })
-                                && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
-                                && state.agent_panel_state.drill_down_agent.is_some()
-                            {
-                                // Esc in inspector: close inspector first (back to panel list),
-                                // don't jump straight to chat. A second Esc from the panel
-                                // list will close the sidebar via the normal handle_input path.
-                                if matches!(domain_event, crate::domain::events::DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc)) {
-                                    state.agent_panel_state.drill_down_agent = None;
-                                    state.agent_panel_state.inspector_scroll_offset = 0;
-                                    state.agent_panel_state.pending_kill_confirm = None;
-                                    state.needs_redraw = true;
-                                    continue;
-                                }
-
-                                // Block inspector owner controls when active tab is read-only
-                                if tab_manager.active_tab().read_only {
-                                    notifications::warning(&mut state, NoticeSource::Tabs, "Tab is read-only (subagent output view)");
-                                    state.needs_redraw = true;
-                                } else if let crate::domain::events::DomainInputEvent::KeyPress(c) = domain_event {
-                                        let agent_id = state.agent_panel_state.drill_down_agent.clone().unwrap();
-                                        match c {
-                                            'p' => {
-                                                if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id).cloned() {
-                                                    let op = match entry.current_status {
-                                                        crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
-                                                        crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
-                                                        _ => {
-                                                            notifications::info(&mut state, NoticeSource::Task, format!("Cannot pause/resume agent in {:?} state", entry.current_status));
-                                                            state.needs_redraw = true;
-                                                            continue;
-                                                        }
-                                                    };
-                                                    let _ = refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
-                                                    if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                        let registry = provider.registry();
-                                                        let _ = registry.send_op(&agent_id, op).await;
-                                                    }
-                                                    state.needs_redraw = true;
-                                                }
-                                                continue;
-                                            }
-                                            'x' => {
-                                                state.agent_panel_state.pending_kill_confirm = Some(agent_id);
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'y' | '\r' | '\n' if state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id) => {
-                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                    let registry = provider.registry();
-                                                    match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
-                                                        Ok(_) => {
-                                                            state.agent_panel_state.drill_down_agent = None;
-                                                            state.agent_panel_state.inspector_scroll_offset = 0;
-                                                            state.agent_panel_state.pending_kill_confirm = None;
-                                                        }
-                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: NoticeLevel::Warning,
-                                                                message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
-                                                            });
-                                                            state.agent_panel_state.drill_down_agent = None;
-                                                            state.agent_panel_state.inspector_scroll_offset = 0;
-                                                            state.agent_panel_state.pending_kill_confirm = None;
-                                                        }
-                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
-                                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                                conversation_id: Some(conversation.id.clone()),
-                                                                level: NoticeLevel::Error,
-                                                                message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
-                                                            });
-                                                            state.agent_panel_state.pending_kill_confirm = None;
-                                                        }
-                                                        Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => {
-                                                            state.agent_panel_state.drill_down_agent = None;
-                                                            state.agent_panel_state.inspector_scroll_offset = 0;
-                                                            state.agent_panel_state.pending_kill_confirm = None;
-                                                        }
-                                                    }
-                                                } else {
-                                                    state.agent_panel_state.pending_kill_confirm = None;
-                                                    notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
-                                                }
-                                                refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'n' if state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id) => {
-                                                state.agent_panel_state.pending_kill_confirm = None;
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'm' => {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: NoticeLevel::Info,
-                                                    message: format!("Change model: close the inspector and press {} to open the model selector", crate::adapters::tui::keymap::render::leader_follow_up_long(crate::adapters::tui::keymap::table::LeaderCmd::Model)),
-                                                });
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            't' => {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conversation.id.clone()),
-                                                    level: NoticeLevel::Info,
-                                                    message: "Update tools: not available from the agent inspector yet".to_string(),
-                                                });
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'c' => {
-                                                let title = if let Some(entry) = state.agent_panel_state.cached_entries.iter().find(|e| e.agent_id == agent_id) {
-                                                    format!("\u{1F441} {} (read-only)", entry.subagent_type)
-                                                } else {
-                                                    "\u{1F441} Agent (read-only)".to_string()
-                                                };
-                                                let body = state.agent_panel_state.spool_tail_cache.get(&agent_id).cloned().unwrap_or_default();
-                                                let body_text = if body.is_empty() { "(subagent has no output yet)".to_string() } else { body };
-                                                let conv = Conversation {
-                                                    id: generate_conversation_id(),
-                                                    title: title.clone(),
-                                                    messages: vec![crate::domain::models::conversation::ChatMessage {
-                                                        id: crate::domain::models::conversation::generate_message_id(),
-                                                        role: crate::domain::models::MessageRole::Assistant,
-                                                        content: body_text,
-                                                        content_blocks: vec![],
-                                                        tool_calls: vec![],
-                                                        created_at: crate::domain::models::session_meta::now_unix(),
-                                                        token_count: None,
-                                                        stop_reason: None,
-                                                        synthetic: true,
-                                                        images: vec![],
-                                                        origin: crate::domain::models::ChannelKind::Terminal,
-                                                        authorship: crate::domain::models::Authorship::HumanWritten,
-                                                        send_authorization: crate::domain::models::SendAuthorization::Unknown,
-                                                        retracted_at_ms: None,
-                                                        history_source: Default::default(),
-                                                    }],
-                                                    turns: vec![],
-                                                    created_at: crate::domain::models::session_meta::now_unix(),
-                                                    updated_at: crate::domain::models::session_meta::now_unix(),
-                                                    last_response_at: None,
-                                                    session_id: Some(agent_id.as_str().to_string()),
-                                                    usage: None,
-                                                    plans: std::collections::HashMap::new(),
-                                                    fork_source: None,
-                                                    compaction: None,
-                                                    peer_row_controls: Default::default(),
-                                                    peer_row_revision: 0,
-                                                };
-                                                tab_manager.create_tab();
-                                                tab_manager.active_tab_mut().read_only = true;
-                                                tab_manager.active_tab_mut().conversation = conv;
-                                                state.focus = FocusState::Chat;
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'j' => {
-                                                state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_add(1);
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            'k' => {
-                                                state.agent_panel_state.inspector_scroll_offset = state.agent_panel_state.inspector_scroll_offset.saturating_sub(1);
-                                                state.needs_redraw = true;
-                                                continue;
-                                            }
-                                            _ => {}
+                            if pane_action.is_none() {
+                                match agent_inspector_keys::on_key(&mut state, &domain_event, tab_manager.active_tab().read_only) {
+                                    InspectorOutcome::PassThrough => {}
+                                    InspectorOutcome::Consumed => continue,
+                                    InspectorOutcome::SendOp { agent_id, op } => {
+                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let _ = provider.registry().send_op(&agent_id, op).await;
                                         }
+                                        state.needs_redraw = true;
+                                        continue;
                                     }
+                                    InspectorOutcome::ConfirmKill(agent_id) => {
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let registry = provider.registry();
+                                            match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
+                                                Ok(_) => agent_inspector_keys::close(&mut state),
+                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: NoticeLevel::Warning,
+                                                        message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
+                                                    });
+                                                    agent_inspector_keys::close(&mut state);
+                                                }
+                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                        conversation_id: Some(conversation.id.clone()),
+                                                        level: NoticeLevel::Error,
+                                                        message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
+                                                    });
+                                                    state.agent_panel_state.pending_kill_confirm = None;
+                                                }
+                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => agent_inspector_keys::close(&mut state),
+                                            }
+                                        } else {
+                                            state.agent_panel_state.pending_kill_confirm = None;
+                                            notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
+                                        }
+                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    InspectorOutcome::ModelNotice => {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: format!("Change model: close the inspector and press {} to open the model selector", crate::adapters::tui::keymap::render::leader_follow_up_long(crate::adapters::tui::keymap::table::LeaderCmd::Model)),
+                                        });
+                                        continue;
+                                    }
+                                    InspectorOutcome::ToolsNotice => {
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                            conversation_id: Some(conversation.id.clone()),
+                                            level: NoticeLevel::Info,
+                                            message: "Update tools: not available from the agent inspector yet".to_string(),
+                                        });
+                                        continue;
+                                    }
+                                    InspectorOutcome::OpenConversation(conv) => {
+                                        tab_manager.create_tab();
+                                        tab_manager.active_tab_mut().read_only = true;
+                                        tab_manager.active_tab_mut().conversation = *conv;
+                                        continue;
+                                    }
+                                }
                             }
 
                             let action = match pane_action {
@@ -8116,7 +8010,12 @@ fn render(
                         None => {
                             use ratatui::widgets::Widget;
                             let block = ratatui::widgets::Block::default()
-                                .title(" No panel selected — Ctrl+X, T for Tasks ")
+                                .title(format!(
+                                    " No panel selected — {} for Tasks ",
+                                    crate::adapters::tui::keymap::render::leader_follow_up_long(
+                                        crate::adapters::tui::keymap::table::LeaderCmd::Tasks
+                                    )
+                                ))
                                 .borders(ratatui::widgets::Borders::ALL)
                                 .border_style(
                                     ratatui::style::Style::default().fg(theme.colors.fg_muted),

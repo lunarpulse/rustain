@@ -10,6 +10,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
+use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
 use crate::adapters::tui::notifications::{
     NoticeAction, NoticeRecord, NoticeSeverity, NotificationStore, Presentation, format_hms,
     headline,
@@ -145,19 +147,6 @@ pub fn close(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
-/// Host-neutral key classes S-LOG understands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogKey {
-    Char(char),
-    Up,
-    Down,
-    Enter,
-    Esc,
-    CtrlC,
-    /// Any other key: consumed, never leaked to the surface below.
-    Other,
-}
-
 /// What the host must do after a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogOutcome {
@@ -167,6 +156,8 @@ pub enum LogOutcome {
     Closed,
     /// Copy this text through the host clipboard helper.
     Copy(String),
+    /// `Ctrl+Q`: the log closed; the host runs its guarded quit request.
+    Quit,
     /// Run the record's retry exactly once.
     Retry {
         action: NoticeAction,
@@ -192,8 +183,9 @@ fn select(log: &mut NotificationLogState, rows: &[&NoticeRecord], index: usize) 
     log.selected_id = rows.get(index).map(|r| r.id);
 }
 
-/// Apply one key to the open log. Without an open log it changes nothing.
-pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOutcome {
+/// Apply one key to the open log: resolve it in `NotificationLog` and run the
+/// command. An unbound key is swallowed. Without an open log it changes nothing.
+pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) -> LogOutcome {
     let Some(log) = state.notification_log.as_ref() else {
         return LogOutcome::Consumed;
     };
@@ -206,12 +198,23 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
         select(log, &rows, selected);
     }
     state.needs_redraw = true;
-    match key {
-        LogKey::Esc | LogKey::CtrlC => {
+    let command = match keymap::resolve(Context::NotificationLog, host, &[key]) {
+        Resolved::Hit(row) => Some(row.command),
+        _ => None,
+    };
+    let Some(CommandId::Overlay(command)) = command else {
+        return LogOutcome::Consumed;
+    };
+    match command {
+        OverlayCmd::NotifClose => {
             close(state);
             LogOutcome::Closed
         }
-        LogKey::Char('j') | LogKey::Down => {
+        OverlayCmd::QuitRequest => {
+            close(state);
+            LogOutcome::Quit
+        }
+        OverlayCmd::NotifNext => {
             if let Some(log) = state.notification_log.as_mut() {
                 if detail {
                     log.detail_scroll = log.detail_scroll.saturating_add(1);
@@ -221,7 +224,7 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
             }
             LogOutcome::Consumed
         }
-        LogKey::Char('k') | LogKey::Up => {
+        OverlayCmd::NotifPrev => {
             if let Some(log) = state.notification_log.as_mut() {
                 if detail {
                     log.detail_scroll = log.detail_scroll.saturating_sub(1);
@@ -231,7 +234,7 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
             }
             LogOutcome::Consumed
         }
-        LogKey::Enter => {
+        OverlayCmd::NotifDetail => {
             if let Some(log) = state.notification_log.as_mut() {
                 if current.is_some() {
                     log.detail = !log.detail;
@@ -240,17 +243,17 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
             }
             LogOutcome::Consumed
         }
-        LogKey::Char('c') => match current {
+        OverlayCmd::NotifCopy => match current {
             Some(record) => LogOutcome::Copy(record.message.clone()),
             None => LogOutcome::Consumed,
         },
-        LogKey::Char('x') => {
+        OverlayCmd::NotifDismiss => {
             if let Some(id) = current.map(|r| r.id) {
                 state.notifications.dismiss(id);
             }
             LogOutcome::Consumed
         }
-        LogKey::Char('r') => {
+        OverlayCmd::NotifRetry => {
             let Some(record) = current else {
                 return LogOutcome::Consumed;
             };
@@ -266,7 +269,7 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
                 _ => LogOutcome::Consumed,
             }
         }
-        LogKey::Char('K') => {
+        OverlayCmd::NotifCompact => {
             let Some(record) = current.filter(|r| compact_eligible(r, facts)) else {
                 return LogOutcome::Consumed;
             };
@@ -285,7 +288,7 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
             );
             LogOutcome::Closed
         }
-        LogKey::Char('n') => {
+        OverlayCmd::NotifFresh => {
             let Some(record) = current.filter(|r| fresh_eligible(r, facts)) else {
                 return LogOutcome::Consumed;
             };
@@ -294,7 +297,7 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
             crate::adapters::tui::decision_pane::request_carryover(state, Some(conversation_id));
             LogOutcome::Closed
         }
-        LogKey::Char(_) | LogKey::Other => LogOutcome::Consumed,
+        _ => LogOutcome::Consumed,
     }
 }
 
@@ -305,20 +308,15 @@ pub fn handle_domain_event(
     event: &crate::domain::events::DomainInputEvent,
     facts: &LogFacts,
 ) -> Option<LogOutcome> {
-    use crate::domain::events::{DomainInputEvent, DomainKey};
-    let key = match event {
-        DomainInputEvent::Resize(..)
-        | DomainInputEvent::FocusGained
-        | DomainInputEvent::FocusLost => return None,
-        DomainInputEvent::KeyPress(c) => LogKey::Char(*c),
-        DomainInputEvent::SpecialKey(DomainKey::Enter) => LogKey::Enter,
-        DomainInputEvent::SpecialKey(DomainKey::Esc) => LogKey::Esc,
-        DomainInputEvent::SpecialKey(DomainKey::CtrlC) => LogKey::CtrlC,
-        DomainInputEvent::SpecialKey(DomainKey::Up) => LogKey::Up,
-        DomainInputEvent::SpecialKey(DomainKey::Down) => LogKey::Down,
-        _ => LogKey::Other,
-    };
-    Some(handle_key(state, key, facts))
+    use crate::domain::events::DomainInputEvent;
+    if matches!(
+        event,
+        DomainInputEvent::Resize(..) | DomainInputEvent::FocusGained | DomainInputEvent::FocusLost
+    ) {
+        return None;
+    }
+    let key = Key::from_domain(event).unwrap_or(Key::Other);
+    Some(handle_key(state, Host::Local, key, facts))
 }
 
 /// Apply a raw crossterm key (the attached client's ingress).
@@ -327,19 +325,7 @@ pub fn handle_raw_key(
     key: crossterm::event::KeyEvent,
     facts: &LogFacts,
 ) -> LogOutcome {
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT);
-    let log_key = match key.code {
-        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => LogKey::CtrlC,
-        KeyCode::Char(c) if plain => LogKey::Char(c),
-        KeyCode::Enter if key.modifiers.is_empty() => LogKey::Enter,
-        KeyCode::Up => LogKey::Up,
-        KeyCode::Down => LogKey::Down,
-        KeyCode::Esc => LogKey::Esc,
-        _ => LogKey::Other,
-    };
-    handle_key(state, log_key, facts)
+    handle_key(state, Host::Attached, Key::from_crossterm(&key), facts)
 }
 
 /// The record row: `severity · HH:MM:SS · source · ×count · message`, with the

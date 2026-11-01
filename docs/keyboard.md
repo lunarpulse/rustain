@@ -98,7 +98,7 @@ Also inherits: Global.
 | `PgDn` | Scroll the transcript one page down | attached | portable |  |
 | `j` | Scroll down / up | local | portable |  |
 | `k` | Scroll up one line | local | portable |  |
-| `Ctrl+U` | Scroll half page up | local | portable |  |
+| `Ctrl+U` | Scroll half page up | local, attached | portable |  |
 | `Ctrl+F` | Scroll full page down (Chat focus — search elsewhere) | local | portable |  |
 | `Ctrl+B` | Scroll full page up | local | portable |  |
 | `G` | Jump to newest message — no effect if already at the bottom | local | portable |  |
@@ -311,6 +311,23 @@ Also inherits: Sidebar.
 |---|---|---|---|---|
 | `p` | Pause or resume the selected agent | local | portable |  |
 
+## Agent inspector
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `p` | Pause the open agent, or resume it when suspended | local | portable |  |
+| `x` | Kill the open agent and its subtree (asks to confirm) | local | portable |  |
+| `y` | Confirm the pending kill (only while the confirmation is shown) | local | portable |  |
+| `n` | Cancel the pending kill (only while the confirmation is shown) | local | portable |  |
+| `m` | Change the agent's model (a notice names the model selector) | local | portable |  |
+| `t` | Update the agent's tools (a notice: not available from the inspector yet) | local | portable |  |
+| `c` | Open the agent's output in a read-only conversation tab | local | portable |  |
+| `j` | Scroll the inspector down one line | local | portable |  |
+| `k` | Scroll the inspector up one line | local | portable |  |
+| `Esc` | Close the inspector and return to the Agents list | local | portable |  |
+
 ## A2A log
 
 Also inherits: Sidebar.
@@ -384,9 +401,11 @@ Also inherits: Append-only text field.
 | `Esc` | Close the palette | local, attached | portable |  |
 | `Ctrl+C` | Close the palette (back one frame) | local, attached | portable |  |
 | `Backspace` | Delete the last filter character | local, attached | portable |  |
-| `Ctrl+Q` | Close the palette, then ask to quit (the local palette swallows Ctrl+Q) | attached | portable |  |
+| `Ctrl+Q` | Close the palette, then ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
 
 ## Model selector
+
+Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -488,7 +507,7 @@ Also inherits: Append-only text field.
 | `r` | Retry the selected record's action (when it has one) | local | portable |  |
 | `K` | Compact the conversation (context warnings) | local | portable |  |
 | `n` | Start fresh with a summary (context warnings) | local | portable |  |
-| `Ctrl+Q` | Ask to quit (the local log swallows Ctrl+Q) | attached | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
 
 ## Quit confirmation
 

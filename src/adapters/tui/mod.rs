@@ -1,4 +1,5 @@
 pub mod accounts_runtime;
+pub mod agent_inspector_keys;
 pub mod app;
 pub mod clipboard;
 #[allow(dead_code)]
