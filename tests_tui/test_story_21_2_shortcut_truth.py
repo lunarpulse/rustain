@@ -158,6 +158,19 @@ def _menu(screen):
     return ""
 
 
+def _menu_painted(screen):
+    """True only once the whole leader box is on screen: the last rail item AND
+    the closing border. The terminal delivers a frame in chunks and the screen
+    can be read between them (rows 1-2 of the box over the stale toast rows
+    beneath it), so a first-row match is not a painted menu."""
+    lines = screen.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip().startswith("┌") and "Ctrl+X" in line:
+            return any(lines[j].strip().startswith("└") for j in range(i + 1, len(lines))) \
+                and "[Esc] Cancel" in _menu(screen)
+    return False
+
+
 def _menu_tail_in_order(menu, attached):
     """Story 21.1 AC5: the leader menu lists `[N] Notifications` and `[X] Clear
     toasts` after `[?] Help` (local) / `[D] Detach` and `[?] Help` (attached)
@@ -404,7 +417,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         tui.send(BACKSPACE * 5)
         _wait(tui, lambda s: "what?" not in _composer(s), "literal text erased")
         tui.send(CTRL_X)
-        screen = _wait(tui, lambda s: "[P] Profile" in _menu(s), "untimed leader menu (local)")
+        screen = _wait(tui, _menu_painted, "untimed leader menu (local), fully painted")
+        assert "[P] Profile" in _menu(screen), _menu(screen)
         _menu_tail_in_order(_menu(screen), attached=False)
         tui.send("?")
         screen = _wait(tui, lambda s: "Keybindings" in s, "Ctrl+X ? opens help")
@@ -570,7 +584,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         # AC6/AC13: the untimed attached leader menu keeps every retained chord
         # painted (qualified when unavailable) and Esc never detaches.
         tui.send(CTRL_X)
-        screen = _wait(tui, lambda s: "[D] Detach" in _menu(s) and "(n/a)" in _menu(s), "attached leader menu")
+        screen = _wait(tui, lambda s: _menu_painted(s) and "[D] Detach" in _menu(s) and "(n/a)" in _menu(s),
+                       "attached leader menu, fully painted")
         _menu_tail_in_order(_menu(screen), attached=True)
         _capture(tui, evidence, "14-attached-menu", screen)
         tui.send(ESC)

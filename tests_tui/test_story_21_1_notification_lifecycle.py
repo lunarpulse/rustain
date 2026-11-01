@@ -136,6 +136,17 @@ def _menu(screen):
     return ""
 
 
+def _menu_painted(screen):
+    """The whole leader box is on screen: closing border and last rail item. A
+    frame reaches the screen in chunks, so a first-row match is not a painted menu."""
+    lines = screen.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip().startswith("┌") and "Ctrl+X" in line:
+            return any(lines[j].strip().startswith("└") for j in range(i + 1, len(lines))) \
+                and "[Esc] Cancel" in _menu(screen)
+    return False
+
+
 def _toasts(screen, rows=3):
     """(severity, text) of every toast row painted above the status row.
 
@@ -198,8 +209,8 @@ def _open_log(tui, evidence, name, attached):
     """`Ctrl+X` then `n`: the leader menu lists Notifications / Clear toasts
     after Help (and Detach, attached) and before Send / Cancel; `n` opens S-LOG."""
     tui.send(CTRL_X)
-    screen = _wait(tui, lambda s: "[N] Notifications" in _menu(s) and "[X] Clear toasts" in _menu(s),
-                   "the leader menu lists Notifications and Clear toasts")
+    screen = _wait(tui, lambda s: _menu_painted(s) and "[N] Notifications" in _menu(s) and "[X] Clear toasts" in _menu(s),
+                   "the leader menu lists Notifications and Clear toasts, fully painted")
     menu = _menu(screen)
     order = ["[?] Help", "[N] Notifications", "[X] Clear toasts", "[Enter] Send", "[Esc] Cancel"]
     if attached:
@@ -543,6 +554,19 @@ def test_toast_helpers_ignore_transcript_text_that_only_looks_like_a_toast(monke
     assert harness.toast_present(_fixture_screen("older", toast), "Permission mode: Plan", "Info", rows=9)
 
 
+def test_status_row_untouched_predicate_tracks_the_documented_clip_only():
+    """The CI row (`ctx:` known, state word clipped by the reserved cue) and the
+    local row (no `ctx:`, `Ready` visible) are both untouched; a row that lost
+    its mode segment, its cue, or its state word without a `ctx:` segment is not."""
+    ci = " anthropic/claude-sonnet-4-6 [F] │ Normal │ ctx: 0/1m (0%) │  Needs you (1) ^X q"
+    local = " anthropic/claude-sonnet-4-6 [F] │ Normal │ Ready │ █ coding  Needs you (1) ^X q"
+    assert "Ready" not in ci, "the CI row has no state word: the old predicate failed here"
+    assert _status_row_untouched(ci) and _status_row_untouched(local)
+    assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Normal │  Needs you (1) ^X q")
+    assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Ready │ █ coding  Needs you (1) ^X q")
+    assert not _status_row_untouched(" anthropic/claude-sonnet-4-6 [F] │ Normal │ Ready │ █ coding")
+
+
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(300)
 def test_s1_toasts_expire_and_notification_log_local_and_attached_80x24(monkeypatch):
@@ -630,6 +654,20 @@ def _cue(screen):
     """The `Needs you (N) ^X q` status cue count, else None (status row only)."""
     match = _CUE.search(harness.status_row(screen))
     return int(match.group(1)) if match else None
+
+
+def _status_row_untouched(row):
+    """The pane leaves the status row's own content in place: the mode segment
+    survives and the `Needs you` cue is reserved at the right edge. The state
+    word (`Ready`) is the LAST left segment, so at 80 columns it clips exactly
+    when the model/`ctx:` segments plus the reserved cue fill the row. AC10 and
+    `status_bar.rs` accept that (the cue clips the left content, never itself);
+    the clip is the registered DF-21-1-STATUS-ROW-STATE-WORD-CLIPPED, owner 21-4.
+    Whether `ctx:` is known at that instant is timing, so the state word may be
+    absent only while the `ctx:` segment explains it."""
+    left = row.split("Needs you")[0]
+    return (_CUE.search(row) is not None and "│ Normal" in left
+            and ("Ready" in left or "ctx:" in left))
 
 
 def _clear_composer(tui, label):
@@ -840,11 +878,14 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
 
         tui = start("r2", fresh=False)
         rail = ("[Enter/Esc] Continue", "[n] New session")
-        screen = _wait(tui, lambda s: _pane_open(s, "Session recovery", *rail),
-                       "the recovery pane with its Continue/New session rail", timeout=20)
+        # The status row is below the pane and paints after it: wait for the cue (the last
+        # thing on the row) so the row is read whole, not between two chunks of one frame.
+        screen = _wait(tui, lambda s: _pane_open(s, "Session recovery", *rail) and _cue(s) == 1,
+                       "the recovery pane with its Continue/New session rail and the status cue", timeout=20)
         _capture(tui, evidence, "21-recovery-pane", screen)
         assert "[y]" not in _pane(screen, "Session recovery"), "recovery paints no `y` key"
-        assert "Ready" in harness.status_row(screen), "the status row is untouched by the pane"
+        assert _status_row_untouched(harness.status_row(screen)), (
+            "the status row is untouched by the pane: " + harness.status_row(screen))
         screen = _answer(tui, ESC, "Session recovery")  # Esc = Continue (RU-5), never New session
         screen = _wait(tui, lambda s: "S2 reply crash" in s and "crash seed" in s,
                        "the SAME conversation continues after Esc")
