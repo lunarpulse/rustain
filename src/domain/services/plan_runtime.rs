@@ -15,6 +15,7 @@ use crate::domain::models::tab::ConversationId;
 use crate::domain::ports::EventEmitter;
 use crate::domain::services::delegation_decider::DelegationDecider;
 use crate::domain::services::launch_spec_builder::LaunchSpecBuilder;
+use crate::domain::services::markdown_source;
 
 type TaskSummary = (
     u32,
@@ -1912,7 +1913,10 @@ fn build_summary_markdown(
     total_tokens: u32,
     tasks: &[TaskSummary],
 ) -> String {
-    let mut md = format!("## Plan complete: {}\n\n", plan_title);
+    let mut md = format!(
+        "## Plan complete: {}\n\n",
+        markdown_source::escape_inline_literal(plan_title)
+    );
 
     // G4-P13: spec mandates · (middle dot U+00B7) between elapsed/token fields
     let mut count_parts = vec![format!("{}/{} tasks completed", completed, total)];
@@ -1935,39 +1939,22 @@ fn build_summary_markdown(
     md.push_str("| # | Task | Status | Elapsed |\n");
     md.push_str("|---|------|--------|---------|\n");
     for (i, (number, title, status, elapsed, error, _result)) in tasks.iter().enumerate() {
+        // Titles and errors are plain text: escaped, so a `|` stays in its cell.
+        let title = markdown_source::escape_inline_literal(title);
+        let status_str = status_cell(*status, error.as_deref());
+        let elapsed_str = match *elapsed {
+            Some(ms) => format_elapsed_ms(ms),
+            None => "—".to_string(),
+        };
         if *number >= 1000 {
             // Sub-task row: number format is parent * 1000 + sub
-            let parent_num = number / 1000;
-            let sub_num = number % 1000;
-            let status_str = match status {
-                PlanTaskStatus::Completed => "✓".to_string(),
-                PlanTaskStatus::Failed => format!(
-                    "✗ {}",
-                    error
-                        .as_deref()
-                        .unwrap_or("error")
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                ),
-                PlanTaskStatus::Skipped => format!(
-                    "⏭ {}",
-                    error
-                        .as_deref()
-                        .unwrap_or("skipped")
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                ),
-                _ => format!("{:?}", status),
-            };
-            let elapsed_str = match *elapsed {
-                Some(ms) => format_elapsed_ms(ms),
-                None => "—".to_string(),
-            };
             md.push_str(&format!(
                 "| {}.{} | {} | {} | {} |\n",
-                parent_num, sub_num, title, status_str, elapsed_str
+                number / 1000,
+                number % 1000,
+                title,
+                status_str,
+                elapsed_str
             ));
             continue;
         }
@@ -1988,34 +1975,7 @@ fn build_summary_markdown(
         let title_with_fraction = if sub_count > 0 {
             format!("{} ({}/{} sub-tasks)", title, completed_subs, sub_count)
         } else {
-            title.clone()
-        };
-
-        let status_str = match status {
-            PlanTaskStatus::Completed => "✓".to_string(),
-            PlanTaskStatus::Failed => format!(
-                "✗ {}",
-                error
-                    .as_deref()
-                    .unwrap_or("error")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            ),
-            PlanTaskStatus::Skipped => format!(
-                "⏭ {}",
-                error
-                    .as_deref()
-                    .unwrap_or("skipped")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-            ),
-            _ => format!("{:?}", status),
-        };
-        let elapsed_str = match *elapsed {
-            Some(ms) => format_elapsed_ms(ms),
-            None => "—".to_string(),
+            title
         };
         md.push_str(&format!(
             "| {} | {} | {} | {} |\n",
@@ -2031,26 +1991,56 @@ fn build_summary_markdown(
         if *status == PlanTaskStatus::Completed {
             if let Some(r) = result {
                 if !r.text.is_empty() {
-                    // G2-P5: use char boundary to avoid panic on multibyte chars
-                    let display = if r.text.len() > 500 {
-                        let boundary = r
-                            .text
-                            .char_indices()
-                            .map(|(i, _)| i)
-                            .take_while(|&i| i < 500)
-                            .last()
-                            .unwrap_or(0);
-                        format!("{} (truncated)", &r.text[..boundary])
-                    } else {
-                        r.text.clone()
-                    };
-                    md.push_str(&format!("\n**Task {} result:**\n{}\n", number, display));
+                    md.push_str(&format!(
+                        "\n**Task {} result:**\n{}\n",
+                        number,
+                        summary_result_body(&r.text)
+                    ));
                 }
             }
         }
     }
 
     md
+}
+
+/// The Status cell of a summary row (`✓`, `✗ first error line`, `⏭ reason`).
+fn status_cell(status: PlanTaskStatus, error: Option<&str>) -> String {
+    let first_line = |fallback: &str| {
+        markdown_source::escape_inline_literal(
+            error.unwrap_or(fallback).lines().next().unwrap_or(""),
+        )
+    };
+    match status {
+        PlanTaskStatus::Completed => "✓".to_string(),
+        PlanTaskStatus::Failed => format!("✗ {}", first_line("error")),
+        PlanTaskStatus::Skipped => format!("⏭ {}", first_line("skipped")),
+        other => format!("{:?}", other),
+    }
+}
+
+/// A task result capped at 500 bytes on a grapheme boundary. The result is
+/// agent markdown, so a text that ends inside an open fence or HTML block
+/// (cut here or cut by the model's token limit) gets the block's closer on its
+/// own line, or it would swallow every later result of the summary. The
+/// ` (truncated)` marker is added only when text was actually cut.
+fn summary_result_body(text: &str) -> String {
+    let cut = markdown_source::truncate_at_grapheme(text, 500);
+    let truncated = cut.len() < text.len();
+    let mut body = cut.to_owned();
+    if let Some(closer) = markdown_source::closer_for_open_block(cut) {
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str(&closer);
+        if truncated {
+            body.push('\n');
+        }
+    }
+    if truncated {
+        body.push_str(" (truncated)");
+    }
+    body
 }
 
 pub fn format_elapsed_ms(ms: i64) -> String {
@@ -2352,6 +2342,137 @@ mod tests {
             entry.len() <= 500 + " (truncated)".len() + 1,
             "entry must remain bounded; got {} bytes",
             entry.len()
+        );
+    }
+
+    fn summary_task(
+        number: u32,
+        title: &str,
+        status: PlanTaskStatus,
+        error: Option<&str>,
+        result: Option<&str>,
+    ) -> TaskSummary {
+        (
+            number,
+            title.to_string(),
+            status,
+            Some(2_000),
+            error.map(str::to_string),
+            result.map(|text| TaskResult {
+                text: text.to_string(),
+                tool_call_count: 0,
+                token_count: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn summary_escapes_titles_fractions_and_error_first_lines() {
+        let tasks = vec![
+            summary_task(1, "A | b", PlanTaskStatus::Completed, None, None),
+            summary_task(
+                1001,
+                "*s*",
+                PlanTaskStatus::Failed,
+                Some("x | y\nsecond"),
+                None,
+            ),
+            summary_task(2, "`z`", PlanTaskStatus::Skipped, None, None),
+        ];
+        let md = build_summary_markdown("P", 1, 2, 1, 1, 0, 0, &tasks);
+        assert!(
+            md.contains("| 1 | A \\| b (0/1 sub-tasks) | ✓ | 2s |\n"),
+            "{md}"
+        );
+        assert!(md.contains("| 1.1 | \\*s\\* | ✗ x \\| y | 2s |\n"), "{md}");
+        assert!(md.contains("| 2 | \\`z\\` | ⏭ skipped | 2s |\n"), "{md}");
+    }
+
+    #[test]
+    fn summary_cuts_results_on_a_grapheme_and_closes_the_block_it_cut() {
+        let fenced = format!("```rust\n{}", "x\n".repeat(400));
+        let family = "👨\u{200d}👩\u{200d}👧";
+        let straddling = format!("{}{family}{}", "a".repeat(490), "z".repeat(60));
+        let tasks = vec![
+            summary_task(1, "f", PlanTaskStatus::Completed, None, Some(&fenced)),
+            summary_task(2, "g", PlanTaskStatus::Completed, None, Some(&straddling)),
+            summary_task(
+                3,
+                "c",
+                PlanTaskStatus::Completed,
+                None,
+                Some("<!-- ".repeat(200).as_str()),
+            ),
+        ];
+        let md = build_summary_markdown("P", 3, 3, 0, 0, 0, 0, &tasks);
+        assert!(
+            md.contains("x\n```\n (truncated)\n\n**Task 2 result:**"),
+            "{md}"
+        );
+        assert!(
+            md.contains(&format!("\n{} (truncated)\n\n**Task 3", "a".repeat(490))),
+            "the whole cluster is dropped: {md}"
+        );
+        assert!(md.contains("-->\n (truncated)\n"), "{md}");
+    }
+
+    #[test]
+    fn summary_closes_a_short_result_that_ends_inside_an_open_block() {
+        let tasks = vec![
+            summary_task(
+                1,
+                "f",
+                PlanTaskStatus::Completed,
+                None,
+                Some("```rust\nlet x;"),
+            ),
+            summary_task(2, "h", PlanTaskStatus::Completed, None, Some("<!-- note")),
+            summary_task(
+                3,
+                "p",
+                PlanTaskStatus::Completed,
+                None,
+                Some("second result prose"),
+            ),
+        ];
+        let md = build_summary_markdown("P", 3, 3, 0, 0, 0, 0, &tasks);
+        assert!(
+            md.contains("\n**Task 1 result:**\n```rust\nlet x;\n```\n\n**Task 2 result:**"),
+            "{md}"
+        );
+        assert!(
+            md.contains("\n**Task 2 result:**\n<!-- note\n-->\n\n**Task 3 result:**"),
+            "{md}"
+        );
+        // Nothing was cut, so there is no marker; a closed fence gains no closer.
+        assert!(!md.contains("(truncated)"), "{md}");
+        let closed = vec![summary_task(
+            1,
+            "c",
+            PlanTaskStatus::Completed,
+            None,
+            Some("```\nx\n```"),
+        )];
+        let md = build_summary_markdown("P", 1, 1, 0, 0, 0, 0, &closed);
+        assert!(md.ends_with("\n**Task 1 result:**\n```\nx\n```\n"), "{md}");
+    }
+
+    #[test]
+    fn summary_plan_title_cannot_forge_structure() {
+        let tasks = vec![summary_task(1, "a", PlanTaskStatus::Completed, None, None)];
+        let md = build_summary_markdown("x\n\n|# |forged |", 1, 1, 0, 0, 0, 0, &tasks);
+        assert_eq!(md.matches("## Plan complete:").count(), 1, "{md}");
+        assert!(
+            md.starts_with("## Plan complete: x  \\|# \\|forged \\|\n\n"),
+            "{md}"
+        );
+        assert_eq!(md.matches("| # | Task |").count(), 1, "{md}");
+        assert_eq!(
+            md.lines()
+                .filter(|l| l.trim_start().starts_with('|'))
+                .count(),
+            3,
+            "only the real header, delimiter and row: {md}"
         );
     }
 

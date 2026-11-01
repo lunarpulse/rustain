@@ -1,5 +1,5 @@
 //! Story 21.12 conformance: markdown structure, sanitizer and invariants
-//! (slice 12-A, pipeline core).
+//! (slice 12-A pipeline core, slice 12-B tables and producers).
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Each
 //! keystone drives the real chat-pane front doors (`render_with_search` for the
@@ -10,12 +10,13 @@
 //! * K1 lists (`k1_lists.rs`), K2 literal prose and K3 whitespace
 //!   (`k2_k3_prose.rs`), K7 sanitizer (`k7_sanitizer.rs`), K8 literal user
 //!   messages (`k8_literal_user.rs`);
+//! * K4 tables (`k4_tables.rs`), K5 cell escaping and K6 summary truncation
+//!   (`k5_k6_summary.rs`), K12 export (`k12_export.rs`);
 //! * K10 height truth and the scoped AD-2112 gate, K11 robustness
 //!   (`k10_k11_invariants.rs`);
 //! * the DF-075 measurement (`k_measure.rs`, `#[ignore]`d).
 //!
-//! Tables (K4), the PlanSummary producer (K5, K6), export (K12) and links (K9,
-//! K13) belong to slices 12-B and 12-C.
+//! Links (K9, K13) belong to slice 12-C.
 
 #[path = "conformance_21_12_markdown/support.rs"]
 mod support;
@@ -31,6 +32,15 @@ mod k7_sanitizer;
 
 #[path = "conformance_21_12_markdown/k8_literal_user.rs"]
 mod k8_literal_user;
+
+#[path = "conformance_21_12_markdown/k4_tables.rs"]
+mod k4_tables;
+
+#[path = "conformance_21_12_markdown/k5_k6_summary.rs"]
+mod k5_k6_summary;
+
+#[path = "conformance_21_12_markdown/k12_export.rs"]
+mod k12_export;
 
 #[path = "conformance_21_12_markdown/k10_k11_invariants.rs"]
 mod k10_k11_invariants;

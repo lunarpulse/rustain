@@ -804,10 +804,10 @@ mod mixed_width {
 }
 
 // ---------------------------------------------------------------------------
-// Story 21.12 (slice 12-A) — markdown structure at inner widths 40/80/120 and
-// the literal user message. Blank rows are kept (the shared helper drops them)
-// because vertical rhythm is part of what is under review. The tables fixture
-// belongs to slice 12-B, which switches tables on.
+// Story 21.12 (slices 12-A, 12-B) — markdown structure at inner widths
+// 40/80/120, the table fixture and the literal user message. Blank rows are
+// kept (the shared helper drops them) because vertical rhythm is part of what
+// is under review.
 // ---------------------------------------------------------------------------
 
 mod markdown_structure {
@@ -928,6 +928,51 @@ fn main() {
         let turn = make_turn("md", vec![prose(EVERY_ELEMENT)], Some(StopReason::EndTurn));
         let conv = make_conversation(vec![make_msg("md", MessageRole::Assistant)], vec![turn]);
         painted(&conv, inner + 2)
+    }
+
+    /// Natural, aligned, wide-glyph, shrinking and collapsing tables (D10).
+    const TABLES: &str = "## Tables
+
+| Name | Qty | Note |
+|:-----|----:|:----:|
+| apple | 3 | fresh |
+| kiwi | 12 | `a  b` and **bold** |
+
+| Command | Description |
+|---|---|
+| cargo test | Runs the full test suite for the whole workspace |
+
+| 名前 | 説明 |
+|---|---|
+| 界界界 | e\u{301}e\u{301} 👨\u{200d}👩\u{200d}👧 |
+
+| alpha | bravo | delta | gamma | omega | sigma | theta |
+|---|---|---|---|---|---|---|
+| 11111 | 22222 | 33333 | 44444 | 55555 | 66666 | 77777 |
+
+| a | b |
+|---|---|
+| 1 | 2 | 3 |";
+
+    fn tables(inner: u16) -> String {
+        let turn = make_turn("tb", vec![prose(TABLES)], Some(StopReason::EndTurn));
+        let conv = make_conversation(vec![make_msg("tb", MessageRole::Assistant)], vec![turn]);
+        painted(&conv, inner + 2)
+    }
+
+    #[test]
+    fn markdown_structure_tables_w40() {
+        insta::assert_snapshot!("markdown_structure_tables_w40", tables(40));
+    }
+
+    #[test]
+    fn markdown_structure_tables_w80() {
+        insta::assert_snapshot!("markdown_structure_tables_w80", tables(80));
+    }
+
+    #[test]
+    fn markdown_structure_tables_w120() {
+        insta::assert_snapshot!("markdown_structure_tables_w120", tables(120));
     }
 
     #[test]

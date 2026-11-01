@@ -34,6 +34,8 @@ const FRAGMENTS: &[&str] = &[
     "3. three",
     "- [ ] todo",
     "- [x] done",
+    "| Name | Qty |\n|:-----|----:|\n| `a  b` | **12** |\n| 界界 | e\u{301} |",
+    "| ctl\u{1b}]52;c;eA==\u{7} | \u{9b}31m c1 |\n|:-:|--:|\n| bidi \u{202e}x\u{200b}y | a\tb |\n| 👨\u{200d}👩\u{200d}👧 | z\u{0}w |",
     "> quote",
     "> > deeper quote",
     "---",
@@ -60,6 +62,9 @@ const FRAGMENTS: &[&str] = &[
     "x  y   z",
     "| a | b |\n|---|---|\n| 1 | 2 | 3 |",
     "hard  \nbreak\\\nhere",
+    "| `a | b` | **x |\n|---|---|\n| y | `z |",
+    "| a |\n|---|\n| 1 | 2 | 3 | 4 |",
+    "| 名前 | n |\n|---|---|\n| 界界界界界界界界 | 1 |",
 ];
 const SEPARATORS: &[&str] = &["\n", "\n\n", " ", "", "  \n", "\r\n"];
 
@@ -217,7 +222,7 @@ fn k10_open_prose_is_rendered_once_per_draw_on_both_hosts() {
 fn k10_pane_height_matches_painted_rows_for_every_fixture_on_both_themes() {
     for mono in [false, true] {
         let theme = theme(mono);
-        for fragment in FRAGMENTS.iter().take(24) {
+        for fragment in FRAGMENTS.iter().take(26) {
             let pane = paint_local(
                 &turn_conversation(fragment),
                 None,
@@ -268,6 +273,10 @@ const MARKDOWN_SOURCES: &[(&str, &str)] = &[
     (
         "sanitize.rs",
         include_str!("../../src/adapters/tui/markdown/sanitize.rs"),
+    ),
+    (
+        "table.rs",
+        include_str!("../../src/adapters/tui/markdown/table.rs"),
     ),
     (
         "highlight.rs",
@@ -379,8 +388,9 @@ fn private_parser_users(sources: &[(String, String)], allowed: &[&str]) -> Vec<S
 fn k10_gate_baseline_defects_stay_out_of_the_markdown_sources() {
     let violations = gate_violations(MARKDOWN_SOURCES);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
-    assert_eq!(MARKDOWN_SOURCES.len(), 6, "the gate must stay scoped");
-    let users = private_parser_users(&src_sources(), &[]);
+    assert_eq!(MARKDOWN_SOURCES.len(), 7, "the gate must stay scoped");
+    // 12-B allowlists exactly one domain module: the producer-side helper.
+    let users = private_parser_users(&src_sources(), &["domain/services/markdown_source.rs"]);
     assert!(
         users.is_empty(),
         "pulldown_cmark must be imported only under src/adapters/tui/markdown/: {users:?}"
@@ -561,5 +571,83 @@ fn k11_streaming_marker_openers_and_closers_finish_in_bounded_time() {
         started.elapsed() < std::time::Duration::from_secs(60),
         "sanitizing 50k openers + 50k closers took {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn k11_five_thousand_table_columns_collapse_in_bounded_time() {
+    let header = format!("|{}\n", "c|".repeat(5_000));
+    let delimiter = format!("|{}\n", "---|".repeat(5_000));
+    let body = format!("|{}\n", "x|".repeat(5_001));
+    let source = format!("{header}{delimiter}{body}");
+    for (width, mode) in [
+        (0usize, 1usize),
+        (1, 1),
+        (10, 0),
+        (80, 1),
+        (80, 0),
+        (120, 2),
+    ] {
+        let source = source.clone();
+        let lines =
+            bounded(move || markdown::render(&source, width, &Theme::dark(), &opts(mode)).lines);
+        assert_fits(&lines, width);
+        if width == 80 && mode != 2 {
+            let text: Vec<String> = lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect();
+            // The repair adds the column the 5,001-cell body row needs.
+            assert_eq!(text, ["table · 5001 cols × 1 rows", ""]);
+        }
+    }
+}
+
+#[test]
+fn k11_repeated_delimiter_lines_sanitize_in_bounded_time() {
+    // A table whose body is no wider than its header needs no repair; the
+    // 50,000 delimiter-like body rows after it are body rows, never new header
+    // candidates (each retry would rescan every remaining row: O(N^2)).
+    let source = "|-|\n".repeat(50_000);
+    for mode in [
+        markdown::RenderMode::Completed,
+        markdown::RenderMode::Streaming,
+    ] {
+        let input = source.clone();
+        let started = std::time::Instant::now();
+        let sanitized = bounded(move || markdown::sanitize::sanitize(&input, mode).into_owned());
+        let elapsed = started.elapsed();
+        assert_eq!(sanitized, source, "no repair is needed in {mode:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "sanitizing 50k delimiter lines took {elapsed:?} in {mode:?}"
+        );
+    }
+    for options in [RenderOptions::completed(), RenderOptions::streaming()] {
+        let input = source.clone();
+        let lines = bounded(move || markdown::render(&input, 40, &Theme::dark(), &options).lines);
+        assert_fits(&lines, 40);
+    }
+}
+
+#[test]
+fn k11_a_huge_table_and_a_huge_cell_render_in_bounded_time() {
+    let rows: String = (0..10_000).map(|i| format!("| r{i} | v |\n")).collect();
+    let table = format!("| k | v |\n|---|---|\n{rows}");
+    let cell = format!("| a |\n|---|\n| {} |\n", "界".repeat(1 << 19));
+    let (table_lines, cell_lines) = bounded(move || {
+        let theme = Theme::dark();
+        (
+            markdown::render(&table, 80, &theme, &RenderOptions::completed()).lines,
+            markdown::render(&cell, 40, &theme, &RenderOptions::completed()).lines,
+        )
+    });
+    assert_eq!(table_lines.len(), 10_000 + 5);
+    assert_fits(&table_lines, 80);
+    assert_fits(&cell_lines, 40);
+    assert!(
+        cell_lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains('…')))
     );
 }

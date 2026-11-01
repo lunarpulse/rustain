@@ -6,7 +6,7 @@
 //! so neither the builder nor the later recursive stages nor `Drop` can be
 //! driven off the stack by adversarial input.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Container frames (quote, list, item) the builder opens before it stops
 /// nesting and flattens the rest into the deepest open container.
@@ -28,7 +28,24 @@ pub enum Block {
     },
     /// An HTML block: shown as literal text, source lines kept.
     Html(String),
+    Table(Table),
     Rule,
+}
+
+/// Column alignment; an absent marker reads as left (D10).
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
+/// A table: one alignment per header cell, then the header and body cells.
+#[derive(Debug, PartialEq)]
+pub struct Table {
+    pub aligns: Vec<Align>,
+    pub head: Vec<Vec<Inline>>,
+    pub rows: Vec<Vec<Vec<Inline>>>,
 }
 
 /// An ordered or unordered list. `tight` is true when no item starts a
@@ -102,15 +119,16 @@ struct Builder {
     link: Option<(String, String)>,
     /// Alt text of the open image.
     image: Option<String>,
+    /// The open table and the cells of its open row.
+    table: Option<(Table, Vec<Vec<Inline>>)>,
 }
 
-/// Parse sanitized markdown into a block tree.
-///
-/// Tables are not enabled here (they arrive with their producer-side escaping,
-/// slice 12-B); a `|` row is an ordinary paragraph.
+/// Parse sanitized markdown into a block tree. Tables are on together with the
+/// producer-side cell escaping (`markdown_source`, slice 12-B).
 #[must_use]
 pub fn parse(input: &str) -> Vec<Block> {
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
     let mut builder = Builder {
         stack: vec![Frame::Root(Vec::new())],
         overflow: 0,
@@ -121,6 +139,7 @@ pub fn parse(input: &str) -> Vec<Block> {
         html: None,
         link: None,
         image: None,
+        table: None,
     };
     for event in Parser::new_ext(input, options) {
         builder.event(event);
@@ -337,6 +356,23 @@ impl Builder {
                 self.link = Some((dest_url.to_string(), String::new()));
             }
             Tag::Image { .. } => self.image = Some(String::new()),
+            Tag::Table(aligns) => {
+                self.flush_implicit();
+                let aligns = aligns
+                    .iter()
+                    .map(|a| match a {
+                        Alignment::Center => Align::Center,
+                        Alignment::Right => Align::Right,
+                        Alignment::None | Alignment::Left => Align::Left,
+                    })
+                    .collect();
+                let table = Table {
+                    aligns,
+                    head: Vec::new(),
+                    rows: Vec::new(),
+                };
+                self.table = Some((table, Vec::new()));
+            }
             _ => {}
         }
     }
@@ -405,6 +441,27 @@ impl Builder {
                         format!("[image: {}]", alt.trim())
                     };
                     self.text(&shown, false);
+                }
+            }
+            TagEnd::TableCell => {
+                let cell = std::mem::take(&mut self.inlines);
+                if let Some((_, row)) = &mut self.table {
+                    row.push(cell);
+                }
+            }
+            TagEnd::TableHead => {
+                if let Some((table, row)) = &mut self.table {
+                    table.head = std::mem::take(row);
+                }
+            }
+            TagEnd::TableRow => {
+                if let Some((table, row)) = &mut self.table {
+                    table.rows.push(std::mem::take(row));
+                }
+            }
+            TagEnd::Table => {
+                if let Some((table, _)) = self.table.take() {
+                    self.push_block(Block::Table(table));
                 }
             }
             _ => {}
@@ -713,5 +770,49 @@ mod tests {
             first.items[0].blocks[0],
             Block::Paragraph(vec![text("item0")])
         );
+    }
+
+    #[test]
+    fn test_table_keeps_alignment_header_and_inline_cells() {
+        let blocks = parse("| a | b | c |\n|:--|:-:|--:|\n| **x** | `y` | z |\n| 1 | 2 | 3 |");
+        let [Block::Table(table)] = blocks.as_slice() else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(table.aligns, [Align::Left, Align::Center, Align::Right]);
+        assert_eq!(
+            table.head,
+            [vec![text("a")], vec![text("b")], vec![text("c")]]
+        );
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0][0], [bold("x")]);
+        assert!(matches!(
+            &table.rows[0][1][..],
+            [Inline::Text {
+                fmt: Fmt { code: true, .. },
+                ..
+            }]
+        ));
+        assert_eq!(table.rows[1][2], [text("3")]);
+    }
+
+    #[test]
+    fn test_table_keeps_the_text_around_it_and_works_inside_containers() {
+        let blocks = parse("before\n\n| a |\n|---|\n| 1 |\n\nafter");
+        assert!(matches!(
+            blocks[..],
+            [Block::Paragraph(_), Block::Table(_), Block::Paragraph(_)]
+        ));
+        let blocks = parse("- item\n\n  | a |\n  |---|\n  | 1 |");
+        let item = &list(&blocks[0]).items[0];
+        assert!(matches!(
+            item.blocks[..],
+            [Block::Paragraph(_), Block::Table(_)]
+        ));
+        // An escaped pipe stays inside its cell.
+        let blocks = parse("| h |\n|---|\n| a \\| b |");
+        let [Block::Table(table)] = blocks.as_slice() else {
+            panic!("{blocks:?}")
+        };
+        assert_eq!(table.rows[0].len(), 1);
     }
 }

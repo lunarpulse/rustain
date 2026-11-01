@@ -15,6 +15,7 @@ use crate::domain::models::MessageRole;
 use crate::domain::models::SessionMeta;
 use crate::domain::models::conversation::Conversation;
 use crate::domain::models::plan::PlanStatus;
+use crate::domain::services::markdown_source::{closer_for_open_block, fence_for};
 
 /// Render a conversation as a markdown document. See AC11 for format.
 ///
@@ -51,10 +52,16 @@ pub fn render_conversation_markdown(
         };
         out.push_str(&format!("## {} ({})\n\n", role, iso8601(msg.created_at)));
 
-        // Text content — preserve verbatim.
+        // Text content — preserve verbatim. A body that ends inside an open
+        // fence or HTML block gets its closer on its own line, or that block
+        // would swallow every later heading of the document.
         if !msg.content.is_empty() {
             out.push_str(&msg.content);
             if !msg.content.ends_with('\n') {
+                out.push('\n');
+            }
+            if let Some(closer) = closer_for_open_block(&msg.content) {
+                out.push_str(&closer);
                 out.push('\n');
             }
             out.push('\n');
@@ -64,20 +71,17 @@ pub fn render_conversation_markdown(
         for tc in &msg.tool_calls {
             out.push_str(&format!("### Tool: {} ({})\n\n", tc.name, tc.id));
             out.push_str("<details>\n<summary>Tool call</summary>\n\n");
-            out.push_str("**Input:**\n```json\n");
-            match serde_json::to_string_pretty(&tc.input) {
-                Ok(s) => out.push_str(&s),
-                Err(_) => out.push_str("(unrenderable input)"),
-            }
-            out.push_str("\n```\n\n");
-            out.push_str("**Result:**\n```\n");
+            let input = serde_json::to_string_pretty(&tc.input)
+                .unwrap_or_else(|_| "(unrenderable input)".to_owned());
+            let fence = fence_for(&input);
+            out.push_str(&format!("**Input:**\n{fence}json\n{input}\n{fence}\n\n"));
             let result_text = tc
                 .result
                 .as_ref()
                 .map(|r| r.content.as_str())
                 .unwrap_or("(no result)");
-            out.push_str(result_text);
-            out.push_str("\n```\n\n");
+            let fence = fence_for(result_text);
+            out.push_str(&format!("**Result:**\n{fence}\n{result_text}\n{fence}\n\n"));
             out.push_str("</details>\n\n");
         }
 

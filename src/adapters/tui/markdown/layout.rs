@@ -10,6 +10,7 @@
 use ratatui::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::table;
 use super::transform::{StyledBlock, StyledInline, StyledList};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -153,6 +154,14 @@ fn render_block(
             render_code_block(language.as_deref(), content, width, styles, out);
         }
         StyledBlock::Html(source) => render_html(source, width, styles, out),
+        StyledBlock::Table(table) => {
+            out.extend(table::render(
+                table,
+                width,
+                styles.code_border,
+                styles.muted,
+            ));
+        }
         StyledBlock::Rule => out.push(Line::from(Span::styled("─".repeat(width), styles.muted))),
     }
 }
@@ -356,7 +365,7 @@ fn runs(text: &str) -> Vec<(bool, &str)> {
 
 /// Prose text with tabs read as one space and every other control character
 /// dropped (the terminal painter drops them, so they must not be measured).
-fn clean_prose(text: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn clean_prose(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.chars().any(char::is_control) {
         return std::borrow::Cow::Borrowed(text);
     }

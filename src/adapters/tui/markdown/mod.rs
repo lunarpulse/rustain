@@ -26,6 +26,7 @@ pub mod highlight;
 pub mod layout;
 pub mod parse;
 pub mod sanitize;
+pub mod table;
 pub mod transform;
 
 use ratatui::prelude::*;

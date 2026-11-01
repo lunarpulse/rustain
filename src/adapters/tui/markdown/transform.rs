@@ -5,7 +5,7 @@
 
 use ratatui::prelude::*;
 
-use super::parse::{Block, Fmt, Inline, List};
+use super::parse::{Align, Block, Fmt, Inline, List, Table};
 use crate::adapters::tui::theme::Theme;
 
 /// Styled block tree produced by Stage 3.
@@ -23,6 +23,7 @@ pub enum StyledBlock {
         content: String,
     },
     Html(String),
+    Table(StyledTable),
     Rule,
 }
 
@@ -37,6 +38,14 @@ pub struct StyledList {
 pub struct StyledItem {
     pub task: Option<bool>,
     pub blocks: Vec<StyledBlock>,
+}
+
+/// A styled table: cells are inline runs; the header carries the heading style.
+#[derive(Debug)]
+pub struct StyledTable {
+    pub aligns: Vec<Align>,
+    pub head: Vec<Vec<StyledInline>>,
+    pub rows: Vec<Vec<Vec<StyledInline>>>,
 }
 
 /// A styled inline node. Soft breaks carry the style of the surrounding block
@@ -174,6 +183,23 @@ fn block_to_styled(block: Block, palette: &mut Palette) -> StyledBlock {
         }
         Block::Code { language, content } => StyledBlock::Code { language, content },
         Block::Html(source) => StyledBlock::Html(source),
+        Block::Table(Table { aligns, head, rows }) => {
+            let head_base = palette.heading_style(3);
+            let body_base = palette.normal;
+            let head = head
+                .into_iter()
+                .map(|cell| inlines_to_styled(cell, head_base, palette))
+                .collect();
+            let rows = rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| inlines_to_styled(cell, body_base, palette))
+                        .collect()
+                })
+                .collect();
+            StyledBlock::Table(StyledTable { aligns, head, rows })
+        }
         Block::Rule => StyledBlock::Rule,
     }
 }

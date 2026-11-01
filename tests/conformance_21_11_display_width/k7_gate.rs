@@ -55,6 +55,10 @@ const SITES: &[Site] = &[
         ]
     ),
     site!(
+        "markdown/table.rs",
+        ["new", "render", "row_line", "fit", "shrink", "rule"]
+    ),
+    site!(
         "widgets/chat_pane/mod.rs",
         [
             "truncate_with_ellipsis",
