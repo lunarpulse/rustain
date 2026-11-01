@@ -228,12 +228,24 @@ def _exercise(binary, evidence, root, monkeypatch):
                        and "Enter log out · Esc back" in s, "the logout account step")
         _capture(tui, evidence, "d3-logout-account", screen)
         tui.send("\r")
-        screen = _wait(tui, lambda s: "Logged out of OpenAI account API key #1." in _plain(s)
-                       and "No OpenAI credentials remain." in _plain(s), "logout result")
-        # The locked warning is a Warning notice: the default Focus density
-        # (`[F]`) queues it rather than painting it (K3 proves it is posted);
-        # the relock itself is checked in the model picker below.
+        # Story 21.1: the two-line `/logout` result is ONE Success toast that
+        # paints only its first line plus `…` at the chat pane's bottom edge
+        # (positional, right-aligned, severity word first); the second line is
+        # never in the toast and is read from the Notification Log below.
+        first = "Logged out of OpenAI account API key #1.…"
+        screen = _wait(tui, lambda s: harness.toast_present(s, first, "Success", rows=3),
+                       "logout result toast")
+        assert "No OpenAI credentials remain." not in "\n".join(harness.toast_rows(screen, 3)), screen
+        # The locked Warning is a visible toast now (the default Focus density no
+        # longer queues notices); the relock itself is checked in the model
+        # picker below. The FULL two-line message is read from S-LOG detail.
         _capture(tui, evidence, "d4-logged-out", screen)
+        tui.open_notification_log()
+        detail = tui.read_notification_detail("Logged out of OpenAI account API key #1.")
+        assert "Logged out of OpenAI account API key #1." in detail, detail
+        assert "No OpenAI credentials remain." in detail, detail
+        (evidence / "d4b-log-detail.screen.txt").write_text("\n".join(tui._screen.display) + "\n")
+        tui.close_notification_log()
         tui.send("\x18")
         tui.send("m")
         screen = _wait(tui, lambda s: _modal(s, "Select Model") and "OpenAI" in s

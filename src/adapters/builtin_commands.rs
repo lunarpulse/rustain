@@ -87,6 +87,8 @@ pub const BUILTINS: &[BuiltinCommand] = &[
     // Story 21.2: presentation commands now registered in the catalogue.
     cmd("ml", true, Offered, false),
     cmd("quit", true, Offered, false),
+    // Story 21.1 AC5: the Notification Log, offered in both hosts (same store).
+    cmd("notifications", true, Offered, false),
     // Attached-only: cleanly detach (never cancels daemon work).
     cmd("detach", false, Offered, false),
 ];
@@ -167,7 +169,10 @@ mod tests {
     fn story21_2_per_host_offering_is_not_the_union() {
         let local: Vec<_> = offered_names(CommandHost::Local).collect();
         let attached: Vec<_> = offered_names(CommandHost::Attached).collect();
-        assert_eq!(attached, ["clear", "team", "ml", "quit", "detach"]);
+        assert_eq!(
+            attached,
+            ["clear", "team", "ml", "quit", "notifications", "detach"]
+        );
         assert!(local.contains(&"quit") && local.contains(&"ml"));
         assert!(!local.contains(&"detach"));
         // Typed auth/account refusal is preserved but never advertised attached.

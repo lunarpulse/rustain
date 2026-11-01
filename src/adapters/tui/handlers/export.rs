@@ -6,8 +6,9 @@
 //! - Cross-search results stale-result guard (Story 4-4 AC5)
 //! - Export confirm/cancel/apply (Story 4-4 AC11/AC12)
 
+use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
-use crate::domain::models::{Conversation, FocusState, StatusState};
+use crate::domain::models::{Conversation, FocusState};
 
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,22 +90,21 @@ pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
         .await;
         match write_result {
             Ok(Ok(())) => {
-                state.status = StatusState::Flash {
-                    message: format!("Overwrote {}", target_for_msg.display()),
-                    remaining_ms: 3000,
-                };
+                notifications::success(
+                    state,
+                    NoticeSource::Export,
+                    format!("Overwrote {}", target_for_msg.display()),
+                );
             }
             Ok(Err(e)) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", e),
-                    remaining_ms: 3000,
-                };
+                notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
             }
             Err(join_err) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", join_err),
-                    remaining_ms: 3000,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Export,
+                    format!("Export failed: {}", join_err),
+                );
             }
         }
     }
@@ -115,10 +115,7 @@ pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
 #[doc(hidden)]
 pub fn apply_cancel_export_overwrite(state: &mut TuiState) {
     state.pending_export = None;
-    state.status = StatusState::Flash {
-        message: "Export cancelled".to_string(),
-        remaining_ms: 2000,
-    };
+    notifications::info(state, NoticeSource::Export, "Export cancelled");
     state.focus = FocusState::Chat;
     state.needs_redraw = true;
 }
@@ -141,18 +138,20 @@ pub async fn apply_export_command(
         match create_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: cannot create exports dir: {}", e),
-                    remaining_ms: 3000,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Export,
+                    format!("Export failed: cannot create exports dir: {}", e),
+                );
                 state.needs_redraw = true;
                 return;
             }
             Err(join_err) => {
-                state.status = StatusState::Flash {
-                    message: format!("Export failed: {}", join_err),
-                    remaining_ms: 3000,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Export,
+                    format!("Export failed: {}", join_err),
+                );
                 state.needs_redraw = true;
                 return;
             }
@@ -185,12 +184,11 @@ pub async fn apply_export_command(
         Some(name) => {
             let raw = std::path::PathBuf::from(name);
             if raw.is_absolute() {
-                state.status = StatusState::Flash {
-                    message:
-                        "Export failed: absolute paths are not allowed (use a name relative to .rustain/exports/)"
-                            .to_string(),
-                    remaining_ms: 3500,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Export,
+                    "Export failed: absolute paths are not allowed (use a name relative to .rustain/exports/)",
+                );
                 state.needs_redraw = true;
                 return;
             }
@@ -198,10 +196,11 @@ pub async fn apply_export_command(
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir))
             {
-                state.status = StatusState::Flash {
-                    message: "Export failed: path contains '..' — not allowed".to_string(),
-                    remaining_ms: 3500,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Export,
+                    "Export failed: path contains '..' — not allowed",
+                );
                 state.needs_redraw = true;
                 return;
             }
@@ -214,10 +213,11 @@ pub async fn apply_export_command(
                 .await
                 {
                     if !canonical_parent.starts_with(&canonical_exports) {
-                        state.status = StatusState::Flash {
-                            message: "Export failed: target escapes .rustain/exports/".to_string(),
-                            remaining_ms: 3500,
-                        };
+                        notifications::error(
+                            state,
+                            NoticeSource::Export,
+                            "Export failed: target escapes .rustain/exports/",
+                        );
                         state.needs_redraw = true;
                         return;
                     }
@@ -271,22 +271,21 @@ pub async fn apply_export_command(
             let display_path = target_path
                 .strip_prefix(&workspace_path_owned)
                 .unwrap_or(&target_path);
-            state.status = StatusState::Flash {
-                message: format!("Exported to {}", display_path.display()),
-                remaining_ms: 3000,
-            };
+            notifications::success(
+                state,
+                NoticeSource::Export,
+                format!("Exported to {}", display_path.display()),
+            );
         }
         Ok(Err(e)) => {
-            state.status = StatusState::Flash {
-                message: format!("Export failed: {}", e),
-                remaining_ms: 3000,
-            };
+            notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
         }
         Err(join_err) => {
-            state.status = StatusState::Flash {
-                message: format!("Export failed: {}", join_err),
-                remaining_ms: 3000,
-            };
+            notifications::error(
+                state,
+                NoticeSource::Export,
+                format!("Export failed: {}", join_err),
+            );
         }
     }
     state.needs_redraw = true;

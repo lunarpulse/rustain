@@ -185,7 +185,7 @@ async fn k01_body(logs: Arc<Mutex<Vec<u8>>>) {
     for event in &tui.event_log {
         assert!(!event.contains(KEY), "an event carries the key: {event}");
     }
-    assert!(!tui.feedback().contains(KEY) && !tui.flash().contains(KEY));
+    assert!(!tui.notices().contains(KEY) && !tui.flash().contains(KEY));
     assert!(tui.copied.lock().unwrap().iter().all(|c| !c.contains(KEY)));
     assert!(!clipboard_file(&world).contains(KEY));
     assert!(!tui.state.input_buffer.contains(KEY));

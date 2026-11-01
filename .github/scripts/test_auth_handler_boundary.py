@@ -117,6 +117,37 @@ fn open() -> HandlerOutcome {
         source = LOGIN.replace('open() }', 'helper.clone() }', 1)
         self.rejected(checker.PATHS[0], source, 'login.rs.*receiver')
 
+    NOTIFY_IMPORT = 'use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};\n'
+
+    def test_notification_store_calls_are_admitted_where_they_occur(self):
+        # Positive control (21-1 integrator-authorized swap): the synchronous,
+        # non-spawning store entries replace the retired flash helpers.
+        login = self.NOTIFY_IMPORT + LOGIN + (
+            'fn feedback(state: &mut TuiState) { notifications::notify(state, NoticeSource::Login, NoticeSeverity::Info, message); }\n'
+            'fn begin(state: &mut TuiState) { super::clipboard::notify_copy(state, &text, &copier); }\n'
+            'fn finished(state: &mut TuiState) { notifications::info(state, NoticeSource::Login, "Login cancelled"); }\n')
+        accounts = self.NOTIFY_IMPORT + ACCOUNTS + (
+            'fn feedback(state: &mut TuiState) { notifications::notify(state, NoticeSource::Accounts, severity, message); }\n')
+        self.sources[checker.PATHS[0]] = login
+        self.sources[checker.PATHS[1]] = accounts
+        self.put()
+        checker.check(self.root)
+
+    def test_notification_store_does_not_admit_spawn_or_other_helpers(self):
+        for call in ('tokio::spawn(work())', 'notifications::notify_later(state, message)',
+                     'notifications::info(state, NoticeSource::Login, message)',
+                     'super::clipboard::flash_copy(state, &text, &copier)'):
+            with self.subTest(call=call):
+                source = self.NOTIFY_IMPORT + LOGIN + 'fn feedback(state: &mut TuiState) { ' + call + '; }\n'
+                self.rejected(checker.PATHS[0], source, 'login.rs.*executable edge')
+        self.sources[checker.PATHS[0]] = LOGIN
+        for call in ('notifications::spawn_notice(state)', 'tokio::spawn(work())'):
+            with self.subTest(call=call):
+                source = self.NOTIFY_IMPORT + ACCOUNTS + 'fn on_key(state: &mut TuiState) { ' + call + '; }\n'
+                self.rejected(checker.PATHS[1], source, 'accounts.rs.*executable edge')
+        with self.subTest(call='unapproved sibling import'):
+            self.rejected(checker.PATHS[0], 'use crate::adapters::tui::notification_log;\n' + LOGIN, 'login.rs.*unapproved helper import')
+
     def test_executable_in_handler_macro(self):
         source = LOGIN.replace('open() }', 'format!("{}", crate::helper::begin()) }', 1)
         self.rejected(checker.PATHS[0], source, 'login.rs.*format')

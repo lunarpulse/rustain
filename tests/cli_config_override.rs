@@ -282,3 +282,26 @@ fn config_show_warns_unknown_top_level_key_to_stderr() {
 
     assert_no_provider_constructed("unknown key warning");
 }
+
+/// Story 21.1 AC1: `[notifications]` is an `AppConfig` field, so a `-c
+/// notifications.*` override is a known key and draws no unknown-key warning.
+#[test]
+#[serial]
+fn config_show_notifications_override_is_a_known_key() {
+    rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT.store(0, Ordering::SeqCst);
+
+    Command::cargo_bin("rustain")
+        .unwrap()
+        .args([
+            "-c",
+            "notifications.info_ttl_secs=7",
+            "config",
+            "show",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("unknown config key").not());
+
+    assert_no_provider_constructed("notifications override");
+}

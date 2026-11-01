@@ -35,10 +35,14 @@ fn ctrl_x_l_dispatches_the_transparency_log_panel() {
         "Ctrl+X, L must open the real panel"
     );
     assert!(!state.which_key.active);
-    // A `Noop` chord inserts a `chord-l` feedback block instead of dispatching.
+    // A `Noop` chord records a Chord-source notice instead of dispatching.
     assert!(
-        !state.feedback_blocks.contains_key("chord-l"),
-        "a Noop chord would have left a 'not yet available' block behind"
+        state
+            .notifications
+            .records()
+            .all(|record| record.source
+                != rustain::adapters::tui::notifications::NoticeSource::Chord),
+        "a Noop chord would have left a 'not yet available' notice behind"
     );
 }
 

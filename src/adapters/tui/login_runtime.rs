@@ -462,9 +462,18 @@ mod tests {
             },
         );
         assert!(!state.login.active);
+        // Story 21.1: the result is a Login-source Success notice in the store.
+        let record = state
+            .notifications
+            .records()
+            .find(|record| {
+                record.source == crate::adapters::tui::notifications::NoticeSource::Login
+            })
+            .expect("a login result notice");
+        assert_eq!(record.message, "Logged in to Anthropic (Claude Pro/Max)");
         assert_eq!(
-            state.feedback_blocks["login-result"].message,
-            "Logged in to Anthropic (Claude Pro/Max)"
+            record.severity,
+            crate::adapters::tui::notifications::NoticeSeverity::Success
         );
     }
 }

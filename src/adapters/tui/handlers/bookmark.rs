@@ -6,9 +6,10 @@
 
 #![allow(dead_code)]
 
+use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::tab::TabManager;
-use crate::domain::models::{Conversation, FocusState, MessageRole, StatusState};
+use crate::domain::models::{Conversation, FocusState, MessageRole};
 use crate::domain::ports::StoragePort;
 
 use super::HandlerOutcome;
@@ -28,18 +29,16 @@ pub async fn handle_apply_bookmark_toggle(
     use crate::adapters::tui::widgets::chat_pane::find_message_index_from_scroll_offset;
 
     if conversation.messages.is_empty() {
-        state.status = StatusState::Flash {
-            message: "No messages to bookmark".to_string(),
-            remaining_ms: 2000,
-        };
+        notifications::info(state, NoticeSource::Bookmark, "No messages to bookmark");
         state.needs_redraw = true;
         return HandlerOutcome::Quiet;
     }
     if state.message_boundaries.is_empty() {
-        state.status = StatusState::Flash {
-            message: "Chat pane not ready — try again after first render".to_string(),
-            remaining_ms: 2000,
-        };
+        notifications::info(
+            state,
+            NoticeSource::Bookmark,
+            "Chat pane not ready — try again after first render",
+        );
         state.needs_redraw = true;
         return HandlerOutcome::Quiet;
     }
@@ -53,10 +52,11 @@ pub async fn handle_apply_bookmark_toggle(
         conversation.messages.len(),
     );
     let Some(durable_idx) = conversation.durable_message_index(target_idx) else {
-        state.status = StatusState::Flash {
-            message: "Cannot bookmark a temporary display".to_string(),
-            remaining_ms: 2000,
-        };
+        notifications::info(
+            state,
+            NoticeSource::Bookmark,
+            "Cannot bookmark a temporary display",
+        );
         state.needs_redraw = true;
         return HandlerOutcome::Quiet;
     };
@@ -67,11 +67,11 @@ pub async fn handle_apply_bookmark_toggle(
         role,
         MessageRole::User | MessageRole::Assistant | MessageRole::System
     ) {
-        state.status = StatusState::Flash {
-            message: "Cannot bookmark tool message — target a user or assistant message"
-                .to_string(),
-            remaining_ms: 2000,
-        };
+        notifications::info(
+            state,
+            NoticeSource::Bookmark,
+            "Cannot bookmark tool message — target a user or assistant message",
+        );
         state.needs_redraw = true;
         return HandlerOutcome::Quiet;
     }
@@ -103,17 +103,15 @@ pub async fn handle_apply_bookmark_toggle(
             } else {
                 format!("Bookmark added (msg {})", target_idx)
             };
-            state.status = StatusState::Flash {
-                message: msg,
-                remaining_ms: 2000,
-            };
+            notifications::success(state, NoticeSource::Bookmark, msg);
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to save bookmark: {}", e),
-                remaining_ms: 3000,
-            };
+            notifications::error(
+                state,
+                NoticeSource::Bookmark,
+                format!("Failed to save bookmark: {}", e),
+            );
         }
     }
     state.needs_redraw = true;
@@ -127,11 +125,11 @@ pub fn handle_apply_open_bookmark_list(
 ) -> HandlerOutcome {
     let bookmarks = &tab_manager.active_tab().session_meta.bookmarks;
     if bookmarks.is_empty() {
-        state.status = StatusState::Flash {
-            message: "No bookmarks in this conversation — press 'm' on a message to add one"
-                .to_string(),
-            remaining_ms: 2000,
-        };
+        notifications::info(
+            state,
+            NoticeSource::Bookmark,
+            "No bookmarks in this conversation — press 'm' on a message to add one",
+        );
         state.needs_redraw = true;
         return HandlerOutcome::Quiet;
     }
@@ -209,17 +207,19 @@ pub async fn handle_apply_delete_bookmark(
                     .bookmark_list_selected
                     .min(new_meta.bookmarks.len() - 1);
             }
-            state.status = StatusState::Flash {
-                message: format!("Bookmark removed (msg {}) — press u to undo", removed_idx),
-                remaining_ms: 2000,
-            };
+            notifications::success(
+                state,
+                NoticeSource::Bookmark,
+                format!("Bookmark removed (msg {}) — press u to undo", removed_idx),
+            );
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to delete bookmark: {}", e),
-                remaining_ms: 3000,
-            };
+            notifications::error(
+                state,
+                NoticeSource::Bookmark,
+                format!("Failed to delete bookmark: {}", e),
+            );
         }
     }
     state.needs_redraw = true;
@@ -259,17 +259,19 @@ pub async fn handle_apply_undo_bookmark_delete(
     {
         Ok(()) => {
             state.bookmark_undo_buffer = None;
-            state.status = StatusState::Flash {
-                message: format!("Bookmark restored (msg {})", idx),
-                remaining_ms: 1500,
-            };
+            notifications::success(
+                state,
+                NoticeSource::Bookmark,
+                format!("Bookmark restored (msg {})", idx),
+            );
         }
         Err(e) => {
             tab_manager.active_tab_mut().session_meta = old_meta;
-            state.status = StatusState::Flash {
-                message: format!("Failed to restore bookmark: {}", e),
-                remaining_ms: 3000,
-            };
+            notifications::error(
+                state,
+                NoticeSource::Bookmark,
+                format!("Failed to restore bookmark: {}", e),
+            );
         }
     }
     state.needs_redraw = true;

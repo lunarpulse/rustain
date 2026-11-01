@@ -780,6 +780,7 @@ mod mixed_width {
                     false,
                     None,
                     rustain::adapters::tui::state::LogAwareness::default(),
+                    0,
                 );
                 input_box::render(
                     frame,

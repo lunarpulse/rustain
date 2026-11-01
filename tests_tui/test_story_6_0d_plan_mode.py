@@ -33,7 +33,7 @@ def test_slash_plan_on_activates_plan_mode(tui: RustainTUI):
     """AC5: /plan on switches to Plan mode and shows PLAN indicator."""
     # Use the command palette to enter Plan mode (reliable)
     tui.set_permission_mode("plan")
-    # Wait for flash to settle and status bar to re-render
+    # Wait for the Info toast to settle and the status bar to re-render
     tui.wait(0.5)
     # Status bar should show "PLAN" chip
     screen = tui.get_screen_text()
@@ -112,7 +112,7 @@ def test_slash_command_plan_toggle_via_input(tui: RustainTUI):
 
 @pytest.mark.story_6_0d
 def test_slash_command_plan_no_args_shows_status(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan' with no args flashes current mode status.
+    """Bug-fix E2E: typing '/plan' with no args toasts the current mode status.
 
     Story 21-2 AC4: Esc on a popup-owned slash popup restores the exact
     pre-trigger composer (it erases the provisional '/plan'), so the old
@@ -127,22 +127,25 @@ def test_slash_command_plan_no_args_shows_status(tui: RustainTUI):
     tui.send(ENTER)  # accept the suggestion, popup closes
     tui.wait(0.3)
     tui.send(ENTER)  # submit '/plan'
+    # Story 21.1: an Info toast (4 s) at the chat pane's bottom edge; the toast
+    # paints only the first message line, ellipsized to the box budget, and this
+    # 57-cell line fits the half-pane box at the harness's 130 columns.
     found = tui.wait_for_screen(
         "Plan mode is not Plan — use /plan on|off|toggle to switch",
         timeout=3.0,
     )
-    assert found, "No-arg /plan should flash current mode status"
+    assert found, "No-arg /plan should toast current mode status"
 
 
 @pytest.mark.story_6_0d
 def test_slash_command_plan_invalid_arg_shows_error(tui: RustainTUI):
-    """Bug-fix E2E: typing '/plan invalid' flashes an unknown-argument error."""
+    """Bug-fix E2E: typing '/plan invalid' toasts an unknown-argument error."""
     tui.send_message("/plan invalid")
     found = tui.wait_for_screen(
         "Unknown /plan argument: invalid. Use on, off, or toggle",
         timeout=3.0,
     )
-    assert found, "Invalid /plan argument should flash error message"
+    assert found, "Invalid /plan argument should toast error message"
 
 
 @pytest.mark.story_6_0d

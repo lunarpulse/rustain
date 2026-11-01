@@ -126,7 +126,7 @@ def _activate(tui: RustainTUI) -> None:
     """
     tui.send_message("use the deploy skill")
     assert tui.wait_for_screen(
-        "Trust and enable this skill for this session?", timeout=45
+        "Trust and enable this skill for this conversation?", timeout=45
     ), tui.get_screen_text()
     tui.send("y")
     assert tui.wait_for_screen("protocol loaded", timeout=60), tui.get_screen_text()

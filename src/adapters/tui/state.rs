@@ -1116,24 +1116,12 @@ pub enum ChordAction {
     OpenUsagePanel,
     /// Set the information density mode (Story 8.4b AC-1).
     SetDensityMode(crate::domain::models::visual::DensityMode),
+    /// Open S-LOG, the Notification Log (Story 21.1 AC5).
+    OpenNotificationLog,
+    /// Archive every visible toast (Story 21.1 AC5); sources are untouched.
+    ClearToasts,
     /// Not yet implemented — show feedback.
     Noop(String),
-}
-
-/// Queued notification for Focus-mode buffering (Story 8.4b AC-8).
-/// Lives in adapters/tui/ — a render-buffer concern, not a domain concept.
-#[derive(Debug, Clone)]
-pub enum QueuedNotification {
-    StatusFlash {
-        level: crate::domain::models::NoticeLevel,
-        message: String,
-        duration_ms: u64,
-    },
-    FeedbackBlock {
-        id: String,
-        level: crate::domain::models::FeedbackLevel,
-        message: String,
-    },
 }
 
 /// A provider column in the model selector dialog (Story 7.2 AC2).
@@ -2540,6 +2528,8 @@ impl WhichKeyState {
             ChordAction::SetDensityMode(crate::domain::models::visual::DensityMode::Dashboard),
         );
         chord_map.insert('?', ChordAction::ShowHelp);
+        chord_map.insert('n', ChordAction::OpenNotificationLog);
+        chord_map.insert('x', ChordAction::ClearToasts);
 
         Self {
             active: false,
@@ -2656,8 +2646,6 @@ pub struct TuiState {
     pub status: StatusState,
     /// Cumulative token usage for the current session.
     pub token_usage: Option<UsageInfo>,
-    /// Previous status state for flash message revert.
-    pub status_before_flash: Option<StatusState>,
     pub should_quit: bool,
     pub theme: Theme,
     /// Scroll position snapshot synced from `view_state.scroll_offset` before
@@ -2820,6 +2808,12 @@ pub struct TuiState {
     /// S-QUIT decision frame (Story 21.2 AC7): one bounded presentation state
     /// with a saved caller focus; 21-4 migrates it onto the modal stack.
     pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
+    /// Session notification store (Story 21.1): every transient notice of the
+    /// host lives here; producers call `notifications::notify`.
+    pub notifications: crate::adapters::tui::notifications::NotificationStore,
+    /// S-LOG (Story 21.1 AC5): the Notification Log, a bounded presentation
+    /// state with a saved caller focus; 21-4 migrates it onto the modal stack.
+    pub notification_log: Option<crate::adapters::tui::notification_log::NotificationLogState>,
     /// Help overlay state (? key or Ctrl+X, ?).
     // Covers: FR108, UX-DR94
     pub help_overlay: HelpOverlayState,
@@ -2883,9 +2877,6 @@ pub struct TuiState {
     /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
     /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
     pub density_user_overridden: bool,
-    /// Notification queue for Focus-mode buffering (Story 8.4b AC-8).
-    /// Bounded at 32; oldest dropped on overflow. Drains FIFO on transition out of Focus.
-    pub queued_notifications: VecDeque<QueuedNotification>,
     /// Whether the history sidebar is visible.
     // Covers: FR107, UX-DR20
     pub sidebar_visible: bool,
@@ -3257,7 +3248,6 @@ impl TuiState {
             cursor_position: 0,
             status: StatusState::Idle,
             token_usage: None,
-            status_before_flash: None,
             should_quit: false,
             theme: Theme::for_capability(capability),
             auto_snapshot: true,
@@ -3311,6 +3301,14 @@ impl TuiState {
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
             quit_confirm: None,
+            notifications: {
+                let mut store = crate::adapters::tui::notifications::NotificationStore::default();
+                store.set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
+                    height.saturating_sub(5),
+                ));
+                store
+            },
+            notification_log: None,
             help_overlay: HelpOverlayState::new(),
             model_selector: ModelSelectorState::new(),
             login: LoginOverlayState::default(),
@@ -3332,7 +3330,6 @@ impl TuiState {
             density_mode: Default::default(),
             session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
-            queued_notifications: VecDeque::new(),
             sidebar_visible: false,
             sidebar_panel: None,
             sidebar_selected: 0,

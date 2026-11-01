@@ -79,7 +79,7 @@ async fn k2_accounts_select_serves_and_rediscovers_the_chosen_account() {
     );
     let discovery_seen = tui.event_log.len();
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!("Active OpenAI account: API key #{id1}.")
     );
     let store: Arc<dyn AuthStorePort> = Arc::new(FileAuthStore::new());
@@ -163,7 +163,7 @@ async fn selected_row_outranked_by_the_environment_is_noted() {
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!(
             "Active OpenAI account: API key #{id1}.\nNote: OpenAI is currently served by OPENAI_API_KEY."
         )

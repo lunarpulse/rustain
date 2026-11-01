@@ -96,6 +96,7 @@ fn render_status_bar_ml(
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -330,6 +331,7 @@ fn test_status_bar_shows_active_agent() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -383,6 +385,7 @@ fn test_status_bar_hides_agent_when_none() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -436,6 +439,7 @@ fn test_status_bar_agent_name_truncated() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();

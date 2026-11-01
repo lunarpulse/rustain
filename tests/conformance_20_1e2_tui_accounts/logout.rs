@@ -92,7 +92,7 @@ async fn k1_k3_logout_reserves_then_relocks_the_provider_live() {
     until_changed(&mut tui).await;
     assert_eq!(tui.state.focus, FocusState::Input, "the overlay closed");
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!("Logged out of OpenAI account API key #{id2}.\nOpenAI now uses API key #{id1}.")
     );
     // Phase 2 rediscovered the account that now serves.
@@ -110,7 +110,7 @@ async fn k1_k3_logout_reserves_then_relocks_the_provider_live() {
     until_changed(&mut tui).await;
     tui.drain();
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!("Logged out of OpenAI account API key #{id1}.\nNo OpenAI credentials remain.")
     );
     assert!(
@@ -313,14 +313,17 @@ async fn k4_stale_row_keeps_the_step_open_with_fresh_rows() {
         frame.contains(&format!("#{id1}  API key #{id1}")),
         "{frame}"
     );
-    assert!(!tui.state.feedback_blocks.contains_key("accounts-result"));
+    assert!(
+        tui.latest_notice(rustain::adapters::tui::notifications::NoticeSource::Accounts)
+            .is_none()
+    );
 
     // Positive control: the remaining row is removed and the step closes.
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
     assert_eq!(tui.state.focus, FocusState::Input);
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!("Logged out of OpenAI account API key #{id1}.\nNo OpenAI credentials remain.")
     );
     assert!(row_ids().await.is_empty());

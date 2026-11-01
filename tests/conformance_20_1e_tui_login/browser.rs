@@ -258,7 +258,7 @@ async fn k03_body() {
     for event in &tui.event_log {
         assert!(!event.contains(CODE), "{event}");
     }
-    assert!(!tui.feedback().contains(CODE) && !tui.flash().contains(CODE));
+    assert!(!tui.notices().contains(CODE) && !tui.flash().contains(CODE));
     assert!(tui.copied.lock().unwrap().iter().all(|c| !c.contains(CODE)));
     assert!(!clipboard_file(&world).contains(CODE));
 }

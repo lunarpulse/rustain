@@ -88,7 +88,7 @@ class TestTabLifecycle:
         )
 
     def test_close_last_tab_is_rejected_with_flash(self, tui: RustainTUI):
-        """Closing the last remaining tab is a no-op — status flashes 'Only one tab open'."""
+        """Closing the last remaining tab is a no-op — an Info toast says 'Only one tab open'."""
         tui.send_message("Only tab message")
         tui.wait_for_idle()
 
@@ -96,12 +96,14 @@ class TestTabLifecycle:
         tui.chat_mode()
         tui.close_tab()
 
-        # The app prevents closing the last tab and flashes a message instead.
+        # The app prevents closing the last tab and posts a 4 s Info toast at the
+        # chat pane's bottom edge instead (Story 21.1; the 3 s wait polls every
+        # 0.5 s right after the palette Enter, inside the TTL).
         # The conversation must remain visible and the TUI must stay alive.
         tui.wait_for_screen("Only one tab open", timeout=3.0)
         tui.assert_screen_contains(
             "Only one tab open",
-            "Closing the last tab should show 'Only one tab open' flash",
+            "Closing the last tab should show the 'Only one tab open' toast",
         )
         tui.assert_responsive(timeout=3.0)
         tui.assert_screen_contains(

@@ -144,7 +144,7 @@ fn k6_leader_inventory_is_complete_untimed_and_structurally_clean() {
     let wk = WhichKeyState::new();
     for host in [ChordHost::Local, ChordHost::Attached] {
         let items = chord_menu::menu_items(&wk, host);
-        for retained in "pmiaslretuwfd?".chars() {
+        for retained in "pmiaslretuwfd?nx".chars() {
             let painted = retained.to_ascii_uppercase().to_string();
             assert!(
                 items.iter().any(|i| i.key == painted),

@@ -319,7 +319,10 @@ Text is laid out by terminal cells and grapheme clusters, not bytes or code
 points: CJK text, emoji sequences (such as ZWJ families) and combining marks
 wrap, clip, pad and edit as whole glyphs, and the composer's height, caret and
 scrolling follow the same wrapped rows. The supported terminal floor is
-unchanged (60×16).
+unchanged (60×16). Notices appear as short toasts that expire on their own
+(errors within 60 s) and stay reviewable in the Notification Log
+(`Ctrl+X n`, `/notifications`); a `Log !N` badge counts warnings and errors you
+have not looked at yet.
 
 **Tool execution** — seven-state FSM per tool call (`Validating → Scheduled →
 AwaitingApproval → Executing → Success/Error/Cancelled`). Parallel batching for

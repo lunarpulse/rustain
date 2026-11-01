@@ -290,6 +290,26 @@ ephemeral prompt-cache breakpoint. A model id with a routing suffix such as
 Chat Completions resends a 408, 429, 5xx or transport failure at open up to five
 times, as omp does.
 
+### Notifications (`[notifications]`)
+
+Transient notices (copy confirmations, model switches, warnings, errors) paint
+as short toasts at the bottom of the chat pane and then expire; each one stays
+reviewable in the Notification Log (`Ctrl+X n` or `/notifications`) for the
+session. Lifetimes are whole seconds and are clamped to `[1, 60]`; a value
+above that range (or `0`) is clamped and logged as a warning, whereas a
+negative or non-integer value invalidates the config. The 60 s ceiling is not
+configurable, so an error never outlives a minute on screen.
+
+```toml
+[notifications]
+info_ttl_secs = 4      # default 4
+success_ttl_secs = 4   # default 4
+warning_ttl_secs = 10  # default 10
+error_ttl_secs = 60    # default 60
+```
+
+Notifications are session-local and are never written to disk.
+
 ### Field-level merge
 
 Setting `[pricing."my-model"]` in user TOML *adds* to the built-in pricing catalog — it does not replace it. The same holds for `[provider.X]` and `[router.step_tiers]`.

@@ -1,30 +1,86 @@
-//! The one copy-to-clipboard flash every copy key shares.
+//! The one copy-to-clipboard notice every copy key shares (Story 21.1 AC4).
 
 use crate::adapters::tui::clipboard::ClipboardResult;
+use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource, notify};
 use crate::adapters::tui::state::TuiState;
-use crate::domain::models::StatusState;
-
-/// Shows `message` as a status flash, remembering the status it replaces.
-pub(crate) fn flash(state: &mut TuiState, message: String) {
-    state.status_before_flash = Some(state.status.clone());
-    state.status = StatusState::Flash {
-        message,
-        remaining_ms: state.theme.timing.status_flash_ms,
-    };
-    state.needs_redraw = true;
-}
 
 /// Copies `text` through `copy` (production: `clipboard::copy_to_clipboard`)
-/// and flashes the outcome; empty text flashes `Nothing to copy`.
-pub(crate) fn flash_copy(state: &mut TuiState, text: &str, copy: &dyn Fn(&str) -> ClipboardResult) {
-    let message = if text.is_empty() {
-        "Nothing to copy".to_string()
+/// and reports the outcome as a notice: Success for a copy, Info for empty
+/// text, Error for a failed copy (the typed result decides, never the text).
+pub(crate) fn notify_copy(
+    state: &mut TuiState,
+    text: &str,
+    copy: &dyn Fn(&str) -> ClipboardResult,
+) {
+    let (severity, message) = if text.is_empty() {
+        (NoticeSeverity::Info, "Nothing to copy".to_string())
     } else {
         match copy(text) {
-            ClipboardResult::Osc52Success => "Copied to clipboard".to_string(),
-            ClipboardResult::FallbackSuccess(path) => format!("Copied to {}", path.display()),
-            ClipboardResult::Failed(error) => format!("Copy failed: {error}"),
+            ClipboardResult::Osc52Success => {
+                (NoticeSeverity::Success, "Copied to clipboard".to_string())
+            }
+            ClipboardResult::FallbackSuccess(path) => (
+                NoticeSeverity::Success,
+                format!("Copied to {}", path.display()),
+            ),
+            ClipboardResult::Failed(error) => {
+                (NoticeSeverity::Error, format!("Copy failed: {error}"))
+            }
         }
     };
-    flash(state, message);
+    notify(state, NoticeSource::Clipboard, severity, message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::StatusState;
+
+    /// K6 — the clipboard family: the typed copy result picks the severity
+    /// (never the text), and no outcome writes the status row.
+    #[test]
+    fn story21_1_copy_outcomes_are_typed_notices_and_never_a_status() {
+        type Case = (&'static str, ClipboardResult, NoticeSeverity, &'static str);
+        let cases: [Case; 4] = [
+            (
+                "x",
+                ClipboardResult::Osc52Success,
+                NoticeSeverity::Success,
+                "Copied to clipboard",
+            ),
+            (
+                "x",
+                ClipboardResult::FallbackSuccess("/tmp/clip.txt".into()),
+                NoticeSeverity::Success,
+                "Copied to /tmp/clip.txt",
+            ),
+            (
+                "x",
+                ClipboardResult::Failed("no tty".into()),
+                NoticeSeverity::Error,
+                "Copy failed: no tty",
+            ),
+            (
+                "",
+                ClipboardResult::Osc52Success,
+                NoticeSeverity::Info,
+                "Nothing to copy",
+            ),
+        ];
+        for (text, result, severity, message) in cases {
+            let mut state = TuiState::new(80, 24);
+            state.status = StatusState::Idle;
+            let result = std::cell::Cell::new(Some(result));
+            notify_copy(&mut state, text, &|_| {
+                result.take().expect("one copy attempt")
+            });
+            let record = state.notifications.visible().next().expect("a notice");
+            assert_eq!(
+                (record.severity, record.message.as_str()),
+                (severity, message)
+            );
+            assert_eq!(record.source, NoticeSource::Clipboard);
+            assert_eq!(state.status, StatusState::Idle);
+        }
+    }
 }

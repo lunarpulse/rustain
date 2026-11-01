@@ -238,9 +238,13 @@ def test_yolo_auto_approve_plan(tui: RustainTUI):
 
     tui.send_message(PROMPT_PLAN)
 
-    found = tui.wait_for_screen("auto-approved", timeout=30.0)
+    # Story 21.1: the status row itself now paints `⚠ YOLO mode active — all
+    # tools auto-approved` while YOLO is the mode, so a bare `auto-approved`
+    # wait would be satisfied by that fact. Wait for the plan notice (an Info
+    # toast, `Plan auto-approved (YOLO mode): <title> — N tasks`) instead.
+    found = tui.wait_for_screen("Plan auto-approved (YOLO mode)", timeout=30.0)
     assert found, (
-        f"Expected 'auto-approved' notice in YOLO mode. Screen:\n{tui.get_screen_text()}"
+        f"Expected 'Plan auto-approved (YOLO mode)' notice. Screen:\n{tui.get_screen_text()}"
     )
 
     screen = tui.get_screen_text()

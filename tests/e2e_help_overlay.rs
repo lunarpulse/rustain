@@ -322,11 +322,19 @@ fn test_e2e_version_command_via_palette() {
     let action = h.press_key(DomainKey::Enter);
     assert!(matches!(action, InputAction::Consumed));
 
-    // Verify version feedback block exists
-    assert!(h.state.feedback_blocks.contains_key("version-info"));
-    let fb = &h.state.feedback_blocks["version-info"];
-    assert!(fb.message.contains("rustain"));
-    assert!(fb.message.contains(env!("CARGO_PKG_VERSION")));
+    // Verify the version notice is in the store (Story 21.1: Info, source Help)
+    let record = h
+        .state
+        .notifications
+        .records()
+        .find(|record| record.source == rustain::adapters::tui::notifications::NoticeSource::Help)
+        .expect("a version notice");
+    assert_eq!(
+        record.severity,
+        rustain::adapters::tui::notifications::NoticeSeverity::Info
+    );
+    assert!(record.message.contains("rustain"));
+    assert!(record.message.contains(env!("CARGO_PKG_VERSION")));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -381,6 +389,7 @@ fn test_e2e_status_bar_hint_for_new_session() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();

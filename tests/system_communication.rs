@@ -161,29 +161,42 @@ fn test_ask_user_question_card_double_border() {
     assert!(last.contains('╝'), "Should have double border bottom-right");
 }
 
-/// AC5: Flash message appears in status bar and auto-dismisses.
+/// AC5 (Story 21.1 AC1): a notice is visible until its store deadline and is
+/// swept by the first draw at or after it; nothing counts ticks down.
 // Covers: FR38 (status bar)
 #[test]
 fn test_flash_message_expiry_simulation() {
-    let tick_ms = 250u64;
-    let mut status = StatusState::Flash {
-        message: "Config parse error".to_string(),
-        remaining_ms: 1000,
+    use rustain::adapters::tui::notifications::{
+        NoticeDraft, NoticeSeverity, NoticeSource, NotificationStore, Presentation,
     };
+    use rustain::domain::clock::MockClock;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    // Simulate 4 ticks (1000ms total)
-    for _ in 0..3 {
-        if let StatusState::Flash { remaining_ms, .. } = &mut status {
-            assert!(*remaining_ms > tick_ms);
-            *remaining_ms -= tick_ms;
-        }
-    }
-    // 4th tick should trigger expiry
-    if let StatusState::Flash { remaining_ms, .. } = &status {
-        assert!(*remaining_ms <= tick_ms, "Should be ready to expire");
-        status = StatusState::Idle;
-    }
-    assert_eq!(status, StatusState::Idle, "Flash should revert to Idle");
+    let ttls = rustain::domain::models::NotificationsConfig::default().clamped();
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut store = NotificationStore::new(clock.clone(), ttls);
+    store.notify(NoticeDraft::new(
+        NoticeSource::Config,
+        NoticeSeverity::Error,
+        "Config parse error",
+    ));
+    let ttl = Duration::from_secs(ttls.error);
+
+    // One millisecond before the deadline the toast is still there.
+    clock.advance(ttl - Duration::from_millis(1));
+    assert!(!store.sweep(), "not expired before its deadline");
+    assert_eq!(store.visible().count(), 1);
+
+    // At the deadline the next sweep expires it exactly once; the record stays
+    // in the log.
+    clock.advance(Duration::from_millis(1));
+    assert!(store.sweep(), "expired at its deadline");
+    assert_eq!(store.visible().count(), 0);
+    assert!(!store.sweep(), "each toast expires exactly once");
+    let record = store.records().next().expect("the record is retained");
+    assert_eq!(record.message, "Config parse error");
+    assert_eq!(record.presentation, Presentation::Expired);
 }
 
 /// AC7: Token usage display formatting.

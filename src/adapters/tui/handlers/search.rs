@@ -20,8 +20,9 @@
 
 #![allow(dead_code)]
 
+use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
-use crate::domain::models::{Conversation, StatusState};
+use crate::domain::models::Conversation;
 use crate::domain::services::search::find_matches;
 
 use super::HandlerOutcome;
@@ -82,7 +83,7 @@ pub fn handle_apply_search_rescan(
 }
 
 /// Advance or reverse the focused search match, wrapping at boundaries.
-/// Emits a "Wrapped to top" / "Wrapped to bottom" flash (800 ms) when the
+/// Emits a "Wrapped to top" / "Wrapped to bottom" Info notice when the
 /// index wraps past 0 or `matches.len() - 1` (Story 4-4 AC3 amendment Fix 3).
 ///
 /// `delta`: +1 for `n` (next), -1 for `N` (previous).
@@ -114,17 +115,9 @@ pub fn handle_apply_search_navigate(state: &mut TuiState, delta: i32) -> Handler
         let wrapped_forward = delta > 0 && prev == len - 1 && new_idx == 0;
         let wrapped_backward = delta < 0 && prev == 0 && new_idx == len - 1;
         if wrapped_forward {
-            state.status_before_flash = Some(state.status.clone());
-            state.status = StatusState::Flash {
-                message: "Wrapped to top".to_string(),
-                remaining_ms: 800,
-            };
+            notifications::info(state, NoticeSource::Search, "Wrapped to top");
         } else if wrapped_backward {
-            state.status_before_flash = Some(state.status.clone());
-            state.status = StatusState::Flash {
-                message: "Wrapped to bottom".to_string(),
-                remaining_ms: 800,
-            };
+            notifications::info(state, NoticeSource::Search, "Wrapped to bottom");
         }
     }
     state.needs_redraw = true;

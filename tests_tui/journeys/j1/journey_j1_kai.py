@@ -165,6 +165,9 @@ def main() -> int:
     require(tui, "Fork conversation", 10, "fork overlay at message 1")
     pane(tui, "fork-overlay")
     tui.send("y")
+    # Story 21.1: `Forked from …` is a Success toast (4 s TTL, chat pane bottom
+    # edge). The 10 s wait polls every 0.5 s and returns on first sight, so it
+    # is inside the TTL; the 1.5 s settle below is shorter than the TTL too.
     require(tui, "Forked from", 10, "fork flash")
     time.sleep(1.5)
     pane(tui, "after-fork")

@@ -180,7 +180,7 @@ pub(crate) fn assert_no_keys(tui: &Tui, keys: &[&str]) {
         for event in &tui.event_log {
             assert!(!event.contains(key), "an event carries a key: {event}");
         }
-        assert!(!tui.feedback().contains(key));
+        assert!(!tui.notices().contains(key));
     }
 }
 

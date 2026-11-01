@@ -54,6 +54,7 @@ use crate::adapters::daemon::protocol::{
     ProtocolError, answer_attach_challenge, read_frame, write_frame,
 };
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource, NotificationStore};
 use crate::adapters::tui::state::{AttachInfo, RecipientSurfaceTarget, TabRenderState, TuiState};
 use crate::adapters::tui::terminal;
 use crate::adapters::tui::widgets::recipient_surface::{
@@ -130,11 +131,11 @@ impl TurnDriver for SocketTurnDriver {
             .is_err()
         {
             let _ = turn_cancel;
-            view.state.status = StatusState::Flash {
-                message: "attach socket closed — message not sent".into(),
-                remaining_ms: 1500,
-            };
-            view.state.needs_redraw = true;
+            notifications::error(
+                view.state,
+                NoticeSource::Attached,
+                "attach socket closed — message not sent",
+            );
             return;
         }
 
@@ -1550,8 +1551,9 @@ fn session_boundary_message() -> ChatMessage {
 }
 
 /// Seed the client's render conversation from the attach snapshot (AC5/AC8):
-/// honest top boundary, then the full current-session transcript, then — if the
-/// daemon denied any actions while unattended — a one-line waiting summary.
+/// honest top boundary, then the full current-session transcript. The
+/// blocked-actions summary is a store notice ([`blocked_actions_notice`]), never
+/// a transcript row (Story 21.1 AC6).
 pub fn seed_conversation(snapshot: &AttachSnapshot) -> Conversation {
     let mut conv = Conversation {
         id: snapshot.conversation_id.clone(),
@@ -1566,13 +1568,58 @@ pub fn seed_conversation(snapshot: &AttachSnapshot) -> Conversation {
             snapshot.peer_row_controls.get(&message.id).cloned(),
         );
     }
-    if snapshot.blocked_actions_waiting > 0 {
-        conv.messages.push(system_message(format!(
+    conv
+}
+
+/// The one-line waiting summary when the daemon denied actions while no client
+/// was attached.
+fn blocked_actions_notice(snapshot: &AttachSnapshot) -> Option<String> {
+    (snapshot.blocked_actions_waiting > 0).then(|| {
+        format!(
             "⚠ {} action(s) waiting on you — denied while no client was attached. Re-run or approve now.",
             snapshot.blocked_actions_waiting
-        )));
+        )
+    })
+}
+
+/// Story 21.1 AC6: the daemon frames that are notices (an oversized frame, a
+/// daemon error or read-only refusal, the answer to a stop request) become
+/// store notices with the same TTL, S-LOG and badge as the local host. None is
+/// a transcript row and none changes the wire. The frame loop and the K9
+/// keystone call this one helper.
+fn apply_notice_frame(
+    state: &mut TuiState,
+    interrupt: &mut crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt,
+    frame: &DaemonFrame,
+) {
+    match frame {
+        DaemonFrame::FrameTooLarge { frame, bytes } => notifications::warning(
+            state,
+            NoticeSource::Daemon,
+            crate::adapters::daemon::protocol::frame_too_large_notice(frame, *bytes),
+        ),
+        // AC6 #1 — handle a daemon read-only refusal gracefully.
+        DaemonFrame::Error(ProtocolError::ReadOnly) => notifications::warning(
+            state,
+            NoticeSource::Daemon,
+            "⚠ read-only — the daemon refused your input (another client holds write).",
+        ),
+        DaemonFrame::Error(e) => {
+            notifications::error(state, NoticeSource::Daemon, format!("[daemon error] {e}"))
+        }
+        DaemonFrame::ActiveTurn { .. } | DaemonFrame::InterruptResult { .. } => {
+            if let Some(notice) = interrupt.apply(frame) {
+                notifications::notify(
+                    state,
+                    NoticeSource::Attached,
+                    NoticeSeverity::from_level(notice.level),
+                    notice.text,
+                );
+            }
+        }
+        _ => {}
     }
-    conv
+    state.needs_redraw = true;
 }
 
 fn retained_approval_attach_notice(count: usize, read_only: bool) -> Option<String> {
@@ -1738,10 +1785,15 @@ pub fn apply_client_event(
             *permission_mode = mode;
             true
         }
-        RawEventKind::SystemNotice { message, .. } => {
-            // The purge-notice (AC7) and other daemon notices arrive here; render
-            // inline as a System message via the normal RawEvent path (no new frame).
-            conversation.messages.push(system_message(message));
+        RawEventKind::SystemNotice { level, message } => {
+            // The purge-notice (AC7) and other daemon notices arrive here; they
+            // become store notices (Story 21.1 AC6), never transcript rows.
+            notifications::notify(
+                state,
+                NoticeSource::Daemon,
+                NoticeSeverity::from_level(level),
+                message,
+            );
             true
         }
         RawEventKind::Tool(transition) => {
@@ -1944,11 +1996,7 @@ fn attached_composer_key_with_team_requests(
 ) -> ComposerOutcome {
     use crossterm::event::KeyCode;
     let flash = |state: &mut TuiState, message: String| {
-        state.status = StatusState::Flash {
-            message,
-            remaining_ms: 1500,
-        };
-        state.needs_redraw = true;
+        notifications::info(state, NoticeSource::Attached, message);
     };
     if crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some() {
         return ComposerOutcome::Handled;
@@ -1972,28 +2020,14 @@ fn attached_composer_key_with_team_requests(
         KeyCode::Enter if attached_sign_in_command(input) => {
             input.clear();
             state.pinned_peer_compose = None;
-            let block = crate::domain::models::FeedbackBlock {
-                id: "attached-sign-in".into(),
-                level: crate::domain::models::FeedbackLevel::Info,
-                message: ATTACHED_SIGN_IN.into(),
-                actions: Vec::new(),
-            };
-            state.feedback_blocks.insert(block.id.clone(), block);
-            state.needs_redraw = true;
+            notifications::info(state, NoticeSource::Login, ATTACHED_SIGN_IN);
         }
         // `/logout` and `/accounts` likewise; a CLI account change reaches the
         // daemon's built providers on their next request.
         KeyCode::Enter if attached_account_command(input) => {
             input.clear();
             state.pinned_peer_compose = None;
-            let block = crate::domain::models::FeedbackBlock {
-                id: "attached-account-change".into(),
-                level: crate::domain::models::FeedbackLevel::Info,
-                message: ATTACHED_ACCOUNT_CHANGE.into(),
-                actions: Vec::new(),
-            };
-            state.feedback_blocks.insert(block.id.clone(), block);
-            state.needs_redraw = true;
+            notifications::info(state, NoticeSource::Accounts, ATTACHED_ACCOUNT_CHANGE);
         }
         KeyCode::Enter => {
             let request = team_requests.mint();
@@ -3103,8 +3137,12 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
 /// detaches (`Ctrl+X d` / `/detach`) or quits this client (guarded `q` / `Ctrl+Q` /
 /// idle `Ctrl+C` / `/quit`), or the daemon closes the connection. `Esc`, `Ctrl+D`
 /// and `Ctrl+C` never detach. The daemon and any in-flight turn keep running
-/// across detach (AC4).
-pub async fn run_attached(workspace: &Path) -> Result<()> {
+/// across detach (AC4). `notifications_cfg` is the resolved `[notifications]`
+/// config (Story 21.1 AC1): it sets the TTLs of the attached notice store.
+pub async fn run_attached(
+    workspace: &Path,
+    notifications_cfg: &crate::domain::models::NotificationsConfig,
+) -> Result<()> {
     let socket = crate::infrastructure::paths::daemon_socket_path(workspace)?;
     let stream = UnixStream::connect(&socket).await.with_context(|| {
         format!(
@@ -3146,17 +3184,8 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             .collect(),
         ..Default::default()
     };
-    if let Some(notice) = retained_approval_attach_notice(snapshot.retained_approvals, read_only) {
-        conversation.messages.push(system_message(notice));
-    }
-    if read_only {
-        // AC6 #2 — one-time, never-silent notice.
-        conversation.messages.push(system_message(
-            "👁 Read-only. Another client is attached with write access. Detach the other to take over.",
-        ));
-    }
     let mut streaming = StreamingState::default();
-    let clock = SystemClock::default();
+    let clock = Arc::new(SystemClock::default());
     let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
     let mut permission_mode = snapshot.permission_mode;
     let attach_info = AttachInfo {
@@ -3189,9 +3218,31 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
     let mut term = terminal::setup(false)?;
     let size = term.size()?;
     let mut state = TuiState::new(size.width, size.height);
+    // Story 21.1 AC1/AC6: the attached notice store shares the loop's one clock.
+    state.notifications = NotificationStore::from_config(notifications_cfg, clock.clone());
+    state
+        .notifications
+        .set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
+            size.height.saturating_sub(5),
+        ));
     state.recipient_context_ids = snapshot.recipient_context_ids.iter().cloned().collect();
     if read_only {
         state.focus = FocusState::Chat;
+    }
+    // Attach-time notices are store records visible in the first frame (AC6).
+    if let Some(notice) = blocked_actions_notice(&snapshot) {
+        notifications::warning(&mut state, NoticeSource::Attached, notice);
+    }
+    if let Some(notice) = retained_approval_attach_notice(snapshot.retained_approvals, read_only) {
+        notifications::info(&mut state, NoticeSource::Attached, notice);
+    }
+    if read_only {
+        // AC6 #2 — one-time, never-silent notice.
+        notifications::info(
+            &mut state,
+            NoticeSource::Attached,
+            "👁 Read-only. Another client is attached with write access. Detach the other to take over.",
+        );
     }
     let mut tab_render_state = TabRenderState::default();
     let tool_block_states: HashMap<
@@ -3228,6 +3279,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             &mut state,
             &conversation,
         );
+        // Story 21.1 A4: every frame starts by archiving the toasts whose deadline
+        // has been reached, so no frame at or after a deadline paints them.
+        notifications::begin_draw(&mut state);
         let drawn = term.draw(|f| {
             let area = f.area();
             let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
@@ -3240,6 +3294,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             ) else {
                 return;
             };
+            state.notifications.set_capacity(
+                crate::adapters::tui::widgets::toast_layer::capacity_for(layout.chat_pane.height),
+            );
             let proposal_higher = attached_proposal_higher_confirmation(
                 &state, !pending_consent_approvals.is_empty(),
                 pending_consolidation_card.is_some(), retract_confirm.is_some(),
@@ -3315,8 +3372,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                 DensityMode::Focus,
                 false,
                 Some(&attach_info),
-            state.log_awareness.display,
-);
+                state.log_awareness.display,
+                state.notifications.unseen(),
+            );
             let display_input = attached_display_input(&state, &input);
             render_attached_composer(
                 f,
@@ -3414,7 +3472,15 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             {
                 visible_approval = approvals.paint(f, layout.chat_pane, &state.theme);
             }
-            attach_keys::paint_overlays(f, area, layout.input_area, layout.status_bar, &state);
+            attach_keys::paint_overlays(
+                f,
+                area,
+                layout.chat_pane,
+                layout.input_area,
+                layout.status_bar,
+                &state,
+                &attach_keys::log_facts(&conversation.id),
+            );
         });
         after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
         state.team_proposal_visible = drawn.is_ok().then_some(visible_proposal).flatten();
@@ -3531,13 +3597,13 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                                 &mut reducer,
                                 &mut state,
                                 &mut permission_mode,
-                                &clock,
+                                &*clock,
                             );
                         }
                     Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
                         tool_inputs.apply(
                             event, Some(withheld), &mut conversation, &mut streaming, &mut reducer,
-                            &mut state, &mut permission_mode, &clock,
+                            &mut state, &mut permission_mode, &*clock,
                         );
                     }
                     Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
@@ -3552,19 +3618,11 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                         conversation.messages = earlier;
                         state.needs_redraw = true;
                     }
-                    Ok(Some(DaemonFrame::FrameTooLarge { frame, bytes })) => {
-                        conversation.messages.push(system_message(
-                            crate::adapters::daemon::protocol::frame_too_large_notice(&frame, bytes),
-                        ));
-                    }
-                    Ok(Some(DaemonFrame::Error(ProtocolError::ReadOnly))) => {
-                        // AC6 #1 — handle a daemon read-only refusal gracefully.
-                        conversation.messages.push(system_message(
-                            "⚠ read-only — the daemon refused your input (another client holds write).",
-                        ));
-                    }
-                    Ok(Some(DaemonFrame::Error(e))) => {
-                        conversation.messages.push(system_message(format!("[daemon error] {e}")));
+                    Ok(Some(frame @ (DaemonFrame::FrameTooLarge { .. }
+                        | DaemonFrame::Error(_)
+                        | DaemonFrame::ActiveTurn { .. }
+                        | DaemonFrame::InterruptResult { .. }))) => {
+                        apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
                     }
                     Ok(Some(DaemonFrame::ApprovalRequest {
                         tool,
@@ -3585,7 +3643,7 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
                     | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
                         if let Some(notice) = approvals.apply(frame, read_only) {
-                            conversation.messages.push(system_message(notice));
+                            notifications::warning(&mut state, NoticeSource::Approval, notice);
                         }
                         state.needs_redraw = true;
                     }
@@ -3607,12 +3665,6 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                             &mut state, &mut tab_render_state, &mut attached_team_requests,
                             &conversation.id, frame,
                         );
-                    }
-                    Ok(Some(frame @ (DaemonFrame::ActiveTurn { .. } | DaemonFrame::InterruptResult { .. }))) => {
-                        if let Some(notice) = attached_interrupt.apply(&frame) {
-                            conversation.messages.push(system_message(notice.text));
-                        }
-                        state.needs_redraw = true;
                     }
                     Ok(Some(DaemonFrame::Detached)) => break Ok(()),
                     Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
@@ -3661,7 +3713,11 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
                     // AttachAck/History are not expected post-handshake; ignore.
                     Ok(Some(_)) => {}
                     Ok(None) => {
-                        conversation.messages.push(system_message("— daemon closed the connection —"));
+                        notifications::warning(
+                            &mut state,
+                            NoticeSource::Daemon,
+                            "— daemon closed the connection —",
+                        );
                         break Ok(());
                     }
                     // Forward-compat: an undecodable / future-shaped frame body is
@@ -3674,6 +3730,9 @@ pub async fn run_attached(workspace: &Path) -> Result<()> {
             }
             _ = tick.tick() => {
                 log_awareness.tick(&mut state.log_awareness);
+                // Story 21.1 AC6: attached notices expire — the tick requests the
+                // deadline redraw (the draw's `begin_draw` does the sweep).
+                notifications::tick(&mut state);
             }
         }
     };
@@ -8351,7 +8410,11 @@ mod tests {
             "closed socket also retires stale local ownership"
         );
         assert!(
-            matches!(state.status, StatusState::Flash { ref message, .. } if message.contains("not sent")),
+            state.notifications.records().any(|record| {
+                record.source == NoticeSource::Attached
+                    && record.severity == NoticeSeverity::Error
+                    && record.message.contains("not sent")
+            }),
             "user gets a visible send failure"
         );
     }
@@ -9303,32 +9366,41 @@ mod tests {
     }
 
     /// Test 11 — `blocked_actions_waiting > 0` surfaces a one-line waiting summary
-    /// on attach so the user doesn't have to scroll to discover them (AC8).
+    /// on attach so the user doesn't have to scroll to discover them (AC8). Story
+    /// 21.1 AC6: it is a store notice, never a transcript row.
     #[test]
     fn blocked_actions_waiting_surfaces_summary() {
         let snap = snapshot_with(vec![user_msg("a", ChannelKind::Terminal)], 3);
         let conv = seed_conversation(&snap);
         assert!(
-            conv.messages
+            !conv
+                .messages
                 .iter()
-                .any(|m| m.content.contains("3 action(s) waiting on you")),
-            "blocked-action summary missing"
+                .any(|m| m.content.contains("waiting on you")),
+            "the summary is never a transcript row"
+        );
+        let notice = blocked_actions_notice(&snap).expect("blocked-action summary missing");
+        let mut state = TuiState::new(80, 24);
+        notifications::warning(&mut state, NoticeSource::Attached, notice);
+        assert!(
+            state.notifications.visible().any(|record| {
+                record.severity == NoticeSeverity::Warning
+                    && record.message.contains("3 action(s) waiting on you")
+            }),
+            "blocked-action summary missing from the first frame's toasts"
         );
 
         // None waiting → no summary.
         let snap0 = snapshot_with(vec![user_msg("a", ChannelKind::Terminal)], 0);
-        let conv0 = seed_conversation(&snap0);
         assert!(
-            !conv0
-                .messages
-                .iter()
-                .any(|m| m.content.contains("waiting on you")),
+            blocked_actions_notice(&snap0).is_none(),
             "summary must not show when nothing is waiting"
         );
     }
 
-    /// AC7 client half — a daemon-emitted purge-notice `SystemNotice` renders inline
-    /// through the normal `RawEvent` path (no new frame).
+    /// AC7 client half — a daemon-emitted purge-notice `SystemNotice` becomes a store
+    /// notice through the normal `RawEvent` path (no new frame); Story 21.1 AC6 maps
+    /// its wire level onto the store severity and never writes a transcript row.
     #[test]
     fn purge_notice_system_notice_renders_inline() {
         let clock = SystemClock::default();
@@ -9339,32 +9411,218 @@ mod tests {
         state.status = StatusState::Idle;
         let mut mode = PermissionMode::Normal;
 
-        apply_client_event(
-            RawEvent {
-                conversation_id: None,
-                timestamp_ms: 0,
-                kind: RawEventKind::SystemNotice {
-                    level: NoticeLevel::Info,
-                    message: "5 facts removed from MEMORY.md — purged from search index".into(),
+        for (level, severity, message) in [
+            (
+                NoticeLevel::Info,
+                NoticeSeverity::Info,
+                "5 facts removed from MEMORY.md — purged from search index",
+            ),
+            (NoticeLevel::Warning, NoticeSeverity::Warning, "warn notice"),
+            (
+                NoticeLevel::Advisory,
+                NoticeSeverity::Warning,
+                "advisory notice",
+            ),
+            (NoticeLevel::Error, NoticeSeverity::Error, "error notice"),
+        ] {
+            apply_client_event(
+                RawEvent {
+                    conversation_id: None,
+                    timestamp_ms: 0,
+                    kind: RawEventKind::SystemNotice {
+                        level,
+                        message: message.into(),
+                    },
                 },
-            },
-            &mut conversation,
-            &mut streaming,
-            &mut reducer,
-            &mut state,
-            &mut mode,
-            &clock,
-        );
+                &mut conversation,
+                &mut streaming,
+                &mut reducer,
+                &mut state,
+                &mut mode,
+                &clock,
+            );
+            assert!(
+                state.notifications.records().any(|record| {
+                    record.source == NoticeSource::Daemon
+                        && record.severity == severity
+                        && record.message == message
+                }),
+                "{message}: SystemNotice must become a {severity:?} store notice"
+            );
+        }
         assert!(
-            conversation
-                .messages
-                .iter()
-                .any(|m| m.content.contains("5 facts removed from MEMORY.md")),
-            "purge-notice SystemNotice should render inline"
+            conversation.messages.is_empty(),
+            "a SystemNotice is never a transcript row"
         );
     }
 
-    fn assert_attached_auth_commands(names: &[&str], feedback_id: &str, message: &str) {
+    /// K9 — the daemon notice frames reach the store through the helper the
+    /// frame loop itself calls; none is a transcript row and the wire is
+    /// unchanged (`PROTOCOL_VERSION == 16`, no frame shape touched).
+    #[test]
+    fn story21_1_attached_notice_frames_are_store_notices_and_the_wire_is_unchanged() {
+        use crate::adapters::daemon::protocol::{
+            InterruptOutcome, InterruptRefusal, PROTOCOL_VERSION, TurnGeneration,
+        };
+        assert_eq!(PROTOCOL_VERSION, 16, "no attach-protocol change in 21-1");
+        let mut state = TuiState::new(80, 24);
+        let mut interrupt =
+            crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(false);
+        let conversation = Conversation::default();
+        let frames = [
+            (
+                DaemonFrame::FrameTooLarge {
+                    frame: "History".into(),
+                    bytes: 5_000_000,
+                },
+                Some((NoticeSource::Daemon, NoticeSeverity::Warning, "History")),
+            ),
+            (
+                DaemonFrame::Error(ProtocolError::ReadOnly),
+                Some((NoticeSource::Daemon, NoticeSeverity::Warning, "read-only")),
+            ),
+            (
+                DaemonFrame::Error(ProtocolError::Internal("boom".into())),
+                Some((
+                    NoticeSource::Daemon,
+                    NoticeSeverity::Error,
+                    "[daemon error]",
+                )),
+            ),
+            (
+                DaemonFrame::ActiveTurn {
+                    generation: Some(TurnGeneration(7)),
+                },
+                None,
+            ),
+            (
+                DaemonFrame::InterruptResult {
+                    generation: TurnGeneration(7),
+                    outcome: InterruptOutcome::Refused {
+                        reason: InterruptRefusal::NoActiveTurn,
+                    },
+                },
+                Some((
+                    NoticeSource::Attached,
+                    NoticeSeverity::Warning,
+                    "stop refused: no turn is running",
+                )),
+            ),
+        ];
+        let mut expected = 0;
+        for (frame, notice) in &frames {
+            apply_notice_frame(&mut state, &mut interrupt, frame);
+            if let Some((source, severity, fragment)) = notice {
+                expected += 1;
+                let newest = state.notifications.records().last().expect("a record");
+                assert_eq!(
+                    (newest.source, newest.severity),
+                    (*source, *severity),
+                    "{frame:?}"
+                );
+                assert!(newest.message.contains(fragment), "{}", newest.message);
+            }
+            assert_eq!(state.notifications.len(), expected, "{frame:?}");
+        }
+        assert_eq!(
+            state.notifications.unseen(),
+            4,
+            "every warning/error occurrence counts toward the badge"
+        );
+        assert!(conversation.messages.is_empty(), "never a transcript row");
+    }
+
+    /// K9 — the attached tick and draw expire toasts on the injected clock:
+    /// the tick asks for a redraw only once a deadline has passed, and the
+    /// first frame drawn at or after a deadline no longer paints that toast
+    /// (the frame loop's `begin_draw` + `paint_overlays`, without a socket).
+    #[test]
+    fn story21_1_attached_tick_and_draw_expire_toasts_on_the_injected_clock() {
+        use crate::adapters::tui::notification_log::LogFacts;
+        use crate::adapters::tui::widgets::toast_layer;
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::NotificationsConfig;
+
+        fn painted(state: &mut TuiState) -> String {
+            use ratatui::layout::Rect;
+            let (width, height) = (100u16, 24u16);
+            notifications::begin_draw(state);
+            let chat_pane = Rect::new(0, 0, width, height - 5);
+            state
+                .notifications
+                .set_capacity(toast_layer::capacity_for(chat_pane.height));
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let state = &*state;
+            terminal
+                .draw(|f| {
+                    attach_keys::paint_overlays(
+                        f,
+                        f.area(),
+                        chat_pane,
+                        Rect::new(0, height - 5, width, 4),
+                        Rect::new(0, height - 1, width, 1),
+                        state,
+                        &LogFacts::default(),
+                    );
+                })
+                .unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        }
+
+        let clock = std::sync::Arc::new(MockClock::new(Instant::now()));
+        let mut state = TuiState::new(100, 24);
+        state.notifications =
+            NotificationStore::new(clock.clone(), NotificationsConfig::default().clamped());
+        let mut interrupt =
+            crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(false);
+        notifications::info(&mut state, NoticeSource::Attached, "info-marker");
+        apply_notice_frame(
+            &mut state,
+            &mut interrupt,
+            &DaemonFrame::Error(ProtocolError::ReadOnly),
+        );
+        apply_notice_frame(
+            &mut state,
+            &mut interrupt,
+            &DaemonFrame::Error(ProtocolError::Internal("error-marker".into())),
+        );
+        let first = painted(&mut state);
+        assert!(first.contains("info-marker") && first.contains("read-only"));
+        assert!(first.contains("error-marker"));
+
+        // 1 ms before the Info deadline (4 s): the tick stays quiet and the frame keeps it.
+        clock.advance(Duration::from_secs(4) - Duration::from_millis(1));
+        state.needs_redraw = false;
+        notifications::tick(&mut state);
+        assert!(!state.needs_redraw, "no deadline has passed yet");
+        assert!(painted(&mut state).contains("info-marker"));
+
+        // At the deadline the tick asks for a redraw and the frame drops the Info.
+        clock.advance(Duration::from_millis(1));
+        notifications::tick(&mut state);
+        assert!(state.needs_redraw, "the deadline passed: redraw");
+        let frame = painted(&mut state);
+        assert!(!frame.contains("info-marker"), "{frame}");
+        assert!(frame.contains("read-only") && frame.contains("error-marker"));
+
+        // Warning at 10 s, Error at 60 s; the records stay in the log.
+        clock.advance(Duration::from_secs(6));
+        let frame = painted(&mut state);
+        assert!(!frame.contains("read-only") && frame.contains("error-marker"));
+        clock.advance(Duration::from_secs(50));
+        let frame = painted(&mut state);
+        assert!(!frame.contains("error-marker"), "{frame}");
+        assert_eq!(state.notifications.len(), 3, "S-LOG keeps every record");
+    }
+
+    fn assert_attached_auth_commands(names: &[&str], source: NoticeSource, message: &str) {
         use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
         use crossterm::event::KeyCode;
 
@@ -9415,16 +9673,13 @@ mod tests {
                             assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
                             assert!(input.is_empty(), "{context}");
                             assert!(state.pinned_peer_compose.is_none(), "{context}");
-                            assert_eq!(state.feedback_blocks.len(), 1, "{context}");
-                            let block = &state.feedback_blocks[feedback_id];
-                            assert_eq!(block.id, feedback_id, "{context}");
-                            assert_eq!(block.message, message, "{context}");
-                            assert_eq!(
-                                block.level,
-                                crate::domain::models::FeedbackLevel::Info,
-                                "{context}"
-                            );
-                            assert!(block.actions.is_empty(), "{context}");
+                            assert!(state.feedback_blocks.is_empty(), "{context}");
+                            assert_eq!(state.notifications.len(), 1, "{context}");
+                            let record = state.notifications.records().next().unwrap();
+                            assert_eq!(record.source, source, "{context}");
+                            assert_eq!(record.message, message, "{context}");
+                            assert_eq!(record.severity, NoticeSeverity::Info, "{context}");
+                            assert!(record.action.is_none(), "{context}");
                             assert!(state.needs_redraw, "{context}");
                         } else {
                             assert!(state.feedback_blocks.is_empty(), "{context}");
@@ -9432,10 +9687,13 @@ mod tests {
                             if read_only {
                                 assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
                                 assert_eq!(input, *line, "{context}");
-                                assert!(
-                                    matches!(&state.status, StatusState::Flash { message, .. } if message == "read-only — can't send here"),
+                                assert_eq!(state.notifications.len(), 1, "{context}");
+                                let record = state.notifications.records().next().unwrap();
+                                assert_eq!(
+                                    record.message, "read-only — can't send here",
                                     "{context}"
                                 );
+                                assert_eq!(record.severity, NoticeSeverity::Info, "{context}");
                                 assert!(state.needs_redraw, "{context}");
                             } else {
                                 assert!(
@@ -9443,6 +9701,7 @@ mod tests {
                                     "{context}"
                                 );
                                 assert!(input.is_empty(), "{context}");
+                                assert!(state.notifications.is_empty(), "{context}");
                             }
                         }
                     }
@@ -9456,7 +9715,7 @@ mod tests {
     fn attached_sign_in_commands_are_answered_locally() {
         assert_attached_auth_commands(
             &["login", "models"],
-            "attached-sign-in",
+            NoticeSource::Login,
             "Sign-in is not available in an attached session. Run `rustain auth login <provider>` in a terminal; restart the daemon to unlock newly signed-in providers.",
         );
     }
@@ -9466,7 +9725,7 @@ mod tests {
     fn attached_account_commands_are_answered_locally() {
         assert_attached_auth_commands(
             &["logout", "accounts"],
-            "attached-account-change",
+            NoticeSource::Accounts,
             "Account changes are not available in an attached session. Run `rustain auth accounts`, `rustain auth use <provider> --id <N>` or `rustain auth logout <provider> --id <N>` in a terminal.",
         );
     }
@@ -9628,10 +9887,16 @@ mod tests {
                 ComposerOutcome::Handled
             ));
             assert_eq!(input, line);
-            assert!(matches!(
-                &state.status,
-                StatusState::Flash { message, .. } if message == "read-only — can't send here"
-            ));
+            assert!(
+                state
+                    .notifications
+                    .records()
+                    .next_back()
+                    .is_some_and(|record| {
+                        record.severity == NoticeSeverity::Info
+                            && record.message == "read-only — can't send here"
+                    })
+            );
         }
         assert!(rx.try_recv().is_err(), "item context writes are refused");
 
@@ -9899,7 +10164,11 @@ mod attached_parity_tests {
             } else {
                 assert!(rx.try_recv().is_err());
                 assert!(
-                    matches!(state.status, StatusState::Flash { message, .. } if message == flash)
+                    state
+                        .notifications
+                        .records()
+                        .next_back()
+                        .is_some_and(|record| record.message == flash)
                 );
             }
         }

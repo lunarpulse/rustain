@@ -19,7 +19,6 @@ convention (see ``harness.py::send_message`` docstring).
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -87,33 +86,12 @@ def write_workspace_skill(
     return skill_dir / "SKILL.md"
 
 
-def _start_tui_with_monitor_density(workspace: Path) -> RustainTUI:
-    """Start a RustainTUI with Monitor density mode.
-
-    The default Focus density mode queues StatusFlash notifications instead of
-    displaying them, so tests that need to observe status-bar flash messages
-    (e.g. /deactivate feedback) must use Monitor mode.
-    """
-    allow_list = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
-    config_dir = workspace / ".rustain"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    config_file = config_dir / "config.toml"
-    if not config_file.exists():
-        config_file.write_text(
-            "[permissions]\n"
-            f"always_tools = {json.dumps(allow_list)}\n"
-            "\n"
-            "[layout]\n"
-            'density_mode = "monitor"\n'
-        )
-    return RustainTUI(build=False, workspace=workspace, allowed_tools=allow_list)
-
-
 def _wait_for_skills_loaded(tui: RustainTUI, count: int, timeout: float = 15.0) -> None:
     """Wait for the background skill scan to complete.
 
-    Polls the screen for the ``Loaded N skill(s)`` SystemNotice flash, then
-    falls back to log inspection if the flash expired before a poll caught it.
+    Polls the screen for the ``Loaded N skill(s)`` SystemNotice (a 4 s Info toast
+    since Story 21.1, visible in the default Focus density), then falls back to
+    log inspection if the toast expired before a poll caught it.
     """
     screen_text = f"Loaded {count} skill"
     if tui.wait_for_screen(screen_text, timeout=timeout):
@@ -180,8 +158,9 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "declined-skill")
-    # Monitor density so the "not trusted" StatusFlash is visible on screen.
-    t = _start_tui_with_monitor_density(ws)
+    # Story 21.1: the default Focus density no longer hides notices, so the
+    # "not trusted" Info toast is visible without the old Monitor-density workaround.
+    t = RustainTUI(build=False, workspace=ws)
     t.start()
     try:
         _wait_for_skills_loaded(t, count=1)
@@ -199,8 +178,9 @@ def test_trust_prompt_decline_via_esc(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "esc-decline")
-    # Monitor density so the "not trusted" StatusFlash is visible on screen.
-    t = _start_tui_with_monitor_density(ws)
+    # Story 21.1: the default Focus density no longer hides notices, so the
+    # "not trusted" Info toast is visible without the old Monitor-density workaround.
+    t = RustainTUI(build=False, workspace=ws)
     t.start()
     try:
         _wait_for_skills_loaded(t, count=1)
@@ -238,9 +218,9 @@ def test_deactivate_with_no_active_skills(tmp_path):
     """AC5: ``/deactivate`` on an empty active-set emits the canonical info notice."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    # Monitor density so the StatusFlash ("No active skills to deactivate")
-    # is displayed on screen instead of being queued (Focus mode default).
-    t = _start_tui_with_monitor_density(ws)
+    # Story 21.1: the default Focus density no longer hides notices, so the
+    # Info toast ("No active skills to deactivate") is visible.
+    t = RustainTUI(build=False, workspace=ws)
     t.start()
     try:
         submit_slash(t, "/deactivate")
@@ -256,9 +236,9 @@ def test_deactivate_unknown_skill_name(tmp_path):
     """AC5: ``/deactivate <name>`` for an inactive skill emits the 'not active' notice."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    # Monitor density so the StatusFlash ("Skill '…' is not active")
-    # is displayed on screen instead of being queued (Focus mode default).
-    t = _start_tui_with_monitor_density(ws)
+    # Story 21.1: the default Focus density no longer hides notices, so the
+    # Info toast ("Skill '…' is not active") is visible.
+    t = RustainTUI(build=False, workspace=ws)
     t.start()
     try:
         type_slowly(t, "/deactivate unknown-skill")

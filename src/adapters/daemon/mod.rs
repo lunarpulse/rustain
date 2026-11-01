@@ -140,7 +140,11 @@ pub async fn run_daemon(
                 if plain {
                     attach_client::run_attach(&workspace).await
                 } else {
-                    crate::infrastructure::runtime::attach_loop::run_attached(&workspace).await
+                    crate::infrastructure::runtime::attach_loop::run_attached(
+                        &workspace,
+                        &config.notifications,
+                    )
+                    .await
                 }
             }
             DaemonAction::Status { json } => run_daemon_status(workspace, config, json).await,

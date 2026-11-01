@@ -35,9 +35,10 @@ use super::login::{LOGIN, LoginAction, close, closed, is_cancel, move_cursor, ta
 use super::{AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::accounts_runtime::Change;
 use crate::adapters::tui::app::InputAction;
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::state::{LoginOrigin, LoginView, OverlayMode, TuiState};
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
-use crate::domain::models::{FeedbackBlock, FeedbackLevel};
+use crate::domain::models::FeedbackLevel;
 
 /// What the event loop's login arm performs for the account steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,14 +126,18 @@ pub fn on_action(state: &mut TuiState, action: AccountAction) -> HandlerOutcome 
     }
 }
 
-fn feedback(state: &mut TuiState, level: FeedbackLevel, message: String) {
-    let block = FeedbackBlock {
-        id: "accounts-result".into(),
-        level,
-        message,
-        actions: Vec::new(),
+/// One notice for an account result. A logout/selection that itself succeeded
+/// (`changed`, a typed fact of the result event) is a Success notice (A2); the
+/// other severities are today's feedback level. The multi-line `/logout` text
+/// stays ONE notice.
+fn feedback(state: &mut TuiState, level: FeedbackLevel, changed: bool, message: String) {
+    let severity = match (level, changed) {
+        (FeedbackLevel::Error, _) => NoticeSeverity::Error,
+        (FeedbackLevel::Warning, _) => NoticeSeverity::Warning,
+        (FeedbackLevel::Info, true) => NoticeSeverity::Success,
+        (FeedbackLevel::Info, false) => NoticeSeverity::Info,
     };
-    state.feedback_blocks.insert(block.id.clone(), block);
+    notifications::notify(state, NoticeSource::Accounts, severity, message);
     state.needs_redraw = true;
 }
 
@@ -161,7 +166,12 @@ pub fn on_event(state: &mut TuiState, event: LoginEvent) {
             if rows.is_empty() {
                 let mode = state.login.mode;
                 close(state);
-                feedback(state, FeedbackLevel::Info, nothing_stored(mode).into());
+                feedback(
+                    state,
+                    FeedbackLevel::Info,
+                    false,
+                    nothing_stored(mode).into(),
+                );
                 return;
             }
             state.login.set_rows(generation, rows);
@@ -173,6 +183,7 @@ pub fn on_event(state: &mut TuiState, event: LoginEvent) {
         LoginEvent::AccountsChanged {
             generation,
             level,
+            changed,
             lines,
             listing,
         } => {
@@ -187,7 +198,7 @@ pub fn on_event(state: &mut TuiState, event: LoginEvent) {
                 }
                 None => {
                     close(state);
-                    feedback(state, level, lines.join("\n"));
+                    feedback(state, level, changed, lines.join("\n"));
                 }
             }
         }

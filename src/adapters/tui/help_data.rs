@@ -222,6 +222,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "/notifications",
+                    description: "Open the Notification Log (also Ctrl+X, N)",
+                    available: true,
+                },
+                HelpBinding {
                     key: "Ctrl+R",
                     description: "Reverse search history",
                     available: true,
@@ -476,6 +481,16 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                 HelpBinding {
                     key: "Ctrl+X, ?",
                     description: "This help overlay",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, N",
+                    description: "Notification Log (also /notifications); Log !N counts unseen warnings and errors",
+                    available: true,
+                },
+                HelpBinding {
+                    key: "Ctrl+X, X",
+                    description: "Clear toasts (hides every visible toast; the log keeps them)",
                     available: true,
                 },
                 HelpBinding {

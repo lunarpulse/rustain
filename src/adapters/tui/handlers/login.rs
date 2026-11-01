@@ -32,13 +32,14 @@ use crate::adapters::auth::host::{self, LoginPlan};
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::login_runtime::Copier;
 use crate::adapters::tui::login_ui::safe_url;
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::state::{
     FieldKind, LOGIN_PICKER_ROWS, LoginOrigin, LoginSection, LoginView, OverlayMode, PendingField,
     TuiState,
 };
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent, LoginFailure, LoginSummary};
 use crate::domain::models::visual::OverlayType;
-use crate::domain::models::{AppConfig, AuthMethod, FeedbackBlock, FeedbackLevel, FocusState};
+use crate::domain::models::{AppConfig, AuthMethod, FocusState};
 use crate::domain::ports::ProviderInfoPort;
 
 /// What the event loop's login arm performs for an overlay key or a picker.
@@ -110,7 +111,7 @@ pub fn on_action(
             }
         }
         LoginAction::Copy(text) => {
-            super::clipboard::flash_copy(state, &text, &**copier);
+            super::clipboard::notify_copy(state, &text, &**copier);
             HandlerOutcome::Quiet
         }
         LoginAction::Closed { origin } => {
@@ -178,7 +179,7 @@ fn begin(
         close(state);
         feedback(
             state,
-            FeedbackLevel::Info,
+            NoticeSeverity::Info,
             host::keyless_line(&plan.display),
         );
         return HandlerOutcome::Quiet;
@@ -204,7 +205,7 @@ fn failed_to_start(state: &mut TuiState, error: &str) {
     close(state);
     feedback(
         state,
-        FeedbackLevel::Error,
+        NoticeSeverity::Error,
         format!("Login failed: {}", display_text(error)),
     );
 }
@@ -222,14 +223,8 @@ pub(super) fn close(state: &mut TuiState) {
     state.needs_redraw = true;
 }
 
-fn feedback(state: &mut TuiState, level: FeedbackLevel, message: String) {
-    let block = FeedbackBlock {
-        id: "login-result".into(),
-        level,
-        message,
-        actions: Vec::new(),
-    };
-    state.feedback_blocks.insert(block.id.clone(), block);
+fn feedback(state: &mut TuiState, severity: NoticeSeverity, message: String) {
+    notifications::notify(state, NoticeSource::Login, severity, message);
     state.needs_redraw = true;
 }
 
@@ -363,7 +358,7 @@ fn finished(
         // A stored credential is reported (and applied) even when the user
         // cancelled after it was persisted.
         Ok(summary) => {
-            feedback(state, FeedbackLevel::Info, summary.lines.join("\n"));
+            feedback(state, NoticeSeverity::Success, summary.lines.join("\n"));
             let column = picker_column.unwrap_or_else(|| {
                 host::login_targets(app)
                     .into_iter()
@@ -376,12 +371,12 @@ fn finished(
         Err(failure) => {
             match failure {
                 LoginFailure::Cancelled => {
-                    super::clipboard::flash(state, "Login cancelled".into());
+                    notifications::info(state, NoticeSource::Login, "Login cancelled");
                 }
                 LoginFailure::Failed(message) => {
                     feedback(
                         state,
-                        FeedbackLevel::Error,
+                        NoticeSeverity::Error,
                         format!("Login failed: {message}"),
                     );
                 }

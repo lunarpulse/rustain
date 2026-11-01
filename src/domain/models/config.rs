@@ -324,6 +324,82 @@ impl Default for ToolProgressConfig {
     }
 }
 
+/// Notification lifetimes (Story 21.1 AC1, OD-1). `[notifications]` keys are
+/// whole seconds, clamped to `[MIN_TTL_SECS, MAX_TTL_SECS]`; the 60 s ceiling is
+/// not configurable (an error must never outlive a minute on screen).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default = "NotificationsConfig::default_info_ttl_secs")]
+    pub info_ttl_secs: u64,
+    #[serde(default = "NotificationsConfig::default_success_ttl_secs")]
+    pub success_ttl_secs: u64,
+    #[serde(default = "NotificationsConfig::default_warning_ttl_secs")]
+    pub warning_ttl_secs: u64,
+    #[serde(default = "NotificationsConfig::default_error_ttl_secs")]
+    pub error_ttl_secs: u64,
+}
+
+/// The effective (clamped) lifetimes in whole seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotificationTtlSecs {
+    pub info: u64,
+    pub success: u64,
+    pub warning: u64,
+    pub error: u64,
+}
+
+impl NotificationsConfig {
+    pub const MIN_TTL_SECS: u64 = 1;
+    pub const MAX_TTL_SECS: u64 = 60;
+
+    fn default_info_ttl_secs() -> u64 {
+        4
+    }
+    fn default_success_ttl_secs() -> u64 {
+        4
+    }
+    fn default_warning_ttl_secs() -> u64 {
+        10
+    }
+    fn default_error_ttl_secs() -> u64 {
+        60
+    }
+
+    fn clamp_one(key: &str, value: u64) -> u64 {
+        let clamped = value.clamp(Self::MIN_TTL_SECS, Self::MAX_TTL_SECS);
+        if clamped != value {
+            tracing::warn!(
+                key,
+                value,
+                clamped,
+                "notifications ttl outside [1, 60] seconds; clamped"
+            );
+        }
+        clamped
+    }
+
+    /// Clamp every lifetime to `[1, 60]` seconds, warning for each change.
+    pub fn clamped(&self) -> NotificationTtlSecs {
+        NotificationTtlSecs {
+            info: Self::clamp_one("notifications.info_ttl_secs", self.info_ttl_secs),
+            success: Self::clamp_one("notifications.success_ttl_secs", self.success_ttl_secs),
+            warning: Self::clamp_one("notifications.warning_ttl_secs", self.warning_ttl_secs),
+            error: Self::clamp_one("notifications.error_ttl_secs", self.error_ttl_secs),
+        }
+    }
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            info_ttl_secs: Self::default_info_ttl_secs(),
+            success_ttl_secs: Self::default_success_ttl_secs(),
+            warning_ttl_secs: Self::default_warning_ttl_secs(),
+            error_ttl_secs: Self::default_error_ttl_secs(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
     #[serde(default)]
@@ -695,6 +771,9 @@ pub struct AppConfig {
     /// Tool progress configuration (stdout tail, counter). Story 16.9, AC4.
     #[serde(default)]
     pub tool_progress: ToolProgressConfig,
+    /// Notification lifetimes (`[notifications]`). Story 21.1 AC1.
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
     /// Tiered model router configuration. Story 7.1c, AC2.
     #[serde(default)]
     pub router: crate::domain::models::router::RouterConfig,
@@ -915,6 +994,7 @@ impl Default for AppConfig {
             provider: std::collections::BTreeMap::new(),
             mouse: MouseConfig::default(),
             tool_progress: ToolProgressConfig::default(),
+            notifications: NotificationsConfig::default(),
             router: crate::domain::models::router::RouterConfig::default(),
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),

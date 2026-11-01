@@ -5,7 +5,6 @@ use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary
 use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
-use crate::domain::models::StatusState;
 use crate::domain::models::autocomplete::AutocompleteKind;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::services::slash_command::parse_slash_command;
@@ -970,13 +969,17 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             match action {
                 ChordAction::Noop(msg) => {
                     // Show "Not yet available" feedback
-                    let block = crate::domain::models::FeedbackBlock {
-                        id: format!("chord-{}", c),
-                        level: crate::domain::models::FeedbackLevel::Info,
-                        message: msg,
-                        actions: Vec::new(),
-                    };
-                    state.feedback_blocks.insert(block.id.clone(), block);
+                    crate::adapters::tui::notifications::info(
+                        state,
+                        crate::adapters::tui::notifications::NoticeSource::Chord,
+                        msg,
+                    );
+                }
+                ChordAction::OpenNotificationLog => {
+                    crate::adapters::tui::notification_log::open(state);
+                }
+                ChordAction::ClearToasts => {
+                    state.notifications.clear_toasts();
                 }
                 ChordAction::ShowHelp => {
                     // Open help overlay
@@ -2935,10 +2938,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         // P11: Ctrl+F in Input with non-empty buffer — give user feedback
         // instead of silently consuming.
         DomainKey::CtrlF if state.focus == FocusState::Input && !state.input_buffer.is_empty() => {
-            state.status = StatusState::Flash {
-                message: "Search needs an empty input: clear it, then press Ctrl+F".into(),
-                remaining_ms: 1500,
-            };
+            crate::adapters::tui::notifications::info(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::Input,
+                "Search needs an empty input: clear it, then press Ctrl+F",
+            );
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -3810,16 +3814,14 @@ fn dispatch_palette_action(
         PaletteAction::SwitchProfile(name) => InputAction::ProfileSwitchRequested(name),
         PaletteAction::OpenPanel(_) => InputAction::Consumed,
         PaletteAction::ShowVersion => {
-            // Display version info as a FeedbackBlock in the chat pane
+            // Display version info as an Info notice (toast + Notification Log)
             // Covers: FR109
             let version = crate::adapters::tui::version_info::version_string();
-            let block = crate::domain::models::FeedbackBlock {
-                id: "version-info".to_string(),
-                level: crate::domain::models::FeedbackLevel::Info,
-                message: version,
-                actions: Vec::new(),
-            };
-            state.feedback_blocks.insert(block.id.clone(), block);
+            crate::adapters::tui::notifications::info(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::Help,
+                version,
+            );
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -3833,13 +3835,11 @@ fn dispatch_palette_action(
         }
         PaletteAction::Noop => {
             // Show "Not yet available" feedback
-            let block = crate::domain::models::FeedbackBlock {
-                id: "palette-noop".to_string(),
-                level: crate::domain::models::FeedbackLevel::Info,
-                message: "Not yet available".to_string(),
-                actions: Vec::new(),
-            };
-            state.feedback_blocks.insert(block.id.clone(), block);
+            crate::adapters::tui::notifications::info(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::Palette,
+                "Not yet available",
+            );
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -6878,9 +6878,12 @@ mod story21_2_shortcut_tests {
         let mut state = TuiState::new(80, 24);
         state.input_buffer = "draft".into();
         handle_input(&mut state, &special(DomainKey::CtrlF));
-        let StatusState::Flash { message, .. } = &state.status else {
-            panic!("expected a flash cue");
-        };
+        let message = state
+            .notifications
+            .visible()
+            .last()
+            .map(|record| record.message.clone())
+            .expect("expected a notice cue");
         assert!(
             message.contains("Ctrl+F") && !message.contains("Esc"),
             "{message}"

@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import time
@@ -225,12 +226,21 @@ def test_relock_relogin_discards_old_startup_discovery_80x24(monkeypatch):
         tui.send("\r")
         tui.until(lambda s: _modal(s, "Log out of OpenAI") and "Enter log out" in s, "last account")
         tui.send("\r")
-        tui.until(lambda s: "No OpenAI credentials remain." in _plain(s), "last-row relock")
+        # Story 21.1: the two-line logout result is one Success toast showing
+        # only its first line (+ `…`) at the chat pane's bottom edge; the
+        # `No OpenAI credentials remain.` line is read from S-LOG detail.
+        relock = re.compile(r"(?<![A-Za-z0-9])Success Logged out of OpenAI account .+\.…(?: ×\d+)?$")
+        screen = tui.until(lambda s: any(relock.search(row.rstrip()) for row in harness.toast_rows(s, 3)),
+                           "last-row relock toast")
+        assert "No OpenAI credentials remain." not in "\n".join(harness.toast_rows(screen, 3)), screen
         tui.send("/login openai\r")
         tui.until(lambda s: _modal(s, "Sign in to OpenAI") and "Enter OpenAI API key:" in s, "new key prompt")
         tui.send(f"\x1b[200~{NEW_KEY}\x1b[201~")
         tui.until(lambda s: "•" * len(NEW_KEY) in s, "masked new key")
         tui.send("\r")
+        # The `Discovered N models` line is the selector's bloom line (the login
+        # handler paints `LoginEvent::Discovered` inside the open Select Model
+        # frame), a modal fact rather than a toast: unchanged by Story 21.1.
         tui.until(lambda s: "Discovered 1 models for OpenAI." in _plain(s), "new discovery published")
         # B's completion event is the structural publication acknowledgement.
         # Release A now, not after additional picker interactions.
@@ -245,6 +255,13 @@ def test_relock_relogin_discards_old_startup_discovery_80x24(monkeypatch):
         tui.send("\r")
         tui.until(lambda s: "Select Model" not in s and NEW_MODEL in s,
                   "new provider selected before reopening picker")
+        # The full two-line logout result is read from S-LOG detail once the old request
+        # was answered (the log is durable; keeping this out of the held-request window
+        # leaves the scenario's timing as it was).
+        tui.open_notification_log()
+        detail = tui.read_notification_detail("Logged out of OpenAI account")
+        assert "No OpenAI credentials remain." in detail, detail
+        tui.close_notification_log()
         with lock:
             phases = [r["phase"] for r in requests if "phase" in r]
         assert "new-validation" in phases and "new-discovery" in phases, phases
@@ -254,6 +271,9 @@ def test_relock_relogin_discards_old_startup_discovery_80x24(monkeypatch):
         tui.until(lambda s: "Open the model picker" not in s, "models completion accepted")
         tui.send("\r")
         screen = tui.until(lambda s: _modal(s, "Select Model") and NEW_MODEL in s, "new model picker")
+        # Toasts paint below the modal and the obsolete 401 is discarded, so the
+        # rejection text must be absent from the whole screen (a stale Warning
+        # toast outside the frame would also fail this).
         assert OLD_MODEL not in screen and REJECTION not in _plain(screen), screen
         assert f"▸ {NEW_MODEL}" in screen, screen
         (evidence / "picker.screen.txt").write_text(screen + "\n", encoding="utf-8")

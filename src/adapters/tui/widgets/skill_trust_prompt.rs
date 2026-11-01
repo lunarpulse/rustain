@@ -11,7 +11,7 @@ use crate::adapters::tui::theme::Theme;
 /// Visual spec:
 /// ```text
 /// ┃ New project skill detected: "review-code"              ┃
-/// ┃ Trust and enable this skill for this session?           ┃
+/// ┃ Trust and enable this skill for this conversation?      ┃
 /// ┃ [y] Yes  [n] No  [i] Inspect              [2 queued]  ┃
 /// ```
 pub fn render_trust_lines<'a>(
@@ -41,11 +41,11 @@ pub fn render_trust_lines<'a>(
         Span::styled(" ┃", border_style),
     ]));
 
-    // Line 2: Trust and enable this skill for this session?
+    // Line 2: Trust and enable this skill for this conversation?
     lines.push(Line::from(vec![
         Span::styled("┃ ", border_style),
         Span::styled(
-            "Trust and enable this skill for this session? ",
+            "Trust and enable this skill for this conversation?",
             Style::default().fg(theme.colors.fg_secondary),
         ),
         Span::styled(" ┃", border_style),
@@ -217,5 +217,14 @@ mod tests {
     #[test]
     fn test_trust_prompt_height() {
         assert_eq!(trust_prompt_height(), 3);
+    }
+
+    #[test]
+    fn story21_1_trust_prompt_names_the_conversation_scope() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let lines = render_trust_lines("review-code", &theme, 0);
+        let line2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(line2.contains("Trust and enable this skill for this conversation?"));
+        assert!(!line2.contains("session"));
     }
 }

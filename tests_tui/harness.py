@@ -35,7 +35,7 @@ from pyte import modes as terminal_modes
 from wcwidth import wcwidth
 
 from keys import (
-    ESC, ENTER, CTRL_C, CTRL_F, CTRL_H, CTRL_P, CTRL_T,
+    ESC, ENTER, CTRL_C, CTRL_F, CTRL_H, CTRL_P, CTRL_T, CTRL_X,
     Chat, Confirm, Permission, Sidebar,
 )
 
@@ -138,6 +138,84 @@ class TerminalScreen(pyte.Screen):
                 end = x + width
                 if end < self.columns and line[end].data == "":
                     line[end] = line[end]._replace(data=" ")
+
+
+# ── Notification screen helpers (Story 21.1) ─────────────────────────────────
+#
+# Positional predicates over a rendered screen (``"\n".join(pyte.display)``):
+# the composer is the bottom-most bordered box, the status row sits directly
+# above it, and the chat pane's bottom edge — where toasts are painted,
+# right-aligned, newest at the bottom — is the row(s) directly above the
+# status row. Nothing here is an unanchored substring search.
+
+NOTIFICATION_LOG_TITLE = "┌ System · Notifications "
+_SEVERITY_WORDS = ("Info", "Success", "Warning", "Error")
+_LOG_ROW = re.compile(r"^(?:Info|Success|Warning|Error) · \d{2}:\d{2}:\d{2} · ")
+
+
+def composer_top(lines: list[str]) -> int | None:
+    """Index of the composer's top border: the nearest ``┌`` above the
+    bottom-most ``└``."""
+    bottom = max((i for i, line in enumerate(lines) if line.strip().startswith("└")), default=None)
+    if bottom is None:
+        return None
+    return max((i for i in range(bottom) if lines[i].strip().startswith("┌")), default=None)
+
+
+def status_row(screen: str) -> str:
+    """The status bar row: the one directly above the composer box ('' if none)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    return lines[top - 1] if top else ""
+
+
+def toast_rows(screen: str, rows: int = 1) -> list[str]:
+    """The chat-pane bottom rows directly above the status row, newest first.
+
+    One borderless row per visible toast below 100 columns (the newest toast is
+    the row adjacent to the status row)."""
+    lines = screen.split("\n")
+    top = composer_top(lines)
+    if not top:
+        return []
+    return [lines[top - 2 - k] for k in range(rows) if top - 2 - k >= 0]
+
+
+def toast_present(screen: str, text: str, severity: str | None = None, rows: int = 1) -> bool:
+    """True when one of the ``rows`` toast rows ends with ``<Severity> <text>``
+    (optionally followed by `` ×N`` and, for the bordered toast of a pane of
+    100+ columns, its right border): right-aligned, anchored at the row end,
+    severity word first. ``text`` is the painted first line (with ``…`` when the
+    message has more lines)."""
+    words = "|".join(re.escape(w) for w in ([severity] if severity else _SEVERITY_WORDS))
+    pattern = re.compile(rf"(?<![A-Za-z0-9])(?:{words}) {re.escape(text)}(?: ×\d+)?\s*│?$")
+    return any(pattern.search(row.rstrip()) for row in toast_rows(screen, rows))
+
+
+def _notification_log_box(screen: str) -> list[str]:
+    """Inner text rows of the ``System · Notifications`` frame ([] when closed)."""
+    lines = screen.split("\n")
+    top = next((i for i, line in enumerate(lines) if NOTIFICATION_LOG_TITLE in line), None)
+    if top is None:
+        return []
+    left = lines[top].index(NOTIFICATION_LOG_TITLE)
+    right = lines[top].rfind("┐")
+    if right <= left:
+        return []
+    bottom = next((i for i in range(top + 1, len(lines))
+                   if len(lines[i]) > right and lines[i][left] == "└"), len(lines))
+    return [lines[i][left + 1:right] for i in range(top + 1, bottom)]
+
+
+def notification_log_rows(screen: str) -> list[str]:
+    """S-LOG list rows (``Severity · HH:MM:SS · source · …``), newest first."""
+    rows = [row.strip() for row in _notification_log_box(screen)]
+    return [row for row in rows if _LOG_ROW.match(row)]
+
+
+def notification_log_text(screen: str) -> str:
+    """Whitespace-normalised text of the whole S-LOG frame interior."""
+    return " ".join(" ".join(_notification_log_box(screen)).split())
 
 
 # ── Main Harness ─────────────────────────────────────────────────────────────
@@ -590,11 +668,15 @@ class RustainTUI:
 
         Valid modes: plan, normal, autoedit, yolo.
 
-        Waits for the status-bar flash emitted by the SetPermissionMode handler
-        (``Permission mode: <Mode>`` for plan/normal/autoedit, or the YOLO
-        warning for yolo) so the test fails loudly if the mode actually did not
-        change — previously this just waited for ``mode.lower()`` anywhere on
-        screen, which could match unrelated text.
+        Waits for the confirmation the SetPermissionMode handler produces: the
+        4 s Info toast ``Permission mode: <Mode>`` (painted at the bottom edge
+        of the chat pane) or — the durable fact — the status row's mode segment
+        (``PLAN`` / ``Normal`` / ``AUTOEDIT`` / ``YOLO``). The status-row fact
+        is accepted because an identical toast arriving within 5 minutes of the
+        previous one's expiry is coalesced into the log and never repainted
+        (Story 21.1 A4), so repeating a mode must not depend on the toast. For
+        yolo the status fact ``YOLO mode active`` is also accepted. The 3 s
+        wait stays inside the 4 s Info TTL; like before it does not raise.
         """
         self.send(CTRL_P)
         time.sleep(0.3)
@@ -603,16 +685,28 @@ class RustainTUI:
             time.sleep(0.05)
         self.send(ENTER)
         arg = mode.lower()
-        expected = {
+        toast = {
             "plan": "Permission mode: Plan",
             "normal": "Permission mode: Normal",
             "autoedit": "Permission mode: AutoEdit",
             "auto": "Permission mode: AutoEdit",
-            "yolo": "YOLO mode active",
+            "yolo": "Permission mode: YOLO",
         }.get(arg)
-        if expected is None:
+        if toast is None:
             raise ValueError(f"Unknown permission mode: {mode}")
-        self.wait_for_screen(expected, timeout=3.0)
+        segment = {"plan": "PLAN", "normal": "Normal", "autoedit": "AUTOEDIT",
+                   "auto": "AUTOEDIT", "yolo": "YOLO"}[arg]
+        fact = re.compile(rf"│ {segment}(?: │|\s*$)")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            screen = self.get_screen_text()
+            row = status_row(screen)
+            # Positional: the Info toast rows above the status row (three rows
+            # per bordered toast), or the status row's own facts — never a
+            # whole-screen substring a transcript line could satisfy.
+            if (toast_present(screen, toast, "Info", rows=9) or fact.search(row)
+                    or (arg == "yolo" and "YOLO mode active" in row)):
+                return
 
     def wait_for_idle(self, seconds: float = TURN_COMPLETE_WAIT) -> None:
         """Wait for the AI turn to complete (text streaming + tool execution).
@@ -624,11 +718,66 @@ class RustainTUI:
         if not self.wait_for_screen("Ready", timeout=seconds):
             time.sleep(1.0)
 
+    # ── Notifications (Story 21.1) ───────────────────────────────────────
+
+    def wait_until(self, predicate, label: str, timeout: float = 10.0) -> str:
+        """Poll the screen until ``predicate(screen)`` holds; return that screen.
+
+        Structural wait: paced by the PTY read inside ``get_screen_text``, never
+        by a sleep, and bounded by ``timeout`` (fails with the last screen).
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            screen = self.get_screen_text()
+            if predicate(screen):
+                return screen
+            assert time.monotonic() < deadline, f"Timed out waiting for {label}:\n{screen}"
+
+    def open_notification_log(self, timeout: float = 10.0) -> str:
+        """Open S-LOG with ``Ctrl+X`` then ``n`` (Input focus); return the screen
+        once the ``System · Notifications`` frame is painted."""
+        self.send(CTRL_X)
+        self.wait_until(
+            lambda s: any(line.strip().startswith("┌") and "Ctrl+X" in line
+                          for line in s.split("\n")),
+            "the Ctrl+X leader menu", timeout)
+        self.send("n")
+        # The rail is the frame's last row: waiting for it means the whole frame
+        # arrived (PTY output can reach the screen mid-frame).
+        return self.wait_until(
+            lambda s: NOTIFICATION_LOG_TITLE in s and "[Esc] Close" in notification_log_text(s),
+            "S-LOG", timeout)
+
+    def read_notification_detail(self, row_contains: str, timeout: float = 10.0) -> str:
+        """In a freshly opened S-LOG (selection on the newest row), select the
+        row whose list text contains ``row_contains`` and press Enter; return the
+        whitespace-normalised text of the detail frame (the FULL wrapped
+        message). Callers close the log with ``close_notification_log``."""
+        screen = self.wait_until(
+            lambda s: any(row_contains in row for row in notification_log_rows(s)),
+            f"S-LOG row containing {row_contains!r}", timeout)
+        rows = notification_log_rows(screen)
+        index = next(i for i, row in enumerate(rows) if row_contains in row)
+        if index:
+            self.send("j" * index)
+        self.send(ENTER)
+        screen = self.wait_until(
+            lambda s: "· detail" in notification_log_text(s) and "[Esc] Close" in notification_log_text(s),
+            "the S-LOG detail view", timeout)
+        return notification_log_text(screen)
+
+    def close_notification_log(self, timeout: float = 10.0) -> None:
+        """Close S-LOG (list or detail) with Esc and wait for the frame to go."""
+        self.send(ESC)
+        self.wait_until(lambda s: NOTIFICATION_LOG_TITLE not in s, "S-LOG closed", timeout)
+
     def rewind(self) -> None:
         """Trigger rewind (R) and confirm (y). Must be in Chat focus."""
         self.send(Chat.REWIND)
         self.wait_for_screen("Rewind", timeout=5.0)
         self.send(Confirm.YES)
+        # `Rewound to message N…` is a 4 s Success toast (Story 21.1); the wait
+        # polls from the confirming `y`, so it is caught as soon as it paints.
         self.wait_for_screen("Rewound to message", timeout=REWIND_SETTLE * 2)
 
     def rewind_fork_instead(self) -> None:
@@ -650,7 +799,9 @@ class RustainTUI:
         self.send(Chat.FORK)
         self.wait_for_screen("Fork", timeout=5.0)
         self.send(Confirm.YES)
-        self.wait_for_screen("Forked conversation", timeout=REWIND_SETTLE * 2)
+        # The Success toast reads `Forked from "<title>" at message N` (or
+        # `Forked at last message — …`), a 4 s toast: wait for its stable prefix.
+        self.wait_for_screen("Forked", timeout=REWIND_SETTLE * 2)
 
     def fork_cancel(self) -> None:
         """Trigger fork (f) and cancel (n)."""

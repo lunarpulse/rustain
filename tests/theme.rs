@@ -53,7 +53,6 @@ fn test_dark_theme_timing_populated() {
     assert_eq!(theme.timing.tick_interval_ms, 250);
     assert_eq!(theme.timing.cursor_blink_ms, 530);
     assert_eq!(theme.timing.status_hint_fade_sessions, 5);
-    assert_eq!(theme.timing.notification_hold_ms, 3000);
     assert_eq!(theme.timing.status_flash_ms, 1000);
     assert_eq!(theme.timing.typing_pulse_ms, 500);
     assert_eq!(theme.timing.auto_scroll_resume_ms, 200);
@@ -425,6 +424,7 @@ fn test_tui_renders_with_theme_colors() {
                     false,
                     None,
                     rustain::adapters::tui::state::LogAwareness::Hidden,
+                    0,
                 );
             }
         })

@@ -145,6 +145,7 @@ fn status(
             false,
             None,
             awareness,
+            0,
         );
     })
 }

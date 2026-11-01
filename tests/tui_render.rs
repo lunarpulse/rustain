@@ -79,6 +79,7 @@ fn render_frame(width: u16, height: u16) -> Terminal<TestBackend> {
                 false,
                     None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
 );
                 input_box::render(
                     frame,

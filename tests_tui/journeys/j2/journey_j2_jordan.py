@@ -21,8 +21,9 @@ the one deliberate exception the diff row is (a string THIS SCRIPT wrote to
 disk, snapshotted and rendered by the binary). Agent activation is asserted from
 the `tools` count that reached the wire, never from the status bar. The model
 switches are proved from the request log's `model`/`path` fields (gate J2); the
-on-screen flashes are only switch-specific witnesses, named precisely because
-they ACCUMULATE — a bare `Switched to` is satisfied by the first flash forever.
+on-screen notices are only switch-specific witnesses (4 s Success toasts, Story
+21.1), named precisely because up to three toasts can be on screen at once — a
+bare `Switched to` is satisfied by an earlier toast that is still visible.
 
 Usage (normally invoked by journey-J2-jordan.sh):
     RUSTAIN_TUI_BINARY=<bin> python3 journey_j2_jordan.py <workspace> <stub-url> <scratch-home>
@@ -300,11 +301,14 @@ def main() -> int:
     tui.send(DOWN)
     time.sleep(0.4)
     tui.send(ENTER)
-    # ⚑ The flashes ACCUMULATE on screen (receipt J2: all three visible at
-    # once), so a bare `Switched to` is satisfied by the FIRST switch even
-    # when a later one silently no-ops — each wait names the
-    # switch-DISTINGUISHING substring instead. Witnesses only: the switch
-    # proof stays in the request log's per-row `model`/`path` (gate J2).
+    # ⚑ The switch notices are 4 s Success toasts and up to three can be on
+    # screen together (receipt J2 predates the TTL: all three were visible at
+    # once), so a bare `Switched to` is satisfied by an EARLIER switch's toast
+    # while it lives, even when a later one silently no-ops — each wait names
+    # the switch-DISTINGUISHING substring instead. Each wait starts right after
+    # the selecting Enter and polls every 0.5 s, well inside the 4 s TTL.
+    # Witnesses only: the switch proof stays in the request log's per-row
+    # `model`/`path` (gate J2).
     require(tui, "Switched to anthropic/Claude Haiku", 20, "model switch flash")
     pane(tui, "model-switched")
     tui.send_message("quick check: is the fix complete?")

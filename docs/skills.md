@@ -156,7 +156,7 @@ before it loads anything:
 
 ```text
 ┃ New project skill detected: "safe-deploy"                ┃
-┃ Trust and enable this skill for this session?            ┃
+┃ Trust and enable this skill for this conversation?       ┃
 ┃ [y] Yes  [n] No  [i] Inspect                             ┃
 ```
 
@@ -174,19 +174,19 @@ Skills under `~/.agents/skills/` are treated as yours and are **not** prompted.
 Only the three workspace directories are — a skill that arrived with a `git
 clone` is a file someone else wrote that is about to steer your agent.
 
-### ⚠ The prompt says "session"; the decision is per **conversation**
+### The decision is per **conversation**
 
-The answer is remembered in memory, keyed on the **conversation**, for as long
-as the process lives. In practice that means:
+The prompt says so, and so does the behaviour: the answer is remembered in
+memory, keyed on the **conversation**, for as long as the process lives. In
+practice that means:
 
 - open a second tab, or start a new conversation, and you are asked again about
-  the same skill — even though you already said yes in this session;
+  the same skill — even though you already said yes in another conversation;
 - restart rustain and every answer is gone;
 - nothing is written to disk, so a "yes" can never be inherited by a later run
   or by another workspace.
 
-The wording is wrong in the safe direction — you are asked too often, never too
-rarely — but it is wrong. Tracked as `DF-19-10-TRUST-PROMPT-SAYS-SESSION`.
+You are asked once per skill per conversation.
 
 ### Execution restriction is immediate; catalogue composition is per message
 
@@ -197,9 +197,8 @@ the same response. The provider-facing catalogue and `<skill>` prompt are
 composed when the message is submitted, so their filtered form appears on the
 next message; that presentation boundary does not weaken execution policy.
 
-### ⚠ You may not see the unmatched-items warning
+### Where you see the unmatched-items warning
 
-That warning is an **advisory** notification, and in the default `Focus`
-density mode advisories are queued rather than displayed. Switch density
-(`Ctrl+X` then `w` for Monitor) to drain the queue and read them. Tracked as
-`DF-19-10-ADVISORY-QUEUED-IN-FOCUS`.
+The warning is a notice like any other: it appears as a toast in **every**
+density mode (`Focus`, `Monitor`, `Dashboard`), and it stays reviewable after the
+toast expires in the Notification Log — `Ctrl+X` then `n`, or `/notifications`.

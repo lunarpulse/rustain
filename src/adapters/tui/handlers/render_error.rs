@@ -8,9 +8,10 @@
 
 #![allow(dead_code)]
 
+use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::terminal::Tui;
-use crate::domain::models::{StatusState, StreamingState};
+use crate::domain::models::StreamingState;
 
 use super::HandlerOutcome;
 
@@ -33,11 +34,11 @@ pub fn handle_render_error(
     streaming.current_blocks.clear();
     streaming.active_tool_calls.clear();
 
-    state.status_before_flash = Some(state.status.clone());
-    state.status = StatusState::Flash {
-        message: format!("Render failed: {}", err),
-        remaining_ms: state.theme.timing.status_flash_ms,
-    };
+    notifications::error(
+        state,
+        NoticeSource::System,
+        format!("Render failed: {}", err),
+    );
     state.needs_redraw = true;
 
     // Attempt terminal recovery

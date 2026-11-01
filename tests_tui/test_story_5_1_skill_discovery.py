@@ -77,9 +77,15 @@ def write_rustain_config(workspace, disabled=None):
     return config_file
 
 
-def _start_tui_with_workspace(workspace_path):
-    """Start a RustainTUI pointing at the given workspace (no auto-build)."""
-    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
+def _start_tui_with_workspace(workspace_path, isolated_home=None):
+    """Start a RustainTUI pointing at the given workspace (no auto-build).
+
+    ``isolated_home`` replaces ``$HOME`` for tests that assert the ABSENCE of a
+    discovery notice: user-global skills in the developer's real home would
+    otherwise paint a (now visible, Story 21.1) ``Loaded N skills`` toast.
+    """
+    overrides = {"HOME": str(isolated_home)} if isolated_home is not None else None
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path, env_overrides=overrides)
     tui.start()
     return tui
 
@@ -87,8 +93,9 @@ def _start_tui_with_workspace(workspace_path):
 def _wait_for_skills_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
     """Wait for the background skill scan to complete.
 
-    Polls the pyte screen for *screen_text* (the SystemNotice flash).
-    If the flash expires before a poll catches it, falls back to checking
+    Polls the pyte screen for *screen_text* (the SystemNotice, a 4 s Info toast
+    at the chat pane's bottom edge since Story 21.1 — visible in every density).
+    If the toast expires before a poll catches it, falls back to checking
     the log file for ``SkillsDiscovered`` or ``Skills scan`` entries.
     """
     if tui.wait_for_screen(screen_text, timeout=timeout):
@@ -140,7 +147,7 @@ def test_empty_workspace_no_skill_notice(build_binary, tmp_path):
     directories exist — avoids spurious failures when the shared ``tui``
     fixture points at a workspace that contains skills.
     """
-    tui = _start_tui_with_workspace(tmp_path)
+    tui = _start_tui_with_workspace(tmp_path, isolated_home=tmp_path / "home")
     try:
         # Give the background scan time to complete
         time.sleep(3.0)

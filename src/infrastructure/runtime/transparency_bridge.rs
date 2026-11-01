@@ -989,7 +989,7 @@ fn spawn_team_thread(
 /// Story 19.18 `AC6(a)` — the `TeamThreadReady` arm: replace the issuing
 /// tab's `team-thread` block IN PLACE, even when that tab is inactive — the
 /// `team_send_settled` cross-tab path. ⛔ Not the board's background path,
-/// which stores an `Advisory` notice (`A12`, `M16`).
+/// which records a Warning notice attributed to the issuing conversation.
 pub fn team_thread_ready(
     active_conversation_id: &str,
     state: &mut TuiState,
@@ -1025,14 +1025,24 @@ pub fn team_board_ready(
 ) {
     if conversation_id == active_conversation_id {
         crate::adapters::tui::handlers::team_command::show_team_board(state, message);
-    } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
-        crate::adapters::tui::handlers::notice::store_background_notice(
-            tab,
-            crate::domain::models::NoticeLevel::Advisory,
-            message,
-        );
-        state.needs_redraw = true;
+    } else if tab_manager.find_by_conversation(conversation_id).is_some() {
+        notify_team_background(state, conversation_id, message);
     }
+}
+
+/// A background tab's team answer is a Warning notice attributed to its
+/// conversation: visible as a toast and reviewable in the Notification Log,
+/// never moving focus.
+fn notify_team_background(state: &mut TuiState, conversation_id: &str, message: String) {
+    use crate::adapters::tui::notifications::{
+        NoticeDraft, NoticeSeverity, NoticeSource, notify_draft,
+    };
+
+    notify_draft(
+        state,
+        NoticeDraft::new(NoticeSource::Team, NoticeSeverity::Warning, message)
+            .conversation(conversation_id),
+    );
 }
 
 /// [`team_board_message`] for a wire request: the daemon's `TeamBoard` handler
@@ -1492,7 +1502,7 @@ pub(crate) fn team_retract_preview_ready(
 
     match preview {
         TeamRetractPreview::Answer(message) if conversation_id != active_conversation_id => {
-            store_team_retract_in_background(tab_manager, &conversation_id, message);
+            store_team_retract_in_background(state, tab_manager, &conversation_id, message);
         }
         TeamRetractPreview::Card(card) => open_team_retract_card(
             state,
@@ -1521,23 +1531,20 @@ pub(crate) fn team_retract_answered(
         }
         show_team_retract(state, message);
     } else {
-        store_team_retract_in_background(tab_manager, &conversation_id, message);
+        store_team_retract_in_background(state, tab_manager, &conversation_id, message);
     }
 }
 
 /// A background tab's retract answer must survive the switch — the board's
 /// own routing (`TeamBoardReady`).
 fn store_team_retract_in_background(
-    tab_manager: &mut crate::domain::models::tab::TabManager,
+    state: &mut TuiState,
+    tab_manager: &crate::domain::models::tab::TabManager,
     conversation_id: &str,
     message: String,
 ) {
-    if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
-        crate::adapters::tui::handlers::notice::store_background_notice(
-            tab,
-            crate::domain::models::NoticeLevel::Advisory,
-            message,
-        );
+    if tab_manager.find_by_conversation(conversation_id).is_some() {
+        notify_team_background(state, conversation_id, message);
     }
 }
 
@@ -2301,6 +2308,31 @@ mod tests {
         assert_eq!(state.feedback_blocks[TEAM_THREAD_BLOCK_ID].message, "mine");
     }
 
+    /// Story 21.1 AC4 — the board's background path is an attributed Warning
+    /// notice in the store (visible in every density), not a hidden advisory.
+    #[test]
+    fn story21_1_a_background_board_answer_is_an_attributed_warning_notice() {
+        use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
+
+        let mut tabs = crate::domain::models::tab::TabManager::default();
+        let issuing = tabs.active_tab().conversation.id.clone();
+        tabs.create_tab();
+        let active = tabs.active_tab().conversation.id.clone();
+        let mut state = TuiState::new(120, 40);
+        state.density_mode = crate::domain::models::visual::DensityMode::Focus;
+        team_board_ready(&active, &mut state, &mut tabs, &issuing, "board".to_owned());
+        let record = state
+            .notifications
+            .visible()
+            .next()
+            .expect("a visible background notice");
+        assert_eq!(record.severity, NoticeSeverity::Warning);
+        assert_eq!(record.source, NoticeSource::Team);
+        assert_eq!(record.message, "board");
+        assert_eq!(record.conversation_id.as_deref(), Some(issuing.as_str()));
+        assert!(state.needs_redraw);
+    }
+
     /// Story 19.18 `K11` (cancel half) — a cancelled session publishes
     /// nothing further. The test awaits the spawned task's handle, then
     /// `try_recv`s: ⛔ no timing wait. Positive control: an uncancelled spawn
@@ -2435,8 +2467,8 @@ mod tests {
             "the background tab's visible Info block is updated in place"
         );
         assert!(
-            state.queued_notifications.is_empty(),
-            "Focus must retain the Info block rather than queue an advisory notice"
+            state.notifications.is_empty(),
+            "Focus retains the Info block; no notice (hidden or visible) is raised for it"
         );
         assert!(state.needs_redraw);
     }

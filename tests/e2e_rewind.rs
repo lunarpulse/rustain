@@ -17,11 +17,12 @@ use tempfile::TempDir;
 
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use rustain::adapters::tui::state::{HeightCache, MessageHeightKey, TabRenderState, TuiState};
 use rustain::domain::models::checkpoint::{CheckpointId, RevertStatus};
 use rustain::domain::models::conversation::{ChatMessage, Conversation, generate_conversation_id};
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-use rustain::domain::models::{FocusState, MessageRole, StatusState, UserMessage};
+use rustain::domain::models::{FocusState, MessageRole, UserMessage};
 use rustain::domain::ports::StoragePort;
 
 fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
@@ -220,24 +221,37 @@ fn test_e2e_rewind_status_hint_shows_counts() {
         "Status hint should show 1 skipped file"
     );
 
-    // And: Flash status variant holds the correct message
-    let status = StatusState::Flash {
-        message: msg.clone(),
-        remaining_ms: 5000,
-    };
-    if let StatusState::Flash {
-        message,
-        remaining_ms,
-    } = &status
-    {
-        assert!(
-            message.contains("Rewound to message 3"),
-            "Flash message correct"
-        );
-        assert_eq!(*remaining_ms, 5000, "Completed action flash = 5000ms");
-    } else {
-        panic!("Status should be Flash variant");
-    }
+    // And: the completed action is a Success store notice for the session
+    // (Story 21.1 AC1/AC4: a 4 s toast, no status flash and no per-notice timer)
+    let mut state = make_state_in_chat_focus(80, 24);
+    notifications::notify(
+        &mut state,
+        NoticeSource::Session,
+        NoticeSeverity::Success,
+        msg.clone(),
+    );
+    let record = state
+        .notifications
+        .visible()
+        .next()
+        .expect("a visible rewind toast");
+    assert!(
+        record.message.contains("Rewound to message 3"),
+        "notice message correct"
+    );
+    assert_eq!(record.severity, NoticeSeverity::Success);
+    assert_eq!(
+        record.deadline - record.first_at,
+        std::time::Duration::from_secs(4),
+        "Completed action toast = 4 s Success lifetime"
+    );
+    assert!(
+        !matches!(
+            state.status,
+            rustain::domain::models::StatusState::Flash { .. }
+        ),
+        "the status row holds no flash"
+    );
 }
 
 #[test]
@@ -768,28 +782,30 @@ fn test_e2e_rewind_blocked_when_permission_pending() {
     // We verify that pending_permission field is accessible from TuiState (guard check would fail)
     // and that the guard message matches the spec.
     let guard_msg = "Cannot rewind: a permission/question is pending — answer it first";
-    let status = StatusState::Flash {
-        message: guard_msg.to_string(),
-        remaining_ms: 3000,
-    };
-    if let StatusState::Flash {
-        message,
-        remaining_ms,
-    } = &status
-    {
-        assert!(
-            message.contains("Cannot rewind"),
-            "Guard message must start with 'Cannot rewind'"
-        );
-        assert!(
-            message.contains("permission/question is pending"),
-            "Guard message must mention permission/question"
-        );
-        assert_eq!(
-            *remaining_ms, 3000,
-            "Blocked action flash must be 3000ms (Status Timeout Rule)"
-        );
-    }
+    notifications::notify(
+        &mut state,
+        NoticeSource::Session,
+        NoticeSeverity::Info,
+        guard_msg,
+    );
+    let record = state
+        .notifications
+        .visible()
+        .next()
+        .expect("a visible guard toast");
+    assert!(
+        record.message.contains("Cannot rewind"),
+        "Guard message must start with 'Cannot rewind'"
+    );
+    assert!(
+        record.message.contains("permission/question is pending"),
+        "Guard message must mention permission/question"
+    );
+    assert_eq!(
+        record.deadline - record.first_at,
+        std::time::Duration::from_secs(4),
+        "Blocked action toast = 4 s Info lifetime (store TTL, no status flash)"
+    );
 }
 
 #[test]

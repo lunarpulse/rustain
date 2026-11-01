@@ -249,6 +249,7 @@ impl TestHarness {
         let scroll_offset = self.state.scroll_offset();
         let auto_scroll = self.state.auto_scroll();
         let status = &self.state.status;
+        let unseen_notices = self.state.notifications.unseen();
         let input_buffer = &self.state.input_buffer;
         let cursor_position = self.state.cursor_position;
         let focus = self.state.focus.clone();
@@ -309,6 +310,7 @@ impl TestHarness {
                         false,
                         None,
                         rustain::adapters::tui::state::LogAwareness::Hidden,
+                        unseen_notices,
                     );
 
                     input_box::render(

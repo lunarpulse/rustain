@@ -232,6 +232,12 @@ impl CommandRegistry {
                 content: None,
             },
             SlashCommandDef {
+                name: "notifications".to_string(),
+                description: "Open the Notification Log (also Ctrl+X, N)".to_string(),
+                source: CommandSource::BuiltIn,
+                content: None,
+            },
+            SlashCommandDef {
                 name: "detach".to_string(),
                 description: "Detach this attached client (daemon work keeps running)"
                     .to_string(),

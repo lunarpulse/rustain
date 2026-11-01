@@ -8,10 +8,11 @@ use super::common::{
 use rustain::adapters::auth_store::FileAuthStore;
 use rustain::adapters::command_registry::CommandRegistry;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
 use rustain::adapters::tui::state::{LoginView, OverlayMode};
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::visual::OverlayType;
-use rustain::domain::models::{AppConfig, FeedbackLevel, FocusState};
+use rustain::domain::models::{AppConfig, FocusState};
 use rustain::domain::ports::AuthStorePort;
 use serial_test::serial;
 use std::sync::Arc;
@@ -32,9 +33,11 @@ fn assert_routed(action: &InputAction, name: &str, args: Option<&str>) {
 
 const LOGIN: FocusState = FocusState::Overlay(OverlayType::Login);
 
-fn block(tui: &Tui) -> (FeedbackLevel, String) {
-    let block = &tui.state.feedback_blocks["accounts-result"];
-    (block.level, block.message.clone())
+/// The newest account-result notice (Story 21.1: a store notice, no longer
+/// the replaced `accounts-result` feedback block); severity is the old level.
+fn block(tui: &Tui) -> (NoticeSeverity, String) {
+    tui.latest_notice(NoticeSource::Accounts)
+        .expect("an accounts-result notice")
 }
 
 /// K6 (M6): every form routes, opens its step, and with nothing stored ends
@@ -96,7 +99,7 @@ async fn k6_logout_and_accounts_route_open_and_report_empty_stores() {
         assert_eq!(tui.state.focus, FocusState::Input, "{line}");
         assert_eq!(
             block(&tui),
-            (FeedbackLevel::Info, text.to_owned()),
+            (NoticeSeverity::Info, text.to_owned()),
             "{line}"
         );
     }
@@ -106,7 +109,7 @@ async fn k6_logout_and_accounts_route_open_and_report_empty_stores() {
     assert_eq!(
         block(&tui),
         (
-            FeedbackLevel::Warning,
+            NoticeSeverity::Warning,
             "Unknown provider: nosuch".to_owned()
         )
     );
@@ -289,7 +292,7 @@ async fn disabled_row_notice_and_store_failure() {
     until_changed(&mut tui).await;
     assert_eq!(tui.state.focus, FocusState::Input);
     let (level, message) = block(&tui);
-    assert_eq!(level, FeedbackLevel::Error);
+    assert_eq!(level, NoticeSeverity::Error);
     assert!(message.starts_with("Account update failed: "), "{message}");
 
     tui.submit("/logout");
@@ -297,7 +300,7 @@ async fn disabled_row_notice_and_store_failure() {
         .await;
     assert_eq!(tui.state.focus, FocusState::Input);
     let (level, message) = block(&tui);
-    assert_eq!(level, FeedbackLevel::Error);
+    assert_eq!(level, NoticeSeverity::Error);
     assert!(
         message.starts_with("Could not read stored accounts: "),
         "{message}"

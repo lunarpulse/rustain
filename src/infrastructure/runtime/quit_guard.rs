@@ -421,15 +421,18 @@ mod tests {
         });
     }
 
-    /// The three interceptors must call the shared helper — never set
-    /// `should_quit` on their own again.
+    /// The remaining banner interceptors (recovery, carryover) must call the shared
+    /// helper — never set `should_quit` on their own again. Story 21.1 A11 deleted
+    /// the third (override-status) interceptor: its banner was a dead prompt whose
+    /// block never set `active_feedback_id`, so it could never fire (S2 deletes the
+    /// other two with the pane).
     #[test]
     fn story21_2_every_banner_ctrl_q_interceptor_uses_the_quit_guard() {
         let source = include_str!("event_loop.rs");
         let production = source;
         assert!(
-            production.matches("quit_guard::quit_from_banner(").count() >= 3,
-            "recovery, carryover and override banners all route through the guard"
+            production.matches("quit_guard::quit_from_banner(").count() >= 2,
+            "recovery and carryover banners both route through the guard"
         );
         let carryover = production
             .split("the prompt does not bypass S-QUIT")

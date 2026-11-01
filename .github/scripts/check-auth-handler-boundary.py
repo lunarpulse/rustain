@@ -9,7 +9,8 @@ login/accounts entry points and their existing local planning/state helpers.
 IMPORT_MODULES permits only existing auth/UI/domain references; runtime imports
 are restricted to reviewed data types, never runtime functions or module aliases.
 FREE_CALLS admits local planning helpers, host::plan/keyless_line, clipboard
-flash_copy, model-selector opening, deferred-permission handoff and bounded text.
+notify_copy and the synchronous notification-store notify, model-selector opening,
+deferred-permission handoff and bounded text.
 METHODS plus RECEIVERS seal the exact existing state/Option/string operations;
 event/key handlers have their own finite synchronous edges. Nested imports,
 callable bindings/parameters and macro definitions cannot shadow approved names.
@@ -131,6 +132,7 @@ IMPORT_MODULES = (
     "crate::adapters::auth::host", "crate::adapters::tui::app",
     "crate::adapters::tui::login_runtime", "crate::adapters::tui::accounts_runtime",
     "crate::adapters::tui::login_ui", "crate::adapters::tui::state",
+    "crate::adapters::tui::notifications",
     "crate::domain::events", "crate::domain::models", "crate::domain::ports",
     "super::login", "super",
 )
@@ -141,7 +143,7 @@ PLANNING = {
 FREE_CALLS = {
     "open", "begin", "start", "take_focus", "close", "feedback", "failed_to_start", "display_text",
     "host::plan", "host::keyless_line", "super::accounts::on_action",
-    "super::clipboard::flash_copy", "super::model_switch::open_selector",
+    "super::clipboard::notify_copy", "notifications::notify", "super::model_switch::open_selector",
     "crate::adapters::tui::app::advance_deferred_permission",
     "crate::adapters::auth::bounded_provider_text", "str::trim", "str::to_owned",
     "Some", "Ok", "Err", "Vec::new", "FocusState::Overlay",
@@ -150,14 +152,14 @@ FREE_CALLS = {
 METHODS = {
     "map", "filter", "is_empty", "is_some", "clone", "get", "to_string", "to_owned",
     "dismiss", "unwrap_or", "open_picker", "open_accounts", "open_methods", "close",
-    "get_or_insert", "next_login_id", "insert", "into", "as_deref",
+    "get_or_insert", "next_login_id", "as_deref",
 }
 RECEIVERS = {
     "map": {"args", "args.map(str::trim).filter(|arg|!arg.is_empty())"},
     "filter": {"args.map(str::trim)"},
     "is_empty": {"arg"},
     "is_some": {"state.login.running"},
-    "clone": {"state.login.origin", "state.focus", "plan.provider_id", "plan.display", "provider", "block.id"},
+    "clone": {"state.login.origin", "state.focus", "plan.provider_id", "plan.display", "provider"},
     "get": {"plan.methods"},
     "to_string": {"error"},
     "to_owned": {"provider"},
@@ -169,8 +171,6 @@ RECEIVERS = {
     "close": {"state.login"},
     "get_or_insert": {"state.login.previous_focus"},
     "next_login_id": {"state.login"},
-    "insert": {"state.feedback_blocks"},
-    "into": {'"login-result"'},
 }
 MACROS = {"format"}
 
@@ -185,7 +185,7 @@ EVENT_FREE_CALLS = {
     "finished", "safe_url", "copy_key", "copy_target", "picker_key", "method_key",
     "running_key", "is_cancel", "closed", "move_cursor", "current",
     "super::accounts::on_event", "super::accounts::on_key",
-    "super::clipboard::flash", "super::model_switch::open_selector", "host::login_targets",
+    "notifications::notify", "notifications::info", "super::model_switch::open_selector", "host::login_targets",
     "PendingField::secret", "PendingField::text", "String::new",
     "InputAction::Login", "LoginAction::Copy", "LoginAction::Accounts",
 }
@@ -209,11 +209,10 @@ EVENT_METHOD_TARGETS = {
     "provider.clone", "login.methods.len", "state.login.cancel_running",
     "state.login.running.as_ref().is_some_and", "running.field.is_some",
     "state.login.running.as_mut", "running.field.as_mut", "field.buffer.push",
-    "field.buffer.pop", "running.field.take", "field.submit", '"accounts-result".into',
-    "block.id.clone", "state.feedback_blocks.insert", "rows.is_empty",
+    "field.buffer.pop", "running.field.take", "field.submit", "rows.is_empty",
     "nothing_stored(mode).into", "state.login.set_accounts", "lines.join",
     "state.login.account.as_mut", "state.login.back_to_picker", "listing.rows.get",
-    "listing.provider.clone", "listing.rows.len", '"Logincancelled".into',
+    "listing.provider.clone", "listing.rows.len",
 }
 EVENT_CALLBACKS = {
     "map": {"(|r|r.login_id)", "(|running|running.origin)"},

@@ -8,16 +8,14 @@
 //! the same warning row but leaves the live stream, its cancellation token and
 //! its tool blocks untouched.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use crate::adapters::tui::handlers;
+use crate::adapters::tui::notifications::{
+    NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource, notify_draft,
+};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::{
-    Conversation, FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, NoticeLevel,
-    StatusState, StreamingPhase, StreamingState,
+    Conversation, NoticeLevel, StatusState, StreamingPhase, StreamingState,
 };
-use crate::infrastructure::runtime::event_bus::EventBus;
 use crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle;
 
 /// Apply a notice addressed to the ACTIVE conversation (or a global one).
@@ -27,7 +25,6 @@ pub(crate) fn apply_active_notice(
     tabs: &mut TabManager,
     conversation: &mut Conversation,
     lifecycle: &mut TuiTurnLifecycle,
-    event_bus: &EventBus,
     level: NoticeLevel,
     msg: String,
 ) {
@@ -56,38 +53,19 @@ pub(crate) fn apply_active_notice(
         msg
     };
 
-    // FeedbackBlock for errors and warnings; flash for info.
-    match level {
-        NoticeLevel::Error => {
-            static FB_COUNTER: AtomicUsize = AtomicUsize::new(0);
-            let fb_id = format!("fb-{}", FB_COUNTER.fetch_add(1, Ordering::Relaxed));
-            let fb = FeedbackBlock {
-                id: fb_id.clone(),
-                level: FeedbackLevel::Error,
-                message: msg,
-                actions: vec![FeedbackAction::Retry],
-            };
-            state.feedback_blocks.insert(fb_id.clone(), fb);
-            state.active_feedback_id = Some(fb_id);
-            state.status = StatusState::Idle;
-            state.focus = FocusState::Chat;
-            handlers::notice::auto_switch_to_monitor_on_error(state, event_bus);
-        }
-        NoticeLevel::Warning | NoticeLevel::Advisory => {
-            handlers::notice::apply_warning_notice(state, msg);
-        }
-        _ => {
-            let flash_duration = state.theme.timing.status_flash_ms;
-            handlers::notice::notify_or_queue(
-                state,
-                crate::adapters::tui::state::QueuedNotification::StatusFlash {
-                    level,
-                    message: msg,
-                    duration_ms: flash_duration,
-                },
-            );
-        }
+    // Story 21.1 AC4: every level is one store notice attributed to its
+    // conversation. No block, no flash, no queue, and never a focus move: the
+    // notice appears as a toast and stays reviewable in S-LOG. An Error carries
+    // the retry handle of the turn that failed.
+    let mut draft = NoticeDraft::new(NoticeSource::System, NoticeSeverity::from_level(level), msg)
+        .conversation(conversation.id.clone());
+    if matches!(level, NoticeLevel::Error) {
+        draft = draft.action(NoticeAction::RetryTurn {
+            messages: conversation.messages.len(),
+        });
+        state.status = StatusState::Idle;
     }
+    notify_draft(state, draft);
     state.needs_redraw = true;
 }
 
@@ -109,10 +87,14 @@ pub(crate) fn apply_background_notice(
         tab.streaming.current_blocks.clear();
         tab.streaming.active_tool_calls.clear();
     }
-    // Errors were always stored; a Warning/Advisory notice addressed here (e.g.
-    // a late `/team send` reply) must survive the switch too.
-    handlers::notice::store_background_notice(tab, level, msg);
-    // Redraw so the tab bar can reflect the state change.
+    // Story 21.1 AC4: a notice addressed to a background conversation is an
+    // attributed store record (no per-tab stash): it survives the switch in
+    // S-LOG with the conversation named, and it paints as a toast now.
+    notify_draft(
+        state,
+        NoticeDraft::new(NoticeSource::System, NoticeSeverity::from_level(level), msg)
+            .conversation(conversation_id),
+    );
     state.needs_redraw = true;
 }
 
@@ -128,7 +110,6 @@ mod tests {
         tabs: TabManager,
         conversation: Conversation,
         lifecycle: TuiTurnLifecycle,
-        bus: EventBus,
         token: CancellationToken,
     }
 
@@ -156,7 +137,6 @@ mod tests {
             tabs,
             conversation,
             lifecycle,
-            bus: EventBus::new(8).0,
             token,
         }
     }
@@ -168,7 +148,6 @@ mod tests {
             &mut f.tabs,
             &mut f.conversation,
             &mut f.lifecycle,
-            &f.bus,
             level,
             text.to_owned(),
         );
@@ -194,8 +173,9 @@ mod tests {
             f.lifecycle.is_live(&f.conversation.id),
             "same live producer"
         );
-        // The notice is visible as a warning-class block (or queued for it).
+        // The advisory is a visible warning toast (Focus density no longer hides it).
         assert!(f.state.needs_redraw);
+        assert_eq!(f.state.notifications.visible().count(), 1);
     }
 
     #[tokio::test]
@@ -232,6 +212,340 @@ mod tests {
         assert!(
             !f.tabs.active_tab().streaming.is_streaming,
             "fatal notice ends it"
+        );
+    }
+
+    fn records(f: &Fixture) -> Vec<(NoticeSeverity, String, Option<String>, Option<NoticeAction>)> {
+        f.state
+            .notifications
+            .records()
+            .map(|r| {
+                (
+                    r.severity,
+                    r.message.clone(),
+                    r.conversation_id.clone(),
+                    r.action,
+                )
+            })
+            .collect()
+    }
+
+    /// K5 — the default Focus density no longer hides any notice, and no level
+    /// moves focus (D2, D8): the consumer is the production front door.
+    #[tokio::test]
+    async fn story21_1_focus_density_shows_every_level_and_nothing_moves_focus() {
+        use crate::domain::models::FocusState;
+        use crate::domain::models::visual::DensityMode;
+        for (level, severity) in [
+            (NoticeLevel::Info, NoticeSeverity::Info),
+            (NoticeLevel::Advisory, NoticeSeverity::Warning),
+            (NoticeLevel::Warning, NoticeSeverity::Warning),
+            (NoticeLevel::Error, NoticeSeverity::Error),
+        ] {
+            let mut f = live_stream();
+            assert_eq!(
+                f.state.density_mode,
+                DensityMode::Focus,
+                "the default density"
+            );
+            f.state.focus = FocusState::Input;
+            apply(&mut f, level, "visible in focus");
+            assert_eq!(
+                f.state.focus,
+                FocusState::Input,
+                "{level:?} never takes focus"
+            );
+            assert_eq!(f.state.density_mode, DensityMode::Focus, "no auto-switch");
+            let visible: Vec<_> = f.state.notifications.visible().collect();
+            assert_eq!(visible.len(), 1, "{level:?}");
+            assert_eq!(visible[0].severity, severity);
+            assert_eq!(
+                visible[0].conversation_id.as_deref(),
+                Some(f.conversation.id.as_str())
+            );
+            assert!(
+                f.state.feedback_blocks.is_empty(),
+                "{level:?}: no transcript block"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_1_error_carries_the_retry_handle_and_idles_the_status() {
+        let mut f = live_stream();
+        f.state.status = StatusState::Streaming;
+        apply(&mut f, NoticeLevel::Error, "provider failed");
+        assert_eq!(f.state.status, StatusState::Idle);
+        let id = f.conversation.id.clone();
+        assert_eq!(
+            records(&f),
+            vec![(
+                NoticeSeverity::Error,
+                "provider failed".to_owned(),
+                Some(id),
+                Some(NoticeAction::RetryTurn {
+                    messages: f.conversation.messages.len()
+                })
+            )]
+        );
+        // Warning/Advisory/Info never carry an action.
+        let mut g = live_stream();
+        apply(&mut g, NoticeLevel::Warning, "w");
+        assert_eq!(g.state.notifications.records().next().unwrap().action, None);
+    }
+
+    /// DF-266: repeated identical notices coalesce instead of flooding.
+    #[tokio::test]
+    async fn story21_1_repeated_identical_notices_coalesce() {
+        let mut f = live_stream();
+        for _ in 0..5 {
+            apply(
+                &mut f,
+                NoticeLevel::Advisory,
+                "r is reserved while a task runs",
+            );
+        }
+        assert_eq!(f.state.notifications.len(), 1);
+        assert_eq!(f.state.notifications.records().next().unwrap().count, 5);
+    }
+
+    /// A background-tab notice is an attributed record, not a per-tab stash.
+    #[tokio::test]
+    async fn story21_1_background_notice_is_an_attributed_record() {
+        let mut f = live_stream();
+        let id = f.conversation.id.clone();
+        apply_background_notice(
+            &mut f.state,
+            &mut f.tabs,
+            &id,
+            NoticeLevel::Error,
+            "late failure".into(),
+        );
+        assert_eq!(
+            records(&f),
+            vec![(
+                NoticeSeverity::Error,
+                "late failure".to_owned(),
+                Some(id),
+                None
+            )],
+            "attributed, and the background arm carries no retry handle"
+        );
+        assert!(
+            f.tabs.active_tab().feedback_blocks.is_empty(),
+            "no bgfb stash"
+        );
+    }
+
+    /// AC1 through the consumer: the deadline comes from the injected clock.
+    #[tokio::test]
+    async fn story21_1_consumer_notices_expire_on_the_injected_clock() {
+        use crate::adapters::tui::notifications::{NotificationStore, begin_draw};
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::NotificationsConfig;
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut f = live_stream();
+        f.state.notifications =
+            NotificationStore::new(clock.clone(), NotificationsConfig::default().clamped());
+        apply(&mut f, NoticeLevel::Info, "info");
+        apply(&mut f, NoticeLevel::Error, "error");
+        clock.advance(Duration::from_secs(4) - Duration::from_millis(1));
+        begin_draw(&mut f.state);
+        assert_eq!(f.state.notifications.visible().count(), 2);
+        clock.advance(Duration::from_millis(1));
+        begin_draw(&mut f.state);
+        let left: Vec<_> = f
+            .state
+            .notifications
+            .visible()
+            .map(|r| r.message.clone())
+            .collect();
+        assert_eq!(left, ["error"], "info expired at 4 s; the error lives 60 s");
+        clock.advance(Duration::from_secs(56));
+        begin_draw(&mut f.state);
+        assert_eq!(f.state.notifications.visible().count(), 0);
+    }
+
+    /// Offer-only catalogue for the real turn driver below.
+    struct Catalogue;
+
+    #[async_trait::async_trait]
+    impl crate::domain::ports::ToolSetPort for Catalogue {
+        fn available_tools(&self) -> Vec<crate::domain::models::ToolDefinition> {
+            ["Read", "Bash", "task"]
+                .iter()
+                .map(|name| crate::domain::models::ToolDefinition {
+                    name: (*name).to_string(),
+                    description: format!("{name} tool"),
+                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
+                    parallel_safe: true,
+                })
+                .collect()
+        }
+
+        async fn execute(
+            &self,
+            tool_name: &str,
+            _input: serde_json::Value,
+            _cancel: CancellationToken,
+        ) -> Result<crate::domain::models::ToolResult, crate::domain::errors::ToolError> {
+            Err(crate::domain::errors::ToolError::NotFound(tool_name.into()))
+        }
+    }
+
+    /// K5 / FR42-a through the REAL producer: `LocalTurnDriver::submit`
+    /// (`turn_driver.rs`, the unhonourable-restriction disclosure) emits the
+    /// Advisory; the production consumer (`event_loop.rs` SystemNotice arm →
+    /// `apply_active_notice`) turns it into a warning toast that is painted in
+    /// the DEFAULT Focus density and never ends the live turn (D2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn story21_1_fr42a_advisory_from_the_real_turn_driver_is_visible_in_focus() {
+        use crate::adapters::filesystem::FileSystemStorage;
+        use crate::adapters::noop::{
+            NoOpApprovalPersistence, NoOpContext, NoOpPersona, NoOpProvider, NoOpSecurity,
+            NoOpStorage, NoOpUsageLedger,
+        };
+        use crate::adapters::skill_activation::SkillActivator;
+        use crate::adapters::tui::notification_log::LogFacts;
+        use crate::adapters::tui::widgets::toast_layer;
+        use crate::domain::events::AppEvent;
+        use crate::domain::models::visual::DensityMode;
+        use crate::domain::models::{ActiveAgent, SessionManager, SessionState};
+        use crate::domain::ports::{ContextAssemblerPort, ContextPort, ToolSetPort};
+        use crate::domain::services::approval_runtime::ApprovalRuntime;
+        use crate::domain::services::tool_scheduler::ToolScheduler;
+        use crate::infrastructure::runtime::turn_driver::{
+            LocalTurnDriver, TurnViewState, UserSubmission,
+        };
+        use arc_swap::ArcSwap;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::sync::Arc;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let security = Arc::new(NoOpSecurity);
+        let tools: Arc<dyn ToolSetPort> = Arc::new(Catalogue);
+        let approval = ApprovalRuntime::new(16, Arc::new(NoOpApprovalPersistence));
+        let scheduler = ToolScheduler::new(security.clone(), tools.clone(), approval, 16);
+        let driver = LocalTurnDriver::new(
+            Arc::new(NoOpProvider),
+            Arc::new(ArcSwap::from_pointee(
+                crate::domain::models::AppConfig::default(),
+            )),
+            event_tx,
+            security,
+            tools,
+            scheduler,
+            Arc::new(SkillActivator::new()),
+            Arc::new(NoOpPersona),
+            Arc::new(ArcSwap::from_pointee(
+                Arc::new(NoOpContext) as Arc<dyn ContextPort>
+            )),
+            Arc::new(ArcSwap::from_pointee(
+                None as Option<Arc<dyn ContextAssemblerPort>>,
+            )),
+            workspace.path().to_path_buf(),
+            Arc::new(FileSystemStorage::new(workspace.path().join("sessions"))),
+            Arc::new(NoOpStorage),
+            Arc::new(crate::domain::services::plan_mode_injector::DefaultPlanInjector::new()),
+            Arc::new(NoOpUsageLedger),
+            crate::infrastructure::telemetry::ActiveRatioWindow::new_in_memory(),
+        );
+        let mut turn_conversation = Conversation::default();
+        let mut turn_streaming = StreamingState::default();
+        let mut turn_state = TuiState::new(120, 24);
+        let mut turn_lifecycle = TuiTurnLifecycle::default();
+        let mut session_manager = SessionManager::new(SessionState::Empty);
+        let agent = ActiveAgent {
+            name: "no-kubectl".to_string(),
+            file: workspace.path().join("no-kubectl.md"),
+            body: String::new(),
+            allowed_tools: None,
+            exclude_tools: Some(vec!["Bash(kubectl:*)".to_string()]),
+            model: None,
+        };
+        driver
+            .submit(
+                UserSubmission {
+                    text: "deploy billing to production".into(),
+                    images: vec![],
+                    synthetic: false,
+                    activation_set: None,
+                    agent_snapshot: Some(agent),
+                    turn_cancel: CancellationToken::new(),
+                },
+                TurnViewState {
+                    conversation: &mut turn_conversation,
+                    streaming: &mut turn_streaming,
+                    state: &mut turn_state,
+                    lifecycle: &mut turn_lifecycle,
+                    session_manager: &mut session_manager,
+                },
+            )
+            .await;
+        if let Some(handle) = turn_lifecycle.take_task(&turn_conversation.id) {
+            tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+                .await
+                .expect("the turn finishes")
+                .expect("the turn task does not panic");
+        }
+        let mut advisories = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let Some((AppEvent::SystemNotice { level, message, .. }, _)) =
+                turn_lifecycle.admit(event)
+                && level == NoticeLevel::Advisory
+            {
+                advisories.push((level, message));
+            }
+        }
+        assert_eq!(advisories.len(), 1, "one FR42-a disclosure: {advisories:?}");
+
+        // The consumer side: a live stream in the default Focus density.
+        let mut f = live_stream();
+        assert_eq!(f.state.density_mode, DensityMode::Focus);
+        for (level, message) in advisories {
+            apply_active_notice(
+                &mut f.state,
+                &mut f.streaming,
+                &mut f.tabs,
+                &mut f.conversation,
+                &mut f.lifecycle,
+                level,
+                message,
+            );
+        }
+        assert!(f.streaming.is_streaming, "an Advisory never ends the turn");
+        assert!(!f.token.is_cancelled());
+        let visible: Vec<_> = f.state.notifications.visible().collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].severity, NoticeSeverity::Warning);
+        assert!(visible[0].message.contains("Bash(kubectl:*)"));
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let theme = f.state.theme.clone();
+        let store = &f.state.notifications;
+        terminal
+            .draw(|frame| {
+                let pane = ratatui::layout::Rect::new(0, 0, 100, 20);
+                toast_layer::render(frame, pane, store, &theme, &LogFacts::default());
+            })
+            .unwrap();
+        let painted: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        // The wide toast is a half-pane box: the severity word and the head of
+        // the first line are painted (the rest is ellipsized).
+        assert!(
+            painted.contains("Warning") && painted.contains("Active tool restriction"),
+            "the Advisory is painted in Focus density: {}",
+            painted.split_whitespace().collect::<Vec<_>>().join(" ")
         );
     }
 }

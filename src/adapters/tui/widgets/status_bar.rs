@@ -43,11 +43,19 @@ pub fn render(
     tab_read_only: bool,
     attached: Option<&crate::adapters::tui::state::AttachInfo>,
     log_awareness: LogAwareness,
+    unseen_notices: u64,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let status_text = status.display_text();
+    // Story 21.1 A12: YOLO is a status FACT of the permission mode, not a flash.
+    // It shows while nothing more specific (streaming, executing, retrying) does.
+    let status_text =
+        if permission_mode == PermissionMode::Yolo && matches!(status, StatusState::Idle) {
+            YOLO_FACT.to_string()
+        } else {
+            status.display_text()
+        };
     let fg = theme.colors.status_fg;
     let sep = " │ ";
 
@@ -372,35 +380,68 @@ pub fn render(
         _ => area,
     };
 
-    // Contextual hint: right-aligned in remaining space (UX-DR93, UX-DR96)
-    // The hint is the first thing truncated if the terminal is too narrow.
-    if let Some(hint) = current_hint {
-        let left_line = Line::from(left_spans.clone());
-        let left_width = left_line
-            .spans
-            .iter()
-            .map(|s| geom::cells(&s.content))
-            .sum::<usize>();
-        let bar_width = area.width as usize;
-        let hint_width = geom::cells(hint);
-        // Only render hint if it fits in the remaining space (with at least 1 gap)
-        if left_width + 1 + hint_width <= bar_width {
-            let padding = bar_width - left_width - hint_width;
-            let mut spans_with_hint = left_spans;
-            spans_with_hint.push(Span::raw(" ".repeat(padding)));
-            spans_with_hint.push(Span::styled(
+    // Contextual hint and the Story 21.1 `Log !N` notice badge: right-aligned in
+    // the remaining space (UX-DR93, UX-DR96). Admission order: the `log: N`
+    // reminder (reserved above) first, then the hint, then the badge — the badge
+    // is only painted when it still fits; the hint is the first thing truncated
+    // if the terminal is too narrow.
+    let left_width = left_spans
+        .iter()
+        .map(|s| geom::cells(&s.content))
+        .sum::<usize>();
+    let bar_width = area.width as usize;
+    let hint = current_hint.filter(|hint| left_width + 1 + geom::cells(hint) <= bar_width);
+    let hint_width = hint.map_or(0, geom::cells);
+    let badge = notice_badge_text(unseen_notices).filter(|badge| {
+        let gap = usize::from(hint.is_some());
+        left_width + 1 + geom::cells(badge) + gap + hint_width <= bar_width
+    });
+    if hint.is_some() || badge.is_some() {
+        let mut right: Vec<Span> = Vec::new();
+        let mut right_width = hint_width;
+        if let Some(badge) = badge {
+            right_width += geom::cells(&badge) + usize::from(hint.is_some());
+            right.push(Span::styled(
+                badge,
+                Style::default()
+                    .fg(theme.colors.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            if hint.is_some() {
+                right.push(Span::raw(" "));
+            }
+        }
+        if let Some(hint) = hint {
+            right.push(Span::styled(
                 hint,
                 theme.typography.hint.fg(theme.colors.text_hint),
             ));
-            let line = Line::from(spans_with_hint);
-            let widget = Paragraph::new(line).style(Style::default().bg(theme.colors.status_bg));
-            return frame.render_widget(widget, area);
         }
+        let padding = bar_width - left_width - right_width;
+        let mut spans = left_spans;
+        spans.push(Span::raw(" ".repeat(padding)));
+        spans.extend(right);
+        let widget =
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.colors.status_bg));
+        return frame.render_widget(widget, area);
     }
 
     let line = Line::from(left_spans);
     let widget = Paragraph::new(line).style(Style::default().bg(theme.colors.status_bg));
     frame.render_widget(widget, area);
+}
+
+/// Story 21.1 A12: the status fact painted while YOLO is the permission mode.
+pub const YOLO_FACT: &str = "⚠ YOLO mode active — all tools auto-approved";
+
+/// Story 21.1 AC5 — the unseen warning/error badge (`Log !N`, capped `99+`).
+/// `None` hides it: it appears only while something still needs a look.
+fn notice_badge_text(unseen: u64) -> Option<String> {
+    match unseen {
+        0 => None,
+        1..=99 => Some(format!("Log !{unseen}")),
+        _ => Some("Log !99+".to_owned()),
+    }
 }
 
 /// Story 19.16g — the reminder's ceiling. The count still moves with journal
@@ -544,6 +585,7 @@ mod tests {
                 false,
                 None,
                 LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -602,6 +644,7 @@ mod tests {
                 false,
                 None,
                 LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -663,6 +706,7 @@ mod tests {
                 false,
                 None,
                 LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -769,6 +813,7 @@ mod tests {
                 true,
                 None,
                 LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -816,6 +861,7 @@ mod tests {
                     false,
                     None,
                     LogAwareness::Hidden,
+                    0,
                 );
             })
             .unwrap();
@@ -872,6 +918,7 @@ mod tests {
                 false,
                 None,
                 LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -927,6 +974,7 @@ mod tests {
                 false,
                 None,
                 awareness,
+                0,
             );
         })
         .unwrap();
@@ -1110,6 +1158,7 @@ mod tests {
                 false,
                 None,
                 awareness,
+                0,
             );
         })
         .unwrap();
@@ -1159,5 +1208,156 @@ mod tests {
                 assert!(!row.contains(G), "{hint:?}: {row:?}");
             }
         }
+    }
+
+    // ── Story 21.1 — YOLO status fact and the `Log !N` notice badge ────────
+
+    /// Render one real row with an explicit permission mode, status and unseen
+    /// notice count.
+    fn draw_notice_bar(
+        width: u16,
+        status: &StatusState,
+        mode: PermissionMode,
+        hint: Option<&str>,
+        awareness: LogAwareness,
+        unseen_notices: u64,
+    ) -> String {
+        let mut t = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        let theme = Theme::dark();
+        t.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                "m",
+                None,
+                status,
+                &theme,
+                0,
+                &[],
+                0,
+                20,
+                mode,
+                None,
+                0,
+                false,
+                None,
+                false,
+                true,
+                0,
+                hint,
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                false,
+                None,
+                awareness,
+                unseen_notices,
+            );
+        })
+        .unwrap();
+        row_text(t.backend().buffer())
+    }
+
+    #[test]
+    fn story21_1_yolo_is_a_status_fact_of_the_permission_mode() {
+        // A12: the fact comes from `permission_mode`, never from a producer's
+        // sticky flash — it shows while idle and yields to specific statuses.
+        let idle = StatusState::Idle;
+        let row = draw_notice_bar(
+            120,
+            &idle,
+            PermissionMode::Yolo,
+            None,
+            LogAwareness::Hidden,
+            0,
+        );
+        assert!(row.contains(YOLO_FACT), "{row}");
+        assert!(!row.contains("Ready"), "{row}");
+
+        let row = draw_notice_bar(
+            120,
+            &idle,
+            PermissionMode::Normal,
+            None,
+            LogAwareness::Hidden,
+            0,
+        );
+        assert!(!row.contains("YOLO"), "{row}");
+        assert!(row.contains("Ready"), "{row}");
+
+        let row = draw_notice_bar(
+            120,
+            &StatusState::Streaming,
+            PermissionMode::Yolo,
+            None,
+            LogAwareness::Hidden,
+            0,
+        );
+        assert!(row.contains("Streaming..."), "{row}");
+        assert!(!row.contains(YOLO_FACT), "{row}");
+    }
+
+    #[test]
+    fn story21_1_notice_badge_is_bounded_and_hidden_at_zero() {
+        // AC5: `Log !N`, capped `99+`, absent while nothing is unseen.
+        for (unseen, expected) in [
+            (0u64, None),
+            (1, Some("Log !1")),
+            (99, Some("Log !99")),
+            (100, Some("Log !99+")),
+            (5_000, Some("Log !99+")),
+        ] {
+            let row = draw_notice_bar(
+                120,
+                &StatusState::Idle,
+                PermissionMode::Normal,
+                None,
+                LogAwareness::Hidden,
+                unseen,
+            );
+            match expected {
+                Some(segment) => {
+                    assert_eq!(row.matches("Log !").count(), 1, "{unseen}: {row}");
+                    assert!(row.trim_end().ends_with(segment), "{unseen}: {row}");
+                }
+                None => assert!(!row.contains("Log !"), "{unseen}: {row}"),
+            }
+        }
+    }
+
+    #[test]
+    fn story21_1_notice_badge_sits_beside_the_log_reminder_and_yields_before_the_hint() {
+        // The `log: N` reminder keeps the right edge; the badge is admitted
+        // beside it and the hint, and is the first thing dropped when the
+        // hint alone fits but the hint plus the badge would not.
+        let row = draw_notice_bar(
+            120,
+            &StatusState::Idle,
+            PermissionMode::Normal,
+            Some("^X d detach"),
+            LogAwareness::Unseen(7),
+            3,
+        );
+        assert!(row.trim_end().ends_with(" log: 7"), "{row}");
+        assert!(row.contains("Log !3 ^X d detach"), "{row}");
+
+        // 80 columns: the left side is ~23 cells, a 54-cell hint fits alone
+        // (78) but not beside the 6-cell badge (85).
+        let hint = "h".repeat(54);
+        let row = draw_notice_bar(
+            80,
+            &StatusState::Idle,
+            PermissionMode::Normal,
+            Some(&hint),
+            LogAwareness::Hidden,
+            3,
+        );
+        assert!(row.trim_end().ends_with(&hint), "hint stays: {row}");
+        assert!(!row.contains("Log !"), "badge yields first: {row}");
     }
 }

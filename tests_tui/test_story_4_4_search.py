@@ -51,16 +51,18 @@ class TestBookmarks:
     """AC8 + AC10: Bookmark toggle and list."""
 
     def test_bookmark_toggle_shows_flash_confirmation(self, tui: RustainTUI):
-        """Pressing m in Chat focus toggles a bookmark and shows a flash message."""
+        """Pressing m in Chat focus toggles a bookmark and shows a Success toast."""
         tui.send_message("Say hello for bookmark test")
         tui.wait_for_idle()
 
         tui.chat_mode()
         tui.scroll_up(2)
         tui.toggle_bookmark()
-        # Status bar should flash "Bookmark added" or "Bookmark removed"
+        # Story 21.1: `Bookmark added` / `Bookmark removed` is a 4 s Success toast
+        # at the chat pane's bottom edge (no longer a status-row flash). The poll
+        # (0.5 s) starts right after the toggle, well inside the TTL.
         tui.wait_for_screen("Bookmark")
-        tui.assert_screen_contains("Bookmark", "Bookmark flash message should appear in status bar")
+        tui.assert_screen_contains("Bookmark", "Bookmark toast should appear")
 
         # Toggle again to un-bookmark
         tui.toggle_bookmark()
@@ -80,8 +82,9 @@ class TestBookmarks:
         # Open the list
         tui.open_bookmark_list()
         tui.wait(0.5)
-        # The bookmark list panel or status flash should appear
-        # (flash if no bookmarks remain, panel otherwise)
+        # The bookmark list panel or the toast should appear
+        # (toast if no bookmarks remain, panel otherwise; the toggle toast is
+        # still alive here: ~2 s of the 4 s TTL have elapsed)
         tui.assert_screen_contains("Bookmark", "Bookmark state should be visible")
         tui.close_overlay()
 

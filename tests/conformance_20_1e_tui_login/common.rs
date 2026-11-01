@@ -328,19 +328,62 @@ impl Tui {
         self.frame_at(80, 24)
     }
 
-    pub(crate) fn feedback(&self) -> String {
+    /// Story 21.1: results are store notices, no longer replaced-in-place
+    /// feedback blocks. The newest notice recorded by `source` (`last_at`
+    /// orders a coalesced repeat after the notice it merged into).
+    pub(crate) fn latest_notice(
+        &self,
+        source: rustain::adapters::tui::notifications::NoticeSource,
+    ) -> Option<(
+        rustain::adapters::tui::notifications::NoticeSeverity,
+        String,
+    )> {
         self.state
-            .feedback_blocks
-            .values()
-            .map(|block| block.message.clone())
+            .notifications
+            .records()
+            .filter(|record| record.source == source)
+            .max_by_key(|record| (record.last_at, record.id))
+            .map(|record| (record.severity, record.message.clone()))
+    }
+
+    /// The newest login result and the newest account result, newline-joined
+    /// (what the `login-result` / `accounts-result` blocks held).
+    pub(crate) fn feedback(&self) -> String {
+        use rustain::adapters::tui::notifications::NoticeSource;
+        [NoticeSource::Login, NoticeSource::Accounts]
+            .into_iter()
+            .filter_map(|source| self.latest_notice(source))
+            .map(|(_, message)| message)
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// The newest account-result notice's message (the old `accounts-result`).
+    pub(crate) fn accounts_result(&self) -> String {
+        self.latest_notice(rustain::adapters::tui::notifications::NoticeSource::Accounts)
+            .map(|(_, message)| message)
+            .expect("an accounts-result notice")
+    }
+
+    /// Every retained notice, oldest first (secret-hygiene scans read all of
+    /// them, not only the newest).
+    pub(crate) fn notices(&self) -> String {
+        self.state
+            .notifications
+            .records()
+            .map(|record| record.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The newest notice of any source (what the status flash held).
     pub(crate) fn flash(&self) -> String {
-        match &self.state.status {
-            rustain::domain::models::StatusState::Flash { message, .. } => message.clone(),
-            _ => String::new(),
-        }
+        self.state
+            .notifications
+            .records()
+            .max_by_key(|record| (record.last_at, record.id))
+            .map(|record| record.message.clone())
+            .unwrap_or_default()
     }
 }
 

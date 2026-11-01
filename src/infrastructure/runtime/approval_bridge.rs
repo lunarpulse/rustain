@@ -224,18 +224,12 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
                     )
                     .await;
                 if let Some(feedback) = feedback {
-                    let id = RequestId::new().0;
-                    state.feedback_blocks.insert(
-                        id.clone(),
-                        crate::domain::models::FeedbackBlock {
-                            id,
-                            level: crate::domain::models::FeedbackLevel::Warning,
-                            message:
-                                crate::domain::services::permission_chain::format_feedback_message(
-                                    &feedback,
-                                ),
-                            actions: vec![],
-                        },
+                    crate::adapters::tui::notifications::warning(
+                        state,
+                        crate::adapters::tui::notifications::NoticeSource::Approval,
+                        crate::domain::services::permission_chain::format_feedback_message(
+                            &feedback,
+                        ),
                     );
                 }
                 advance(state);

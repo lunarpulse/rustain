@@ -38,13 +38,17 @@ use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_inp
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
+use crate::adapters::tui::notification_log;
+use crate::adapters::tui::notifications::{
+    self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
+};
 use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
     autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
     input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar,
-    team_proposal_card, usage_panel, which_key_bar,
+    team_proposal_card, toast_layer, usage_panel, which_key_bar,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
@@ -52,7 +56,8 @@ use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
 #[cfg(feature = "a2a")]
 use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
 use crate::infrastructure::runtime::{
-    artifact_bridge, quit_guard, recovery_prompt, room_bridge, system_notice, transparency_bridge,
+    artifact_bridge, notice_actions, quit_guard, recovery_prompt, room_bridge, system_notice,
+    transparency_bridge,
 };
 use ratatui::layout::Rect;
 
@@ -209,9 +214,9 @@ use crate::domain::models::visual::{
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
-    NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, RetryState, SessionManager,
-    SessionState, StatusState, StreamChunk, StreamingState, UsageInfo, UserMessage, ViewState,
-    generate_conversation_id, next_delay,
+    NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, SessionManager, SessionState,
+    StatusState, StreamChunk, StreamingState, UsageInfo, UserMessage, ViewState,
+    generate_conversation_id,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
@@ -224,9 +229,6 @@ use crate::domain::services::turn_queue::TurnQueue;
 use crate::infrastructure::runtime::app_context::AppContext;
 use crate::infrastructure::runtime::app_state::AppState;
 use crate::infrastructure::runtime::turn;
-
-// `apply_warning_notice` extracted to `crate::adapters::tui::handlers::notice`
-// per Story 8.0a Phase 4 Task 10 (notice sub-task). Inline test moved per DGI-E.
 
 // Context-warning handlers extracted to `crate::adapters::tui::handlers::context_warning`
 // per Story 8.0a Phase 4 Task 6. The functions `upsert_context_warning` and
@@ -397,6 +399,10 @@ pub async fn run(
     let size = terminal.size()?;
     let capability = detect_color_capability();
     let mut state = TuiState::with_capability(size.width, size.height, capability);
+    state.notifications = notifications::NotificationStore::from_config(
+        &config.notifications,
+        Arc::new(crate::domain::clock::SystemClock::default()),
+    );
     if let Some(tracker) = refresh_tracker {
         state.model_selector.refreshing = tracker;
     }
@@ -1011,6 +1017,15 @@ pub async fn run(
                                 }
                                 continue;
                             }
+                            // Story 21.1 AC5: S-LOG owns every user key while open (after
+                            // S-QUIT, before every lower interceptor); resize/focus events flow on.
+                            if state.notification_log.is_some() {
+                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager));
+                                if let Some(outcome) = notification_log::handle_domain_event(&mut state, &domain_event, &facts) {
+                                    notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
+                                    continue;
+                                }
+                            }
                             // Intercept input when recovery prompt is active
                             if state.active_feedback_id.as_deref() == Some(recovery_prompt::RECOVERY_BLOCK_ID) {
                                 match recovery_prompt::recovery_choice(&domain_event) {
@@ -1137,48 +1152,6 @@ pub async fn run(
                                 }
                             }
 
-                            if state.active_feedback_id.as_deref().is_some_and(|id| id.starts_with("override-status-")) {
-                                use crate::domain::events::DomainInputEvent;
-                                match &domain_event {
-                                    DomainInputEvent::KeyPress('c') | DomainInputEvent::KeyPress('C') => {
-                                        if let Some(fb_id) = state.active_feedback_id.take() {
-                                            state.feedback_blocks.remove(&fb_id);
-                                        }
-                                        if let Some(port) = state.session_overrides.keys().next().copied() {
-                                            let outcome = handlers::adapter_override::handle_clear_adapter_override(
-                                                &mut state, &app_state.agent_core, &app_state.compose_snapshot,
-                                                &app_state.profile_resolver, port,
-                                            ).await;
-                                            if let HandlerOutcome::Notify(event) = outcome {
-                                                let _ = app_state.event_bus.emit_domain(event);
-                                            }
-                                        }
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
-                                        if let Some(fb_id) = state.active_feedback_id.take() {
-                                            state.feedback_blocks.remove(&fb_id);
-                                        }
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                    // Story 19.3 (code review D1): Ctrl+Q quits rather than
-                                    // being blocked by the wildcard below. Esc above only
-                                    // dismisses the override banner.
-                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
-                                        // Story 21.2 AC7: the banner does not bypass S-QUIT.
-                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
-                                            if let Some(fb_id) = state.active_feedback_id.take() {
-                                                state.feedback_blocks.remove(&fb_id);
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    _ => continue,
-                                }
-                            }
-
                             if state.sidebar_visible
                                 && matches!(state.focus, FocusState::Sidebar { .. })
                                 && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
@@ -1197,10 +1170,7 @@ pub async fn run(
 
                                 // Block inspector owner controls when active tab is read-only
                                 if tab_manager.active_tab().read_only {
-                                    state.status = StatusState::Flash {
-                                        message: "Tab is read-only (subagent output view)".to_string(),
-                                        remaining_ms: 2000,
-                                    };
+                                    notifications::warning(&mut state, NoticeSource::Tabs, "Tab is read-only (subagent output view)");
                                     state.needs_redraw = true;
                                 } else if let crate::domain::events::DomainInputEvent::KeyPress(c) = domain_event {
                                         let agent_id = state.agent_panel_state.drill_down_agent.clone().unwrap();
@@ -1211,10 +1181,7 @@ pub async fn run(
                                                         crate::domain::models::NodeState::Running => crate::domain::models::Op::Pause,
                                                         crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
                                                         _ => {
-                                                            state.status = StatusState::Flash {
-                                                                message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
-                                                                remaining_ms: 2000,
-                                                            };
+                                                            notifications::info(&mut state, NoticeSource::Task, format!("Cannot pause/resume agent in {:?} state", entry.current_status));
                                                             state.needs_redraw = true;
                                                             continue;
                                                         }
@@ -1268,10 +1235,7 @@ pub async fn run(
                                                     }
                                                 } else {
                                                     state.agent_panel_state.pending_kill_confirm = None;
-                                                    state.status = StatusState::Flash {
-                                                        message: "Kill unavailable".to_string(),
-                                                        remaining_ms: 2000,
-                                                    };
+                                                    notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
                                                 }
                                                 refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
                                                 state.needs_redraw = true;
@@ -1368,10 +1332,7 @@ pub async fn run(
                             if tab_manager.active_tab().read_only && action.is_mutation() {
                                 state.input_buffer.clear();
                                 state.cursor_position = 0;
-                                state.status = StatusState::Flash {
-                                    message: "Tab is read-only (subagent output view)".to_string(),
-                                    remaining_ms: 2000,
-                                };
+                                notifications::warning(&mut state, NoticeSource::Tabs, "Tab is read-only (subagent output view)");
                                 state.needs_redraw = true;
                                 continue;
                             }
@@ -1430,14 +1391,7 @@ pub async fn run(
                                         state.resolved_mentions.clear();
                                         // P9: Show FeedbackBlock for each file resolution error
                                         for err in &file_errors {
-                                            let fb = FeedbackBlock {
-                                                id: generate_conversation_id(),
-                                                message: err.reason.clone(),
-                                                level: FeedbackLevel::Error,
-                                                actions: vec![],
-                                            };
-                                            state.feedback_blocks.insert(fb.id.clone(), fb);
-                                            state.needs_redraw = true;
+                                            notifications::error(&mut state, NoticeSource::Input, err.reason.clone());
                                         }
                                         if !file_contexts.is_empty() {
                                             let prefix = message_builder::build_file_context_prefix(&file_contexts);
@@ -1461,11 +1415,7 @@ pub async fn run(
                                             images: all_images,
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
-                                            state.status_before_flash = Some(state.status.clone());
-                                            state.status = StatusState::Flash {
-                                            message: "Message queue full".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
+                                            notifications::info(&mut state, NoticeSource::Input, "Message queue full");
                                             state.needs_redraw = true;
                                         }
                                     } else {
@@ -1914,109 +1864,18 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::FeedbackRetry => {
-                                    // Story 7.4 AC9: cfail- block retry → re-trigger compaction
-                                    if state.active_feedback_id.as_deref().is_some_and(|id| id.starts_with("cfail-")) {
-                                        if let Some(fb_id) = state.active_feedback_id.take() {
-                                            state.feedback_blocks.remove(&fb_id);
-                                        }
-                                        let app_context = AppContext::new(&app_state, &router);
-                                        match handlers::compaction::handle_trigger_compaction(
-                                            &conversation,
-                                            &streaming,
-                                            &mut state,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            CompactionPurpose::Inline,
-                                            &app_context,
-                                        ) {
-                                            HandlerOutcome::Quiet => {}
-                                            HandlerOutcome::RequestCompaction(payload) => {
-                                                tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
-                                            }
-                                            _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
-                                        }
-                                        continue;
-                                    }
                                     // Clear the feedback block and retry the last user message
                                     if let Some(fb_id) = state.active_feedback_id.take() {
                                         state.feedback_blocks.remove(&fb_id);
                                     }
-                                    // Get retry attempt count
-                                    let attempt = state.retry_state.as_ref().map_or(0, |r| r.attempt);
-                                    let max_attempts: u8 = 5;
-                                    if attempt >= max_attempts {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: "Max retries reached".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
-                                        state.retry_state = None;
-                                        state.needs_redraw = true;
-                                    } else {
-                                        let delay = next_delay(attempt);
-                                        state.retry_state = Some(RetryState {
-                                            attempt: attempt + 1,
-                                            max_attempts,
-                                            delay_ms: delay,
-                                        });
-                                        state.status = StatusState::Retrying {
-                                            attempt: attempt + 1,
-                                            max: max_attempts,
-                                            next_in_ms: delay,
-                                        };
-                                        state.needs_redraw = true;
-
-                                        // Find the last user message to retry
-                                        let last_user_text = conversation
-                                            .messages
-                                            .iter()
-                                            .rev()
-                                            .find(|m| m.role == MessageRole::User)
-                                            .map(|m| m.content.clone());
-
-                                        if let Some(text) = last_user_text {
-                                            // Remove failed assistant response after the last user message
-                                            if let Some(pos) = conversation.messages.iter().rposition(|m| m.role == MessageRole::User) {
-                                                conversation.messages.truncate(pos);
-                                            }
-                                            // Schedule retry after actual backoff delay
-                                            let delay_duration = std::time::Duration::from_millis(delay);
-                                            let tx = domain_tx.clone();
-                                            let retry_text = text;
-                                            let retry_conv_id = conversation.id.clone();
-                                            tokio::spawn(async move {
-                                                tokio::time::sleep(delay_duration).await;
-                                                let _ = tx.send(AppEvent::RetryMessage {
-                                                    conversation_id: retry_conv_id,
-                                                    content: retry_text,
-                                                });
-                                            });
-                                        }
-                                    }
+                                    notice_actions::retry_last_turn(&mut state, &mut conversation, &domain_tx);
                                 }
                                 InputAction::FeedbackCompact => {
                                     if let Some(fb_id) = state.active_feedback_id.take() {
                                         state.feedback_blocks.remove(&fb_id);
                                     }
                                     state.needs_redraw = true;
-                                    let app_context = AppContext::new(&app_state, &router);
-                                    match handlers::compaction::handle_trigger_compaction(
-                                        &conversation,
-                                        &streaming,
-                                        &mut state,
-                                        &provider,
-                                        config,
-                                        &domain_tx,
-                                        CompactionPurpose::Inline,
-                                        &app_context,
-                                    ) {
-                                        HandlerOutcome::Quiet => {}
-                                        HandlerOutcome::RequestCompaction(payload) => {
-                                            tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
-                                        }
-                                        _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
-                                    }
+                                    notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
                                 }
                                 InputAction::FeedbackDismiss => {
                                     if let Some(fb_id) = state.active_feedback_id.take() {
@@ -2122,6 +1981,8 @@ pub async fn run(
                                         // Covers: Sprint Change Proposal 2026-04-08
                                         state.multiline_mode = !state.multiline_mode;
                                         state.needs_redraw = true;
+                                    } else if cmd_name == "notifications" {
+                                        notification_log::open(&mut state);
                                     } else if cmd_name == "quit" {
                                         // Story 21.2 AC7: `/quit` takes the SAME guarded decision as
                                         // `q` / Ctrl+Q / idle Ctrl+C. The typed command was already
@@ -2303,26 +2164,7 @@ pub async fn run(
                                                 } else {
                                                     " (profile default)"
                                                 };
-                                                state.status = StatusState::Flash {
-                                                    message: format!("{}: {}{}", label, current, suffix),
-                                                    remaining_ms: state.theme.timing.status_flash_ms,
-                                                };
-                                                if state.session_overrides.contains_key(&port) {
-                                                    let fb = crate::domain::models::FeedbackBlock {
-                                                        id: format!("override-status-{}", std::time::SystemTime::now()
-                                                            .duration_since(std::time::UNIX_EPOCH)
-                                                            .unwrap_or_default()
-                                                            .as_nanos()),
-                                                        level: crate::domain::models::FeedbackLevel::Info,
-                                                        message: format!("{}: {}{}\nPress [c] to clear override, [Esc] to dismiss", label, current, suffix),
-                                                        actions: vec![
-                                                            crate::domain::models::FeedbackAction::Custom("clear-override".into()),
-                                                            crate::domain::models::FeedbackAction::Dismiss,
-                                                        ],
-                                                    };
-                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                                }
-                                                state.needs_redraw = true;
+                                                notifications::info(&mut state, NoticeSource::Adapter, format!("{}: {}{}", label, current, suffix));
                                             }
                                         }
                                     } else {
@@ -2357,17 +2199,7 @@ pub async fn run(
                                             context_prefix.push_str(&message_builder::build_command_context_prefix(&ctx));
                                         }
                                         for err in &cmd_errors {
-                                            let fb = FeedbackBlock {
-                                                id: generate_conversation_id(),
-                                                message: format!(
-                                                    "Command '/{}' references missing file: {}",
-                                                    cmd_name, err.raw_path
-                                                ),
-                                                level: FeedbackLevel::Warning,
-                                                actions: vec![],
-                                            };
-                                            state.feedback_blocks.insert(fb.id.clone(), fb);
-                                            state.needs_redraw = true;
+                                            notifications::warning(&mut state, NoticeSource::Input, format!("Command '/{}' references missing file: {}", cmd_name, err.raw_path));
                                         }
                                     }
 
@@ -2378,14 +2210,7 @@ pub async fn run(
                                     }
                                     // P9: Show FeedbackBlock for each file resolution error
                                     for err in &file_errors {
-                                        let fb = FeedbackBlock {
-                                            id: generate_conversation_id(),
-                                            message: err.reason.clone(),
-                                            level: FeedbackLevel::Error,
-                                            actions: vec![],
-                                        };
-                                        state.feedback_blocks.insert(fb.id.clone(), fb);
-                                        state.needs_redraw = true;
+                                        notifications::error(&mut state, NoticeSource::Input, err.reason.clone());
                                     }
                                     state.resolved_mentions.clear();
 
@@ -2421,12 +2246,7 @@ pub async fn run(
                                             images: all_images,
                                         };
                                         if turn_queue.enqueue(msg).is_err() {
-                                            state.status_before_flash = Some(state.status.clone());
-                                            state.status = StatusState::Flash {
-                                                message: "Message queue full".to_string(),
-                                                remaining_ms: state.theme.timing.status_flash_ms,
-                                            };
-                                            state.needs_redraw = true;
+                                            notifications::info(&mut state, NoticeSource::Input, "Message queue full");
                                         }
                                     } else {
                                         let _skill_snap = skill_activator.snapshot_for_turn(&conversation.id).await;
@@ -2446,7 +2266,7 @@ pub async fn run(
                                     if content.is_empty() {
                                         content = state.resolve_copy_content(&conversation);
                                     }
-                                    handlers::clipboard::flash_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                    handlers::clipboard::notify_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 InputAction::CopyTaskResult { plan_id, task_number } => {
                                     let content = plan_id.as_deref()
@@ -2464,7 +2284,7 @@ pub async fn run(
                                             }
                                         })
                                         .unwrap_or_default();
-                                    handlers::clipboard::flash_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                    handlers::clipboard::notify_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 // ─── Story 6.4: Task Control & Plan Deviation ───
 
@@ -3156,14 +2976,7 @@ pub async fn run(
                                 }
                                 // ─── End Story 6.4 ───
                                 InputAction::ImageFormatError => {
-                                    let fb = FeedbackBlock {
-                                        id: generate_conversation_id(),
-                                        message: "Unsupported image format. Supported: PNG, JPEG, GIF, WebP".to_string(),
-                                        level: FeedbackLevel::Error,
-                                        actions: vec![],
-                                    };
-                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                    state.needs_redraw = true;
+                                    notifications::error(&mut state, NoticeSource::Image, "Unsupported image format. Supported: PNG, JPEG, GIF, WebP");
                                 }
                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                     // AC4: Show confirm/cancel FeedbackBlock for large images.
@@ -3211,11 +3024,7 @@ pub async fn run(
                                     if let Some(fb_id) = state.active_feedback_id.take() {
                                         state.feedback_blocks.remove(&fb_id);
                                     }
-                                    state.status_before_flash = Some(state.status.clone());
-                                    state.status = StatusState::Flash {
-                                        message: "Image attachment cancelled".to_string(),
-                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                    };
+                                    notifications::info(&mut state, NoticeSource::Image, "Image attachment cancelled");
                                     restore_focus_after_modal(&mut state);
                                     state.needs_redraw = true;
                                 }
@@ -3233,14 +3042,7 @@ pub async fn run(
                                             // Propagate image-validation outcomes inline
                                             match inner_action {
                                                 InputAction::ImageFormatError => {
-                                                    let fb = FeedbackBlock {
-                                                        id: generate_conversation_id(),
-                                                        message: "Unsupported image format. Supported: PNG, JPEG, GIF, WebP".to_string(),
-                                                        level: FeedbackLevel::Error,
-                                                        actions: vec![],
-                                                    };
-                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                                    state.needs_redraw = true;
+                                                    notifications::error(&mut state, NoticeSource::Image, "Unsupported image format. Supported: PNG, JPEG, GIF, WebP");
                                                 }
                                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                                     let attachment = ImageAttachment { media_type, data };
@@ -3272,34 +3074,15 @@ pub async fn run(
                                                     );
                                                 }
                                                 Ok(None) => {
-                                                    state.status_before_flash = Some(state.status.clone());
-                                                    state.status = StatusState::Flash {
-                                                        message: "Clipboard is empty".to_string(),
-                                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                                    };
-                                                    state.needs_redraw = true;
+                                                    notifications::info(&mut state, NoticeSource::Clipboard, "Clipboard is empty");
                                                 }
                                                 Err(e) => {
-                                                    let fb = FeedbackBlock {
-                                                        id: generate_conversation_id(),
-                                                        message: format!("Could not read clipboard: {e}"),
-                                                        level: FeedbackLevel::Error,
-                                                        actions: vec![],
-                                                    };
-                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                                    state.needs_redraw = true;
+                                                    notifications::error(&mut state, NoticeSource::Clipboard, format!("Could not read clipboard: {e}"));
                                                 }
                                             }
                                         }
                                         Err(e) => {
-                                            let fb = FeedbackBlock {
-                                                id: generate_conversation_id(),
-                                                message: format!("Could not read clipboard: {e}"),
-                                                level: FeedbackLevel::Error,
-                                                actions: vec![],
-                                            };
-                                            state.feedback_blocks.insert(fb.id.clone(), fb);
-                                            state.needs_redraw = true;
+                                            notifications::error(&mut state, NoticeSource::Clipboard, format!("Could not read clipboard: {e}"));
                                         }
                                     }
                                 }
@@ -3356,11 +3139,7 @@ pub async fn run(
                                 }
                                 InputAction::CloseTab => {
                                     if tab_manager.tab_count() == 1 {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: "Only one tab open".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Tabs, "Only one tab open");
                                         state.needs_redraw = true;
                                     } else {
                                         // Save current tab state
@@ -3486,21 +3265,13 @@ pub async fn run(
                                         state.needs_redraw = true;
                                     } else {
                                         // Terminal too narrow - show info message
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = crate::domain::models::StatusState::Flash {
-                                            message: "Terminal too narrow for sidebar. Use Ctrl+P to search history.".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::System, "Terminal too narrow for sidebar. Use Ctrl+P to search history.");
                                         state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::SetDensityMode(mode) => {
                                     if state.density_mode == mode {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = crate::domain::models::StatusState::Flash {
-                                            message: format!("Already in {} mode", mode.display_label()),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Density, format!("Already in {} mode", mode.display_label()));
                                     } else {
                                         handlers::notice::apply_density_transition(&mut state, mode, &app_state.event_bus);
                                     }
@@ -3634,11 +3405,7 @@ pub async fn run(
                                                 }
                                                 Err(e) => {
                                                     tracing::error!("Failed to load conversation {}: {}", conv_id, e);
-                                                    state.status_before_flash = Some(state.status.clone());
-                                                    state.status = StatusState::Flash {
-                                                        message: format!("Failed to load conversation: {}", e),
-                                                        remaining_ms: state.theme.timing.status_flash_ms,
-                                                    };
+                                                    notifications::error(&mut state, NoticeSource::Session, format!("Failed to load conversation: {}", e));
                                                     state.needs_redraw = true;
                                                 }
                                             }
@@ -3652,10 +3419,7 @@ pub async fn run(
                                             crate::domain::models::NodeState::Suspended => crate::domain::models::Op::Resume,
                                             _ => {
                                                 // Only Running→Pause and Suspended→Resume are valid
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Cannot pause/resume agent in {:?} state", entry.current_status),
-                                                    remaining_ms: 2000,
-                                                };
+                                                notifications::info(&mut state, NoticeSource::Task, format!("Cannot pause/resume agent in {:?} state", entry.current_status));
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -3676,10 +3440,7 @@ pub async fn run(
 
                                         // Don't delete the active conversation if it's the only tab
                                         if conv_id == conversation.id && tab_manager.tab_count() == 1 {
-                                            state.status = StatusState::Flash {
-                                                message: "Cannot delete the only open conversation".to_string(),
-                                                remaining_ms: state.theme.timing.status_flash_ms,
-                                            };
+                                            notifications::info(&mut state, NoticeSource::Session, "Cannot delete the only open conversation");
                                         } else {
                                             // Show confirmation prompt (AC5)
                                             let display_title = if title.is_empty() { "Untitled".to_string() } else { title };
@@ -3705,19 +3466,9 @@ pub async fn run(
                                     // Show confirmation prompt (AC6)
                                     let count = session_index.len();
                                     if count == 0 {
-                                        state.status = StatusState::Flash {
-                                            message: "No conversations to delete".to_string(),
-                                            remaining_ms: state.theme.timing.status_flash_ms,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "No conversations to delete");
                                     } else {
-                                        state.pending_delete = Some(DeleteConfirmTarget::Bulk { count });
-                                        state.status = StatusState::Flash {
-                                            message: format!("Delete {} conversations? [y/n]", count),
-                                            remaining_ms: 30_000,
-                                        };
-                                        state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                            ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Bulk { count })
-                                        ));
+                                        begin_bulk_delete_confirmation(&mut state, count);
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -3814,11 +3565,7 @@ pub async fn run(
                                                 conversation.usage = None;
                                                 conversation.fork_source = None;
                                                 save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
-                                                // U1: Clear status bar immediately after successful delete
-                                                state.status = StatusState::Flash {
-                                                    message: "All conversations deleted".to_string(),
-                                                    remaining_ms: state.theme.timing.status_flash_ms,
-                                                };
+                                                complete_bulk_delete(&mut state);
                                             }
                                         }
                                     }
@@ -3844,24 +3591,15 @@ pub async fn run(
                                 InputAction::ForkAtMessage => {
                                     // Guard: cannot fork while streaming
                                     if streaming.is_streaming {
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot fork while streaming — wait for response to complete".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot fork while streaming — wait for response to complete");
                                         state.needs_redraw = true;
                                     } else if conversation.messages.is_empty() {
                                         // Guard: no messages to fork
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot fork: conversation has no messages".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot fork: conversation has no messages");
                                         state.needs_redraw = true;
                                     } else if state.message_boundaries.is_empty() {
                                         // Guard: chat pane hasn't rendered yet
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot fork: chat pane not ready".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot fork: chat pane not ready");
                                         state.needs_redraw = true;
                                     } else {
                                         // Determine which message is focused
@@ -3879,7 +3617,7 @@ pub async fn run(
                                             .min(conversation.messages.len().saturating_sub(1))
                                         };
                                         if let Err(error) = handlers::transcript_target::durable_target(&conversation, fork_message_index) {
-                                            state.status = StatusState::Flash { message: error.to_string(), remaining_ms: 3000 };
+                                            notifications::warning(&mut state, NoticeSource::Session, error.to_string());
                                             state.needs_redraw = true;
                                             continue;
                                         }
@@ -3950,10 +3688,7 @@ pub async fn run(
                                                                 message_index + 1
                                                             )
                                                         };
-                                                        state.status = StatusState::Flash {
-                                                            message: hint_msg,
-                                                            remaining_ms: 5000,
-                                                        };
+                                                        notifications::success(&mut state, NoticeSource::Session, hint_msg);
                                                         state.focus = FocusState::Chat;
                                                     }
                                                     Ok(None) => {
@@ -3968,10 +3703,7 @@ pub async fn run(
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork failed: {}", e);
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Fork failed: {}", e),
-                                                    remaining_ms: 3000,
-                                                };
+                                                notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
                                                 state.focus = FocusState::Chat;
                                             }
                                         }
@@ -3987,28 +3719,16 @@ pub async fn run(
                                 InputAction::RewindAtMessage => {
                                     // DF-018 guard: block if permission/question overlay is active
                                     if state.pending_permission.is_some() || state.ask_user_question.is_some() {
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot rewind: a permission/question is pending \u{2014} answer it first".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot rewind: a permission/question is pending \u{2014} answer it first");
                                         state.needs_redraw = true;
                                     } else if streaming.is_streaming {
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot rewind while streaming \u{2014} wait for response to complete".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot rewind while streaming \u{2014} wait for response to complete");
                                         state.needs_redraw = true;
                                     } else if conversation.messages.is_empty() {
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot rewind: conversation has no messages".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot rewind: conversation has no messages");
                                         state.needs_redraw = true;
                                     } else if state.message_boundaries.is_empty() {
-                                        state.status = StatusState::Flash {
-                                            message: "Cannot rewind: chat pane not ready".to_string(),
-                                            remaining_ms: 3000,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Session, "Cannot rewind: chat pane not ready");
                                         state.needs_redraw = true;
                                     } else {
                                         // MIRRORED FROM FORK: same message-targeting algorithm
@@ -4028,7 +3748,7 @@ pub async fn run(
                                         let durable_target = match handlers::transcript_target::durable_target(&conversation, target_message_index) {
                                             Ok(index) => index,
                                             Err(error) => {
-                                                state.status = StatusState::Flash { message: error.to_string(), remaining_ms: 3000 };
+                                                notifications::warning(&mut state, NoticeSource::Session, error.to_string());
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -4081,17 +3801,14 @@ pub async fn run(
                                             Ok(outcome) => outcome,
                                             Err(handlers::transcript_target::RewindFailure::Begin(error)) => {
                                                 tracing::error!("begin_rewind_txn failed — aborting rewind: {}", error);
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Rewind aborted: could not create recovery journal ({})", error),
-                                                    remaining_ms: 5000,
-                                                };
+                                                notifications::error(&mut state, NoticeSource::Session, format!("Rewind aborted: could not create recovery journal ({})", error));
                                                 state.focus = FocusState::Chat;
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
                                             Err(handlers::transcript_target::RewindFailure::Truncate(error)) => {
                                                 tracing::error!("revert_to_checkpoint failed: {}", error);
-                                                state.status = StatusState::Flash { message: format!("Rewind failed: {}", error), remaining_ms: 3000 };
+                                                notifications::error(&mut state, NoticeSource::Session, format!("Rewind failed: {}", error));
                                                 state.focus = FocusState::Chat;
                                                 state.needs_redraw = true;
                                                 continue;
@@ -4151,10 +3868,8 @@ pub async fn run(
                                                         target_msg_idx + 1, restored
                                                     )
                                                 };
-                                                state.status = StatusState::Flash {
-                                                    message: status_msg,
-                                                    remaining_ms: 5000,
-                                                };
+                                                let severity = if conflicts > 0 { NoticeSeverity::Warning } else { NoticeSeverity::Success };
+                                                notifications::notify(&mut state, NoticeSource::Session, severity, status_msg);
                                             }
                                         state.focus = FocusState::Chat;
                                         state.needs_redraw = true;
@@ -4195,10 +3910,7 @@ pub async fn run(
                                                                 message_index + 1
                                                             )
                                                         };
-                                                        state.status = StatusState::Flash {
-                                                            message: hint_msg,
-                                                            remaining_ms: 5000,
-                                                        };
+                                                        notifications::success(&mut state, NoticeSource::Session, hint_msg);
                                                         state.focus = FocusState::Chat;
                                                     }
                                                     Ok(None) => {
@@ -4213,10 +3925,7 @@ pub async fn run(
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork (from rewind) failed: {}", e);
-                                                state.status = StatusState::Flash {
-                                                    message: format!("Fork failed: {}", e),
-                                                    remaining_ms: 3000,
-                                                };
+                                                notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
                                                 state.focus = FocusState::Chat;
                                             }
                                         }
@@ -4255,11 +3964,7 @@ pub async fn run(
                                         state.search_state.substate =
                                             crate::adapters::tui::state::SearchSubstate::Navigating;
                                     } else {
-                                        state.status_before_flash = Some(state.status.clone());
-                                        state.status = StatusState::Flash {
-                                            message: "No matches found".to_string(),
-                                            remaining_ms: 1200,
-                                        };
+                                        notifications::info(&mut state, NoticeSource::Search, "No matches found");
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -4669,7 +4374,9 @@ pub async fn run(
                                             crate::adapters::tui::state::Direction::Up => "No previous prose turn",
                                             crate::adapters::tui::state::Direction::Left | crate::adapters::tui::state::Direction::Right => "",
                                         };
-                                        state.status = StatusState::Flash { message: msg.to_string(), remaining_ms: 2000 };
+                                        if !msg.is_empty() {
+                                            notifications::info(&mut state, NoticeSource::Input, msg);
+                                        }
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -4778,10 +4485,10 @@ pub async fn run(
                                             state.auto_snapshot = state.scroll_snapshot == 0;
                                             tab_manager.active_tab_mut().view_state.scroll_offset = state.scroll_snapshot;
                                         }
-                                        state.status = StatusState::Flash { message: "Recenter: turn snapshot to top".to_string(), remaining_ms: 2000 };
+                                        notifications::info(&mut state, NoticeSource::Input, "Recenter: turn snapshot to top");
                                     } else {
                                         tracing::debug!("RecenterAnchor: no target turn");
-                                        state.status = StatusState::Flash { message: "No assistant turn to recenter".into(), remaining_ms: 2000 };
+                                        notifications::info(&mut state, NoticeSource::Input, "No assistant turn to recenter");
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -4800,7 +4507,7 @@ pub async fn run(
                                         crate::domain::models::SummaryTier::Tier1 => "Tier1 (terse)",
                                         crate::domain::models::SummaryTier::Tier2 => "Tier2 (descriptive)",
                                     };
-                                    state.status = StatusState::Flash { message: format!("Summary tier: {}", tier_name), remaining_ms: 2000 };
+                                    notifications::info(&mut state, NoticeSource::Input, format!("Summary tier: {}", tier_name));
                                     state.needs_redraw = true;
                                 }
 
@@ -5828,7 +5535,7 @@ pub async fn run(
                             // K2 keystone drive the same code (Story 21.2 AC2).
                             system_notice::apply_active_notice(
                                 &mut state, &mut streaming, &mut tab_manager, &mut conversation,
-                                &mut turn_lifecycle, &app_state.event_bus, level, msg,
+                                &mut turn_lifecycle, level, msg,
                             );
                         } else if let Some(id) = notice_conv_id {
                             // Background tab notice — apply to its stored state in TabManager
@@ -6457,33 +6164,7 @@ pub async fn run(
                             state.pending_plan_reminder_at_turn = None;
                         }
 
-                        let mode_str = match mode {
-                            PermissionMode::Plan => "Plan",
-                            PermissionMode::Normal => "Normal",
-                            PermissionMode::AutoEdit => "AutoEdit",
-                            PermissionMode::Yolo => "YOLO",
-                        };
-                        // Only capture status_before_flash if current state isn't already a Flash —
-                        // prevents rapid mode switches from burying the pre-flash Idle state under
-                        // another Flash as the revert target.
-                        if !matches!(state.status, StatusState::Flash { .. }) {
-                            state.status_before_flash = Some(state.status.clone());
-                        }
-                        if matches!(mode, PermissionMode::Yolo) {
-                            // AC7: Yolo mode warning stays until mode changes — use u64::MAX so
-                            // the tick-based Flash expiry never decrements to zero. Transitioning
-                            // out of Yolo replaces status with the new mode's flash (below).
-                            state.status = StatusState::Flash {
-                                message: "⚠ YOLO mode active — all tools auto-approved".to_string(),
-                                remaining_ms: u64::MAX,
-                            };
-                        } else {
-                            state.status = StatusState::Flash {
-                                message: format!("Permission mode: {}", mode_str),
-                                remaining_ms: state.theme.timing.status_flash_ms,
-                            };
-                        }
-                        state.needs_redraw = true;
+                        notice_actions::announce_permission_mode(&mut state, mode);
                     }
                     AppEvent::RetryMessage { content: text, .. } => {
                         // Delayed retry arrived — start the turn now (no images on retry)
@@ -6581,17 +6262,15 @@ pub async fn run(
                                     if is_active {
                                         state.token_usage = conv.usage.clone();
                                     }
-                                    // Insert success feedback block (active tab only)
+                                    // Compaction-done Success notice (active tab only)
                                     if is_active {
-                                        let fb = FeedbackBlock {
-                                            id: format!("cdone-{}", conversation_id),
-                                            level: FeedbackLevel::Info,
-                                            message: format!("Context compacted: {} → {} tokens. Conversation history preserved in session.",
+                                        notifications::success(
+                                            &mut state,
+                                            NoticeSource::Compaction,
+                                            format!("Context compacted: {} → {} tokens. Conversation history preserved in session.",
                                                 crate::adapters::tui::widgets::model_selector::humanize_ctx(pre_tokens),
                                                 crate::adapters::tui::widgets::model_selector::humanize_ctx(summary_tokens + kept_tokens)),
-                                            actions: vec![],
-                                        };
-                                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                                        );
                                         // Clear context warning
                                         handlers::context_warning::handle_clear_context_warning(&mut state);
                                         state.context_warn_level = crate::adapters::tui::state::ContextWarnLevel::None;
@@ -6698,15 +6377,16 @@ pub async fn run(
                             }
                             _ => {
                                 if is_active {
-                                    let fb = FeedbackBlock {
-                                        id: format!("cfail-{}", conversation_id),
-                                        level: FeedbackLevel::Error,
-                                        message: format!("Compaction failed: {}. Context unchanged.", reason),
-                                        actions: vec![FeedbackAction::Retry, FeedbackAction::StartFresh],
-                                    };
-                                    let fb_id = fb.id.clone();
-                                    state.feedback_blocks.insert(fb_id.clone(), fb);
-                                    state.active_feedback_id = Some(fb_id);
+                                    notifications::notify_draft(
+                                        &mut state,
+                                        NoticeDraft::new(
+                                            NoticeSource::Compaction,
+                                            NoticeSeverity::Error,
+                                            format!("Compaction failed: {}. Context unchanged.", reason),
+                                        )
+                                        .conversation(conversation.id.clone())
+                                        .action(NoticeAction::RetryCompaction),
+                                    );
                                 }
                             }
                         }
@@ -7309,24 +6989,7 @@ pub async fn run(
                                 state.focus = prev;
                             }
                         }
-                        let fb = crate::domain::models::FeedbackBlock {
-                            id: format!(
-                                "profile-switch-{}",
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_nanos()
-                            ),
-                            level: crate::domain::models::FeedbackLevel::Info,
-                            message: format!(
-                                "Profile switched to '{profile_name}' — {summary}\nBridge previous conversation context? [y/n]"
-                            ),
-                            actions: vec![
-                                crate::domain::models::FeedbackAction::Custom("bridge-context".into()),
-                                crate::domain::models::FeedbackAction::Dismiss,
-                            ],
-                        };
-                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                        notifications::success(&mut state, NoticeSource::Profile, format!("Profile switched to '{profile_name}' — {summary}"));
                         state.needs_redraw = true;
                     }
                     AppEvent::ProfileSwitchFailed {
@@ -7428,13 +7091,7 @@ pub async fn run(
                         ..
                     } => {
                         let label = crate::domain::services::adapter_overlay::port_label(port);
-                        state.status = crate::domain::models::StatusState::Flash {
-                            message: format!(
-                                "{}: {} [override]",
-                                label, adapter_name
-                            ),
-                            remaining_ms: state.theme.timing.status_flash_ms,
-                        };
+                        notifications::info(&mut state, NoticeSource::Adapter, format!("{}: {} [override]", label, adapter_name));
                         state.needs_redraw = true;
                     }
                     AppEvent::SessionAdapterOverrideFailed {
@@ -7443,19 +7100,7 @@ pub async fn run(
                         error,
                     } => {
                         let label = crate::domain::services::adapter_overlay::port_label(port);
-                        let fb = crate::domain::models::FeedbackBlock {
-                            id: format!("override-fail-{}", std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_nanos()),
-                            level: crate::domain::models::FeedbackLevel::Error,
-                            message: format!(
-                                "Override /{} {} failed: {}",
-                                label, requested_adapter, error
-                            ),
-                            actions: vec![],
-                        };
-                        state.feedback_blocks.insert(fb.id.clone(), fb);
+                        notifications::error(&mut state, NoticeSource::Adapter, format!("Override /{} {} failed: {}", label, requested_adapter, error));
                         state.needs_redraw = true;
                     }
                     AppEvent::Subagent(envelope) => {
@@ -7639,25 +7284,13 @@ pub async fn run(
                         Some(Ok(Err(e))) => {
                             state.model_selector.connecting = None;
                             pending_health_check = None;
-                            let fb = crate::domain::models::FeedbackBlock {
-                                id: generate_conversation_id(),
-                                level: crate::domain::models::FeedbackLevel::Warning,
-                                message: format!("Connection failed: {}", e),
-                                actions: vec![],
-                            };
-                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                            notifications::warning(&mut state, NoticeSource::Health, format!("Connection failed: {}", e));
                             state.needs_redraw = true;
                         }
                         Some(Err(e)) => {
                             state.model_selector.connecting = None;
                             pending_health_check = None;
-                            let fb = crate::domain::models::FeedbackBlock {
-                                id: generate_conversation_id(),
-                                level: crate::domain::models::FeedbackLevel::Warning,
-                                message: format!("Health check panicked: {}", e),
-                                actions: vec![],
-                            };
-                            state.feedback_blocks.insert(fb.id.clone(), fb);
+                            notifications::warning(&mut state, NoticeSource::Health, format!("Health check panicked: {}", e));
                             state.needs_redraw = true;
                         }
                         None => {
@@ -7945,10 +7578,11 @@ async fn apply_open_cross_search_result(
                     result.conversation_id,
                     e
                 );
-                state.status = StatusState::Flash {
-                    message: format!("Failed to open conversation: {}", e),
-                    remaining_ms: 3000,
-                };
+                notifications::error(
+                    state,
+                    NoticeSource::Session,
+                    format!("Failed to open conversation: {}", e),
+                );
                 state.needs_redraw = true;
                 return;
             }
@@ -8383,6 +8017,8 @@ fn render(
     context_window: u32,
     agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
+    notifications::begin_draw(state);
+    let log_facts = notice_actions::log_facts(conversation, streaming, tab_manager_for_bar);
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
     let mut content_height = 0usize;
@@ -9426,7 +9062,8 @@ fn render(
                     density_mode,
                     tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
                     None, // Story 12.2c — local TUI is not an attach client
-                state.log_awareness.display,
+                    state.log_awareness.display,
+                    state.notifications.unseen(),
 );
                 input_box::render(
                     frame,
@@ -9439,6 +9076,15 @@ fn render(
                     input_scroll_offset,
                     image_indicator.as_deref(),
                 );
+
+                // Story 21.1 A5: toasts paint inside the chat pane, after the status row and
+                // composer, below every overlay AND below the composer's own popups (reverse
+                // search, slash autocomplete) so a toast never covers what the user is
+                // choosing from (same order as the attached host); they never move layout.
+                state
+                    .notifications
+                    .set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
+                toast_layer::render(frame, app_layout.chat_pane, &state.notifications, theme, &log_facts);
 
                 // Render reverse search overlay above input box
                 if reverse_search.active {
@@ -9506,6 +9152,17 @@ fn render(
                 // Render profile switcher overlay (Story 8.4 AC-1)
                 if profile_switcher.active {
                     profile_switcher::render(frame, area, profile_switcher, theme);
+                }
+
+                // S-LOG (Story 21.1 AC5): above the status row, below only S-QUIT.
+                if let Some(log) = state.notification_log.as_ref() {
+                    let above_status = Rect::new(
+                        area.x,
+                        area.y,
+                        area.width,
+                        app_layout.status_bar.y.saturating_sub(area.y),
+                    );
+                    notification_log::render(frame, above_status, log, &state.notifications, theme, &log_facts);
                 }
 
                 // S-QUIT decision frame: painted last, over every other overlay (AC7).
@@ -10065,6 +9722,27 @@ fn resolve_command_context(
         }),
         file_errors,
     )
+}
+
+/// `DeleteAllConversations` with `count` conversations: show the `[y/n]`
+/// prompt and move focus to the confirmation overlay (AC6).
+pub fn begin_bulk_delete_confirmation(state: &mut TuiState, count: usize) {
+    state.pending_delete = Some(DeleteConfirmTarget::Bulk { count });
+    state.status = StatusState::Flash {
+        message: format!("Delete {} conversations? [y/n]", count),
+        remaining_ms: 30_000,
+    };
+    state.focus = FocusState::Overlay(OverlayType::Confirmation(
+        ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Bulk { count }),
+    ));
+}
+
+/// The confirmed bulk delete has run: the `[y/n]` prompt flash is cleared
+/// immediately (U1; nothing ticks a flash any more) and the outcome is one
+/// Success notice.
+pub fn complete_bulk_delete(state: &mut TuiState) {
+    state.status = StatusState::Idle;
+    notifications::success(state, NoticeSource::Session, "All conversations deleted");
 }
 
 #[cfg(test)]

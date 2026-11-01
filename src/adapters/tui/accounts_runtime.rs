@@ -29,6 +29,7 @@ fn unreadable(generation: u64, error: &dyn std::fmt::Display) -> LoginEvent {
     LoginEvent::AccountsChanged {
         generation,
         level: FeedbackLevel::Error,
+        changed: false,
         lines: vec![format!(
             "Could not read stored accounts: {}",
             display_text(&error.to_string())
@@ -112,6 +113,7 @@ pub async fn run_listing(
     let closing = |level, line: String| LoginEvent::AccountsChanged {
         generation,
         level,
+        changed: false,
         lines: vec![line],
         listing: None,
     };
@@ -192,6 +194,7 @@ pub async fn run_change(
         LoginEvent::AccountsChanged {
             generation,
             level: FeedbackLevel::Info,
+            changed: true,
             lines: lines.iter().map(|line| display_text(line)).collect(),
             listing: None,
         },
@@ -244,6 +247,7 @@ async fn failed(
     LoginEvent::AccountsChanged {
         generation,
         level,
+        changed: false,
         lines: vec![line],
         listing: fresh.filter(|_| keep).map(|accounts| listing(&accounts)),
     }

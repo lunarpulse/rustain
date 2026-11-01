@@ -689,9 +689,12 @@ pub enum LoginEvent {
     /// An account listing that cannot open, or the result of a logout or
     /// selection: `listing` keeps the account step open with refreshed rows
     /// and `lines` as its notice; `None` closes the overlay and shows `lines`.
+    /// `changed` is the typed fact that a logout/selection itself succeeded
+    /// (Story 21.1 A2: a Success notice, never inferred from the text).
     AccountsChanged {
         generation: u64,
         level: crate::domain::models::FeedbackLevel,
+        changed: bool,
         lines: Vec<String>,
         listing: Option<AccountListing>,
     },

@@ -32,6 +32,10 @@ pub enum AttachedRoute {
     Unavailable(&'static str),
     /// Attached-only meaning: cleanly detach, never cancelling daemon work.
     Detach,
+    /// Opens S-LOG, the Notification Log (Story 21.1): same store and widget.
+    NotificationLog,
+    /// Archives every visible toast (Story 21.1); sources are untouched.
+    ClearToasts,
 }
 
 /// One retained chord.
@@ -121,6 +125,16 @@ pub const RETAINED_CHORDS: &[ChordSpec] = &[
         key: '?',
         name: "Help",
         attached: AttachedRoute::Same,
+    },
+    ChordSpec {
+        key: 'n',
+        name: "Notifications",
+        attached: AttachedRoute::NotificationLog,
+    },
+    ChordSpec {
+        key: 'x',
+        name: "Clear toasts",
+        attached: AttachedRoute::ClearToasts,
     },
 ];
 
@@ -265,5 +279,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn story21_1_notification_chords_are_retained_rows_in_both_hosts() {
+        let wk = WhichKeyState::new();
+        for host in [ChordHost::Local, ChordHost::Attached] {
+            let items = menu_items(&wk, host);
+            let n = items.iter().find(|i| i.key == "N").unwrap();
+            assert_eq!(n.name, "Notifications", "{host:?}");
+            assert!(n.available, "{host:?}");
+            let x = items.iter().find(|i| i.key == "X").unwrap();
+            assert_eq!(x.name, "Clear toasts", "{host:?}");
+            assert!(x.available, "{host:?}");
+        }
+        let notifications = RETAINED_CHORDS.iter().find(|c| c.key == 'n').unwrap();
+        assert!(matches!(
+            notifications.attached,
+            AttachedRoute::NotificationLog
+        ));
+        let clear = RETAINED_CHORDS.iter().find(|c| c.key == 'x').unwrap();
+        assert!(matches!(clear.attached, AttachedRoute::ClearToasts));
     }
 }

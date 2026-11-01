@@ -101,6 +101,7 @@ fn render_full_layout(
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
             input_box::render(
                 frame,
@@ -333,6 +334,7 @@ fn test_permission_prompt_in_full_layout() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
             input_box::render(
                 frame,
@@ -442,6 +444,7 @@ fn test_ask_user_question_in_full_layout() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
             input_box::render(
                 frame,

@@ -512,7 +512,8 @@ mod tests {
         let mut reg = PaletteRegistry::new();
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 47); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts + 1 /ml + 1 /quit (21-2 AC1; /detach is attached-only)
+        assert_eq!(reg.all_entries().len(), 48); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts + 1 /ml + 1 /quit (21-2 AC1) + 1 /notifications (21-1 AC5); /detach is attached-only
+        assert!(reg.all_entries().iter().any(|e| e.name == "/notifications"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/login"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/models"));
         assert!(reg.all_entries().iter().any(|e| e.name == "/logout"));
@@ -534,7 +535,7 @@ mod tests {
         );
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 47); // 45 + /ml + /quit (21-2 AC1)
+        assert_eq!(reg.all_entries().len(), 48); // 45 + /ml + /quit (21-2 AC1) + /notifications (21-1 AC5)
     }
 
     #[test]
@@ -550,19 +551,19 @@ mod tests {
         assert_eq!(reg.all_entries().len(), 1);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.slash_entries.len(), 47); // 21 base + 7 port slash + 7 adapter palette + 1 /fanout + 1 /team + 1 /room + 1 /artifacts + 1 /artifact + 1 /peer + 1 /login + 1 /models + 1 /logout + 1 /accounts + 1 /ml + 1 /quit (21-2 AC1; /detach is attached-only)
+        assert_eq!(reg.slash_entries.len(), 48); // 47 + /notifications (21-1 AC5); see test_populate_from_command_registry
         assert_eq!(reg.registered_entries.len(), 1);
-        assert_eq!(reg.all_entries().len(), 48);
+        assert_eq!(reg.all_entries().len(), 49);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 48);
+        assert_eq!(reg.all_entries().len(), 49);
         assert!(reg.all_entries().iter().any(|e| e.name == "claude-sonnet"));
 
         reg.register(make_entry("gpt-4o", "OpenAI model", PaletteScope::Model));
-        assert_eq!(reg.all_entries().len(), 49);
+        assert_eq!(reg.all_entries().len(), 50);
 
         reg.populate_from_command_registry(&cr);
-        assert_eq!(reg.all_entries().len(), 49);
+        assert_eq!(reg.all_entries().len(), 50);
     }
 }

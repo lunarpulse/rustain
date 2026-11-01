@@ -300,10 +300,17 @@ fn test_version_palette_action_produces_feedback() {
     // Press Enter to execute
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::Consumed);
-    // version-info feedback block should exist
-    assert!(state.feedback_blocks.contains_key("version-info"));
-    let fb = &state.feedback_blocks["version-info"];
-    assert!(fb.message.contains("rustain"));
+    // the version notice (Story 21.1: Info, source Help) should be in the store
+    let record = state
+        .notifications
+        .records()
+        .find(|record| record.source == rustain::adapters::tui::notifications::NoticeSource::Help)
+        .expect("a version notice");
+    assert_eq!(
+        record.severity,
+        rustain::adapters::tui::notifications::NoticeSeverity::Info
+    );
+    assert!(record.message.contains("rustain"));
 }
 
 // ============================================================
@@ -405,6 +412,7 @@ fn test_status_bar_renders_hint() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();
@@ -469,6 +477,7 @@ fn test_status_bar_no_hint_when_none() {
                 false,
                 None,
                 rustain::adapters::tui::state::LogAwareness::Hidden,
+                0,
             );
         })
         .unwrap();

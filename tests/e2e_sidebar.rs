@@ -7,7 +7,7 @@ use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::sidebar;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::visual::{DeleteConfirmTarget, PanelType};
-use rustain::domain::models::{ConversationSummary, FocusState};
+use rustain::domain::models::{ConversationSummary, FocusState, StatusState};
 use rustain::domain::services::session_index::{SessionIndex, SessionSummary};
 
 use ratatui::Terminal;
@@ -553,6 +553,51 @@ fn test_e2e_bulk_delete_with_confirmation() {
     // Confirm bulk delete
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_eq!(action, InputAction::ConfirmDelete);
+}
+
+/// Story 21.1 S1-1: the bulk-delete `[y/n]` prompt is a Flash that nothing
+/// ticks any more, so the confirmed delete must clear it (the Single arm and
+/// the cancel path already do). `DeleteAllConversations` with two
+/// conversations, then `y`.
+#[test]
+fn test_e2e_bulk_delete_confirmation_clears_the_prompt_flash() {
+    use rustain::infrastructure::runtime::event_loop::{
+        begin_bulk_delete_confirmation, complete_bulk_delete,
+    };
+
+    let mut state = make_state();
+    state.sidebar_entry_count = 2;
+    begin_bulk_delete_confirmation(&mut state, 2);
+    match &state.status {
+        StatusState::Flash { message, .. } => {
+            assert!(
+                message.contains("Delete 2 conversations? [y/n]"),
+                "{message}"
+            );
+        }
+        other => panic!("the prompt is a flash, got {other:?}"),
+    }
+    assert_eq!(
+        state.pending_delete,
+        Some(DeleteConfirmTarget::Bulk { count: 2 })
+    );
+
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
+    assert_eq!(action, InputAction::ConfirmDelete);
+    complete_bulk_delete(&mut state);
+
+    assert_eq!(state.status, StatusState::Idle);
+    assert!(
+        !matches!(state.status, StatusState::Flash { .. }),
+        "the prompt must not outlive the confirmation"
+    );
+    let notices: Vec<&str> = state
+        .notifications
+        .visible()
+        .map(|r| r.message.as_str())
+        .collect();
+    assert_eq!(notices, vec!["All conversations deleted"]);
+    assert!(notices.iter().all(|m| !m.contains("[y/n]")));
 }
 
 // ── Relative time formatting ────────────────────────────────────────────────

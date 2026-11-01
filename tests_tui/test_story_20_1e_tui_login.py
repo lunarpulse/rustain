@@ -325,10 +325,18 @@ def _exercise(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: (raw.flush() or True) and osc52 in
               (evidence / "native.raw.bin").read_text(encoding="utf-8"), "OSC 52 copy of the launch URL")
         tui.send("\x1b")
-        screen = _wait(tui, lambda s: "Login cancelled" in s
-                       and "Sign in to Anthropic" not in s and "Local shortcut" not in s,
-                       "Login cancelled with the modal removed")
+        # Story 21.1 (AC2/AC4): `Login cancelled` is an Info notice. The Warning and
+        # the two Success toasts raised earlier in this scene still fill the pane's
+        # visible cap, and an Info never displaces a higher severity (A6), so it is
+        # archived straight into the Notification Log. The durable, structural facts
+        # are the modal gone and the log row; no toast is required.
+        screen = _wait(tui, lambda s: "Sign in to Anthropic" not in s and "Local shortcut" not in s,
+                       "the login modal removed")
         _capture(tui, evidence, "c2-cancelled", screen)
+        tui.open_notification_log()
+        detail = tui.read_notification_detail("Login cancelled")
+        assert "Login cancelled" in detail, detail
+        tui.close_notification_log()
         with socket.socket() as probe:
             probe.settimeout(5)
             assert probe.connect_ex(("127.0.0.1", port)) != 0, "callback port still open"

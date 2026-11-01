@@ -101,6 +101,8 @@ class TestTabCancellationLifecycleNoApi:
         # Close the only tab — should be rejected
         tui.chat_mode()
         tui.close_tab()
+        # Story 21.1: an Info toast (4 s) at the chat pane's bottom edge; this
+        # 3 s poll starts right after the palette Enter, inside the TTL.
         tui.wait_for_screen("Only one tab open", timeout=3.0)
 
         tui.assert_screen_contains("Only one tab open")

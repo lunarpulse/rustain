@@ -397,8 +397,14 @@ fn test_ctrl_x_invalid_key_dismisses() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('z'));
     assert_eq!(action, InputAction::Consumed);
     assert!(!state.which_key.active); // Dismissed
-    // No feedback block for invalid keys
-    assert!(!state.feedback_blocks.contains_key("chord-z"));
+    // No notice for invalid keys (a `Noop` chord would record a Chord notice)
+    assert!(
+        state
+            .notifications
+            .records()
+            .all(|record| record.source
+                != rustain::adapters::tui::notifications::NoticeSource::Chord)
+    );
 }
 
 // ============================================================
@@ -738,6 +744,30 @@ fn test_palette_backspace_clears_scope_when_prefix_deleted() {
     );
     assert!(state.command_palette.filter_text.is_empty());
     assert_eq!(state.command_palette.current_scope, None);
+}
+
+// Story 21.1 AC5: `/notifications` is offered by the palette in both hosts.
+#[test]
+fn story21_1_palette_offers_notifications_in_both_hosts() {
+    use rustain::adapters::builtin_commands::CommandHost;
+    use rustain::adapters::command_registry::CommandRegistry;
+
+    let commands = CommandRegistry::new();
+    for host in [CommandHost::Local, CommandHost::Attached] {
+        let mut reg = PaletteRegistry::for_host(host);
+        reg.populate_from_command_registry(&commands);
+        let entry = reg
+            .all_entries()
+            .into_iter()
+            .find(|entry| entry.name == "/notifications")
+            .unwrap_or_else(|| panic!("{host:?} palette hides /notifications"));
+        assert_eq!(entry.scope, PaletteScope::SlashCommand, "{host:?}");
+        assert_eq!(
+            entry.action,
+            PaletteAction::ExecuteCommand("notifications".to_string(), None),
+            "{host:?}"
+        );
+    }
 }
 
 // ============================================================

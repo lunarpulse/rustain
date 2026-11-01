@@ -98,7 +98,7 @@ async fn k5_disabled_configuration_leaves_stored_rows_unread() {
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!(
             "Active OpenAI account: API key #{id}.\nNote: OpenAI is disabled in configuration."
         )
@@ -110,7 +110,7 @@ async fn k5_disabled_configuration_leaves_stored_rows_unread() {
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!("Logged out of OpenAI account API key #{id}.\nNo OpenAI credentials remain.")
     );
     assert!(row_ids().await.is_empty());
@@ -152,7 +152,7 @@ async fn alias_shadowed_logout_reports_the_real_remaining_row() {
     tui.key(DomainKey::Enter);
     until_changed(&mut tui).await;
     assert_eq!(
-        tui.state.feedback_blocks["accounts-result"].message,
+        tui.accounts_result(),
         format!(
             "Logged out of OpenAI account API key #{id1}.\nNo enabled provider reads OpenAI credentials."
         )

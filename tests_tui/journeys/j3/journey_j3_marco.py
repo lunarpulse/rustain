@@ -328,7 +328,7 @@ def unfold_finished_turn(tui) -> None:
        is `]]`/`[[` — whose `start_ref` is `focused.or(topmost_on_screen)`
        (`event_loop.rs:4909`). In a conversation with exactly ONE assistant
        turn, that turn IS `topmost_on_screen`, so `]]` searches strictly after
-       it and `[[` strictly before it; both find nothing, both flash "No next
+       it and `[[` strictly before it; both find nothing, both toast "No next
        prose turn", and `focused_turn` stays `None`. Measured, not inferred: a
        diagnostic run pressed `g ]] Tab Tab Enter` and opened invocation 0.
        J0's honesty block claims "every block is expandable by keyboard as of
@@ -374,7 +374,7 @@ def main() -> int:
     # ── Launch 1 — the junior's rustain ──────────────────────────────────────
     tui = launch(workspace, stub_url, home, PERSONA, shim_dir, fresh=True)
     require(tui, "Ready", 30, "boot")
-    # The `Loaded N skills` notice is a StatusFlash and expires; the status bar's
+    # The `Loaded N skills` notice is a 4 s Info toast and expires; the status bar's
     # `Skills: N active` counts ACTIVE skills, which is 0 here. The persistent
     # screen state that proves DISCOVERY ran is the slash popup: skills are
     # exposed as slash commands, and `refresh_*_suggestions` cannot list one the
@@ -396,7 +396,7 @@ def main() -> int:
     # The trust gate. Product-minted, all three lines (`skill_trust_prompt.rs`).
     require(
         tui,
-        "Trust and enable this skill for this session?",
+        "Trust and enable this skill for this conversation?",
         60,
         "the first activation of a workspace skill is trust-gated",
     )
@@ -410,7 +410,7 @@ def main() -> int:
     tui.send(ESC)
     require(
         tui,
-        "Trust and enable this skill for this session?",
+        "Trust and enable this skill for this conversation?",
         15,
         "Esc returned to the trust prompt rather than declining",
     )
@@ -441,9 +441,12 @@ def main() -> int:
     tui.send("i")  # back to Input focus for submission 2
     time.sleep(0.5)
 
-    # Keep the original Monitor workaround for a non-vacuous negative: if
-    # safe-deploy were still disclosed, its Advisory would render in the first
-    # permission pane instead of disappearing into Focus mode's queue.
+    # Story 21.1: Focus density no longer queues an Advisory — every notice is a
+    # toast with a TTL in every density — so this Monitor switch is no longer
+    # needed to surface it. It is kept only so the sub2 captures below stay
+    # framed in the density they were recorded in; the negative stays
+    # non-vacuous because a still-disclosed safe-deploy would now paint its
+    # Advisory toast on the first permission pane.
     tui.send(CTRL_X)
     time.sleep(0.5)
     tui.send("w")
@@ -496,13 +499,13 @@ def main() -> int:
     # again, and the wait is the product-minted prompt that answer produces.
     #
     # …which is itself the finding: trust was granted for this skill, in this
-    # session, in launch 1. `skill_activation.rs:261-276` keys the decision on
-    # `conversation_id`, so a new conversation asks again while the prompt says
-    # "for this session" — `DF-19-10-TRUST-PROMPT-SAYS-SESSION`, demonstrated
-    # rather than asserted.
+    # conversation, in launch 1. `skill_activation.rs:261-276` keys the decision
+    # on `conversation_id`, so a new conversation asks again. The prompt used to
+    # say "for this session" (`DF-19-10-TRUST-PROMPT-SAYS-SESSION`); Story 21.1
+    # AC7 made it say "for this conversation", so the re-ask is now truthful.
     require(
         tui,
-        "Trust and enable this skill for this session?",
+        "Trust and enable this skill for this conversation?",
         90,
         "a new conversation re-asks for trust the operator already granted",
     )
@@ -515,7 +518,7 @@ def main() -> int:
     require(tui, TEAM_CONTROL_SKILL, 60, "the team control requested activation")
     require(
         tui,
-        "Trust and enable this skill for this session?",
+        "Trust and enable this skill for this conversation?",
         20,
         "the cloned control runbook raised its own trust prompt",
     )
@@ -523,8 +526,11 @@ def main() -> int:
     tui.send("y")
     require(tui, "The team runbooks are in place.", 60, "both runbooks activated")
 
-    # DF-19-10-ADVISORY-QUEUED-IN-FOCUS: Monitor is still required to surface
-    # the positive FR42-a control. The unavailable name is driver-owned `Glob`,
+    # Story 21.1: `DF-19-10-ADVISORY-QUEUED-IN-FOCUS` is closed — the Advisory is
+    # a visible Warning toast in Focus density too, so the Monitor switch below
+    # is no longer required to surface the positive FR42-a control (it is kept
+    # so the capture stays in the density it was recorded in). The unavailable
+    # name is driver-owned `Glob`,
     # not one of the now-honourable Bash patterns.
     tui.send(CTRL_X)
     time.sleep(0.5)
@@ -550,7 +556,7 @@ def main() -> int:
     tui.send_message("deploy billing to production")
     require(
         tui,
-        "Trust and enable this skill for this session?",
+        "Trust and enable this skill for this conversation?",
         60,
         "the decline leg reached the same trust gate",
     )

@@ -28,6 +28,9 @@ mod slash_argument_parsing;
 #[path = "../conformance_21_2_shortcut_truth.rs"]
 mod conformance_21_2_shortcut_truth;
 
+#[path = "../conformance_21_1_notification_lifecycle.rs"]
+mod conformance_21_1_notification_lifecycle;
+
 #[path = "../conformance_19_1_line_diff.rs"]
 mod conformance_19_1_line_diff;
 

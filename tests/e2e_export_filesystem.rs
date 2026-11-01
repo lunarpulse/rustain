@@ -21,7 +21,7 @@ use tempfile::TempDir;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::conversation::{ChatMessage, Conversation};
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-use rustain::domain::models::{FocusState, MessageRole, SessionMeta, StatusState};
+use rustain::domain::models::{FocusState, MessageRole, SessionMeta};
 use rustain::infrastructure::runtime::event_loop::{
     apply_cancel_export_overwrite, apply_confirm_export_overwrite, apply_export_command,
 };
@@ -91,13 +91,13 @@ fn state() -> TuiState {
     s
 }
 
-/// Drain a Flash message from state if present.
+/// The newest notice message from the store (Story 21.1: export results are
+/// store notices, no longer status flashes).
 fn flash_message(s: &TuiState) -> Option<&str> {
-    if let StatusState::Flash { message, .. } = &s.status {
-        Some(message.as_str())
-    } else {
-        None
-    }
+    s.notifications
+        .records()
+        .max_by_key(|record| (record.last_at, record.id))
+        .map(|record| record.message.as_str())
 }
 
 // ── AC11: auto-number on collision ─────────────────────────────────────────

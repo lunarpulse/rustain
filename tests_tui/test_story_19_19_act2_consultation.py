@@ -187,7 +187,11 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
             }))
             (config / "a2a-interaction.toml").write_text(
                 '[interaction.defaults]\nresponse_mode = "notify-and-wait"\nnotification = "immediate"\n')
-            (config / "config.toml").write_text('[permissions]\nalways_tools = ["Read"]\n')
+            # Story 21.1: the attach-time `Read-only.` notice is a toast, not a
+            # transcript row. A 30 s Info lifetime keeps the structural wait for
+            # it (start_tui) independent of runner speed; no sleep is involved.
+            (config / "config.toml").write_text(
+                '[permissions]\nalways_tools = ["Read"]\n\n[notifications]\ninfo_ttl_secs = 30\n')
             environments[alias] = {
                 **os.environ, **stub.env("scene-" + alias, homes[alias]),
                 "TERM": "xterm-256color", "RUSTAIN_CONFIG_DIR": str(config),
@@ -240,6 +244,13 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
             raw = root / f"{alias}-{'attached' if attached else 'standalone'}-{next(sessions)}.terminal.txt"
             tui.child.logfile_read = resources.enter_context(raw.open("w"))
             assert tui.wait_for_screen("Read-only." if read_only else "Ready", timeout=30), tui.get_screen_text()
+            if read_only:
+                # The notice is a toast (30 s here), not a transcript row: clear it with
+                # `Ctrl+X x` so the long one-row toast never covers transcript rows the
+                # scene captures; the record stays in the Notification Log.
+                tui.send("\x18")
+                tui.send("x")
+                assert tui.wait_for_screen_not_contains("Read-only.", timeout=5.0), tui.get_screen_text()
             return tui
 
         def save(tui, name):

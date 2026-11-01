@@ -14,6 +14,8 @@ pub mod layout;
 pub mod login_runtime;
 pub mod login_ui;
 pub mod markdown;
+pub mod notification_log;
+pub mod notifications;
 pub mod palette_gate;
 pub mod quit_confirm;
 pub mod refresh_tracker;

@@ -1,8 +1,8 @@
 //! Attached host key front door (Story 21.2 Task 5: AC6 / AC8 / AC12 / AC13).
 //!
 //! [`handle_attached_key`] is the one place `run_attached` sends EVERY key
-//! event. It keeps the pre-existing owner order (S-QUIT first, then the new
-//! overlays, then the team-retract card, approvals, proposals, recipient
+//! event. It keeps the pre-existing owner order (S-QUIT first, then S-LOG, then
+//! the new overlays, then the team-retract card, approvals, proposals, recipient
 //! surface, the peer card Tab and the inline decision cards) and adds what the
 //! attached client was missing:
 //!
@@ -43,20 +43,22 @@ use crate::adapters::command_registry::{CommandRegistry, CommandSource};
 use crate::adapters::daemon::protocol::{ClientFrame, ProposalToken};
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::tui::app::{cancel_autocomplete_popup, convert_crossterm_event, handle_input};
-use crate::adapters::tui::chord_menu::{self, AttachedRoute, ChordHost, ChordSpec};
+use crate::adapters::tui::chord_menu::{self, AttachedRoute, ChordHost};
+use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
+use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
 use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitKeyOutcome, QuitRequest};
 use crate::adapters::tui::state::{PendingConsolidationCard, TabRenderState, TuiState};
 use crate::adapters::tui::widgets::{
     autocomplete_popup, command_palette as command_palette_widget, help_overlay, input_box,
-    which_key_bar,
+    toast_layer, which_key_bar,
 };
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::visual::OverlayType;
 use crate::domain::models::{
     Conversation, FeedbackBlock, FeedbackLevel, FocusState, MouseConfig, SessionManager,
-    StatusState, StreamingState,
+    StreamingState,
 };
 use crate::infrastructure::runtime::attach_interrupt::{AttachedInterrupt, nothing_to_stop_notice};
 use crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle;
@@ -113,6 +115,7 @@ impl AttachedChrome {
                 shortcut: match name {
                     "ml" => Some("Alt+M".to_owned()),
                     "quit" => Some("Ctrl+Q".to_owned()),
+                    "notifications" => Some("Ctrl+X, N".to_owned()),
                     "detach" => Some("Ctrl+X, D".to_owned()),
                     _ => None,
                 },
@@ -207,6 +210,7 @@ fn attached_description(commands: &CommandRegistry, name: &str) -> String {
             match name {
                 "ml" => "Toggle multi-line input (Alt+M)",
                 "quit" => "Leave this client (asks first when work is in flight)",
+                "notifications" => "Open the notification log",
                 "detach" => "Detach this client; the daemon and its work keep running",
                 _ => "",
             }
@@ -283,15 +287,15 @@ pub(super) struct KeyCtx<'a> {
 }
 
 impl KeyCtx<'_> {
-    fn flash(&mut self, message: impl Into<String>) {
-        self.state.status = StatusState::Flash {
-            message: message.into(),
-            remaining_ms: 1500,
-        };
-        self.state.needs_redraw = true;
+    /// An Info notice about the attached client itself (a refused or inert
+    /// action): a store record, never a status flash.
+    fn info(&mut self, message: impl Into<String>) {
+        notifications::info(self.state, NoticeSource::Attached, message);
     }
 
-    fn feedback(&mut self, id: &str, message: &str) {
+    /// A class-V view block (the peer-retract receipt): not a notice, so it
+    /// keeps its `feedback_blocks` row until the next key.
+    fn view_block(&mut self, id: &str, message: &str) {
         self.state.feedback_blocks.insert(
             id.to_owned(),
             FeedbackBlock {
@@ -345,6 +349,9 @@ fn close_surfaces(state: &mut TuiState) {
     if state.help_overlay.active {
         state.focus = state.help_overlay.close();
     }
+    if state.notification_log.is_some() {
+        notification_log::close(state);
+    }
     state.needs_redraw = true;
 }
 
@@ -352,6 +359,7 @@ fn close_surfaces(state: &mut TuiState) {
 /// owns the keyboard.
 pub(super) fn paste_blocked(state: &TuiState) -> bool {
     state.quit_confirm.is_some()
+        || state.notification_log.is_some()
         || state.command_palette.active
         || state.which_key.active
         || state.help_overlay.active
@@ -370,26 +378,41 @@ pub(super) fn status_hint(state: &TuiState) -> Option<&'static str> {
         })
 }
 
-/// Paint the attached overlays above the base frame. Draw order: slash popup,
-/// the untimed which-key menu (above the status row), the palette, the help
-/// overlay, and S-QUIT last.
+/// The S-LOG facts of the attached client: the one conversation it shows, no
+/// running-turn fact and NO retry path (`r` is never painted or acted on).
+pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
+    LogFacts {
+        active_conversation_id: Some(conversation_id.to_owned()),
+        active_messages: 0,
+        turn_running: false,
+        retry_supported: false,
+        titles: Vec::new(),
+    }
+}
+
+/// Paint the attached overlays above the base frame. Draw order: the toast
+/// layer (below every overlay), slash popup, the untimed which-key menu (above
+/// the status row), the palette, the help overlay, S-LOG, and S-QUIT last.
 pub(super) fn paint_overlays(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
+    chat_pane: Rect,
     input_area: Rect,
     status_bar: Rect,
     state: &TuiState,
+    facts: &LogFacts,
 ) {
+    toast_layer::render(frame, chat_pane, &state.notifications, &state.theme, facts);
+    let above_status = Rect::new(
+        area.x,
+        area.y,
+        area.width,
+        status_bar.y.saturating_sub(area.y),
+    );
     if state.autocomplete.active {
         autocomplete_popup::render(frame, input_area, &state.autocomplete, &state.theme);
     }
     if state.which_key.active {
-        let above_status = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            status_bar.y.saturating_sub(area.y),
-        );
         which_key_bar::render(
             frame,
             above_status,
@@ -408,6 +431,16 @@ pub(super) fn paint_overlays(
             &state.help_overlay,
             &state.theme,
             state.multiplexer_detected,
+        );
+    }
+    if let Some(log) = &state.notification_log {
+        notification_log::render(
+            frame,
+            above_status,
+            log,
+            &state.notifications,
+            &state.theme,
+            facts,
         );
     }
     if let Some(quit) = &state.quit_confirm {
@@ -432,6 +465,10 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     if is_ctrl(&key, 'q') {
         close_surfaces(ctx.state);
         return request_quit(ctx);
+    }
+    // S-LOG owns every key while it is open (S-QUIT and Ctrl+Q above it).
+    if ctx.state.notification_log.is_some() {
+        return log_key(ctx, key);
     }
     // A transient surface that is open owns the key until it closes.
     if ctx.state.which_key.active {
@@ -610,7 +647,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             if !m.contains(KeyModifiers::CONTROL) && ctx.retract_confirm.is_some() =>
         {
             if ctx.read_only {
-                ctx.flash("read-only — can't retract here");
+                ctx.info("read-only — can't retract here");
             } else if let Some((message_id, _)) = ctx.retract_confirm.take() {
                 // Stale-target gate: the row must still be retractable now.
                 if retractable_rows(ctx.conversation).any(|row| row.id == message_id) {
@@ -618,12 +655,12 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                         message_id,
                         target_seq: None,
                     });
-                    ctx.feedback(
+                    ctx.view_block(
                         "peer-retract",
                         "Retracted. Marked in your log — never deleted.\nWhat was already read, was read.",
                     );
                 } else {
-                    ctx.flash("that message can no longer be retracted — nothing sent");
+                    ctx.info("that message can no longer be retracted — nothing sent");
                 }
             }
             ctx.state.needs_redraw = true;
@@ -808,14 +845,22 @@ async fn enter_key(ctx: &mut KeyCtx<'_>, m: KeyModifiers) -> KeyFlow {
 fn ctrl_c(ctx: &mut KeyCtx<'_>) -> KeyFlow {
     if let Some(frame) = ctx.interrupt.interrupt_frame() {
         if ctx.frame_tx.send(frame).is_err() {
-            ctx.flash("attach socket closed — stop request not sent");
+            notifications::error(
+                ctx.state,
+                NoticeSource::Attached,
+                "attach socket closed — stop request not sent",
+            );
         }
         return KeyFlow::Continue;
     }
     if ctx.read_only && ctx.streaming.is_streaming {
         let notice = nothing_to_stop_notice(true);
-        ctx.conversation.messages.push(system_message(notice.text));
-        ctx.state.needs_redraw = true;
+        notifications::notify(
+            ctx.state,
+            NoticeSource::Attached,
+            NoticeSeverity::from_level(notice.level),
+            notice.text,
+        );
         return KeyFlow::Continue;
     }
     request_quit(ctx)
@@ -890,21 +935,48 @@ async fn chord(ctx: &mut KeyCtx<'_>, c: char, origin: FocusState) -> KeyFlow {
             let args = crate::adapters::tui::handlers::team_command::TeamLogArgs::default();
             run_team_log(ctx, &args).await;
         }
-        AttachedRoute::Unavailable(remedy) => show_unavailable(ctx, spec, remedy),
+        AttachedRoute::Unavailable(remedy) => show_unavailable(ctx, remedy),
+        AttachedRoute::NotificationLog => {
+            // The leader restored the origin focus; S-LOG saves it as its caller.
+            notification_log::open(ctx.state);
+        }
+        AttachedRoute::ClearToasts => {
+            let _ = ctx.state.notifications.clear_toasts();
+            ctx.state.needs_redraw = true;
+        }
         AttachedRoute::Detach => return KeyFlow::Detach,
     }
     KeyFlow::Continue
 }
 
 /// The capability-qualified unavailable result of one retained chord.
-fn show_unavailable(ctx: &mut KeyCtx<'_>, spec: &ChordSpec, remedy: &str) {
-    // `i`/`m` reuse the existing sign-in refusal (same block as typed `/login`).
-    let id = if remedy == chord_menu::ATTACHED_SIGN_IN {
-        "attached-sign-in".to_owned()
+fn show_unavailable(ctx: &mut KeyCtx<'_>, remedy: &str) {
+    // `i`/`m` reuse the existing sign-in refusal (same notice as typed `/login`).
+    let source = if remedy == chord_menu::ATTACHED_SIGN_IN {
+        NoticeSource::Login
     } else {
-        format!("attached-chord-{}", spec.key)
+        NoticeSource::Chord
     };
-    ctx.feedback(&id, remedy);
+    notifications::info(ctx.state, source, remedy);
+}
+
+/// One key while S-LOG is open: the shared handler decides; a copy goes through
+/// the clipboard helper (its result is itself a notice). The attached client has
+/// no retry path, so `Retry` is never offered and never acted on.
+fn log_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    let facts = log_facts(&ctx.conversation.id);
+    match notification_log::handle_raw_key(ctx.state, key, &facts) {
+        LogOutcome::Copy(text) => {
+            crate::adapters::tui::handlers::clipboard::notify_copy(
+                ctx.state,
+                &text,
+                &crate::adapters::tui::clipboard::copy_to_clipboard,
+            );
+        }
+        LogOutcome::Closed | LogOutcome::Consumed | LogOutcome::Retry { .. } => {}
+    }
+    ctx.state.needs_redraw = true;
+    KeyFlow::Continue
 }
 
 async fn run_team_log(
@@ -1045,7 +1117,7 @@ async fn run_palette_command(ctx: &mut KeyCtx<'_>, name: String, args: Option<St
         return request_quit(ctx);
     }
     if ctx.state.pinned_peer_compose.is_some() {
-        ctx.flash("finish or cancel your peer reply before running a command from the palette");
+        ctx.info("finish or cancel your peer reply before running a command from the palette");
         return KeyFlow::Continue;
     }
     let text = match args {
@@ -1061,11 +1133,11 @@ async fn run_palette_command(ctx: &mut KeyCtx<'_>, name: String, args: Option<St
 /// Open the existing retract confirmation for one REAL retractable row.
 fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
     if ctx.read_only {
-        ctx.flash("read-only — can't retract here");
+        ctx.info("read-only — can't retract here");
         return;
     }
     let Some(message_id) = message_id else {
-        ctx.flash("no auto-sent message to retract");
+        ctx.info("no auto-sent message to retract");
         return;
     };
     let target = retractable_rows(ctx.conversation)
@@ -1073,7 +1145,7 @@ fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
         .map(|row| (row.id.clone(), preview_line(&row.content, 48)));
     match target {
         Some(target) => *ctx.retract_confirm = Some(target),
-        None => ctx.flash("that message can no longer be retracted — nothing sent"),
+        None => ctx.info("that message can no longer be retracted — nothing sent"),
     }
     ctx.state.needs_redraw = true;
 }
@@ -1086,6 +1158,8 @@ enum LocalSlash {
     Detach,
     Multiline,
     Quit,
+    /// `/notifications`: open S-LOG.
+    Notifications,
     /// A known built-in this client does not handle: refused, never model input.
     Unavailable(&'static str),
 }
@@ -1096,6 +1170,7 @@ fn local_slash(text: &str) -> Option<LocalSlash> {
         "detach" => Some(LocalSlash::Detach),
         "ml" => Some(LocalSlash::Multiline),
         "quit" => Some(LocalSlash::Quit),
+        "notifications" => Some(LocalSlash::Notifications),
         other if builtin_commands::attached_unavailable(other) => {
             builtin_commands::find(other).map(|builtin| LocalSlash::Unavailable(builtin.name))
         }
@@ -1122,11 +1197,16 @@ fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
             ctx.state.multiline_mode = !ctx.state.multiline_mode;
             KeyFlow::Continue
         }
+        LocalSlash::Notifications => {
+            notification_log::open(ctx.state);
+            KeyFlow::Continue
+        }
         LocalSlash::Quit => request_quit(ctx),
         LocalSlash::Unavailable(name) => {
-            ctx.feedback(
-                &format!("attached-unavailable-{name}"),
-                &format!(
+            notifications::info(
+                ctx.state,
+                NoticeSource::Attached,
+                format!(
                     "/{name} is not available in an attached session. Detach (Ctrl+X d) and use it from a standalone `rustain` session."
                 ),
             );
@@ -1371,6 +1451,17 @@ mod tests {
                 .map(|block| block.message.as_str())
         }
 
+        /// The newest store notice from `source` (message text): the attached
+        /// notices of Story 21.1 are records, never feedback blocks or flashes.
+        fn notice(&self, source: NoticeSource) -> Option<&str> {
+            self.state
+                .notifications
+                .records()
+                .rev()
+                .find(|record| record.source == source)
+                .map(|record| record.message.as_str())
+        }
+
         fn retractable(&mut self, id: &str, content: &str) {
             let mut row = system_message(content);
             row.id = id.to_owned();
@@ -1402,21 +1493,21 @@ mod tests {
         let mut exercised: BTreeSet<String> = BTreeSet::new();
 
         // Capability-qualified unavailable chords: the same logical command's
-        // explicit result with its real remedy, shown as a feedback block.
-        let unavailable: [(char, &str, &str); 11] = [
-            ('p', "attached-chord-p", "rustain profile"),
-            ('m', "attached-sign-in", "rustain auth login"),
-            ('i', "attached-sign-in", "rustain auth login"),
-            ('a', "attached-chord-a", "/team status"),
-            ('s', "attached-chord-s", "/team status"),
-            ('r', "attached-chord-r", "/team status"),
-            ('e', "attached-chord-e", "/team status"),
-            ('t', "attached-chord-t", "/team status"),
-            ('u', "attached-chord-u", "/team status"),
-            ('w', "attached-chord-w", "single layout"),
-            ('f', "attached-chord-f", "single layout"),
+        // explicit result with its real remedy, shown as a store notice.
+        let unavailable: [(char, NoticeSource, &str); 11] = [
+            ('p', NoticeSource::Chord, "rustain profile"),
+            ('m', NoticeSource::Login, "rustain auth login"),
+            ('i', NoticeSource::Login, "rustain auth login"),
+            ('a', NoticeSource::Chord, "/team status"),
+            ('s', NoticeSource::Chord, "/team status"),
+            ('r', NoticeSource::Chord, "/team status"),
+            ('e', NoticeSource::Chord, "/team status"),
+            ('t', NoticeSource::Chord, "/team status"),
+            ('u', NoticeSource::Chord, "/team status"),
+            ('w', NoticeSource::Chord, "single layout"),
+            ('f', NoticeSource::Chord, "single layout"),
         ];
-        for (key, block, remedy) in unavailable {
+        for (key, source, remedy) in unavailable {
             let mut rig = Rig::new(false);
             rig.type_text("draft").await;
             assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
@@ -1425,9 +1516,13 @@ mod tests {
             assert!(!rig.state.which_key.active, "{key}: leader consumed");
             assert_eq!(rig.state.focus, FocusState::Input, "{key}: origin restored");
             assert_eq!(rig.input, "draft", "{key}: draft untouched");
+            assert!(
+                rig.state.feedback_blocks.is_empty(),
+                "{key}: a notice, never a transcript feedback block"
+            );
             let message = rig
-                .feedback(block)
-                .unwrap_or_else(|| panic!("{key}: no {block}"));
+                .notice(source)
+                .unwrap_or_else(|| panic!("{key}: no {source:?} notice"));
             assert!(message.contains(remedy), "{key}: {message}");
             let spec = chord_menu::spec_for(key).unwrap();
             assert!(
@@ -1441,13 +1536,13 @@ mod tests {
             exercised.insert(key.to_ascii_uppercase().to_string());
         }
 
-        // `i`/`m` reuse the existing sign-in refusal: the typed `/login` block.
+        // `i`/`m` reuse the existing sign-in refusal: the typed `/login` notice.
         let mut typed = Rig::new(false);
         typed.type_text("/login").await;
         typed.state.autocomplete.dismiss();
         typed.enter().await;
         assert_eq!(
-            typed.feedback("attached-sign-in"),
+            typed.notice(NoticeSource::Login),
             Some(chord_menu::ATTACHED_SIGN_IN)
         );
 
@@ -1511,6 +1606,30 @@ mod tests {
         assert!(!rig.state.which_key.active);
         assert_eq!(rig.state.focus, FocusState::Chat);
         exercised.insert("Esc".to_owned());
+
+        // `n`: S-LOG opens over the origin focus; Esc closes it and the draft
+        // is untouched.
+        let mut rig = Rig::new(false);
+        rig.type_text("keep me").await;
+        rig.ctrl('x').await;
+        assert_eq!(rig.ch('n').await, KeyFlow::Continue);
+        assert!(rig.state.notification_log.is_some());
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert_eq!(rig.esc().await, KeyFlow::Continue);
+        assert!(rig.state.notification_log.is_none());
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert_eq!(rig.input, "keep me");
+        exercised.insert("N".to_owned());
+
+        // `x`: archives every visible toast; the log keeps the records.
+        let mut rig = Rig::new(false);
+        notifications::info(&mut rig.state, NoticeSource::Attached, "one");
+        assert_eq!(rig.state.notifications.visible().count(), 1);
+        rig.ctrl('x').await;
+        assert_eq!(rig.ch('x').await, KeyFlow::Continue);
+        assert_eq!(rig.state.notifications.visible().count(), 0);
+        assert_eq!(rig.state.notifications.records().len(), 1);
+        exercised.insert("X".to_owned());
 
         // The painted menu inventory equals the exercised routes, so hiding an
         // attached chord (or painting one without a caller) fails here.
@@ -1705,14 +1824,18 @@ mod tests {
         let mut viewer = Rig::new(true);
         viewer.streaming.is_streaming = true;
         assert_eq!(viewer.ctrl('c').await, KeyFlow::Continue);
+        // Story 21.1 AC6: the refusal is a store notice (toast + S-LOG), not a
+        // transcript row.
         assert_eq!(
             viewer
-                .conversation
-                .messages
+                .state
+                .notifications
+                .records()
                 .last()
-                .map(|m| m.content.clone()),
+                .map(|r| r.message.clone()),
             Some(InterruptRefusal::ReadOnly.to_string())
         );
+        assert!(viewer.conversation.messages.is_empty());
         assert!(viewer.frames().is_empty());
         // Read-only and idle follows the same quit rule as a writer.
         let mut viewer = Rig::new(true);
@@ -1814,7 +1937,7 @@ mod tests {
             assert_eq!(rig.enter().await, KeyFlow::Continue);
             assert!(rig.frames().is_empty(), "/{name} must not reach the model");
             let message = rig
-                .feedback(&format!("attached-unavailable-{name}"))
+                .notice(NoticeSource::Attached)
                 .unwrap_or_else(|| panic!("/{name}: no refusal"));
             assert!(
                 message.starts_with(&format!("/{name} is not available in an attached session")),
@@ -1827,7 +1950,7 @@ mod tests {
         rig.type_text("/accounts").await;
         rig.state.autocomplete.dismiss();
         rig.enter().await;
-        assert!(rig.feedback("attached-account-change").is_some());
+        assert!(rig.notice(NoticeSource::Accounts).is_some());
         assert!(rig.frames().is_empty());
         // A custom (non built-in) command keeps its daemon passthrough.
         let mut rig = Rig::new(false);
@@ -1848,10 +1971,10 @@ mod tests {
         rig.state.autocomplete.dismiss();
         rig.enter().await;
         assert!(rig.frames().is_empty());
-        assert!(matches!(
-            &rig.state.status,
-            StatusState::Flash { message, .. } if message == "read-only — can't retract here"
-        ));
+        assert_eq!(
+            rig.notice(NoticeSource::Attached),
+            Some("read-only — can't retract here")
+        );
         // Writer: only the PREVIEW request goes out (confirmation comes from
         // the daemon-served card); no retraction effect and no model turn.
         let mut rig = Rig::new(false);
@@ -2038,10 +2161,10 @@ mod tests {
         rig.enter().await;
         assert!(rig.retract_confirm.is_none());
         assert!(rig.frames().is_empty());
-        assert!(matches!(
-            &rig.state.status,
-            StatusState::Flash { message, .. } if message == "read-only — can't retract here"
-        ));
+        assert_eq!(
+            rig.notice(NoticeSource::Attached),
+            Some("read-only — can't retract here")
+        );
     }
 
     // ── AC4: slash popup ─────────────────────────────────────────────────────
@@ -2062,7 +2185,10 @@ mod tests {
                 other => panic!("unexpected {other:?}"),
             })
             .collect();
-        assert_eq!(names, ["clear", "team", "ml", "quit", "detach"]);
+        assert_eq!(
+            names,
+            ["clear", "team", "ml", "quit", "notifications", "detach"]
+        );
         rig.type_text("cl").await;
         assert_eq!(rig.state.autocomplete.suggestions.len(), 1);
         // Esc closes the popup and restores the exact pre-trigger composer.
@@ -2100,6 +2226,10 @@ mod tests {
         rig.esc().await;
         rig.ctrl('p').await;
         assert!(paste_blocked(&rig.state), "palette");
+        rig.esc().await;
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        assert!(paste_blocked(&rig.state), "S-LOG");
         rig.esc().await;
         rig.ctrl('q').await; // idle: exits directly, no frame
         rig.type_text("draft").await;
@@ -2153,9 +2283,18 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
+                let chat_pane = Rect::new(0, 0, width, height - 5);
                 let input_area = Rect::new(0, height - 5, width, 4);
                 let status_bar = Rect::new(0, height - 1, width, 1);
-                paint_overlays(f, area, input_area, status_bar, state);
+                paint_overlays(
+                    f,
+                    area,
+                    chat_pane,
+                    input_area,
+                    status_bar,
+                    state,
+                    &log_facts("conversation-1"),
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -2223,5 +2362,109 @@ mod tests {
             input_box::tail_scroll(&"x\n".repeat(20), area),
             21 - input_box::MAX_INPUT_LINES
         );
+    }
+
+    // ── Story 21.1 AC5/AC6: S-LOG and toasts in the attached host ────────────
+
+    #[tokio::test]
+    async fn story21_1_attached_slash_notifications_opens_the_log_which_owns_every_key() {
+        let mut rig = Rig::new(false);
+        notifications::warning(&mut rig.state, NoticeSource::Attached, "something happened");
+        rig.type_text("/notifications").await;
+        rig.state.autocomplete.dismiss();
+        assert_eq!(rig.enter().await, KeyFlow::Continue);
+        assert!(rig.input.is_empty(), "the command is consumed");
+        assert!(rig.state.notification_log.is_some());
+        assert!(rig.frames().is_empty(), "never sent to the daemon");
+        assert_eq!(
+            rig.state.notifications.unseen(),
+            0,
+            "presenting the log clears the badge"
+        );
+        // Every key belongs to S-LOG: text never reaches the composer, and `r`
+        // is inert because the attached client has no retry path.
+        rig.type_text("rhi").await;
+        assert!(rig.input.is_empty());
+        assert!(rig.frames().is_empty());
+        assert!(rig.state.notification_log.is_some());
+        // Ctrl+Q closes the log first, then asks to quit (idle: exits directly).
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Quit);
+        assert!(rig.state.notification_log.is_none());
+    }
+
+    #[tokio::test]
+    async fn story21_1_attached_toasts_and_log_paint_in_overlay_order() {
+        let mut rig = Rig::new(false);
+        notifications::info(&mut rig.state, NoticeSource::Attached, "toast marker");
+        let painted = paint(&rig.state, 80).join("\n");
+        assert!(painted.contains("toast marker"), "{painted}");
+        assert!(painted.contains("Info"), "severity word painted: {painted}");
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        let painted = paint(&rig.state, 80).join("\n");
+        assert!(painted.contains("Notifications (1)"), "{painted}");
+    }
+
+    /// K8 — both retained chords dispatch through the real attached chord
+    /// arms: `Ctrl+X n` opens S-LOG with the origin focus as its caller,
+    /// `Ctrl+X x` archives every visible toast and keeps the log rows.
+    #[tokio::test]
+    async fn story21_1_attached_ctrl_x_n_and_x_dispatch_through_the_chord_arms() {
+        let mut rig = Rig::new(false);
+        rig.state.focus = FocusState::Chat;
+        notifications::error(&mut rig.state, NoticeSource::Attached, "an error");
+        notifications::info(&mut rig.state, NoticeSource::Attached, "an info");
+        assert_eq!(rig.state.notifications.visible().count(), 2);
+
+        assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
+        assert_eq!(rig.ch('x').await, KeyFlow::Continue);
+        assert_eq!(rig.state.notifications.visible().count(), 0, "x clears");
+        assert_eq!(rig.state.notifications.len(), 2, "the log keeps both");
+        assert!(rig.state.notification_log.is_none(), "x is not the log");
+        assert_eq!(rig.state.focus, FocusState::Chat);
+
+        assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
+        assert_eq!(rig.ch('n').await, KeyFlow::Continue);
+        let log = rig.state.notification_log.as_ref().expect("S-LOG is open");
+        assert_eq!(log.caller_focus, FocusState::Chat);
+        assert!(rig.frames().is_empty(), "never sent to the daemon");
+    }
+
+    /// K6 (attached families) — a refused send and a dead socket reach the user
+    /// as store notices through the real key ingress, never as a status
+    /// flash or a transcript row: the read-only send refusal is an Info toast,
+    /// the dead-socket stop request is an Error toast.
+    #[tokio::test]
+    async fn story21_1_attached_flash_families_are_store_notices_not_status_or_rows() {
+        use crate::domain::models::StatusState;
+
+        let mut viewer = Rig::new(true);
+        viewer.type_text("hello").await;
+        assert_eq!(viewer.enter().await, KeyFlow::Continue);
+        let refusal = viewer
+            .state
+            .notifications
+            .visible()
+            .next()
+            .expect("a toast");
+        assert_eq!(refusal.message, "read-only — can't send here");
+        assert_eq!(refusal.severity, NoticeSeverity::Info);
+        assert_eq!(refusal.source, NoticeSource::Attached);
+        assert!(viewer.frames().is_empty(), "nothing reached the daemon");
+        assert!(!matches!(viewer.state.status, StatusState::Flash { .. }));
+        assert!(viewer.conversation.messages.is_empty());
+
+        let mut rig = Rig::new(false);
+        rig.interrupt.apply(&DaemonFrame::ActiveTurn {
+            generation: Some(TurnGeneration(7)),
+        });
+        rig.streaming.is_streaming = true;
+        rig.rx.close();
+        assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
+        let dead = rig.state.notifications.visible().next().expect("a toast");
+        assert_eq!(dead.message, "attach socket closed — stop request not sent");
+        assert_eq!(dead.severity, NoticeSeverity::Error);
+        assert!(!matches!(rig.state.status, StatusState::Flash { .. }));
+        assert!(rig.conversation.messages.is_empty());
     }
 }

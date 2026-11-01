@@ -522,7 +522,11 @@ fn ctrl_x_r_dispatches_the_durable_room_panel() {
             InputAction::OpenPanel(PanelType::Room),
             "Ctrl+X, {key} must open the real panel"
         );
-        assert!(!state.feedback_blocks.contains_key("chord-r"));
+        assert!(
+            state.notifications.records().all(|record| record.source
+                != rustain::adapters::tui::notifications::NoticeSource::Chord),
+            "a Noop chord would have left a 'not yet available' notice behind"
+        );
     }
 }
 

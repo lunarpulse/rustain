@@ -9,6 +9,7 @@ pub(crate) mod attach_interrupt;
 pub mod attach_loop;
 pub mod event_bus;
 pub mod event_loop;
+pub(crate) mod notice_actions;
 pub(crate) mod panel_bridge;
 pub mod peer_bridge;
 pub(crate) mod quit_guard;

@@ -156,24 +156,57 @@ fn boundary_move_does_not_change_order_and_commit_survives_later_cancel() {
 }
 
 #[test]
-fn finite_flash_expires_but_sticky_warning_survives_ticks() {
+fn story21_1_tick_requests_a_redraw_only_when_a_toast_deadline_passed() {
+    use crate::adapters::tui::notifications::{
+        self, NoticeSeverity, NoticeSource, NotificationStore,
+    };
+    use crate::domain::clock::MockClock;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
     let conversation = conversation();
     let mut state = TuiState::new(160, 24);
-    state.status_before_flash = Some(StatusState::Idle);
-    state.status = StatusState::Flash {
-        message: "temporary".into(),
-        remaining_ms: 200,
-    };
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    state.notifications = NotificationStore::new(
+        clock.clone(),
+        crate::domain::models::NotificationsConfig::default().clamped(),
+    );
+    notifications::notify(
+        &mut state,
+        NoticeSource::System,
+        NoticeSeverity::Info,
+        "temporary",
+    );
+    state.needs_redraw = false;
+
+    // A tick before the deadline neither redraws nor changes the toast: no
+    // per-tick decrement exists any more (A4).
     tick_status(&mut state, &conversation, 50);
-    assert!(matches!(
-        state.status,
-        StatusState::Flash {
-            remaining_ms: 150,
-            ..
-        }
-    ));
+    assert!(!state.needs_redraw);
+    assert_eq!(state.notifications.visible().count(), 1);
+
+    // Once the deadline has passed the tick asks for the redraw whose
+    // `begin_draw` sweeps the toast; the record stays for the log.
+    clock.advance(Duration::from_secs(60));
     tick_status(&mut state, &conversation, 150);
-    assert!(matches!(state.status, StatusState::Idle));
+    assert!(state.needs_redraw);
+    notifications::begin_draw(&mut state);
+    assert_eq!(state.notifications.visible().count(), 0);
+    assert_eq!(state.notifications.records().count(), 1);
+    state.needs_redraw = false;
+    tick_status(&mut state, &conversation, 150);
+    assert!(
+        !state.needs_redraw,
+        "an expired toast asks for no more redraws"
+    );
+}
+
+#[test]
+fn status_flash_is_not_decremented_by_ticks() {
+    // The delete-confirmation Flash is the one status flash left: sticky, and
+    // the tick leaves it (and its `remaining_ms`) alone.
+    let conversation = conversation();
+    let mut state = TuiState::new(160, 24);
     state.status = StatusState::Flash {
         message: "sticky".into(),
         remaining_ms: u64::MAX,
@@ -183,6 +216,18 @@ fn finite_flash_expires_but_sticky_warning_survives_ticks() {
         state.status,
         StatusState::Flash {
             remaining_ms: u64::MAX,
+            ..
+        }
+    ));
+    state.status = StatusState::Flash {
+        message: "finite".into(),
+        remaining_ms: 200,
+    };
+    tick_status(&mut state, &conversation, 250);
+    assert!(matches!(
+        state.status,
+        StatusState::Flash {
+            remaining_ms: 200,
             ..
         }
     ));

@@ -104,7 +104,12 @@ def _world(tmp_path, tool, invocation, evidence):
         home.mkdir()
         (ws / ".rustain").mkdir(parents=True)
         (ws / ".env").write_text("")
-        (ws / ".rustain/config.toml").write_text("[permissions]\nalways_tools = []\n")
+        # Story 21.1: the attach-time `Read-only.` notice of the mirror is a 4 s
+        # Info toast, no longer a transcript row. A 30 s Info lifetime (as 19_19
+        # act2 does) keeps the mirror's structural wait independent of runner
+        # speed; no other Info notice is raised in these scenes.
+        (ws / ".rustain/config.toml").write_text(
+            "[permissions]\nalways_tools = []\n\n[notifications]\ninfo_ttl_secs = 30\n")
         scene = tmp_path / "scene.json"
         _scene(scene, tool, invocation)
         stub = stack.enter_context(SceneStub(scene, tmp_path / "requests.jsonl"))
@@ -259,6 +264,7 @@ class Plain:
 
 def _observer(stack, ws, env, evidence):
     mirror = _tui(stack, ws, env, evidence, attached=True, name="mirror")
+    # The read-only notice is a toast now (30 s Info lifetime from `_world`).
     _wait(lambda: "Read-only" in mirror.get_screen_text(), mirror.get_screen_text)
     return mirror
 

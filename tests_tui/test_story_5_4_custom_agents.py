@@ -42,9 +42,15 @@ def type_slowly(t: RustainTUI, text: str, delay: float = CHAR_DELAY) -> None:
         time.sleep(delay)
 
 
-def _start_tui_with_workspace(workspace_path):
-    """Start a RustainTUI pointing at the given workspace (no auto-build)."""
-    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path)
+def _start_tui_with_workspace(workspace_path, isolated_home=None):
+    """Start a RustainTUI pointing at the given workspace (no auto-build).
+
+    ``isolated_home`` replaces ``$HOME`` for tests that assert the ABSENCE of a
+    discovery notice: user-global agents in the developer's real home would
+    otherwise paint a (now visible, Story 21.1) ``Discovered N custom agent(s)`` toast.
+    """
+    overrides = {"HOME": str(isolated_home)} if isolated_home is not None else None
+    tui = RustainTUI(fresh=True, build=False, workspace=workspace_path, env_overrides=overrides)
     tui.start()
     return tui
 
@@ -52,7 +58,8 @@ def _start_tui_with_workspace(workspace_path):
 def _wait_for_agents_loaded(tui: RustainTUI, screen_text: str, timeout: float = 15.0) -> None:
     """Wait for the background agent scan to complete.
 
-    Polls the pyte screen for *screen_text* (the SystemNotice flash).
+    Polls the pyte screen for *screen_text* (the SystemNotice, a 4 s Info toast
+    at the chat pane's bottom edge since Story 21.1 — visible in every density).
     Falls back to checking the log file for ``AgentsDiscovered`` entries.
     """
     if tui.wait_for_screen(screen_text, timeout=timeout):
@@ -194,10 +201,13 @@ def test_no_agents_dir_renders_only_default(build_binary, tmp_path):
     No discovery notice should appear. The @Agents/ popup should still
     work and show the 'default' entry with the 'no agents discovered' description.
     """
-    tui = _start_tui_with_workspace(tmp_path)
+    tui = _start_tui_with_workspace(tmp_path, isolated_home=tmp_path / "home")
     try:
         time.sleep(3.0)
 
+        # Story 21.1: a discovery toast would be painted for 4 s in the default
+        # Focus density (no density queue hides it any more), so this absence
+        # check is non-vacuous: with zero agents no notice is posted at all.
         tui.assert_screen_not_contains(
             "Discovered",
             msg="Empty workspace should not show agent discovery notice",

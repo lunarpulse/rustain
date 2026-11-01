@@ -923,6 +923,7 @@ mod tests {
                         false,
                         None,
                         view.display,
+                        0,
                     );
                 })
                 .unwrap();

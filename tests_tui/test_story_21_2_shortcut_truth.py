@@ -146,13 +146,28 @@ def _status_row(screen):
 
 
 def _menu(screen):
-    """Text of the Ctrl+X leader box (the bordered box titled `Ctrl+X`), else ''."""
+    """Text of the Ctrl+X leader box (the bordered box titled `Ctrl+X`), else ''.
+
+    Menu items are painted whole (never split across rows), so `[P] Profile`,
+    `[D] Detach` and `(n/a)` stay findable at 80 columns however the menu wraps."""
     lines = screen.split("\n")
     for i, line in enumerate(lines):
         if line.strip().startswith("┌") and "Ctrl+X" in line:
             end = next((j for j in range(i + 1, len(lines)) if lines[j].strip().startswith("└")), len(lines))
             return "\n".join(lines[i + 1:end])
     return ""
+
+
+def _menu_tail_in_order(menu, attached):
+    """Story 21.1 AC5: the leader menu lists `[N] Notifications` and `[X] Clear
+    toasts` after `[?] Help` (local) / `[D] Detach` and `[?] Help` (attached)
+    and before `[Enter] Send` / `[Esc] Cancel`, available (never `(n/a)`)."""
+    order = ["[?] Help", "[N] Notifications", "[X] Clear toasts", "[Enter] Send", "[Esc] Cancel"]
+    if attached:
+        order.insert(0, "[D] Detach")
+    positions = [menu.find(item) for item in order]
+    assert all(p >= 0 for p in positions) and positions == sorted(positions), (order, positions, menu)
+    assert "[N] Notifications (n/a)" not in menu and "[X] Clear toasts (n/a)" not in menu, menu
 
 
 def _capture(tui, evidence, name, screen=None):
@@ -389,7 +404,8 @@ def _exercise(binary, evidence, root, monkeypatch):
         tui.send(BACKSPACE * 5)
         _wait(tui, lambda s: "what?" not in _composer(s), "literal text erased")
         tui.send(CTRL_X)
-        _wait(tui, lambda s: "[P] Profile" in _menu(s), "untimed leader menu (local)")
+        screen = _wait(tui, lambda s: "[P] Profile" in _menu(s), "untimed leader menu (local)")
+        _menu_tail_in_order(_menu(screen), attached=False)
         tui.send("?")
         screen = _wait(tui, lambda s: "Keybindings" in s, "Ctrl+X ? opens help")
         _capture(tui, evidence, "04-help", screen)
@@ -431,11 +447,24 @@ def _exercise(binary, evidence, root, monkeypatch):
         tui.send(ENTER)
         # The composer is consumed; an echoed warning may legitimately repeat the name.
         _wait(tui, lambda s: "/nosuchcmd" not in _composer(s), "unknown slash consumed")
+        # Story 21.1: the Advisory is a Warning toast on the chat pane's bottom
+        # row (positional, right-aligned, severity word first; 10 s TTL).
+        unknown = "Unknown command: /nosuchcmd — not a built-in or a custom command."
+        screen = _wait(tui, lambda s: harness.toast_present(s, unknown, "Warning"),
+                       "unknown-command Warning toast")
+        _capture(tui, evidence, "07a-unknown-slash-toast", screen)
         tui.send(CTRL_X)
         screen = _wait(tui, lambda s: "[P] Profile" in _menu(s), "leader menu over a live stream")
         _capture(tui, evidence, "07-menu-over-stream", screen)
         tui.send(ESC)
         _wait(tui, lambda s: "[P] Profile" not in _menu(s), "leader menu closed")
+        # `Ctrl+X x` archives the visible toast so the 10 s Warning cannot sit
+        # over the transcript's bottom row while the held stream is asserted.
+        tui.send(CTRL_X)
+        _wait(tui, lambda s: "[X] Clear toasts" in _menu(s), "leader menu lists Clear toasts")
+        tui.send("x")
+        _wait(tui, lambda s: "[X] Clear toasts" not in _menu(s)
+              and not harness.toast_present(s, unknown, "Warning"), "toast cleared by Ctrl+X x")
         tui.send(CTRL_P)
         _wait(tui, _palette_listed, "palette over a live stream")
         tui.send(ESC)
@@ -542,6 +571,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         # painted (qualified when unavailable) and Esc never detaches.
         tui.send(CTRL_X)
         screen = _wait(tui, lambda s: "[D] Detach" in _menu(s) and "(n/a)" in _menu(s), "attached leader menu")
+        _menu_tail_in_order(_menu(screen), attached=True)
         _capture(tui, evidence, "14-attached-menu", screen)
         tui.send(ESC)
         _wait(tui, lambda s: "[D] Detach" not in _menu(s) and "attached" in _status_row(s), "menu closed, still attached")

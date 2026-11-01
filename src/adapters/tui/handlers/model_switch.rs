@@ -29,9 +29,10 @@
 
 use tokio::sync::mpsc;
 
+use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
-use crate::domain::models::{Conversation, NoticeLevel, StreamingState, generate_conversation_id};
+use crate::domain::models::{Conversation, NoticeLevel, StreamingState};
 use crate::domain::ports::ProviderInfoPort;
 
 use super::{HandlerOutcome, SpawnRequest};
@@ -63,13 +64,7 @@ pub fn open_selector(
 ) {
     let columns = crate::adapters::tui::state::model_selector_columns(info);
     if columns.is_empty() {
-        let fb = crate::domain::models::FeedbackBlock {
-            id: "model-selector-empty".to_string(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message: "No models available".to_string(),
-            actions: Vec::new(),
-        };
-        state.feedback_blocks.insert(fb.id.clone(), fb);
+        notifications::info(state, NoticeSource::Model, "No models available");
     } else {
         let active = column.map_or_else(|| info.active_delegate_id(), str::to_owned);
         let model = state
@@ -191,13 +186,11 @@ pub async fn handle_apply_model_switch(
                 provider,
             });
         } else {
-            let fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!("Provider '{}' not found", resolved_pid),
-                actions: vec![],
-            };
-            state.feedback_blocks.insert(fb.id.clone(), fb);
+            notifications::warning(
+                state,
+                NoticeSource::Model,
+                format!("Provider '{}' not found", resolved_pid),
+            );
             state.needs_redraw = true;
             return HandlerOutcome::Quiet;
         }
@@ -261,13 +254,7 @@ pub async fn handle_complete_model_switch(
 
     if resolved_pid != info.active_delegate_id() {
         if let Err(e) = info.set_active_provider(resolved_pid) {
-            let fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!("Switch failed: {}", e),
-                actions: vec![],
-            };
-            state.feedback_blocks.insert(fb.id.clone(), fb);
+            notifications::warning(state, NoticeSource::Model, format!("Switch failed: {}", e));
             state.needs_redraw = true;
             return HandlerOutcome::Quiet;
         }
@@ -288,35 +275,29 @@ pub async fn handle_complete_model_switch(
         .map(|m| m.display_name.clone())
         .unwrap_or_else(|| model_id.to_string());
 
-    let fb = crate::domain::models::FeedbackBlock {
-        id: generate_conversation_id(),
-        level: crate::domain::models::FeedbackLevel::Info,
-        message: format!(
+    notifications::success(
+        state,
+        NoticeSource::Model,
+        format!(
             "Switched to {}/{} (context: {})",
             provider_display_name,
             model_display_name,
             humanize_ctx(context_window)
         ),
-        actions: vec![],
-    };
-    state.feedback_blocks.insert(fb.id.clone(), fb);
+    );
 
     // Story 7.3 AC7: warn when switching to a non-tool model
     if let Some(ref md) = model_desc {
         use crate::domain::models::provider::ModelCapability;
         if !md.capabilities.contains(&ModelCapability::ToolUse) {
-            let warning_fb = crate::domain::models::FeedbackBlock {
-                id: generate_conversation_id(),
-                level: crate::domain::models::FeedbackLevel::Warning,
-                message: format!(
+            notifications::warning(
+                state,
+                NoticeSource::Model,
+                format!(
                     "{} does not support tool use. Tool execution will be unavailable.",
                     md.display_name
                 ),
-                actions: vec![],
-            };
-            state
-                .feedback_blocks
-                .insert(warning_fb.id.clone(), warning_fb);
+            );
         }
     }
 

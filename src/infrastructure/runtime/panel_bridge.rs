@@ -101,18 +101,7 @@ pub(crate) fn tick_status(state: &mut TuiState, conversation: &Conversation, tic
     {
         state.needs_redraw = true;
     }
-    // u64::MAX is the sticky YOLO warning, replaced only by a mode change/cancel.
-    if let StatusState::Flash { remaining_ms, .. } = &mut state.status
-        && *remaining_ms != u64::MAX
-    {
-        if *remaining_ms <= tick_ms {
-            state.status = state
-                .status_before_flash
-                .take()
-                .unwrap_or(StatusState::Idle);
-            state.needs_redraw = true;
-        } else {
-            *remaining_ms -= tick_ms;
-        }
-    }
+    // Story 21.1 A4: a notification deadline that has passed asks for the redraw
+    // that sweeps it; nothing is decremented per tick.
+    crate::adapters::tui::notifications::tick(state);
 }

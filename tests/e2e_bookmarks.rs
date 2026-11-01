@@ -352,11 +352,11 @@ fn test_e2e_bookmark_glyph_preserves_height_invariant() {
 fn test_e2e_quote_with_empty_bookmarks_returns_open_action_and_apply_flashes() {
     // AC10: pressing `'` with empty bookmarks dispatches OpenBookmarkList;
     // the event loop's handler (apply_open_bookmark_list) is what actually
-    // decides between opening the overlay and flashing the teaching message.
+    // decides between opening the overlay and recording the teaching notice.
     // Here we verify:
     //   (a) the key handler dispatches OpenBookmarkList from chat focus, and
     //   (b) apply_open_bookmark_list with empty bookmarks leaves the focus
-    //       unchanged and sets a Flash status — no overlay.
+    //       unchanged and records a store notice (Story 21.1) — no overlay.
     //
     // This covers the party-mode Fix 31 (empty-bookmarks teaching moment).
     let mut state = make_chat_state();
