@@ -137,7 +137,9 @@ async fn approved() -> DraftFixture {
     options.runtime_factory = Some(Arc::new(|workspace, storage, _| {
         build_runtime(
             Arc::new(ScriptedProvider {
-                text: format!("{START}\napproved draft body\n{END}"),
+                // Paragraph breaks, not soft breaks: 21-12 AC2 renders a soft
+                // break as a space, which would put both sentinels on one row.
+                text: format!("{START}\n\napproved draft body\n\n{END}"),
                 requests: Arc::new(parking_lot::Mutex::new(Vec::new())),
                 gate: None,
             }),
@@ -158,14 +160,15 @@ async fn approved() -> DraftFixture {
         (
             0,
             PeerDraftAction::Approve,
-            format!("{START}\napproved draft body\n{END}"),
+            format!("{START}\n\napproved draft body\n\n{END}"),
         ),
         (
             1,
             PeerDraftAction::Edit {
-                content: "K20A_EDITED_START\noperator edited bytes intact\nK20A_EDITED_END".into(),
+                content: "K20A_EDITED_START\n\noperator edited bytes intact\n\nK20A_EDITED_END"
+                    .into(),
             },
-            "K20A_EDITED_START\noperator edited bytes intact\nK20A_EDITED_END".into(),
+            "K20A_EDITED_START\n\noperator edited bytes intact\n\nK20A_EDITED_END".into(),
         ),
     ] {
         sender

@@ -1,0 +1,46 @@
+---
+source: tests/render_snapshots.rs
+expression: every_element(80)
+---
+│ Release notes
+│ ────────────────────────────────────────────────────────────────────────────────
+│
+│ What changed
+│
+│ Details
+│
+│ A paragraph with bold, italic, gone, inline  code, a link
+│ (https://example.test/docs) and [image: diagram]. Soft breaks join; a hard break
+│ splits. Literal text stays: SELECT * FROM t, 2 * 3, Vec<String>.
+│
+│ • top
+│   • second
+│     • third
+│       • fourth
+│ • [ ] todo
+│ • [x] done
+│
+│ 3. third
+│ 4. fourth
+│
+│ • loose one
+│
+│ • loose two
+│
+│ │ quoted text
+│ │
+│ │ │ nested quote
+│
+│ ────────────────────────────────────────────────────────────────────────────────
+│
+│ ┌─ rust ───────────────────────────────────────────────────────────────────────┐
+│ │fn main() {                                                                   │
+│ │        println!("tab");                                                      │
+│ │}                                                                             │
+│ └──────────────────────────────────────────────────────────────────────────────┘
+│
+│ <div>
+│   html block
+│ </div>
+│
+│

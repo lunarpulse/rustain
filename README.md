@@ -318,8 +318,11 @@ collapsible tool blocks, vim-style navigation (`j`/`k`/`i`), command palette,
 Text is laid out by terminal cells and grapheme clusters, not bytes or code
 points: CJK text, emoji sequences (such as ZWJ families) and combining marks
 wrap, clip, pad and edit as whole glyphs, and the composer's height, caret and
-scrolling follow the same wrapped rows. The supported terminal floor is
-unchanged (60×16). Notices appear as short toasts that expire on their own
+scrolling follow the same wrapped rows. Agent markdown renders as CommonMark
+(nested lists, quotes, headings, literal HTML and escapes, code whitespace,
+soft breaks as spaces) through one pipeline whose height always equals its
+painted rows, and your own messages are shown exactly as typed. The supported
+terminal floor is unchanged (60×16). Notices appear as short toasts that expire on their own
 (errors within 60 s) and stay reviewable in the Notification Log
 (`Ctrl+X n`, `/notifications`); a `Log !N` badge counts warnings and errors you
 have not looked at yet. Prompts that need an answer (recovery, daily budget,

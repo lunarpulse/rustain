@@ -9,16 +9,13 @@ use crate::domain::models::FocusState;
 /// Maximum number of visible input lines before scrolling.
 pub const MAX_INPUT_LINES: usize = 8;
 
-/// Display tab stop of the composer (matches the delimited-body convention).
-const TAB_STOP: usize = 8;
-
 /// Cells of one composer grapheme when it starts at `used` cells into a row of
 /// `width` cells. Tabs advance to the next tab stop (display only; the source
 /// keeps the tab), controls other than tab are not painted, everything else is
 /// its string width.
 fn grapheme_cells(grapheme: &str, used: usize, width: usize) -> usize {
     if grapheme == "\t" {
-        (TAB_STOP - used % TAB_STOP).min(width)
+        (geom::TAB_STOP - used % geom::TAB_STOP).min(width)
     } else if grapheme.chars().next().is_some_and(char::is_control) {
         0
     } else {

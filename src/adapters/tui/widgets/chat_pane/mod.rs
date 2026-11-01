@@ -25,6 +25,7 @@ use crate::domain::models::{
     PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
     TurnPart, ViewState,
 };
+use crate::domain::services::message_builder::{ContextRef, split_context_prefix};
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
 
@@ -82,8 +83,9 @@ fn legacy_streaming_lines(
             &streaming.current_text_buffer,
             width,
             theme,
-            &markdown::RenderOptions::default(),
-        );
+            &markdown::RenderOptions::streaming(),
+        )
+        .lines;
         if has_error {
             for line in &mut prose {
                 for span in &mut line.spans {
@@ -275,6 +277,7 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
+    std::mem::discriminant(&msg.role).hash(&mut hasher);
     msg.content.hash(&mut hasher);
     msg.content_blocks.hash(&mut hasher);
     msg.stop_reason.hash(&mut hasher);
@@ -285,14 +288,17 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     hasher.finish()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_message_height(
     content: &str,
+    role: MessageRole,
     has_error: bool,
     is_cancelled: bool,
     _is_bookmarked: bool,
     auto_sent_marker: bool,
     peer_derived: bool,
     width: usize,
+    theme: &Theme,
 ) -> usize {
     let content = if peer_derived {
         crate::domain::services::peer_text::sanitize_peer_text_block(content)
@@ -309,12 +315,18 @@ fn compute_message_height(
     let content_height = if peer_derived || has_error || content.is_empty() {
         let wrapped = wrap_text(&content, content_width);
         wrapped.len()
+    } else if role == MessageRole::User {
+        // Literal user text: the same helper paints it (D12), so height and
+        // paint cannot diverge.
+        user_message_lines(&content, content_width, theme).len()
     } else {
-        // Use the markdown pipeline — same code path as render_message() — to
-        // guarantee the height invariant required by virtual scrolling (AC6).
+        // Use the markdown pipeline — same code path, theme and options as
+        // render_message() — to guarantee the height invariant required by
+        // virtual scrolling (AC6, AD-2113).
         markdown::compute_height(
             &content,
             content_width,
+            theme,
             &markdown::RenderOptions::completed(),
         )
     };
@@ -326,6 +338,33 @@ fn compute_message_height(
     // Story 19.20a: automatic sends and consumed legacy retractions add one row.
     let marker_line = if auto_sent_marker { 1 } else { 0 };
     1 + marker_line + content_height + interrupted_line
+}
+
+/// Body rows of a user-role message (Story 21.12, D12): the machine-built
+/// context prefix becomes one `[file] <path>` / `[command] <name>` meta line
+/// per item, and the typed text follows exactly as typed (`Literal` mode).
+/// Height and paint both call this, so they cannot diverge.
+fn user_message_lines(content: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let (context, text) = split_context_prefix(content);
+    let meta = theme.typography.meta.fg(theme.colors.fg_muted);
+    let mut lines: Vec<Line<'static>> = context
+        .iter()
+        .map(|item| {
+            let label = match item {
+                ContextRef::File(path) => format!("[file] {path}"),
+                ContextRef::Command(name) => format!("[command] {name}"),
+            };
+            Line::from(Span::styled(
+                geom::ellipsize(&geom::expand_tabs(&label, 0), width, "…").into_owned(),
+                meta,
+            ))
+        })
+        .collect();
+    lines.extend(markdown::render(text, width, theme, &markdown::RenderOptions::literal()).lines);
+    lines
 }
 
 fn has_auto_sent_marker(msg: &crate::domain::models::ChatMessage) -> bool {
@@ -559,15 +598,19 @@ fn render_message<'a>(
             content_width,
             theme,
             &markdown::RenderOptions::completed(),
-        );
+        )
+        .lines;
         lines.extend(parsed_lines);
+    } else if msg.role == MessageRole::User {
+        lines.extend(user_message_lines(&content, content_width, theme));
     } else {
         let parsed_lines = markdown::render(
             &content,
             content_width,
             theme,
             &markdown::RenderOptions::completed(),
-        );
+        )
+        .lines;
         lines.extend(parsed_lines);
     }
     let content_end = lines.len();
@@ -949,7 +992,7 @@ pub(super) fn expanded_turn_height(
 
 fn expanded_turn_height_attached(
     turn: &Turn,
-    _theme: &Theme,
+    theme: &Theme,
     width: usize,
     tool_block_states: &HashMap<String, ToolBlockState>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
@@ -993,6 +1036,7 @@ fn expanded_turn_height_attached(
                 height += crate::adapters::tui::markdown::compute_height(
                     text,
                     content_width,
+                    theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
                 );
             }
@@ -1001,6 +1045,7 @@ fn expanded_turn_height_attached(
                 height += crate::adapters::tui::markdown::compute_height(
                     text,
                     content_width,
+                    theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
                 );
             }
@@ -1347,7 +1392,8 @@ fn render_expanded_turn<'a>(
                     content_width,
                     theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
-                );
+                )
+                .lines;
                 lines.extend(prose_lines);
             }
             TurnPart::Reasoning { text, .. } => {
@@ -1357,7 +1403,8 @@ fn render_expanded_turn<'a>(
                     content_width,
                     theme,
                     &crate::adapters::tui::markdown::RenderOptions::completed(),
-                );
+                )
+                .lines;
                 for line in reasoning_lines {
                     let styled_spans: Vec<Span<'a>> = line
                         .spans
@@ -1957,12 +2004,14 @@ fn render_with_search_impl(
                     let is_bookmarked = bookmarks.binary_search(&i).is_ok();
                     h = compute_message_height(
                         &msg.content,
+                        msg.role,
                         has_error,
                         is_cancelled,
                         is_bookmarked,
                         has_auto_sent_marker(msg),
                         msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
+                        theme,
                     );
                     for tc in &msg.tool_calls {
                         let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
@@ -2005,12 +2054,14 @@ fn render_with_search_impl(
                         let is_bookmarked = bookmarks.binary_search(&i).is_ok();
                         let computed = compute_message_height(
                             &msg.content,
+                            msg.role,
                             has_error,
                             is_cancelled,
                             is_bookmarked,
                             has_auto_sent_marker(msg),
                             msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
+                            theme,
                         );
                         tab_render_state.height_cache.set_message(key, computed);
                         computed
@@ -2106,16 +2157,20 @@ fn render_with_search_impl(
     };
     let _ = open_turn_height;
 
-    // Open prose height: text buffered during streaming, not yet committed to turn.parts
-    if let Some(op) = open_prose {
-        if !op.is_empty() {
-            let cw = width.saturating_sub(2);
-            cumulative_offset += crate::adapters::tui::markdown::compute_height(
-                op,
-                cw,
-                &crate::adapters::tui::markdown::RenderOptions::default(),
-            );
-        }
+    // Open prose: text buffered during streaming, not yet committed to
+    // turn.parts. It is rendered ONCE per draw: this height pass keeps the
+    // lines and the paint pass below reuses them (B13, AC8).
+    let mut open_prose_lines = open_prose.filter(|text| !text.is_empty()).map(|text| {
+        markdown::render(
+            text,
+            width.saturating_sub(2),
+            theme,
+            &markdown::RenderOptions::streaming(),
+        )
+        .lines
+    });
+    if let Some(prose_lines) = &open_prose_lines {
+        cumulative_offset += prose_lines.len();
     }
 
     // Attached streaming belongs to the same height model and clipped range as feedback.
@@ -2299,12 +2354,14 @@ fn render_with_search_impl(
                         );
                         let text_height = compute_message_height(
                             &msg.content,
+                            msg.role,
                             msg.content_blocks.contains(&ContentBlockType::Error),
                             msg.stop_reason == Some(StopReason::Cancelled),
                             is_bookmarked,
                             has_auto_sent_marker(msg),
                             msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
+                            theme,
                         );
                         for (j, line) in msg_lines.into_iter().enumerate() {
                             let abs_line = line_offset + j;
@@ -2351,12 +2408,14 @@ fn render_with_search_impl(
                     );
                     let text_height = compute_message_height(
                         &msg.content,
+                        msg.role,
                         msg.content_blocks.contains(&ContentBlockType::Error),
                         msg.stop_reason == Some(StopReason::Cancelled),
                         is_bookmarked,
                         has_auto_sent_marker(msg),
                         msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
+                        theme,
                     );
                     for (j, line) in msg_lines.into_iter().enumerate() {
                         let abs_line = line_offset + j;
@@ -2487,35 +2546,26 @@ fn render_with_search_impl(
             }
             line_offset += tl_len;
 
-            // Open prose: render streaming text not yet committed to turn.parts
-            if let Some(op) = open_prose {
-                if !op.is_empty() {
-                    let cw = width.saturating_sub(2);
-                    let prose_lines = crate::adapters::tui::markdown::render(
-                        op,
-                        cw,
-                        theme,
-                        &crate::adapters::tui::markdown::RenderOptions::default(),
-                    );
-                    let gutter_prose = gutter_lines(prose_lines, theme);
-                    let gp_len = gutter_prose.len();
-                    for (j, line) in gutter_prose.into_iter().enumerate() {
-                        let abs_line = line_offset + j;
-                        if abs_line >= visible_start && abs_line < visible_end {
-                            lines.push(line);
-                        }
+            // Open prose: the lines rendered once by the height pass above.
+            if let Some(prose_lines) = open_prose_lines.take() {
+                let gutter_prose = gutter_lines(prose_lines, theme);
+                let gp_len = gutter_prose.len();
+                for (j, line) in gutter_prose.into_iter().enumerate() {
+                    let abs_line = line_offset + j;
+                    if abs_line >= visible_start && abs_line < visible_end {
+                        lines.push(line);
                     }
-                    line_offset += gp_len;
-                    // Trailing gutter half-line
-                    let abs_last = line_offset;
-                    if abs_last >= visible_start && abs_last < visible_end {
-                        lines.push(Line::from(Span::styled(
-                            "│",
-                            Style::default().fg(theme.colors.accent),
-                        )));
-                    }
-                    line_offset += 1;
                 }
+                line_offset += gp_len;
+                // Trailing gutter half-line
+                let abs_last = line_offset;
+                if abs_last >= visible_start && abs_last < visible_end {
+                    lines.push(Line::from(Span::styled(
+                        "│",
+                        Style::default().fg(theme.colors.accent),
+                    )));
+                }
+                line_offset += 1;
             }
         }
     }
@@ -4168,8 +4218,17 @@ mod parts_aware_tests {
         };
         let theme = Theme::dark();
         let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
-        let computed =
-            compute_message_height(&message.content, false, false, false, true, false, 80);
+        let computed = compute_message_height(
+            &message.content,
+            MessageRole::Assistant,
+            false,
+            false,
+            false,
+            true,
+            false,
+            80,
+            &theme,
+        );
         assert_eq!(
             rendered.len(),
             computed,
@@ -4212,16 +4271,67 @@ mod parts_aware_tests {
             hash_message_content(&plain),
             hash_message_content(&surfaced)
         );
+        let other_role = crate::domain::models::ChatMessage {
+            role: MessageRole::Assistant,
+            ..plain.clone()
+        };
+        assert_ne!(
+            hash_message_content(&plain),
+            hash_message_content(&other_role)
+        );
 
         let theme = Theme::dark();
         let rendered = render_message(&surfaced, 80, &theme, false, false, None, None, false);
-        let computed =
-            compute_message_height(&surfaced.content, false, false, false, false, false, 80);
+        let computed = compute_message_height(
+            &surfaced.content,
+            surfaced.role,
+            false,
+            false,
+            false,
+            false,
+            false,
+            80,
+            &theme,
+        );
         assert_eq!(rendered.len(), computed);
         assert!(
             computed
-                > compute_message_height(&plain.content, false, false, false, false, false, 80)
+                > compute_message_height(
+                    &plain.content,
+                    plain.role,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    80,
+                    &theme,
+                )
         );
+    }
+
+    #[test]
+    fn context_meta_labels_carry_no_control_characters() {
+        let message = crate::domain::models::ChatMessage {
+            role: MessageRole::User,
+            content: "<file path=\"a\u{1b}b\tc\">\n<![CDATA[x]]>\n</file>\n\n\
+                      <command name=\"r\u{7}v\">\n<![CDATA[y]]>\n</command>\n\nhi"
+                .to_owned(),
+            ..Default::default()
+        };
+        let theme = Theme::dark();
+        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let rows: Vec<String> = rendered.iter().map(ToString::to_string).collect();
+        assert!(rows.iter().any(|row| row.contains("[file] ab")), "{rows:?}");
+        assert!(
+            rows.iter().any(|row| row.contains("[command] rv")),
+            "{rows:?}"
+        );
+        for line in &rendered {
+            for span in &line.spans {
+                assert!(!span.content.chars().any(char::is_control), "{span:?}");
+            }
+        }
     }
 
     #[test]
@@ -4258,8 +4368,17 @@ mod parts_aware_tests {
             !content.iter().any(|line| line.contains('\x1b')),
             "{content:?}"
         );
-        let computed =
-            compute_message_height(&message.content, false, false, false, false, true, 80);
+        let computed = compute_message_height(
+            &message.content,
+            message.role,
+            false,
+            false,
+            false,
+            false,
+            true,
+            80,
+            &Theme::dark(),
+        );
         assert_eq!(
             rendered.len(),
             computed,
@@ -4504,12 +4623,14 @@ mod parts_aware_tests {
                     };
                     let computed = compute_message_height(
                         &message.content,
+                        role,
                         block == ContentBlockType::Error,
                         false,
                         false,
                         false,
                         block == ContentBlockType::PeerText,
                         usize::from(width),
+                        &Theme::dark(),
                     );
                     let conversation = dw_conversation(vec![message]);
                     let (buffer, result) = dw_paint(&conversation, width, 60, attached);

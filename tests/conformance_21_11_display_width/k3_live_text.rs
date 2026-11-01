@@ -279,7 +279,11 @@ fn k3_shared_wrapper_wraps_cjk_at_content_width_40_instead_of_clipping() {
 }
 
 fn code_rows(content: &str, width: u16) -> Vec<String> {
-    let conversation = make_conversation(vec![user_message(content)], vec![]);
+    // 21-12 AC6: user messages render literally (no fences), so the markdown
+    // fixtures of these clip tests are assistant messages. Same row layout.
+    let mut message = make_msg("asst-1", MessageRole::Assistant);
+    message.content = content.to_owned();
+    let conversation = make_conversation(vec![message], vec![]);
     let chat = simple_chat(&conversation, width);
     assert_whole_clusters(&chat.painted.buffer);
     assert_no_partial_family(&screen(&chat.painted.buffer));

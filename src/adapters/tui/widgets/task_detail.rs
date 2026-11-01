@@ -153,7 +153,8 @@ pub fn render(
             inner.width as usize,
             theme,
             &markdown::RenderOptions::completed(),
-        );
+        )
+        .lines;
         let total = lines.len();
         // 6-3 AC7: clamp the caller-provided scroll offset against the body
         // height so the last line stays in view when scrolling past the end
@@ -403,7 +404,10 @@ mod tests {
         let body: String = (1..=40)
             .map(|i| format!("line-marker-{:02}", i))
             .collect::<Vec<_>>()
-            .join("\n");
+            // Hard breaks (21-12 B7): a single `\n` is a soft break and joins
+            // the markers into one paragraph, which is not what this test
+            // measures (one row per marker).
+            .join("  \n");
         task.result = Some(TaskResult {
             text: body,
             tool_call_count: 0,
@@ -441,7 +445,8 @@ mod tests {
         let body: String = (1..=40)
             .map(|i| format!("line-marker-{:02}", i))
             .collect::<Vec<_>>()
-            .join("\n");
+            // Hard breaks (21-12 B7): one row per marker, see the sibling test.
+            .join("  \n");
         task.result = Some(TaskResult {
             text: body,
             tool_call_count: 0,

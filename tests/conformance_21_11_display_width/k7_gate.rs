@@ -41,10 +41,26 @@ const SITES: &[Site] = &[
         "widgets/chat_pane/word_wrap.rs",
         ["wrap_text", "wrap_line_words", "char_wrap_word"]
     ),
-    site!("markdown/layout.rs", ["clip_str", "display_width"]),
+    site!(
+        "markdown/layout.rs",
+        [
+            "render_code_block",
+            "build_code_header",
+            "render_html",
+            "wrap_inlines",
+            "hard_wrap",
+            "unit",
+            "render_list",
+            "literal"
+        ]
+    ),
     site!(
         "widgets/chat_pane/mod.rs",
-        ["truncate_with_ellipsis", "apply_search_highlights"]
+        [
+            "truncate_with_ellipsis",
+            "apply_search_highlights",
+            "user_message_lines"
+        ]
     ),
     site!("widgets/login_dialog.rs", ["single_line"]),
     site!("widgets/permission_prompt.rs", ["key_rows"]),

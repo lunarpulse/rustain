@@ -802,3 +802,165 @@ mod mixed_width {
         insta::assert_snapshot!("mixed_width_shell_composer_w80", text);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Story 21.12 (slice 12-A) — markdown structure at inner widths 40/80/120 and
+// the literal user message. Blank rows are kept (the shared helper drops them)
+// because vertical rhythm is part of what is under review. The tables fixture
+// belongs to slice 12-B, which switches tables on.
+// ---------------------------------------------------------------------------
+
+mod markdown_structure {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use rustain::adapters::tui::state::TabRenderState;
+    use rustain::adapters::tui::theme::Theme;
+    use rustain::adapters::tui::widgets::chat_pane;
+    use rustain::domain::models::StreamingState;
+    use rustain::domain::services::message_builder::{
+        ResolvedFileContext, build_file_context_prefix,
+    };
+    use std::collections::{BTreeMap, HashMap};
+    use unicode_width::UnicodeWidthStr;
+
+    const EVERY_ELEMENT: &str = "# Release notes
+
+## What changed
+
+### Details
+
+A paragraph with **bold**, *italic*, ~~gone~~, `inline  code`, a [link](https://example.test/docs) and ![diagram](x.png). Soft
+breaks join; a hard break  
+splits. Literal text stays: SELECT * FROM t, 2 \\* 3, Vec<String>.
+
+- top
+  - second
+    - third
+      - fourth
+- [ ] todo
+- [x] done
+
+3. third
+4. fourth
+
+- loose one
+
+- loose two
+
+> quoted **text**
+>
+> > nested quote
+
+---
+
+```rust
+fn main() {
+\tprintln!(\"tab\");
+}
+```
+
+<div>
+  html block
+</div>";
+
+    /// Paint the whole conversation and return every row (blank rows kept) up
+    /// to the reported content height, with the right edge trimmed.
+    fn painted(conversation: &Conversation, width: u16) -> String {
+        let height = 120;
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut total = 0usize;
+        terminal
+            .draw(|frame| {
+                let mut tab = TabRenderState::default();
+                total = chat_pane::render_with_search(
+                    frame,
+                    Rect::new(0, 0, width, height),
+                    conversation,
+                    None,
+                    &StreamingState::default(),
+                    &ViewState::default(),
+                    &clock,
+                    0,
+                    true,
+                    &Theme::dark(),
+                    &mut tab,
+                    &HashMap::new(),
+                    &BTreeMap::new(),
+                    None,
+                    None,
+                    &[],
+                    &[],
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .total_content_height;
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..usize::from(height))
+            .take(total)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0u16;
+                while x < width {
+                    let symbol = buffer[(x, y as u16)].symbol();
+                    row.push_str(symbol);
+                    x += u16::try_from(symbol.width().max(1)).unwrap();
+                }
+                row.trim_end().to_owned()
+            })
+            .collect();
+        for row in &rows {
+            assert!(
+                row.width() <= usize::from(width),
+                "row wider than pane: {row:?}"
+            );
+        }
+        rows.join("\n")
+    }
+
+    fn every_element(inner: u16) -> String {
+        let turn = make_turn("md", vec![prose(EVERY_ELEMENT)], Some(StopReason::EndTurn));
+        let conv = make_conversation(vec![make_msg("md", MessageRole::Assistant)], vec![turn]);
+        painted(&conv, inner + 2)
+    }
+
+    #[test]
+    fn markdown_structure_every_element_w40() {
+        insta::assert_snapshot!("markdown_structure_every_element_w40", every_element(40));
+    }
+
+    #[test]
+    fn markdown_structure_every_element_w80() {
+        insta::assert_snapshot!("markdown_structure_every_element_w80", every_element(80));
+    }
+
+    #[test]
+    fn markdown_structure_every_element_w120() {
+        insta::assert_snapshot!("markdown_structure_every_element_w120", every_element(120));
+    }
+
+    #[test]
+    fn markdown_structure_literal_user_message_w80() {
+        let prefix = build_file_context_prefix(&[ResolvedFileContext {
+            path: "notes/auth.md".to_owned(),
+            content: "# Auth\n\nsecret body that must not be shown".to_owned(),
+            ..ResolvedFileContext::default()
+        }]);
+        let mut user = make_msg("u1", MessageRole::User);
+        user.content = format!(
+            "{prefix}literal **x** <T> and `y`\n  indented\tafter tab\n\n# not a heading\n{}",
+            "a long unbroken-tail ".repeat(6)
+        );
+        let conv = make_conversation(vec![user], vec![]);
+        insta::assert_snapshot!(
+            "markdown_structure_literal_user_message_w80",
+            painted(&conv, 80)
+        );
+    }
+}

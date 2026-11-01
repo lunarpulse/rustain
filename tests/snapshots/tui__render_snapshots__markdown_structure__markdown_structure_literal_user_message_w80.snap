@@ -1,0 +1,12 @@
+---
+source: tests/render_snapshots.rs
+expression: "painted(&conv, 80)"
+---
+You:
+[file] notes/auth.md
+literal **x** <T> and `y`
+  indented      after tab
+
+# not a heading
+a long unbroken-tail a long unbroken-tail a long unbroken-tail a long
+unbroken-tail a long unbroken-tail a long unbroken-tail

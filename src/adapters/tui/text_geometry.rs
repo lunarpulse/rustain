@@ -251,6 +251,36 @@ pub fn expand_to_graphemes(text: &str, start: usize, end: usize) -> (usize, usiz
     (lo, hi)
 }
 
+/// Display tab stop shared by the composer and the markdown renderer (tabs in
+/// code, HTML blocks and literal text expand to the next multiple of this).
+pub const TAB_STOP: usize = 8;
+
+/// `text` with every tab expanded to the next [`TAB_STOP`] boundary (the first
+/// cell of `text` is column `start`) and every other control character
+/// dropped. Control characters are not painted by the terminal backend, so
+/// keeping them would make measured and painted widths disagree. Text with no
+/// control character is returned borrowed.
+#[must_use]
+pub fn expand_tabs(text: &str, start: usize) -> Cow<'_, str> {
+    if !text.chars().any(char::is_control) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len() + TAB_STOP);
+    let mut column = start;
+    for grapheme in text.graphemes(true) {
+        if grapheme == "\t" {
+            let advance = TAB_STOP - column % TAB_STOP;
+            out.extend(std::iter::repeat_n(' ', advance));
+            column += advance;
+        } else if grapheme.chars().next().is_some_and(char::is_control) {
+            continue;
+        } else {
+            out.push_str(grapheme);
+            column += cells(grapheme);
+        }
+    }
+    Cow::Owned(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +435,21 @@ mod tests {
         assert_eq!(expand_to_graphemes(accent, 1, 2), (1, 4));
         assert_eq!(expand_to_graphemes("abc", 1, 2), (1, 2));
         assert_eq!(expand_to_graphemes("abc", 0, 3), (0, 3));
+    }
+
+    #[test]
+    fn display_width_expand_tabs_stops_at_eight_and_drops_other_controls() {
+        assert!(matches!(expand_tabs("plain 界", 0), Cow::Borrowed(_)));
+        assert_eq!(expand_tabs("\tx", 0), "        x");
+        assert_eq!(expand_tabs("ab\tx", 0), "ab      x");
+        assert_eq!(expand_tabs("12345678\tx", 0), "12345678        x");
+        assert_eq!(expand_tabs("\tx", 3), "     x");
+        assert_eq!(expand_tabs("界\tx", 0), "界      x");
+        assert_eq!(expand_tabs("a\u{7}b\u{1b}[c\r\n", 0), "ab[c");
+        for text in ["\t\t", "a\tb\tc", &format!("{G}\t{A}\t")] {
+            let out = expand_tabs(text, 0);
+            assert!(!out.chars().any(char::is_control));
+        }
+        assert_eq!(cells(&expand_tabs(&format!("{G}\tx"), 0)), 9);
     }
 }

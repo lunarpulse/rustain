@@ -37,6 +37,9 @@ mod conformance_19_1_line_diff;
 #[path = "../conformance_21_11_display_width.rs"]
 mod conformance_21_11_display_width;
 
+#[path = "../conformance_21_12_markdown.rs"]
+mod conformance_21_12_markdown;
+
 #[path = "../conformance_density_mode.rs"]
 mod conformance_density_mode;
 

@@ -257,6 +257,72 @@ fn tool_results_message(tool_results: Vec<ToolResultMessage>) -> Message {
     }
 }
 
+/// One machine-built context block at the head of a stored user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextRef<'a> {
+    /// `<file path="…">` from [`build_file_context_prefix`].
+    File(std::borrow::Cow<'a, str>),
+    /// `<command name="…">` from [`build_command_context_prefix`].
+    Command(std::borrow::Cow<'a, str>),
+}
+
+/// Reverse of [`escape_xml_attr`]; `&amp;` last so `&amp;lt;` stays `&lt;`.
+fn unescape_xml_attr(raw: &str) -> std::borrow::Cow<'_, str> {
+    if !raw.contains('&') {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    std::borrow::Cow::Owned(
+        raw.replace("&quot;", "\"")
+            .replace("&gt;", ">")
+            .replace("&lt;", "<")
+            .replace("&amp;", "&"),
+    )
+}
+
+/// The leading context block of `input`, if `input` starts with exactly what
+/// the two prefix builders produce: its reference and the text after it.
+fn take_context_block(input: &str) -> Option<(ContextRef<'_>, &str)> {
+    let (opening, closing, is_file) = if input.starts_with("<file path=\"") {
+        ("<file path=\"", "]]>\n</file>\n\n", true)
+    } else if input.starts_with("<command name=\"") {
+        ("<command name=\"", "]]>\n</command>\n\n", false)
+    } else {
+        return None;
+    };
+    let after_opening = &input[opening.len()..];
+    // The escaped attribute holds no raw quote, `<` or `>`.
+    let value_end = after_opening.find(['"', '<', '>'])?;
+    let body = after_opening[value_end..].strip_prefix("\">\n<![CDATA[")?;
+    // Any `]]>` inside the content was rewritten to `]]]]><![CDATA[>`, so the
+    // first `]]>` followed by the closing tag is the real terminator.
+    let end = body.find(closing)?;
+    let value = unescape_xml_attr(&after_opening[..value_end]);
+    let item = if is_file {
+        ContextRef::File(value)
+    } else {
+        ContextRef::Command(value)
+    };
+    Some((item, &body[end + closing.len()..]))
+}
+
+/// Split the machine-built context prefix off a stored user message (Story
+/// 21.12, D12).
+///
+/// Recognises **only** the exact leading blocks [`build_file_context_prefix`]
+/// and [`build_command_context_prefix`] produce, in any order and number, and
+/// returns them with the typed text that follows. Anything that is not in that
+/// exact format stays part of the text, so a user's own `<file …>` is never
+/// hidden unless it is byte-for-byte a machine-built block at the very start.
+pub fn split_context_prefix(content: &str) -> (Vec<ContextRef<'_>>, &str) {
+    let mut items = Vec::new();
+    let mut rest = content;
+    while let Some((item, after)) = take_context_block(rest) {
+        items.push(item);
+        rest = after;
+    }
+    (items, rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +643,114 @@ mod tests {
         assert_eq!(api[0].content, "Vdone");
         assert_eq!(api[0].tool_uses.len(), 3);
         assert_eq!(api[0].provider_replay.len(), 3);
+    }
+
+    // ── split_context_prefix (Story 21.12, D12) ─────────────────────────────
+
+    fn file_ctx(path: &str, content: &str) -> ResolvedFileContext {
+        ResolvedFileContext {
+            path: path.to_owned(),
+            content: content.to_owned(),
+            ..ResolvedFileContext::default()
+        }
+    }
+
+    fn names(items: &[ContextRef<'_>]) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| match item {
+                ContextRef::File(path) => format!("file:{path}"),
+                ContextRef::Command(name) => format!("command:{name}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn split_context_prefix_recovers_items_and_text() {
+        let files = [
+            file_ctx("a b/\"q\".md", "x ]]> y\n\nz"),
+            file_ctx("<&>.rs", "]]"),
+            file_ctx("&lt;&amp;&quot;", "tail ]]>\n</file>\n\n still content"),
+        ];
+        let command = ResolvedCommandContext {
+            name: "n&m".to_owned(),
+            content: "body ]]>\n</command>\n\n".to_owned(),
+        };
+        let text = "<file path=\"user\">\ntext";
+        let stored = format!(
+            "{}{}{text}",
+            build_file_context_prefix(&files),
+            build_command_context_prefix(&command),
+        );
+        let (items, rest) = split_context_prefix(&stored);
+        assert_eq!(
+            names(&items),
+            [
+                "file:a b/\"q\".md",
+                "file:<&>.rs",
+                "file:&lt;&amp;&quot;",
+                "command:n&m"
+            ]
+        );
+        assert_eq!(rest, text);
+    }
+
+    #[test]
+    fn split_context_prefix_leaves_everything_else_untouched() {
+        for text in [
+            "",
+            "plain",
+            "<file path=\"x\">\nno cdata\n</file>\n\nt",
+            "<file path=\"x\"><![CDATA[inline]]></file>\n\nt",
+            "<file path=\"a<b\">\n<![CDATA[x]]>\n</file>\n\nt",
+            "<file path=\"x\">\n<![CDATA[never closed",
+            "<command name=\"x\">\n<![CDATA[x]]>\n</file>\n\nt",
+            " <file path=\"x\">\n<![CDATA[x]]>\n</file>\n\nt",
+        ] {
+            let (items, rest) = split_context_prefix(text);
+            assert!(items.is_empty(), "{text:?}");
+            assert_eq!(rest, text);
+        }
+        // Only a leading block counts: the same shape after text stays text.
+        let later = format!("hello {}", build_file_context_prefix(&[file_ctx("p", "c")]));
+        assert!(split_context_prefix(&later).0.is_empty());
+    }
+
+    mod split_context_prefix_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 128, failure_persistence: None, ..ProptestConfig::default() })]
+
+            #[test]
+            fn round_trips_arbitrary_paths_names_contents_and_text(
+                paths in proptest::collection::vec("\\PC{0,24}", 0..3),
+                contents in proptest::collection::vec("(\\PC|\\n|\\]\\]>|\\]){0,40}", 0..3),
+                command in proptest::option::of(("\\PC{0,16}", "(\\PC|\\n|\\]\\]>){0,30}")),
+                text in "(\\PC|\\n|\\t){0,60}",
+            ) {
+                prop_assume!(!text.starts_with("<file path=\"") && !text.starts_with("<command name=\""));
+                let files: Vec<ResolvedFileContext> = paths
+                    .iter()
+                    .zip(contents.iter().cycle())
+                    .map(|(path, content)| file_ctx(path, content))
+                    .collect();
+                let mut stored = build_file_context_prefix(&files);
+                let mut expected: Vec<String> =
+                    files.iter().map(|f| format!("file:{}", f.path)).collect();
+                if let Some((name, content)) = &command {
+                    stored.push_str(&build_command_context_prefix(&ResolvedCommandContext {
+                        name: name.clone(),
+                        content: content.clone(),
+                    }));
+                    expected.push(format!("command:{name}"));
+                }
+                stored.push_str(&text);
+                let (items, rest) = split_context_prefix(&stored);
+                prop_assert_eq!(names(&items), expected);
+                prop_assert_eq!(rest, text.as_str());
+            }
+        }
     }
 }
