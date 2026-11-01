@@ -173,13 +173,12 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
 
 
 @pytest.mark.story_5_2
-def test_trust_prompt_decline_via_esc(tmp_path):
-    """AC4: Esc on the trust prompt is equivalent to ``n`` (decline)."""
+def test_trust_prompt_esc_never_declines(tmp_path):
+    """21.3 AC16 (was 5-2 AC4 "Esc is equivalent to ``n``"): Esc never decides a card. It posts the
+    cue, the trust prompt stays pending and only the explicit ``n`` declines."""
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "esc-decline")
-    # Story 21.1: the default Focus density no longer hides notices, so the
-    # "not trusted" Info toast is visible without the old Monitor-density workaround.
     t = RustainTUI(build=False, workspace=ws)
     t.start()
     try:
@@ -187,6 +186,10 @@ def test_trust_prompt_decline_via_esc(tmp_path):
         submit_slash(t, "/esc-decline")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
         t.send(ESC)
+        assert t.wait_for_screen("never decide this card", timeout=3.0)
+        t.assert_screen_contains("Trust and enable this skill", msg="Esc must leave the trust prompt pending")
+        t.assert_screen_not_contains("not trusted", msg="Esc must not decline the skill")
+        t.send("n")
         assert t.wait_for_screen("not trusted", timeout=3.0)
     finally:
         t.stop()

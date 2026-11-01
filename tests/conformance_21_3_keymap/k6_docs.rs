@@ -113,6 +113,30 @@ fn the_lint_has_a_positive_control_independent_of_the_scanned_files() {
     );
 }
 
+/// Lines that name `Esc` together with declining or cancelling without saying it never does.
+fn stale_card_doc_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.contains("Esc"))
+        .filter(|line| line.contains("declin") || line.contains("cancel"))
+        .filter(|line| !line.contains("never"))
+        .collect()
+}
+
+/// R6: the user docs of the cards say `Esc` never decides one.
+#[test]
+fn the_card_docs_never_say_esc_declines_or_cancels() {
+    for file in ["docs/skills.md", "docs/profiles.md", "docs/a2a.md"] {
+        let text = std::fs::read_to_string(root().join(file)).expect("a scoped doc");
+        assert!(stale_card_doc_lines(&text).is_empty(), "{file}");
+    }
+    // Positive control: the retired wording fails the same scanner.
+    assert_eq!(
+        stale_card_doc_lines("`n` or `Esc` declines it\nfine").len(),
+        1
+    );
+    assert!(stale_card_doc_lines("`Esc` never declines it").is_empty());
+}
+
 /// KG-1: the "Does" cell is plain words, never a Rust enum name (`Chat(OpenPalette)`).
 #[test]
 fn no_does_cell_is_a_debug_name() {

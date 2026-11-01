@@ -1,3 +1,6 @@
+use crate::adapters::tui::keymap::Context as KeyContext;
+use crate::adapters::tui::keymap::render::{rail, rail_pair};
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::state::{
     RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
 };
@@ -516,19 +519,34 @@ pub(crate) fn render_recipient_surface(
             footer.push('\n');
         }
         if surface.can_toggle_target {
-            footer.push_str(if read_only {
-                "[Tab] View item/response\n"
+            let tab = rail(KeyContext::RecipientSurface, OverlayCmd::RecipientToggle);
+            footer.push_str(&if read_only {
+                format!("{tab} View item/response\n")
             } else {
-                "[Tab] Item/Response actions\n"
+                format!("{tab} Item/Response actions\n")
             });
         }
         if surface.omitted_before > 0 {
-            footer.push_str("[p] Earlier  ");
+            footer.push_str(&format!(
+                "{} Earlier  ",
+                rail(KeyContext::RecipientSurface, OverlayCmd::RecipientPrev)
+            ));
         }
         if surface.omitted_after > 0 {
-            footer.push_str("[l] Newer  ");
+            footer.push_str(&format!(
+                "{} Newer  ",
+                rail(KeyContext::RecipientSurface, OverlayCmd::RecipientNext)
+            ));
         }
-        footer.push_str("[PgUp/PgDn] Scroll  [Esc] Close");
+        footer.push_str(&format!(
+            "[{}] Scroll  {} Close",
+            rail_pair(
+                KeyContext::RecipientSurface,
+                OverlayCmd::RecipientPageUp,
+                OverlayCmd::RecipientPageDown
+            ),
+            rail(KeyContext::RecipientSurface, OverlayCmd::RecipientClose)
+        ));
         surface.cached_footer = footer
             .split('\n')
             .flat_map(|line| {

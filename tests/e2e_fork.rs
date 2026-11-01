@@ -124,7 +124,7 @@ fn test_e2e_fork_cancel_via_n_key() {
 }
 
 #[test]
-fn test_e2e_fork_cancel_via_esc() {
+fn test_e2e_fork_esc_does_not_cancel_the_confirmation() {
     // Given: fork confirmation overlay is active
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
@@ -135,12 +135,9 @@ fn test_e2e_fork_cancel_via_esc() {
     let event = DomainInputEvent::SpecialKey(DomainKey::Esc);
     let action = handle_input(&mut state, &event);
 
-    // Then: ForkCancel returned
-    assert_eq!(
-        action,
-        InputAction::ForkCancel,
-        "Esc in Fork confirmation should return ForkCancel"
-    );
+    // Then: nothing is decided (3-C, A8: Esc never answers a card; `n` cancels)
+    assert_eq!(action, InputAction::Consumed);
+    assert_eq!(state.pending_fork_index, Some(2));
 }
 
 #[test]

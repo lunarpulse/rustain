@@ -367,6 +367,9 @@ pub(crate) fn fanout_command(
                                         threshold,
                                         adjusted: None,
                                     });
+                                crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(
+                                    state,
+                                );
                                 state.needs_redraw = true;
                             }
                         }
@@ -416,24 +419,32 @@ pub(crate) fn fanout_command(
 /// what `[a]` trusts there, the pin
 /// ([`crate::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE`]).
 pub(crate) fn consent_card_text(sender: &crate::domain::models::PolicyPrincipal) -> String {
+    use crate::adapters::tui::keymap::{Context, render::rail, table_card::CardCmd};
     use crate::domain::models::{PinnedVia, PolicyPrincipal};
     use crate::domain::services::peer_admission::{BOUND_KEY_CONSENT_LINE, ROTATED_KEY_DOCTRINE};
 
     let peer = sender.peer();
+    let (allow_once, always, decline) = (
+        rail(Context::Consent, CardCmd::Yes),
+        rail(Context::Consent, CardCmd::Always),
+        rail(Context::Consent, CardCmd::No),
+    );
     let key_line = || {
-        format!("[a] trusts the key this sender presents, not the person; {ROTATED_KEY_DOCTRINE}.")
+        format!(
+            "{always} trusts the key this sender presents, not the person; {ROTATED_KEY_DOCTRINE}."
+        )
     };
     let trust_line = match sender {
         PolicyPrincipal::Pseudonymous(_) => key_line(),
         PolicyPrincipal::Pinned { via, .. } => match via {
             PinnedVia::Rap => key_line(),
-            PinnedVia::BoundA2a => format!("[a] {BOUND_KEY_CONSENT_LINE}"),
+            PinnedVia::BoundA2a => format!("{always} {BOUND_KEY_CONSENT_LINE}"),
         },
     };
     format!(
         "Consent required — {peer}\n\
          No standing consent is recorded for this sender.\n\
-         [y] Allow once  [a] Always allow  [n] Decline\n\
+         {allow_once} Allow once  {always} Always allow  {decline} Decline\n\
          {trust_line}\n\
          Awaiting your decision.\n\
          Logged immediately for safety; interruption timing follows your policy."
@@ -1189,6 +1200,14 @@ pub async fn team_retract_preview(
 
     let alias = retract_alias(peer);
     let shown_item = sanitize_disclosable(item, MAX_PEER_ID_BYTES);
+    let confirm_key = |command: crate::adapters::tui::keymap::table_card::CardCmd| {
+        crate::adapters::tui::keymap::render::rail(
+            crate::adapters::tui::keymap::Context::Confirm,
+            command,
+        )
+    };
+    let confirm_yes = confirm_key(crate::adapters::tui::keymap::table_card::CardCmd::Yes);
+    let confirm_no = confirm_key(crate::adapters::tui::keymap::table_card::CardCmd::No);
     // Story 19.18d `A13` — the co-holder sentence is omitted only when the
     // host's list answered `principalBound: true`; an unverified read keeps it.
     let (rows, armed, key_line, task, principal_bound) = match preview_item_retract(
@@ -1218,7 +1237,7 @@ pub async fn team_retract_preview(
                     rows,
                     false,
                     format!(
-                        "Already removed on {alias}'s host — nothing to mark.  [n] Cancel (Esc)"
+                        "Already removed on {alias}'s host — nothing to mark.  {confirm_no} Cancel"
                     ),
                     found.task,
                     principal_bound,
@@ -1227,7 +1246,7 @@ pub async fn team_retract_preview(
                 (
                     rows,
                     true,
-                    "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)".to_owned(),
+                    format!("Awaiting your decision.  {confirm_yes} Retract  {confirm_no} Cancel"),
                     found.task,
                     principal_bound,
                 )
@@ -1250,7 +1269,7 @@ pub async fn team_retract_preview(
                 retract_read_failure_cause(&alias, &refusal)
             ),
             false,
-            format!("Cannot verify on {alias}'s host.  [n] Cancel (Esc)"),
+            format!("Cannot verify on {alias}'s host.  {confirm_no} Cancel"),
             None,
             false,
         ),
@@ -1772,6 +1791,9 @@ pub(crate) async fn memory_command(
 }
 
 #[cfg(test)]
+pub(super) use tests::bridge_app_state;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::ports::{ConsentProjectionQuery, ConsentState, RoomJournalReader};
@@ -2100,7 +2122,7 @@ mod tests {
     /// A real `AppState` over `workspace`, composed exactly as the startup
     /// root composes it, minus the slots this test does not read. Returns the
     /// domain receiver the event bus feeds.
-    pub(super) fn bridge_app_state(
+    pub(in crate::infrastructure::runtime) fn bridge_app_state(
         workspace: &std::path::Path,
     ) -> (
         AppState,

@@ -5,6 +5,9 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::RewindPreview;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -161,8 +164,13 @@ pub fn render_rewind_confirmation_lines(
     )));
 
     // Footer: actions
-    let actions = "[y] Rewind  [f] Fork instead  [n] Cancel";
-    let padded_actions = format!("║ {} ║", geom::pad_right(actions, inner_width));
+    let actions = format!(
+        "{} Rewind  {} Fork instead  {} Cancel",
+        rail(Context::Rewind, CardCmd::Yes),
+        rail(Context::Rewind, CardCmd::ForkInstead),
+        rail(Context::Rewind, CardCmd::No)
+    );
+    let padded_actions = format!("║ {} ║", geom::pad_right(&actions, inner_width));
     lines.push(Line::from(Span::styled(
         padded_actions,
         Style::default()

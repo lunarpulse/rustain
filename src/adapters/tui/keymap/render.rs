@@ -181,3 +181,85 @@ pub fn shortcut_for_slash(name: &str) -> Option<String> {
         .find(|row| row.slash.strip_prefix('/') == Some(name))
         .map(|row| row.long_label())
 }
+
+// ── decision cards (Story 21.3 AC15, AC16) ────────────────────────────────────
+
+/// The key `context` binds to `command`, as a rail paints it inside brackets or alone:
+/// `y`, `Esc`, `Ctrl+D`, `Space`. `?` when the context has no such row.
+pub fn rail_key(context: Context, command: impl Into<CommandId>) -> String {
+    let command = command.into();
+    table()
+        .iter()
+        .find(|row| row.context == context && row.command == command)
+        .map_or_else(|| "?".to_owned(), |row| row.long_label())
+}
+
+/// The bracketed key of a card rail (`[y]`, `[Ctrl+D]`), from the card's own row.
+pub fn rail(context: Context, command: impl Into<CommandId>) -> String {
+    format!("[{}]", rail_key(context, command))
+}
+
+/// Two keys of one rail item joined by a slash (`PgUp/PgDn`).
+pub fn rail_pair(
+    context: Context,
+    first: impl Into<CommandId>,
+    second: impl Into<CommandId>,
+) -> String {
+    format!("{}/{}", rail_key(context, first), rail_key(context, second))
+}
+
+/// One cue naming `items` (context, command pairs, painted as `[key] Label`): the text
+/// `Esc` and `Ctrl+C` post on a card instead of deciding it (A8).
+pub fn cue(items: &[(Context, CommandId)]) -> String {
+    let (esc, ctrl_c) = (
+        key_text_at(super::table_card::CardCmd::Cue, 0),
+        key_text_at(super::table_card::CardCmd::Cue, 1),
+    );
+    let named: Vec<String> = items
+        .iter()
+        .filter_map(|(context, command)| {
+            let row = table()
+                .iter()
+                .find(|row| row.context == *context && row.command == *command)?;
+            Some(format!("[{}] {}", row.long_label(), row.label))
+        })
+        .collect();
+    format!(
+        "{esc} and {ctrl_c} never decide this card. Press {}",
+        named.join("  ")
+    )
+}
+
+/// The command that says no to a card (deny, decline, cancel, skip).
+pub fn is_negative(command: CommandId) -> bool {
+    use super::table_card::CardCmd;
+    use super::table_permission::PermissionCmd;
+    matches!(
+        command,
+        CommandId::Permission(PermissionCmd::Deny)
+            | CommandId::Card(CardCmd::No | CardCmd::CancelPlan | CardCmd::Skip)
+    )
+}
+
+/// Cells of a cue the toast shows at 80 columns (the body after the notice prefix).
+pub const CUE_BUDGET_CELLS: usize = 74;
+
+/// The cue of a card context in `host`: every labelled row of the context. The negative
+/// key is named second (first when that still would not fit), so a toast clipped at 80
+/// columns never loses it (R7).
+pub fn card_cue(context: Context, host: Host) -> String {
+    let mut items: Vec<(Context, CommandId)> = rows_of(context, host)
+        .filter(|row| !row.label.is_empty())
+        .map(|row| (context, row.command))
+        .collect();
+    if let Some(at) = items.iter().position(|(_, command)| is_negative(*command)) {
+        let negative = items.remove(at);
+        let slot = at.min(1);
+        items.insert(slot, negative);
+        if slot > 0 && UnicodeWidthStr::width(cue(&items[..=slot]).as_str()) > CUE_BUDGET_CELLS {
+            let negative = items.remove(slot);
+            items.insert(0, negative);
+        }
+    }
+    cue(&items)
+}

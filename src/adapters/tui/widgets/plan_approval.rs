@@ -6,6 +6,9 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::PendingPlanApproval;
 use crate::adapters::tui::theme::Theme;
 
@@ -70,26 +73,26 @@ pub fn render_plan_approval_card(
     // Action footer
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(
-            "[y]",
+            rail(Context::PlanApproval, CardCmd::Yes),
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .fg(Color::Green),
         ),
         Span::raw(" Approve  "),
         Span::styled(
-            "[a]",
+            rail(Context::PlanApproval, CardCmd::Always),
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .fg(Color::Cyan),
         ),
         Span::raw(" Approve & AutoEdit  "),
         Span::styled(
-            "[n]",
+            rail(Context::PlanApproval, CardCmd::No),
             Style::default().add_modifier(Modifier::BOLD).fg(Color::Red),
         ),
         Span::raw(" Reject  "),
         Span::styled(
-            "[e]",
+            rail(Context::PlanApproval, CardCmd::Edit),
             Style::default()
                 .add_modifier(Modifier::BOLD)
                 .fg(Color::Yellow),

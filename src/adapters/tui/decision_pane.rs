@@ -82,35 +82,53 @@ impl DecisionKind {
         !matches!(self, Self::Recovery | Self::DeleteConversations)
     }
 
-    /// The painted rail: `(key, label)` pairs, exactly the keys the handler honours.
+    /// The painted rail: `(key, label)` pairs, exactly the keys the handler honours. The
+    /// key text is generated from the `DecisionPane` rows of the registry (Story 21.3 AC15).
     #[must_use]
-    pub fn rail(self) -> &'static [(&'static str, &'static str)] {
+    pub fn rail(self) -> Vec<(String, &'static str)> {
+        let key = |command: OverlayCmd| keymap::render::rail(Context::DecisionPane, command);
         match self {
-            Self::Recovery => &[("[Enter/Esc]", "Continue"), ("[n]", "New session")],
-            Self::Carryover => &[
-                ("[y]", "Carry over a summary"),
-                ("[n]", "Start fresh without it"),
-                ("[Esc]", "Later"),
+            Self::Recovery => vec![
+                (
+                    format!(
+                        "[{}]",
+                        keymap::render::rail_pair(
+                            Context::DecisionPane,
+                            OverlayCmd::PaneEnter,
+                            OverlayCmd::PaneEsc
+                        )
+                    ),
+                    "Continue",
+                ),
+                (key(OverlayCmd::PaneNo), "New session"),
             ],
-            Self::Budget => &[
-                ("[y]", "Continue"),
-                ("[s]", "Switch model"),
-                ("[p]", "Pause until tomorrow"),
-                ("[Esc]", "Later"),
+            Self::Carryover => vec![
+                (key(OverlayCmd::PaneYes), "Carry over a summary"),
+                (key(OverlayCmd::PaneNo), "Start fresh without it"),
+                (key(OverlayCmd::PaneEsc), "Later"),
             ],
-            Self::ContextWarning => &[
-                ("[K]", "Compact"),
-                ("[n]", "Start fresh"),
-                ("[Esc]", "Later"),
+            Self::Budget => vec![
+                (key(OverlayCmd::PaneYes), "Continue"),
+                (key(OverlayCmd::PaneSwitch), "Switch model"),
+                (key(OverlayCmd::PanePause), "Pause until tomorrow"),
+                (key(OverlayCmd::PaneEsc), "Later"),
             ],
-            Self::LargeImage => &[
-                ("[y]", "Attach anyway"),
-                ("[n]", "Cancel"),
-                ("[Esc]", "Later"),
+            Self::ContextWarning => vec![
+                // Letters fold case in the pane's resolver; the rail paints the capital.
+                (key(OverlayCmd::PaneCompact).to_uppercase(), "Compact"),
+                (key(OverlayCmd::PaneNo), "Start fresh"),
+                (key(OverlayCmd::PaneEsc), "Later"),
             ],
-            Self::DeleteConversations => {
-                &[("[y]", "Delete"), ("[n]", "Cancel"), ("[Esc]", "Cancel")]
-            }
+            Self::LargeImage => vec![
+                (key(OverlayCmd::PaneYes), "Attach anyway"),
+                (key(OverlayCmd::PaneNo), "Cancel"),
+                (key(OverlayCmd::PaneEsc), "Later"),
+            ],
+            Self::DeleteConversations => vec![
+                (key(OverlayCmd::PaneYes), "Delete"),
+                (key(OverlayCmd::PaneNo), "Cancel"),
+                (key(OverlayCmd::PaneEsc), "Cancel"),
+            ],
         }
     }
 }
@@ -501,6 +519,71 @@ pub fn waiting(state: &TuiState) -> usize {
     state.decisions.len()
 }
 
+/// An inline card answers only in Chat focus (Story 21.3 AC17), so a card that arrives while
+/// focus is Input would strand the user: `y` would be composer text. On arrival, an empty
+/// composer hands the card its focus (FR-21-3-c; the local permission card does the same).
+/// A composer with text keeps focus (`user_mid_sentence`): the user is typing and the card
+/// waits behind the paint rule. A client that cannot answer (`can_answer` false: read-only
+/// attach) and every other focus, an overlay included, stay as they are.
+/// Returns whether focus moved; the caller redraws.
+pub fn take_chat_focus_for_card(
+    focus: &mut FocusState,
+    borrowed_from: &mut Option<FocusState>,
+    can_answer: bool,
+    user_mid_sentence: bool,
+) -> bool {
+    let moves = can_answer && !user_mid_sentence && *focus == FocusState::Input;
+    if moves {
+        borrowed_from.get_or_insert(FocusState::Input);
+        *focus = FocusState::Chat;
+    }
+    moves
+}
+
+/// Return arrival-borrowed focus once the host's last card settles. A user focus
+/// change relinquishes the borrow even while cards remain; never overwrite it.
+pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
+    if state.card_focus_borrowed_from.is_none() {
+        return;
+    }
+    if state.focus != FocusState::Chat
+        || card_focus_blocked(state)
+        || state.recipient_surface.is_some()
+    {
+        state.card_focus_borrowed_from = None;
+    } else if !card_pending {
+        state.focus = state.card_focus_borrowed_from.take().unwrap();
+        state.needs_redraw = true;
+    }
+}
+
+/// Key-owning surfaces may keep Input focus; card arrivals must wait for dismissal.
+pub fn card_focus_blocked(state: &TuiState) -> bool {
+    matches!(state.focus, FocusState::Overlay(_))
+        || state.quit_confirm.is_some()
+        || state.notification_log.is_some()
+        || state.which_key.active
+        || state.command_palette.active
+        || state.help_overlay.active
+        || state.autocomplete.active
+        || state.reverse_search.active
+}
+
+/// [`take_chat_focus_for_card`] in the local host: the composer is `state.input_buffer`.
+pub fn take_chat_focus_for_local_card(state: &mut TuiState) {
+    let mid_sentence = !state.input_buffer.is_empty();
+    if !card_focus_blocked(state)
+        && take_chat_focus_for_card(
+            &mut state.focus,
+            &mut state.card_focus_borrowed_from,
+            true,
+            mid_sentence,
+        )
+    {
+        state.needs_redraw = true;
+    }
+}
+
 /// The status-row cue while decisions wait.
 #[must_use]
 pub fn status_cue(waiting: usize) -> Option<String> {
@@ -708,7 +791,7 @@ pub fn render(
 
     let mut rail: Vec<Span<'static>> = Vec::new();
     for (key, label) in item.kind.rail() {
-        rail.push(Span::styled((*key).to_owned(), accent));
+        rail.push(Span::styled(key, accent));
         rail.push(Span::styled(format!(" {label}  "), normal));
     }
     let rail_lines = footer_lines(rail, inner_width);
@@ -1406,5 +1489,44 @@ mod tests {
         assert_eq!(status_cue(0), None);
         assert_eq!(status_cue(1).as_deref(), Some("Needs you (1) ^X q"));
         assert_eq!(status_cue(3).as_deref(), Some("Needs you (3) ^X q"));
+    }
+
+    /// FR-21-3-c: a card arriving in an empty Input hands it Chat focus; nothing else moves.
+    #[test]
+    fn story21_3_card_arrival_takes_chat_focus_only_from_an_empty_input() {
+        use crate::domain::models::visual::OverlayType;
+        let overlay = FocusState::Overlay(OverlayType::CommandPalette);
+        // (focus, can answer, user mid-sentence) -> (focus after, moved)
+        let cases = [
+            (FocusState::Input, true, false, FocusState::Chat, true),
+            (FocusState::Input, true, true, FocusState::Input, false),
+            (FocusState::Chat, true, false, FocusState::Chat, false),
+            (FocusState::Input, false, false, FocusState::Input, false),
+            (overlay.clone(), true, false, overlay, false),
+        ];
+        for (mut focus, can_answer, typing, want, moved) in cases {
+            let before = focus.clone();
+            let mut borrowed = None;
+            assert_eq!(
+                take_chat_focus_for_card(&mut focus, &mut borrowed, can_answer, typing),
+                moved,
+                "{before:?} answer={can_answer} typing={typing}"
+            );
+            assert_eq!(
+                focus, want,
+                "{before:?} answer={can_answer} typing={typing}"
+            );
+            assert_eq!(borrowed, moved.then_some(FocusState::Input));
+        }
+        // The local host reads the composer from the state and asks for a redraw.
+        let mut state = TuiState::new(80, 24);
+        state.needs_redraw = false;
+        take_chat_focus_for_local_card(&mut state);
+        assert!(state.focus == FocusState::Chat && state.needs_redraw);
+        let mut typing = TuiState::new(80, 24);
+        typing.input_buffer = "draft".into();
+        typing.needs_redraw = false;
+        take_chat_focus_for_local_card(&mut typing);
+        assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
     }
 }

@@ -20,6 +20,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail_key;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::domain::models::visual::symbols;
 
 /// Pure decision returned by the adaptive spawn gate.
@@ -74,7 +77,7 @@ impl SpawnGateSnapshot {
 /// Render the `ExceptionalSpawnGate` as a single-line PermissionCard variant.
 ///
 /// Format:
-/// `spawn {N}? ⚠ {N} rows · ←→ adjust N · ↵ confirm · c cap at {threshold}`
+/// `spawn {N}? · n cancel ⚠ {N} rows · ←→ adjust N · ↵ confirm · c cap at {threshold}`
 /// where `N` is the effective breadth (adjusted when the user has nudged it,
 /// else the raw request). Padded to `width` so the `┃ … ┃` border closes flush
 /// (mirrors [`permission_prompt`](super::permission_prompt)'s card grammar).
@@ -96,6 +99,11 @@ pub fn render_spawn_gate(snap: &SpawnGateSnapshot, width: u16) -> Vec<Line<'stat
     // reads in warning yellow and affordances read muted/gray.
     let mut content: Vec<Span> = vec![
         Span::styled(format!("spawn {n}?"), accent),
+        Span::styled(sep, muted),
+        Span::styled(
+            format!("{} cancel", rail_key(Context::SpawnGate, CardCmd::No)),
+            body,
+        ),
         Span::raw(" "),
         Span::styled(format!("{} {n} rows", symbols::WARNING), warn),
         Span::styled(sep, muted),
@@ -103,7 +111,14 @@ pub fn render_spawn_gate(snap: &SpawnGateSnapshot, width: u16) -> Vec<Line<'stat
         Span::styled(sep, muted),
         Span::styled("\u{21B5} confirm", body), // ↵ confirm
         Span::styled(sep, muted),
-        Span::styled(format!("c cap at {}", snap.threshold), body),
+        Span::styled(
+            format!(
+                "{} cap at {}",
+                rail_key(Context::SpawnGate, CardCmd::Cap),
+                snap.threshold
+            ),
+            body,
+        ),
     ];
 
     // Pad to `width` (minus the 4 chars of `┃ ` + ` ┃` border overhead) so the
@@ -130,6 +145,34 @@ mod tests {
     /// Join a line's spans back into a flat string for assertion.
     fn rendered(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn story21_3_spawn_gate_cancel_is_visible_in_the_painted_viewport() {
+        for width in [60, 80] {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 4)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        ratatui::widgets::Paragraph::new(render_spawn_gate(
+                            &SpawnGateSnapshot {
+                                requested: 20,
+                                threshold: 8,
+                                adjusted: None,
+                            },
+                            width,
+                        )),
+                        frame.area(),
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row: String = (0..width)
+                .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+                .collect();
+            assert!(row.contains("n cancel"), "{width}: {row}");
+        }
     }
 
     #[test]

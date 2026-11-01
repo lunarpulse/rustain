@@ -4,8 +4,11 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
+use crate::adapters::tui::keymap::render::leader_follow_up_long;
+use crate::adapters::tui::keymap::table::LeaderCmd;
 use crate::domain::services::command_normalize;
 use crate::domain::services::frontmatter;
 
@@ -87,11 +90,22 @@ const MODE_USAGE: &[UsageRow] = &[("PERMISSIONS", "/mode", "Switch permission mo
 const PLAN_USAGE: &[UsageRow] = &[(COMMANDS, "/plan on|off|toggle", "Toggle Plan mode", true)];
 #[rustfmt::skip]
 const ML_USAGE: &[UsageRow] = &[("INPUT", "/ml", "Toggle multi-line mode via slash command", true)];
+static NOTIFICATIONS_DESC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Open the Notification Log (also {})",
+        leader_follow_up_long(LeaderCmd::Notifications)
+    )
+});
+static NOTIFICATIONS_USAGE: LazyLock<[UsageRow; 1]> =
+    LazyLock::new(|| [("INPUT", "/notifications", NOTIFICATIONS_DESC.as_str(), true)]);
+static TEAM_LOG_DESC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "A2A transparency log (also {}); an unfiltered, displayed visit clears the `log: N` reminder — not an acknowledgement",
+        leader_follow_up_long(LeaderCmd::A2aLog)
+    )
+});
 #[rustfmt::skip]
-const NOTIFICATIONS_USAGE: &[UsageRow] = &[("INPUT", "/notifications", "Open the Notification Log (also Ctrl+X, N)", true)];
-#[rustfmt::skip]
-const TEAM_USAGE: &[UsageRow] = &[
-    (COMMANDS, "/team log", "A2A transparency log (also Ctrl+X, L); an unfiltered, displayed visit clears the `log: N` reminder — not an acknowledgement", true),
+const TEAM_USAGE_REST: &[UsageRow] = &[
     (COMMANDS, "/team board [--last | --actions | --action <action-id> | <peer-id>]", "Daemon-served board/inventory over the composed egress; read-only attachment is allowed, Peer tier is refused; explicit reads only (a2a feature)", A2A),
     (COMMANDS, "/team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…>", "Daemon-served typed send; trusted-local writer; --subject is local, --stories states story holders (a2a feature)", A2A),
     (COMMANDS, "/team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…>", "Send to holders named by this host's received and own story lists; refuse disagreement; selection grants nothing (a2a feature)", A2A),
@@ -106,15 +120,36 @@ const TEAM_USAGE: &[UsageRow] = &[
     (COMMANDS, "/team status", "Daemon-authoritative effective sender-consent status over its composed roster; read-only attachment is allowed, Peer tier is refused", true),
     (COMMANDS, "/team untrust <peer>", "Durably revoke standing consent; trusted-local writer attachment only, Peer/read-only refused", true),
 ];
+static TEAM_USAGE: LazyLock<Vec<UsageRow>> = LazyLock::new(|| {
+    let mut rows: Vec<UsageRow> = vec![(COMMANDS, "/team log", TEAM_LOG_DESC.as_str(), true)];
+    rows.extend_from_slice(TEAM_USAGE_REST);
+    rows
+});
+static ROOM_DESC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Durable room replay, read-only (also {})",
+        leader_follow_up_long(LeaderCmd::Room)
+    )
+});
 #[rustfmt::skip]
-const ROOM_USAGE: &[UsageRow] = &[
-    (COMMANDS, "/room", "Durable room replay, read-only (also Ctrl+X, R)", true),
+const ROOM_USAGE_REST: &[UsageRow] = &[
     (COMMANDS, "/room role list", "Show journaled room roles (owner/editor/viewer)", true),
     (COMMANDS, "/room role grant <peer> <role>", "Record a room role for a configured peer (room edits only)", true),
     (COMMANDS, "/room role revoke <peer>", "Record withdrawal of a peer's room role", true),
 ];
-#[rustfmt::skip]
-const ARTIFACTS_USAGE: &[UsageRow] = &[(COMMANDS, "/artifacts", "Durable artifact list with lineage, read-only (also Ctrl+X, E)", true)];
+static ROOM_USAGE: LazyLock<Vec<UsageRow>> = LazyLock::new(|| {
+    let mut rows: Vec<UsageRow> = vec![(COMMANDS, "/room", ROOM_DESC.as_str(), true)];
+    rows.extend_from_slice(ROOM_USAGE_REST);
+    rows
+});
+static ARTIFACTS_DESC: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "Durable artifact list with lineage, read-only (also {})",
+        leader_follow_up_long(LeaderCmd::Artifacts)
+    )
+});
+static ARTIFACTS_USAGE: LazyLock<[UsageRow; 1]> =
+    LazyLock::new(|| [(COMMANDS, "/artifacts", ARTIFACTS_DESC.as_str(), true)]);
 #[rustfmt::skip]
 const ARTIFACT_USAGE: &[UsageRow] = &[
     (COMMANDS, "/artifact show <id>", "Drill into one artifact: kind, lineage, apply decision, policy", true),
@@ -262,7 +297,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
-                usage: TEAM_USAGE,
+                usage: TEAM_USAGE.as_slice(),
             },
             SlashCommandDef {
                 name: "room".to_string(),
@@ -270,7 +305,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
-                usage: ROOM_USAGE,
+                usage: ROOM_USAGE.as_slice(),
             },
             // Story 18.4b. The description names EVERY sub-verb: that is a
             // tested convention (`conformance_18_3a_room.rs` asserts the /room
@@ -290,7 +325,7 @@ impl CommandRegistry {
                     .to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
-                usage: ARTIFACTS_USAGE,
+                usage: ARTIFACTS_USAGE.as_slice(),
             },
             SlashCommandDef {
                 name: "artifact".to_string(),
@@ -348,7 +383,7 @@ impl CommandRegistry {
                 description: "Open the Notification Log".to_string(),
                 source: CommandSource::BuiltIn,
                 content: None,
-                usage: NOTIFICATIONS_USAGE,
+                usage: NOTIFICATIONS_USAGE.as_slice(),
             },
             SlashCommandDef {
                 name: "detach".to_string(),

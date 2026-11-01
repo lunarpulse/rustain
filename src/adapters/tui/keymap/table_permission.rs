@@ -3,11 +3,10 @@
 //! decision cards that share its `y/s/a/n/f/r` grammar (`AttachedApprovals::key`,
 //! consent / consolidation / retract arms of `attach_keys::handle_attached_key`).
 //!
-//! Slice 3-A describes TODAY's arms exactly, the destructive ones included:
-//! `Esc` DENIES (closes Review first when it is open) and attached `Ctrl+C` on a
-//! consent / consolidation / retract card is remapped to that decline. Slice 3-C
-//! changes both (A8: no decision, an info cue) and rewrites these two rows. Every
-//! other key is swallowed by the card and has no row.
+//! Slice 3-C (A8): `Esc` and `Ctrl+C` never decide the card. With the Review reader open they
+//! close it; otherwise they post one cue naming the explicit keys. The attached consent /
+//! consolidation / retract cards have their own contexts (`table_card`). Every other key
+//! is swallowed by the card and has no row.
 
 use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};
 
@@ -26,8 +25,8 @@ pub enum PermissionCmd {
     DenyWithFeedback,
     /// `r`: open the exact-input Review reader.
     Review,
-    /// `Esc` (3-A, as shipped): close Review when it is open, otherwise DENY.
-    BackOrDeny,
+    /// `Esc` / `Ctrl+C`: close Review when it is open, otherwise one cue (never a decision).
+    BackOrCue,
     /// `PageUp`: page the Review reader / card up.
     ReviewPageUp,
     /// `PageDown`: page the Review reader / card down.
@@ -58,7 +57,7 @@ const PERMISSION: &[Binding] = &[
     p(&[Key::Char('n')], PermissionCmd::Deny, "Deny").help(P, "n", "Deny tool call"),
     p(&[Key::Char('f')], PermissionCmd::DenyWithFeedback, "Deny + feedback").help(P, "f", "Deny + feedback — provide text guidance to the LLM"),
     p(&[Key::Char('r')], PermissionCmd::Review, "Review").help(P, "r", "Review").does("Open the exact tool input for review"),
-    p(&[Key::Esc], PermissionCmd::BackOrDeny, "").does("Close the review when it is open; otherwise deny the tool call"),
+    p(&[Key::Esc], PermissionCmd::BackOrCue, "").does("Close the review when it is open; otherwise remind which keys decide the tool call"),
     p(&[Key::PageUp], PermissionCmd::ReviewPageUp, "").does("Page the review reader up"),
     p(&[Key::PageDown], PermissionCmd::ReviewPageDown, "").does("Page the review reader down"),
     p(&[Key::Char('j')], PermissionCmd::ScrollLineDown, "").local().does("Scroll the chat down one line"),
@@ -66,7 +65,7 @@ const PERMISSION: &[Binding] = &[
     p(&[Key::Char('G')], PermissionCmd::ScrollToBottom, "").local().does("Scroll the chat to the bottom"),
     p(&[Key::Char('g')], PermissionCmd::ScrollToTop, "").local().does("Scroll the chat to the top"),
     p(&[Key::Ctrl('q')], PermissionCmd::QuitRequest, "").attached().does("Ask to quit"),
-    p(&[Key::Ctrl('c')], PermissionCmd::BackOrDeny, "").attached().does("Decline the card (close the review first when it is open)"),
+    p(&[Key::Ctrl('c')], PermissionCmd::BackOrCue, "").does("Close the review when it is open; otherwise remind which keys decide the tool call"),
 ];
 
 pub const ROWS: &[Binding] = PERMISSION;

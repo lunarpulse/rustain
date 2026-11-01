@@ -165,10 +165,10 @@ fn menu_keeps_the_relative_order_of_21_1_and_21_2() {
     }
 }
 
-/// AC4/KG-2: `^X menu` is painted exactly where `Ctrl+X` opens the leader, in
-/// every overlay that can take focus (one predicate drives both).
+/// AC4/KG-2: the tail is offered iff Ctrl+X opens the leader. Painting may
+/// omit it whole when status facts need the width (status_bar witnesses).
 #[test]
-fn status_tail_menu_iff_ctrl_x_opens_leader() {
+fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     let overlay = |o: OverlayType| FocusState::Overlay(o);
     let foci = [
         ("Input", FocusState::Input),
@@ -191,13 +191,13 @@ fn status_tail_menu_iff_ctrl_x_opens_leader() {
     for (name, focus) in foci {
         let mut state = fresh();
         state.focus = focus;
-        let painted = status_tail(&state) == StatusTail::Menu;
+        let offered = status_tail(&state) == StatusTail::Menu;
         press(&mut state, Key::Ctrl('x'));
         assert_eq!(
-            painted, state.which_key.active,
-            "{name}: ^X menu iff Ctrl+X opens"
+            offered, state.which_key.active,
+            "{name}: ^X menu offered iff Ctrl+X opens"
         );
-        if painted { opened += 1 } else { blocked += 1 }
+        if offered { opened += 1 } else { blocked += 1 }
     }
     assert_eq!(
         (opened, blocked),

@@ -1,6 +1,9 @@
 use ratatui::prelude::*;
 
 use super::plan_card::wrap_description;
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
@@ -79,8 +82,20 @@ pub fn render_ask_user_lines(
         )));
     }
 
-    // Bottom border: ╚═══════╝
-    let bottom = format!("╚{}╝", "═".repeat(w.saturating_sub(2)));
+    // Bottom border: ╚═══════╝. An unanswered question carries its two keys in the border
+    // (rows stay untouched); a submitted one, or a border too narrow for them, stays plain.
+    let border_cells = w.saturating_sub(2);
+    let hint = format!(
+        " {} Send  {} Skip question ",
+        rail(Context::Question, CardCmd::Send),
+        rail(Context::Question, CardCmd::Skip)
+    );
+    let hint_cells = geom::cells(&hint);
+    let bottom = if state.submitted_answer.is_none() && hint_cells < border_cells {
+        format!("╚═{hint}{}╝", "═".repeat(border_cells - 1 - hint_cells))
+    } else {
+        format!("╚{}╝", "═".repeat(border_cells))
+    };
     lines.push(Line::from(Span::styled(
         bottom,
         Style::default().fg(theme.colors.accent),

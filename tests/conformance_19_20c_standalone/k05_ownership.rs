@@ -156,16 +156,23 @@ async fn k05_review_feedback_escape_and_queue_keep_request_ownership() {
     f.key(KeyCode::Esc).await;
     assert!(f.state.permission_reader.review.is_none());
     assert_eq!(f.current_id(), a);
+    // 3-C (A8): `Esc` no longer denies (was `PermissionDeny`): it posts one cue, the card
+    // stays current, and the explicit `n` denies each request once.
     assert!(matches!(
         f.key(KeyCode::Esc).await,
+        Some(InputAction::Consumed)
+    ));
+    assert_eq!(f.current_id(), a);
+    assert!(matches!(
+        f.key(KeyCode::Char('n')).await,
         Some(InputAction::PermissionDeny)
     ));
     f.wait_closed(&a).await;
     assert_eq!(f.current_id(), b);
-    f.key(KeyCode::Esc).await;
+    f.key(KeyCode::Char('n')).await;
     f.wait_closed(&b).await;
     assert_eq!(f.current_id(), c);
-    f.key(KeyCode::Esc).await;
+    f.key(KeyCode::Char('n')).await;
     f.wait_closed(&c).await;
     f.finish().await;
     assert!(f.tools.executed.lock().is_empty());
@@ -534,11 +541,10 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     use rustain::domain::models::OverlayType;
 
     let mut f = Fixture::new(64).await;
+    // Since 3-A the open leader owns every key, so Help can no longer sit on top of it: the
+    // leader menu itself is the higher owner the permission waits behind.
     f.state.which_key.open(FocusState::Chat);
-    f.state
-        .help_overlay
-        .open(FocusState::Overlay(OverlayType::WhichKey));
-    f.state.focus = FocusState::Overlay(OverlayType::Help);
+    f.state.focus = FocusState::Overlay(OverlayType::WhichKey);
     f.submit(vec![(
         "Bash",
         json!({"command": "printf AFTER-HIGHER-OWNER"}),
@@ -546,7 +552,6 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     .await;
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
-    f.key(KeyCode::Esc).await;
     assert_eq!(f.state.focus, FocusState::Overlay(OverlayType::WhichKey));
     assert!(f.state.pending_permission.is_none());
     assert_eq!(f.state.permission_queue.len(), 1);

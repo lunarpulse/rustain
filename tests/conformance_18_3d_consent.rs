@@ -279,9 +279,15 @@ fn production_wiring_uses_the_journal_projection_and_central_a2a_gate() {
 fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
     let renderer =
         std::fs::read_to_string("src/infrastructure/runtime/transparency_bridge.rs").unwrap();
-    for label in ["[y] Allow once", "[a] Always allow", "[n] Decline"] {
+    // 3-C: the keys are generated from the Consent rows; the label words stay in the renderer.
+    for (label, command) in [
+        ("Allow once", "CardCmd::Yes"),
+        ("Always allow", "CardCmd::Always"),
+        ("Decline", "CardCmd::No"),
+    ] {
         assert!(
-            renderer.contains(label),
+            renderer.contains(label)
+                && renderer.contains(&format!("rail(Context::Consent, {command})")),
             "missing consent-card label {label}"
         );
     }
@@ -301,7 +307,7 @@ fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
     for arm in [
         "(KeyCode::Char('y'), m)",
         "(KeyCode::Char('a'), m)",
-        "(KeyCode::Char('n'), m) | (KeyCode::Esc, m)",
+        "(KeyCode::Char('n'), m)",
         "!ctx.consent.is_empty()",
         "ApprovalOutcome::Once",
         "ApprovalOutcome::AlwaysAndSave",

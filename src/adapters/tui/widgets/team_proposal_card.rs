@@ -5,14 +5,23 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear};
 
 use crate::adapters::tui::widgets::delimited_body::wrap_text as wrap_prefix;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{SemanticMessageType, TeamProposal};
 
 const HEADING: &str =
     "Your agent proposes a message. Nothing has been sent. Awaiting your decision.";
-const MORE: &str = "… more not shown — [r] Review first";
 const DRAFT: &str = "Finish or clear your draft to decide.";
+
+fn more_marker() -> String {
+    format!(
+        "… more not shown — {} Review first",
+        rail(Context::TeamProposal, CardCmd::Review)
+    )
+}
 
 fn type_token(message_type: SemanticMessageType) -> &'static str {
     crate::domain::models::semantic_message_type_metadata(message_type).token
@@ -172,8 +181,11 @@ impl CardView {
 
         let footer = if self.draft_empty {
             format!(
-                "[y] Send to {}   [r] Review first   [n] Dismiss",
-                aliases(&proposal)
+                "{} Send to {}   {} Review first   {} Dismiss",
+                rail(Context::TeamProposal, CardCmd::Yes),
+                aliases(&proposal),
+                rail(Context::TeamProposal, CardCmd::Review),
+                rail(Context::TeamProposal, CardCmd::No)
             )
         } else {
             DRAFT.to_owned()
@@ -225,7 +237,7 @@ impl CardView {
                 || content.len() + footer_rows.len() < usize::from(max_height.saturating_sub(2)))
         {
             content.extend(
-                wrap_prefix(MORE, inner_width, 1)
+                wrap_prefix(&more_marker(), inner_width, 1)
                     .0
                     .into_iter()
                     .map(Line::from),

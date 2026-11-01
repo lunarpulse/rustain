@@ -12,6 +12,9 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -46,7 +49,7 @@ pub const APPLY_CARD_BINDINGS: [ApplyCardBinding; 2] = [
     },
     ApplyCardBinding {
         key: 'n',
-        label: "Cancel (Esc)",
+        label: "Cancel",
         choice: ApplyCardChoice::Decline,
     },
 ];
@@ -65,7 +68,7 @@ pub const RESOLVE_CARD_BINDINGS: [ApplyCardBinding; 2] = [
     },
     ApplyCardBinding {
         key: 'n',
-        label: "Cancel (Esc)",
+        label: "Cancel",
         choice: ApplyCardChoice::Decline,
     },
 ];
@@ -106,6 +109,15 @@ pub fn choice_for_key(key: char) -> Option<ApplyCardChoice> {
         .iter()
         .find(|binding| binding.key == key)
         .map(|binding| binding.choice)
+}
+
+/// The `Confirm` row that paints and dispatches `choice`: the card's key text comes from the
+/// registry, so what is painted is what the table binds.
+fn choice_command(choice: ApplyCardChoice) -> CardCmd {
+    match choice {
+        ApplyCardChoice::Accept => CardCmd::Yes,
+        ApplyCardChoice::Decline => CardCmd::No,
+    }
 }
 
 #[must_use]
@@ -153,7 +165,13 @@ pub fn render_apply_card_lines<'a>(
     // line while it fits, then break — ⛔ never truncate.
     let actions: Vec<String> = bindings_for(card.mode)
         .iter()
-        .map(|binding| format!("[{}] {}", binding.key, binding.label))
+        .map(|binding| {
+            format!(
+                "{} {}",
+                rail(Context::Confirm, choice_command(binding.choice)),
+                binding.label
+            )
+        })
         .collect();
     let single = format!("  Awaiting your decision.  {}", actions.join("  "));
     if fits(&single, width) {

@@ -9,6 +9,7 @@ use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::visual::DensityMode;
 
 use super::table::{GlobalCmd, LeaderCmd};
+use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
 use super::table_inspector::InspectorCmd;
@@ -137,6 +138,7 @@ impl Key {
     /// Long label used by help, the palette shortcut column and prose.
     pub fn label(self) -> String {
         match self {
+            Key::Char(' ') => "Space".to_owned(),
             Key::Char(c) => c.to_string(),
             Key::Ctrl(c) => format!("Ctrl+{}", c.to_ascii_uppercase()),
             Key::Alt(c) => format!("Alt+{}", c.to_ascii_uppercase()),
@@ -385,10 +387,32 @@ pub enum Context {
     DecisionPane,
     RecipientSurface,
     Login,
+    /// Shared parent of every decision card: the `Esc` / `Ctrl+C` cue rows (A8).
+    Card,
+    /// The permission feedback field (sub-frame of the permission card).
+    Feedback,
+    Question,
+    SkillTrust,
+    SkillTrustInspect,
+    PlanApproval,
+    /// The inline plan card and the plan deviation card (same `y/e/n` grammar).
+    PlanDecision,
+    SkipCascade,
+    Delegation,
+    SpawnGate,
+    /// The `y` / `n` confirmations: fork, artifact apply, `/peer add`, `/team retract`,
+    /// consolidation, cancel-plan, the attached retract confirmation.
+    Confirm,
+    Forget,
+    Rewind,
+    ExportOverwrite,
+    TeamProposal,
+    /// Attached sender-consent card.
+    Consent,
 }
 
 impl Context {
-    pub const ALL: [Context; 36] = [
+    pub const ALL: [Context; 52] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -425,6 +449,22 @@ impl Context {
         Context::DecisionPane,
         Context::RecipientSurface,
         Context::Login,
+        Context::Card,
+        Context::Feedback,
+        Context::Question,
+        Context::SkillTrust,
+        Context::SkillTrustInspect,
+        Context::PlanApproval,
+        Context::PlanDecision,
+        Context::SkipCascade,
+        Context::Delegation,
+        Context::SpawnGate,
+        Context::Confirm,
+        Context::Forget,
+        Context::Rewind,
+        Context::ExportOverwrite,
+        Context::TeamProposal,
+        Context::Consent,
     ];
 
     /// Name painted in the "No binding for Ctrl+X <key> in <context>" toast and docs.
@@ -466,6 +506,22 @@ impl Context {
             Context::DecisionPane => "Decisions",
             Context::RecipientSurface => "Recipient surface",
             Context::Login => "Login",
+            Context::Card => "Decision cards (shared)",
+            Context::Feedback => "Permission feedback",
+            Context::Question => "Question",
+            Context::SkillTrust => "Skill trust",
+            Context::SkillTrustInspect => "Skill trust (inspect)",
+            Context::PlanApproval => "Plan approval",
+            Context::PlanDecision => "Plan card",
+            Context::SkipCascade => "Skip cascade",
+            Context::Delegation => "Delegation",
+            Context::SpawnGate => "Spawn gate",
+            Context::Confirm => "Confirmation card",
+            Context::Forget => "Forget",
+            Context::Rewind => "Rewind",
+            Context::ExportOverwrite => "Export overwrite",
+            Context::TeamProposal => "Team proposal",
+            Context::Consent => "Consent",
         }
     }
 
@@ -488,7 +544,24 @@ impl Context {
             | Context::QuitConfirm
             | Context::DecisionPane
             | Context::RecipientSurface
-            | Context::Login => &[],
+            | Context::Login
+            | Context::Card
+            | Context::SkillTrustInspect
+            | Context::Consent => &[],
+            // The decision cards own every key: the shared cue rows only (A8).
+            Context::SkillTrust
+            | Context::PlanApproval
+            | Context::PlanDecision
+            | Context::SkipCascade
+            | Context::Delegation
+            | Context::SpawnGate
+            | Context::Confirm
+            | Context::Forget
+            | Context::Rewind
+            | Context::ExportOverwrite
+            | Context::TeamProposal => &[Context::Card],
+            Context::Feedback => &[Context::FieldEdit],
+            Context::Question => &[Context::Card, Context::FieldEdit],
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
             Context::SidebarHistory
@@ -521,6 +594,7 @@ impl Context {
                 | Context::DecisionPane
                 | Context::ModelSelector
                 | Context::ProfileSwitcher
+                | Context::ExportOverwrite
         )
     }
 }
@@ -627,6 +701,7 @@ pub enum CommandId {
     Panel(PanelCmd),
     Inspector(InspectorCmd),
     Overlay(OverlayCmd),
+    Card(CardCmd),
 }
 
 macro_rules! command_from {
@@ -651,6 +726,7 @@ command_from!(
     Panel(PanelCmd),
     Inspector(InspectorCmd),
     Overlay(OverlayCmd),
+    Card(CardCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

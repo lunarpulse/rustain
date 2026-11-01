@@ -1,6 +1,9 @@
 use ratatui::prelude::*;
 use ratatui::widgets::BorderType;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
@@ -380,11 +383,16 @@ pub fn render_plan_card_lines<'a>(
             }
         }
 
-        let action_text = "[y] Approve  [e] Edit  [n] Reject";
-        let action_display = if geom::cells(action_text) > inner_width {
-            "[y] [e] [n]".to_string()
+        let (yes, edit, no) = (
+            rail(Context::PlanDecision, CardCmd::Yes),
+            rail(Context::PlanDecision, CardCmd::Edit),
+            rail(Context::PlanDecision, CardCmd::No),
+        );
+        let action_text = format!("{yes} Approve  {edit} Edit  {no} Reject");
+        let action_display = if geom::cells(&action_text) > inner_width {
+            format!("{yes} {edit} {no}")
         } else {
-            action_text.to_string()
+            action_text
         };
         let action_pad = inner_width.saturating_sub(geom::cells(&action_display));
         let action_left = action_pad / 2;
@@ -395,11 +403,11 @@ pub fn render_plan_card_lines<'a>(
                 Style::default().fg(theme.colors.decision_border),
             ),
             Span::raw(" ".repeat(action_left)),
-            Span::styled("[y]", Style::default().fg(theme.colors.success)),
+            Span::styled(yes, Style::default().fg(theme.colors.success)),
             Span::raw(" Approve  "),
-            Span::styled("[e]", Style::default().fg(theme.colors.info)),
+            Span::styled(edit, Style::default().fg(theme.colors.info)),
             Span::raw(" Edit  "),
-            Span::styled("[n]", Style::default().fg(theme.colors.error)),
+            Span::styled(no, Style::default().fg(theme.colors.error)),
             Span::raw(" Reject"),
             Span::raw(" ".repeat(action_right)),
             Span::styled(
@@ -621,9 +629,7 @@ mod tests {
             })
             .collect();
         assert!(text.contains("Plan: Test Plan"));
-        assert!(text.contains("[y]"));
-        assert!(text.contains("[e]"));
-        assert!(text.contains("[n]"));
+        assert!(text.contains("[y] Approve  [e] Edit  [n] Reject"));
         assert!(text.contains("Estimated:"));
         assert!(text.contains("5 tool calls"));
         assert!(!text.contains("~5 tool calls"));

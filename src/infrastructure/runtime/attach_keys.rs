@@ -320,6 +320,19 @@ impl KeyCtx<'_> {
     }
 }
 
+/// The attached decision card that owns `Esc` / `Ctrl+C` now: sender consent, the
+/// consolidation card or the retract confirmation (A8; the permission approvals and the
+/// team retract card answer in `attach_loop`).
+fn attached_card_context(ctx: &KeyCtx<'_>) -> Option<Context> {
+    if !ctx.consent.is_empty() {
+        Some(Context::Consent)
+    } else if ctx.consolidation_token.is_some() || ctx.retract_confirm.is_some() {
+        Some(Context::Confirm)
+    } else {
+        None
+    }
+}
+
 /// Lend the attached composer to the shared composer state for one call and
 /// hand it back. The cursor is always at the end of the attached buffer.
 fn with_lent_input<R>(
@@ -454,6 +467,38 @@ pub(super) fn paint_overlays(
 
 /// The attached key front door. Called by `run_attached` for every key event.
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
+    let overlay_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state);
+    let flow = handle_attached_key_inner(ctx, key).await;
+    if overlay_was_open
+        && ctx.state.focus == FocusState::Input
+        && !crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state)
+    {
+        reconcile_pending_card_after_overlay_close(ctx);
+    }
+    super::settle_attached_card_focus(
+        ctx.state,
+        ctx.read_only,
+        ctx.approvals,
+        ctx.consent,
+        ctx.consolidation_token,
+        ctx.retract_confirm,
+    );
+    flow
+}
+
+fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
+    if super::attached_card_pending(
+        ctx.approvals,
+        ctx.consent,
+        ctx.consolidation_token,
+        ctx.retract_confirm,
+    ) {
+        super::attached_card_arrived(ctx.state, ctx.input, ctx.read_only);
+    }
+}
+
+async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crossterm::event::KeyEventKind;
 
     // S-QUIT owns every key while its frame is open — before approvals,
@@ -505,12 +550,16 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     );
     if ctx.approvals.key(
         key,
-        ctx.read_only
-            || approval_higher
-            || !matches!(ctx.state.focus, FocusState::Chat | FocusState::Input),
+        ctx.read_only || approval_higher || ctx.state.focus != FocusState::Chat,
         attached_display_input(ctx.state, ctx.input),
         ctx.frame_tx,
     ) {
+        if std::mem::take(&mut ctx.approvals.cue) {
+            ctx.info(crate::adapters::tui::keymap::render::card_cue(
+                Context::Permission,
+                Host::Attached,
+            ));
+        }
         ctx.state.needs_redraw = true;
         return KeyFlow::Continue;
     }
@@ -572,21 +621,28 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     // Any further keypress dismisses the retract confirmation.
     ctx.state.feedback_blocks.remove("peer-retract");
 
-    // `Ctrl+C` inside a decision card is "back one frame": it answers exactly
-    // like `Esc` (the card's own decline), never an interrupt or a quit.
-    let key =
-        if is_ctrl(&key, 'c') && (ctx.decision_cards_pending() || ctx.retract_confirm.is_some()) {
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
-        } else {
-            key
-        };
+    // `Esc` and `Ctrl+C` never decide a card (A8): one cue naming the keys that do. A card
+    // answers only in Chat focus (AC17); in Input both keys keep their usual meaning.
+    let chat = ctx.state.focus == FocusState::Chat;
+    if chat
+        && key.kind == KeyEventKind::Press
+        && (key.code == KeyCode::Esc && key.modifiers.is_empty() || is_ctrl(&key, 'c'))
+        && let Some(card) = attached_card_context(ctx)
+    {
+        ctx.info(crate::adapters::tui::keymap::render::card_cue(
+            card,
+            Host::Attached,
+        ));
+        ctx.state.needs_redraw = true;
+        return KeyFlow::Continue;
+    }
 
     match (key.code, key.modifiers) {
         // Story 18.3d AC1 — sender-consent Approval Pattern. The guard is the
         // daemon-derived pending FIFO, so these single-letter keys are inert
         // everywhere else.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && !ctx.consent.is_empty() =>
+            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
         {
             if let Some(pending) = ctx.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
@@ -597,7 +653,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Char('a'), m)
-            if !m.contains(KeyModifiers::CONTROL) && !ctx.consent.is_empty() =>
+            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
         {
             if let Some(pending) = ctx.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
@@ -609,8 +665,8 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             }
             ctx.state.needs_redraw = true;
         }
-        (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-            if !m.contains(KeyModifiers::CONTROL) && !ctx.consent.is_empty() =>
+        (KeyCode::Char('n'), m)
+            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
         {
             if let Some(pending) = ctx.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
@@ -622,7 +678,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         }
         // Story 12.2d AC4/AC5 — consolidation card intercept.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && ctx.consolidation_token.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.consolidation_token.is_some() =>
         {
             if let Some(token) = ctx.consolidation_token.take() {
                 let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
@@ -633,10 +689,10 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             *ctx.consolidation_card = None;
             ctx.state.needs_redraw = true;
         }
-        (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-            if !m.contains(KeyModifiers::CONTROL) && ctx.consolidation_token.is_some() =>
+        (KeyCode::Char('n'), m)
+            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.consolidation_token.is_some() =>
         {
-            // n or Esc while the card is shown → decline.
+            // n while the card is shown → decline.
             if let Some(token) = ctx.consolidation_token.take() {
                 let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
                     token,
@@ -650,7 +706,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         // (Approval grammar, never a bare key on a transient surface). It is
         // opened only by the palette's retract route.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && ctx.retract_confirm.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.retract_confirm.is_some() =>
         {
             if ctx.read_only {
                 ctx.info("read-only — can't retract here");
@@ -671,8 +727,8 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             }
             ctx.state.needs_redraw = true;
         }
-        (KeyCode::Char('n'), m) | (KeyCode::Esc, m)
-            if !m.contains(KeyModifiers::CONTROL) && ctx.retract_confirm.is_some() =>
+        (KeyCode::Char('n'), m)
+            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.retract_confirm.is_some() =>
         {
             *ctx.retract_confirm = None;
             ctx.state.needs_redraw = true;
@@ -1050,9 +1106,29 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             ctx.state.needs_redraw = true;
         }
         LeaderCmd::Decisions => {
-            // The attached client has no decision producers: every permission,
-            // plan and question card stays inline (21-6 migrates them).
-            ctx.info("No decisions waiting in this client");
+            if ctx.approvals.pending.is_empty() {
+                ctx.info("No decisions waiting in this client");
+            } else {
+                ctx.info(format!(
+                    "Approval pending: clear the draft, {}then {} / {}",
+                    if ctx.state.focus == FocusState::Input {
+                        format!(
+                            "{} to Chat, ",
+                            crate::adapters::tui::keymap::render::key_text(InputCmd::ReturnToChat)
+                        )
+                    } else {
+                        String::new()
+                    },
+                    crate::adapters::tui::keymap::render::rail(
+                        Context::Permission,
+                        crate::adapters::tui::keymap::table_permission::PermissionCmd::AllowOnce
+                    ),
+                    crate::adapters::tui::keymap::render::rail(
+                        Context::Permission,
+                        crate::adapters::tui::keymap::table_permission::PermissionCmd::Deny
+                    ),
+                ));
+            }
         }
         LeaderCmd::Detach => return KeyFlow::Detach,
         // The leader's own Ctrl+Q row (AC20a): the menu is closed above, the guarded
@@ -1253,7 +1329,17 @@ fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
         .find(|row| row.id == message_id)
         .map(|row| (row.id.clone(), preview_line(&row.content, 48)));
     match target {
-        Some(target) => *ctx.retract_confirm = Some(target),
+        Some(target) => {
+            *ctx.retract_confirm = Some(target);
+            // FR-21-3-c: the operator opened it; the confirm answers only in Chat focus.
+            crate::adapters::tui::decision_pane::take_chat_focus_for_card(
+                &mut ctx.state.focus,
+                &mut ctx.state.card_focus_borrowed_from,
+                !ctx.read_only,
+                false,
+            );
+            ctx.state.focus = FocusState::Chat;
+        }
         None => ctx.info("that message can no longer be retracted — nothing sent"),
     }
     ctx.state.needs_redraw = true;
@@ -1423,6 +1509,7 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{apply_attached_approval_frame, attached_card_arrived};
     use super::*;
     use crate::adapters::daemon::protocol::{DaemonFrame, InterruptRefusal, TurnGeneration};
     use crate::adapters::tui::keymap::render::leader_menu;
@@ -1528,7 +1615,12 @@ mod tests {
                 log_service: &self.log_service,
                 chrome: &mut self.chrome,
             };
-            handle_attached_key(&mut ctx, KeyEvent::new(code, modifiers)).await
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                handle_attached_key(&mut ctx, KeyEvent::new(code, modifiers)),
+            )
+            .await
+            .expect("attached key deadline")
         }
 
         async fn ch(&mut self, c: char) -> KeyFlow {
@@ -2265,9 +2357,24 @@ mod tests {
         );
         assert!(rig.frames().is_empty(), "no immediate effect");
         // `n` declines; reopen and confirm with `y`.
+        assert_eq!(
+            rig.state.focus,
+            FocusState::Chat,
+            "the palette route hands the confirm Chat focus, where it answers (AC17)"
+        );
         rig.ch('n').await;
         assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
-        rig.retract_confirm = Some(("peer-response-node-a".to_owned(), "first".to_owned()));
+        assert_eq!(
+            rig.state.focus,
+            FocusState::Input,
+            "decline returns borrowed focus"
+        );
+        rig.ctrl('p').await;
+        rig.type_text("retract").await;
+        for _ in 0..first {
+            rig.press(KeyCode::Down, KeyModifiers::NONE).await;
+        }
+        rig.enter().await;
         rig.ch('y').await;
         let frames = rig.frames();
         assert!(matches!(
@@ -2276,10 +2383,21 @@ mod tests {
                 if message_id == "peer-response-node-a"
         ));
 
-        // Stale target: the row was retracted meanwhile — `y` sends nothing.
+        // Stale target: the row was retracted meanwhile — `y` sends nothing. The confirm
+        // opens through the real palette route, which hands it Chat focus (FR-21-3-c).
         let mut rig = Rig::new(false);
         rig.retractable("peer-response-node-a", "auto reply");
-        rig.retract_confirm = Some(("peer-response-node-a".to_owned(), "auto".to_owned()));
+        assert_eq!(rig.state.focus, FocusState::Input);
+        rig.input = "saved retract draft".into();
+        rig.ctrl('p').await;
+        rig.type_text("retract").await;
+        rig.enter().await;
+        assert!(rig.retract_confirm.is_some());
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        rig.ch('i').await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert_eq!(rig.input, "saved retract draft");
+        rig.esc().await;
         rig.conversation.messages[0].retracted_at_ms = Some(1);
         rig.ch('y').await;
         assert!(rig.frames().is_empty(), "stale target never retracts");
@@ -2379,8 +2497,10 @@ mod tests {
 
     // ── the pre-existing owners keep their keys ──────────────────────────────
 
+    /// 21-3 3-C (AC16, AC17; was "keeps its keys and Ctrl+C declines it"): a card answers only
+    /// in Chat focus, and `Esc` / `Ctrl+C` post one cue instead of declining it.
     #[tokio::test]
-    async fn story21_2_attached_consent_card_keeps_its_keys_and_ctrl_c_declines_it() {
+    async fn story21_3_attached_consent_and_retract_cards_answer_in_chat_and_never_on_esc() {
         fn consent() -> PendingConsentApproval {
             PendingConsentApproval {
                 request_id: crate::domain::models::RequestId::new(),
@@ -2390,6 +2510,31 @@ mod tests {
         }
         let mut rig = Rig::new(false);
         rig.consent.push_back(consent());
+        // Input focus: `y` is text and the card stays pending.
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty() && rig.consent.len() == 1);
+        assert_eq!(rig.input, "y");
+        rig.input.clear();
+        attached_card_arrived(&mut rig.state, &rig.input, false);
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        let cue = crate::adapters::tui::keymap::render::card_cue(Context::Consent, Host::Attached);
+        for pressed_ctrl_c in [false, true] {
+            if pressed_ctrl_c {
+                rig.ctrl('c').await;
+            } else {
+                rig.esc().await;
+            }
+            assert!(
+                rig.frames().is_empty() && rig.consent.len() == 1,
+                "no decision"
+            );
+            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
+        }
+        assert!(
+            rig.state.quit_confirm.is_none(),
+            "Ctrl+C is never a quit here"
+        );
+        // Positive control: the explicit keys decide, once each.
         rig.ch('y').await;
         assert!(matches!(
             rig.frames().as_slice(),
@@ -2398,9 +2543,13 @@ mod tests {
                 ..
             }]
         ));
-        // Ctrl+C is "back one frame": the card's decline, never an exit/interrupt.
-        rig.consent.push_back(consent());
-        assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
+        assert_eq!(
+            rig.state.focus,
+            FocusState::Input,
+            "consent returns borrowed focus"
+        );
+        rig.retained_arrives(false);
+        rig.ch('n').await;
         assert!(matches!(
             rig.frames().as_slice(),
             [ClientFrame::ApprovalResponse {
@@ -2408,8 +2557,598 @@ mod tests {
                 ..
             }]
         ));
-        assert!(rig.consent.is_empty());
-        assert!(rig.state.quit_confirm.is_none());
+        // The retract confirmation: same grammar, same cue.
+        rig.retract_confirm = Some(("peer-response-node-a".to_owned(), "first".to_owned()));
+        assert_eq!(rig.state.focus, FocusState::Input);
+        attached_card_arrived(&mut rig.state, &rig.input, false);
+        rig.esc().await;
+        assert!(rig.retract_confirm.is_some() && rig.frames().is_empty());
+        assert_eq!(
+            rig.notice(NoticeSource::Attached),
+            Some(
+                crate::adapters::tui::keymap::render::card_cue(Context::Confirm, Host::Attached)
+                    .as_str()
+            )
+        );
+        rig.ch('n').await;
+        assert!(rig.retract_confirm.is_none());
+    }
+
+    impl Rig {
+        /// An approval reaches the loop as the daemon sends it (request, input, complete);
+        /// the loop then paints the card by its own rule.
+        fn approval_arrives(&mut self, id: &str) {
+            use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+            let data = r#"{"command":"ok"}"#;
+            let request_id = || RequestId(id.into());
+            for frame in [
+                DaemonFrame::ApprovalRequest {
+                    request_id: request_id(),
+                    tool: "Bash".into(),
+                    source: ApprovalSource::ForegroundTurn {
+                        conversation_id: "c".into(),
+                    },
+                    risk: crate::domain::models::ToolRisk::Standard,
+                    summary: "command summary".into(),
+                    input_bytes: Some(data.len() as u64),
+                },
+                DaemonFrame::ApprovalInputChunk {
+                    request_id: request_id(),
+                    sequence: 0,
+                    data: data.into(),
+                },
+                DaemonFrame::ApprovalInputComplete {
+                    request_id: request_id(),
+                    chunks: 1,
+                },
+            ] {
+                apply_attached_approval_frame(
+                    &mut self.state,
+                    &mut self.approvals,
+                    frame,
+                    &self.input,
+                    self.read_only,
+                );
+            }
+            self.paint_approvals();
+        }
+
+        /// The loop's own paint rule: a writer in Chat or Input with an empty composer.
+        fn paint_approvals(&mut self) {
+            let paints = !self.read_only
+                && matches!(self.state.focus, FocusState::Chat | FocusState::Input)
+                && attached_display_input(&self.state, &self.input).is_empty();
+            let theme = crate::adapters::tui::theme::Theme::dark();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            let mut painted = None;
+            terminal
+                .draw(|f| {
+                    if paints {
+                        painted = self.approvals.paint(f, f.area(), &theme);
+                    }
+                })
+                .unwrap();
+            self.approvals.painted = painted;
+        }
+    }
+
+    impl Rig {
+        fn retained_arrives(&mut self, consolidation: bool) {
+            if consolidation {
+                super::super::apply_attached_consolidation_frame(
+                    &mut self.state,
+                    &mut self.consolidation_card,
+                    &mut self.consolidation_token,
+                    DaemonFrame::ConsolidationProposed {
+                        token: ProposalToken(7),
+                        proposals: vec![],
+                    },
+                    &self.input,
+                    self.read_only,
+                );
+            } else {
+                super::super::apply_attached_consent_frame(
+                    &mut self.state,
+                    &mut self.consent,
+                    DaemonFrame::ApprovalRequest {
+                        request_id: crate::domain::models::RequestId::new(),
+                        tool: "a2a/sender-consent".into(),
+                        source: crate::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                            conversation_id: "c".into(),
+                        },
+                        risk: crate::domain::models::ToolRisk::Standard,
+                        summary: "consent".into(),
+                        input_bytes: None,
+                    },
+                    &self.input,
+                    self.read_only,
+                );
+            }
+        }
+    }
+
+    async fn retained_attached_arrival(consolidation: bool) {
+        for (focus, draft) in [
+            (FocusState::Input, ""),
+            (FocusState::Input, "draft\n界"),
+            (FocusState::Overlay(OverlayType::Help), ""),
+        ] {
+            let mut rig = Rig::new(false);
+            rig.state.focus = focus.clone();
+            rig.input = draft.into();
+            rig.retained_arrives(consolidation);
+            let takes = focus == FocusState::Input && draft.is_empty();
+            assert_eq!(
+                rig.state.focus,
+                if takes {
+                    FocusState::Chat
+                } else {
+                    focus.clone()
+                }
+            );
+            assert_eq!(rig.input, draft);
+            assert!(rig.frames().is_empty());
+            if takes {
+                rig.ch('i').await;
+                assert_eq!(rig.state.focus, FocusState::Input);
+                rig.retained_arrives(consolidation);
+                assert_eq!(
+                    rig.state.focus,
+                    FocusState::Chat,
+                    "burst retakes empty Input"
+                );
+            } else if focus == FocusState::Input {
+                rig.esc().await;
+                rig.ch('i').await;
+                assert_eq!(rig.state.focus, FocusState::Input);
+                assert_eq!(rig.input, draft);
+            }
+            assert_eq!(rig.consolidation_token.is_some(), consolidation);
+            assert_eq!(rig.consent.is_empty(), consolidation);
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_attached_consent() {
+        retained_attached_arrival(false).await;
+    }
+
+    #[tokio::test]
+    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_attached_consolidation() {
+        retained_attached_arrival(true).await;
+    }
+
+    #[tokio::test]
+    async fn story21_3_borrowed_consent_focus_restores_composition() {
+        let mut rig = Rig::new(false);
+        rig.retained_arrives(false);
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        rig.ch('y').await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::ApprovalResponse { .. }]
+        ));
+        let pending = super::super::attached_card_pending(
+            &rig.approvals,
+            &rig.consent,
+            &rig.consolidation_token,
+            &rig.retract_confirm,
+        );
+        super::super::handle_attached_paste(
+            &mut rig.state,
+            &mut rig.input,
+            "first line\nsecond line",
+            pending,
+        );
+        rig.enter().await;
+        assert_eq!(
+            rig.frames().iter().find_map(user_text),
+            Some("first line\nsecond line")
+        );
+        // Tab saves this restored focus, not the card's Chat.
+        let mut row = system_message("pending response");
+        row.id = "peer".into();
+        rig.conversation.messages.push(row);
+        rig.conversation.peer_row_controls.insert(
+            "peer".into(),
+            crate::domain::models::PeerRowControl {
+                node_id: "node".into(),
+                item_address: None,
+                stories: None,
+                status: None,
+                selected_for: None,
+                retro: None,
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
+                sender_label: "sender".into(),
+                stage: crate::domain::models::PeerRowStage::AwaitingOperator,
+                node_resolvable: true,
+            },
+        );
+        rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
+        assert!(rig.state.recipient_surface.is_some());
+        rig.esc().await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+    }
+
+    #[tokio::test]
+    async fn story21_3_borrowed_focus_respects_explicit_user_control() {
+        let mut rig = Rig::new(false);
+        rig.retained_arrives(false);
+        rig.ch('i').await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+        rig.esc().await;
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        rig.ch('y').await;
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::ApprovalResponse { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn story21_3_borrowed_focus_waits_for_last_attached_card() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("queued");
+        rig.retained_arrives(false);
+        rig.ch('y').await;
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        assert_eq!(rig.approvals.pending.len(), 1);
+        rig.paint_approvals();
+        rig.ch('y').await;
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert_eq!(rig.frames().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn story21_3_borrowed_focus_settles_after_frame_without_key() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("withdrawn");
+        apply_attached_approval_frame(
+            &mut rig.state,
+            &mut rig.approvals,
+            DaemonFrame::ApprovalClosed {
+                request_id: crate::domain::models::RequestId("withdrawn".into()),
+            },
+            &rig.input,
+            false,
+        );
+        super::super::settle_attached_card_focus(
+            &mut rig.state,
+            false,
+            &rig.approvals,
+            &rig.consent,
+            &rig.consolidation_token,
+            &rig.retract_confirm,
+        );
+        assert!(rig.approvals.pending.is_empty());
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert!(rig.frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_3_borrowed_focus_does_not_restore_unborrowed_focus() {
+        for (read_only, draft) in [(true, ""), (false, "draft")] {
+            let mut rig = Rig::new(read_only);
+            rig.input = draft.into();
+            rig.retained_arrives(false);
+            assert_eq!(rig.state.focus, FocusState::Input);
+            rig.esc().await;
+            rig.ch('y').await;
+            assert_eq!(rig.state.focus, FocusState::Chat);
+            assert_eq!(rig.input, draft);
+        }
+    }
+
+    async fn arrival_behind_surface(surface: char) {
+        for draft in ["", "saved draft"] {
+            let mut rig = Rig::new(false);
+            rig.input = draft.into();
+            rig.streaming.is_streaming = true;
+            if surface == 'q' {
+                rig.ctrl('q').await;
+            } else {
+                rig.ctrl('x').await;
+                rig.ch(surface).await;
+            }
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert!(rig.state.notification_log.is_some() || rig.state.quit_confirm.is_some());
+            rig.approval_arrives("behind-surface");
+            assert_eq!(rig.state.focus, FocusState::Input, "surface keeps focus");
+            rig.ch('d').await;
+            assert_eq!(rig.input, draft, "surface keeps its keys");
+            rig.esc().await;
+            assert_eq!(
+                rig.state.focus,
+                if draft.is_empty() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                }
+            );
+            assert_eq!(rig.approvals.pending.len(), 1);
+            assert_eq!(rig.input, draft);
+            assert!(
+                rig.frames().is_empty(),
+                "dismissal never decides or interrupts"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_3_arrival_behind_log_attached() {
+        arrival_behind_surface('n').await;
+    }
+    #[tokio::test]
+    async fn story21_3_arrival_behind_quit_attached() {
+        arrival_behind_surface('q').await;
+    }
+
+    #[tokio::test]
+    async fn story21_3_attached_approval_arriving_behind_help_remains_discoverable() {
+        for draft in ["", "saved draft"] {
+            let mut rig = Rig::new(false);
+            rig.input = draft.into();
+            rig.ctrl('x').await;
+            rig.ch('?').await;
+            assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+            rig.approval_arrives("behind-help");
+            assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+            rig.esc().await;
+            assert_eq!(
+                rig.state.focus,
+                if draft.is_empty() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                }
+            );
+            rig.paint_approvals();
+            if !draft.is_empty() {
+                assert_eq!(
+                    super::super::attached_notice_badges(&rig.state, &rig.approvals).decisions,
+                    1
+                );
+                assert!(rig.approvals.painted.is_none(), "draft hides card");
+            }
+            rig.ch('y').await;
+            if draft.is_empty() {
+                assert!(matches!(
+                    rig.frames().as_slice(),
+                    [ClientFrame::ApprovalResponse {
+                        outcome: crate::domain::models::ApprovalOutcome::Once,
+                        ..
+                    }]
+                ));
+                rig.ch('y').await;
+                assert!(rig.frames().is_empty());
+            } else {
+                assert_eq!(rig.input, "saved drafty");
+                assert!(rig.frames().is_empty());
+                assert_eq!(rig.approvals.pending.len(), 1);
+                rig.ctrl('x').await;
+                rig.ch('q').await;
+                let route = rig.notice(NoticeSource::Attached).unwrap();
+                assert!(
+                    route.contains("clear the draft")
+                        && route.contains(&crate::adapters::tui::keymap::render::key_text(
+                            InputCmd::ReturnToChat
+                        ))
+                );
+                assert!(route.contains(&crate::adapters::tui::keymap::render::rail(
+                    Context::Permission,
+                    crate::adapters::tui::keymap::table_permission::PermissionCmd::Deny
+                )));
+                rig.esc().await;
+                rig.paint_approvals();
+                assert!(
+                    rig.approvals.painted.is_none(),
+                    "Esc does not expose a drafted approval"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_3_attached_proposal_ctrl_c_cues_without_interrupting_a_live_turn() {
+        let mut rig = Rig::new(false);
+        rig.state.focus = FocusState::Chat;
+        super::super::apply_attached_proposal_frame(
+            &mut rig.state,
+            &mut rig.tab,
+            &mut rig.team_requests,
+            "c",
+            DaemonFrame::TeamProposal {
+                proposal: "p".into(),
+                recipients: vec!["peer".into()],
+                message_type: crate::domain::models::SemanticMessageType::ArchitectureUpdate,
+                body: "review".into(),
+            },
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut layout = crate::adapters::tui::layout::compute_layout(
+                    frame.area(),
+                    &rig.state.theme,
+                    "",
+                    1,
+                    false,
+                    crate::domain::models::visual::DensityMode::Focus,
+                )
+                .unwrap();
+                let card = super::super::prepare_attached_proposal(
+                    &rig.state,
+                    &rig.tab,
+                    "",
+                    false,
+                    false,
+                    &mut layout,
+                    frame.area(),
+                );
+                rig.state.team_proposal_visible =
+                    crate::adapters::tui::widgets::team_proposal_card::render(
+                        card,
+                        frame.buffer_mut(),
+                        &rig.state.theme,
+                    );
+            })
+            .unwrap();
+        assert!(rig.state.team_proposal_visible.is_some());
+        rig.interrupt.apply(&DaemonFrame::ActiveTurn {
+            generation: Some(TurnGeneration(7)),
+        });
+        rig.streaming.is_streaming = true;
+        rig.ctrl('c').await;
+        assert!(rig.frames().is_empty(), "no interrupt or decision");
+        assert_eq!(
+            rig.notice(NoticeSource::Approval),
+            Some(
+                crate::adapters::tui::keymap::render::card_cue(
+                    Context::TeamProposal,
+                    Host::Attached
+                )
+                .as_str()
+            )
+        );
+        assert!(rig.state.pending_team_proposals.contains_key("c"));
+        rig.input = "saved draft".into();
+        rig.ctrl('c').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::InterruptTurn { .. }]
+        ));
+        assert_eq!(rig.input, "saved draft");
+        assert!(rig.state.pending_team_proposals.contains_key("c"));
+    }
+
+    /// 21-3 3-C patch round (R1, FR-21-3-c): an approval that arrives while the writer sits in
+    /// an empty Input hands the card Chat focus; `y` then decides once. Esc / Ctrl+C post the
+    /// registry cue through the host (R4c) and a card never answers outside Chat (R4b).
+    #[tokio::test]
+    async fn story21_3_attached_approval_arrival_takes_chat_focus_for_an_empty_composer() {
+        let mut rig = Rig::new(false);
+        assert_eq!(rig.state.focus, FocusState::Input);
+        rig.approval_arrives("a");
+        assert_eq!(rig.state.focus, FocusState::Chat, "the arrival takes focus");
+        let cue =
+            crate::adapters::tui::keymap::render::card_cue(Context::Permission, Host::Attached);
+        for ctrl_c in [false, true] {
+            if ctrl_c {
+                rig.ctrl('c').await;
+            } else {
+                rig.esc().await;
+            }
+            assert!(rig.frames().is_empty(), "no decision");
+            assert_eq!(rig.approvals.pending.len(), 1, "the card stays pending");
+            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
+        }
+        assert!(
+            rig.state.quit_confirm.is_none(),
+            "Ctrl+C is never a quit here"
+        );
+        // Outside Chat the painted card is blocked: `y` is composer text.
+        rig.state.focus = FocusState::Input;
+        rig.ch('y').await;
+        assert_eq!(rig.input, "y");
+        assert!(rig.frames().is_empty() && rig.approvals.pending.len() == 1);
+        rig.input.clear();
+        rig.state.focus = FocusState::Chat;
+        rig.paint_approvals();
+        rig.ch('y').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::ApprovalResponse {
+                outcome: crate::domain::models::ApprovalOutcome::Once,
+                ..
+            }]
+        ));
+        assert!(rig.approvals.pending.is_empty(), "decided once");
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty(), "a second `y` decides nothing");
+    }
+
+    /// A draft keeps focus: the user is mid-sentence, so `y` stays text and no frame goes out
+    /// (the card is hidden by the paint rule and still pending). A read-only client keeps focus.
+    #[tokio::test]
+    async fn story21_3_attached_approval_arrival_never_takes_focus_from_a_draft_or_a_reader() {
+        let mut rig = Rig::new(false);
+        rig.input = "half a sentence ".to_owned();
+        rig.approval_arrives("a");
+        assert_eq!(rig.state.focus, FocusState::Input);
+        rig.ch('y').await;
+        assert_eq!(rig.input, "half a sentence y");
+        assert!(rig.frames().is_empty());
+        assert_eq!(rig.approvals.pending.len(), 1, "the card waits");
+
+        let mut reader = Rig::new(true);
+        reader.approval_arrives("a");
+        assert_eq!(reader.state.focus, FocusState::Input);
+        reader.ch('y').await;
+        assert_eq!(reader.input, "y");
+        assert!(reader.frames().is_empty());
+    }
+
+    /// R4a: the consolidation card answers `y` / `n` in Chat (a token is sent once), they are
+    /// text in Input, and `Esc` / `Ctrl+C` post the registry cue and leave it pending. The
+    /// arrival takes the Chat focus through the loop's own function.
+    #[tokio::test]
+    async fn story21_3_attached_consolidation_card_answers_in_chat_and_cues_on_esc() {
+        fn card() -> Option<PendingConsolidationCard> {
+            Some(PendingConsolidationCard {
+                conversation_id: String::new(),
+                proposals: vec![],
+            })
+        }
+        let mut rig = Rig::new(false);
+        rig.consolidation_card = card();
+        rig.consolidation_token = Some(ProposalToken(7));
+        // Input focus: `y` / `n` are text.
+        rig.ch('y').await;
+        rig.ch('n').await;
+        assert_eq!(rig.input, "yn");
+        assert!(rig.frames().is_empty() && rig.consolidation_token.is_some());
+        rig.input.clear();
+        attached_card_arrived(&mut rig.state, &rig.input, false);
+        assert_eq!(rig.state.focus, FocusState::Chat);
+        let cue = crate::adapters::tui::keymap::render::card_cue(Context::Confirm, Host::Attached);
+        for ctrl_c in [false, true] {
+            if ctrl_c {
+                rig.ctrl('c').await;
+            } else {
+                rig.esc().await;
+            }
+            assert!(rig.frames().is_empty() && rig.consolidation_token.is_some());
+            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
+        }
+        rig.ch('n').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::ConsolidationResolve {
+                token: ProposalToken(7),
+                accept: false
+            }]
+        ));
+        assert!(rig.consolidation_token.is_none() && rig.consolidation_card.is_none());
+        assert_eq!(
+            rig.state.focus,
+            FocusState::Input,
+            "consolidation returns borrowed focus"
+        );
+        rig.consolidation_card = card();
+        rig.consolidation_token = Some(ProposalToken(8));
+        attached_card_arrived(&mut rig.state, &rig.input, false);
+        rig.ch('y').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::ConsolidationResolve {
+                token: ProposalToken(8),
+                accept: true
+            }]
+        ));
     }
 
     // ── draw: the attached overlays at 60 / 80 / 130 columns ─────────────────

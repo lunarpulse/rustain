@@ -3,6 +3,9 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
@@ -54,11 +57,20 @@ pub fn render_trust_lines<'a>(
     // Line 3: [y] Yes  [n] No  [i] Inspect  [N queued]
     let mut line3_spans = vec![
         Span::styled("┃ ", border_style),
-        Span::styled("[y]", Style::default().fg(theme.colors.success)),
+        Span::styled(
+            rail(Context::SkillTrust, CardCmd::Yes),
+            Style::default().fg(theme.colors.success),
+        ),
         Span::styled(" Yes  ", Style::default().fg(theme.colors.fg_secondary)),
-        Span::styled("[n]", Style::default().fg(theme.colors.error)),
+        Span::styled(
+            rail(Context::SkillTrust, CardCmd::No),
+            Style::default().fg(theme.colors.error),
+        ),
         Span::styled(" No  ", Style::default().fg(theme.colors.fg_secondary)),
-        Span::styled("[i]", Style::default().fg(theme.colors.accent)),
+        Span::styled(
+            rail(Context::SkillTrust, CardCmd::Inspect),
+            Style::default().fg(theme.colors.accent),
+        ),
         Span::styled(" Inspect", Style::default().fg(theme.colors.fg_secondary)),
     ];
     if queue_len > 0 {
@@ -134,7 +146,10 @@ pub fn render_inspect_lines<'a>(
     // Footer: [Esc] Back
     lines.push(Line::from(vec![
         Span::styled("┃ ", border_style),
-        Span::styled("[Esc]", Style::default().fg(theme.colors.fg_secondary)),
+        Span::styled(
+            rail(Context::SkillTrustInspect, CardCmd::Back),
+            Style::default().fg(theme.colors.fg_secondary),
+        ),
         Span::styled(
             " Back to trust prompt",
             Style::default().fg(theme.colors.fg_secondary),

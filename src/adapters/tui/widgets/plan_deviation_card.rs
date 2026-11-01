@@ -5,6 +5,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
+
 pub fn render(
     area: Rect,
     buf: &mut Buffer,
@@ -44,7 +48,12 @@ pub fn render(
         buf.set_string(
             area.x,
             area.y + 3,
-            "║ [y] Approve revised  [e] Edit  [n] Reject",
+            format!(
+                "║ {} Approve revised  {} Edit  {} Reject",
+                rail(Context::PlanDecision, CardCmd::Yes),
+                rail(Context::PlanDecision, CardCmd::Edit),
+                rail(Context::PlanDecision, CardCmd::No)
+            ),
             style,
         );
     }

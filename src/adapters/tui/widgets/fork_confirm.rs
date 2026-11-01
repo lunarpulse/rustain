@@ -1,6 +1,9 @@
 use ratatui::prelude::*;
 
 use super::plan_card::wrap_description;
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
@@ -63,8 +66,12 @@ pub fn render_fork_confirmation_lines(
     }
 
     // Action line
-    let actions = "[y] Fork  [n] Cancel";
-    let padded_actions = format!("║ {} ║", geom::pad_right(actions, inner_width));
+    let actions = format!(
+        "{} Fork  {} Cancel",
+        rail(Context::Confirm, CardCmd::Yes),
+        rail(Context::Confirm, CardCmd::No)
+    );
+    let padded_actions = format!("║ {} ║", geom::pad_right(&actions, inner_width));
     lines.push(Line::from(Span::styled(
         padded_actions,
         Style::default()

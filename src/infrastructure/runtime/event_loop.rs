@@ -1015,7 +1015,7 @@ pub async fn run(
                             // consulted before the recovery/carryover/override interceptors so
                             // no lower card can see (or answer) a `y`.
                             if state.quit_confirm.is_some()
-                                && let Some(outcome) = crate::adapters::tui::quit_confirm::handle_domain_event(&mut state, &domain_event)
+                                && let Some(outcome) = crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| crate::adapters::tui::quit_confirm::handle_domain_event(state, &domain_event))
                             {
                                 if outcome == crate::adapters::tui::quit_confirm::QuitKeyOutcome::Confirmed {
                                     turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
@@ -1027,7 +1027,7 @@ pub async fn run(
                             // S-QUIT, before every lower interceptor); resize/focus events flow on.
                             if state.notification_log.is_some() {
                                 let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
-                                if let Some(outcome) = notification_log::handle_domain_event(&mut state, &domain_event, &facts) {
+                                if let Some(outcome) = crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| notification_log::handle_domain_event(state, &domain_event, &facts)) {
                                     if outcome == notification_log::LogOutcome::Quit { quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue); } else { notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router); }
                                     continue;
                                 }
@@ -2464,7 +2464,7 @@ pub async fn run(
                                     let executing_plan = conversation.plans.values()
                                         .find(|p| p.status == PlanStatus::Executing);
                                     if let Some(plan) = executing_plan {
-                                        state.task_panel_state.cancel_plan_confirm = Some(plan.id.clone());
+                                        arrive_cancel_plan_confirmation(&mut state, plan.id.clone());
                                     } else {
                                         let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
@@ -2696,7 +2696,7 @@ pub async fn run(
                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                 conversation_id: Some(conv_id.clone()),
                                                 level: NoticeLevel::Warning,
-                                                message: "Nothing to edit on auto-skip deviation. Use [n] to reject and stop.".to_string(),
+                                                message: format!("Nothing to edit on auto-skip deviation. Use {} to reject and stop.", crate::adapters::tui::keymap::render::rail(crate::adapters::tui::keymap::Context::PlanDecision, crate::adapters::tui::keymap::table_card::CardCmd::No)),
                                             });
                                         }
                                         PlanDecision::Reject => {
@@ -5490,11 +5490,10 @@ pub async fn run(
                             });
                             state.needs_redraw = true;
                         } else {
-                            state.pending_consolidation_card = Some(crate::adapters::tui::state::PendingConsolidationCard {
+                            arrive_consolidation_card(&mut state, crate::adapters::tui::state::PendingConsolidationCard {
                                 conversation_id: conversation.id.clone(),
                                 proposals: proposals.into_iter().map(|f| (f, true)).collect(),
                             });
-                            state.needs_redraw = true;
                         }
                     }
                     AppEvent::MemoryConsolidationResolved { conversation_id, accepted } => {
@@ -5711,13 +5710,12 @@ pub async fn run(
                                 }
                             } else {
                                 // Normal mode: show delegation card
-                                state.pending_delegation_card = Some(crate::adapters::tui::state::PendingDelegationCard {
+                                arrive_delegation_card(&mut state, crate::adapters::tui::state::PendingDelegationCard {
                                     conversation_id,
                                     plan_id,
                                     task_number,
                                     suggestion,
                                 });
-                                state.needs_redraw = true;
                             }
                         }
                     }
@@ -5866,8 +5864,7 @@ pub async fn run(
                                 ).await;
                                 }
                             } else if cid == conversation.id {
-                                state.task_panel_state.pending_deviation = Some((pid, deviation_kind));
-                                state.needs_redraw = true;
+                                arrive_deviation_card(&mut state, pid, deviation_kind);
                             }
                         }
                         AppEvent::SetPermissionMode(mode) => {
@@ -7124,6 +7121,7 @@ pub async fn run(
             // Branch 4: Active task monitoring (placeholder for future stories)
             // Currently a no-op future that never resolves
         }
+        crate::adapters::tui::app::settle_local_card_focus(&mut state);
 
         if state.should_quit {
             break;
@@ -7763,6 +7761,7 @@ fn render(
     crate::adapters::tui::decision_pane::prune_closed(state, &log_facts);
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
+    let inline_card = crate::adapters::tui::app::inline_card(state);
     let mut content_height = 0usize;
     let mut block_bounds: Vec<usize> = Vec::new();
     let mut msg_bounds: Vec<usize> = Vec::new();
@@ -8125,7 +8124,8 @@ fn render(
 
                 // Story 6.4: render priority chain (cards > drill-down > chat)
                 // 1. Plan deviation card (AC5)
-                if let Some((ref pid, _)) = state.task_panel_state.pending_deviation {
+                if let Some((pid, _)) = &state.task_panel_state.pending_deviation
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Deviation) {
                     use crate::adapters::tui::widgets::plan_deviation_card;
                     let plan_data = conversation.plans.get(pid);
                     let (original, current, changed, summary) = if let Some(plan) = plan_data {
@@ -8156,7 +8156,8 @@ fn render(
                     skip_chat_render = true;
                 }
                 // 2. Cancel plan confirm card (AC6)
-                else if let Some(ref pid) = state.task_panel_state.cancel_plan_confirm {
+                else if let Some(pid) = &state.task_panel_state.cancel_plan_confirm
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::CancelPlan) {
                     use crate::adapters::tui::widgets::cancel_plan_confirm_card;
                     let (plan_title, n_pending, n_completed) = conversation
                         .plans
@@ -8189,7 +8190,8 @@ fn render(
                     skip_chat_render = true;
                 }
                 // 3. Skip cascade card (AC2)
-                else if let Some(ref pending) = state.task_panel_state.skip_cascade_pending {
+                else if let Some(pending) = &state.task_panel_state.skip_cascade_pending
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::SkipCascade) {
                     use crate::adapters::tui::widgets::task_skip_cascade_card;
                     task_skip_cascade_card::render(
                         app_layout.chat_pane,
@@ -8331,7 +8333,8 @@ fn render(
                     visible_feedback_ids = result.visible_feedback_ids;
                 }
 
-                if let Some(ref gate) = state.pending_spawn_gate {
+                if let Some(gate) = &state.pending_spawn_gate
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Spawn) {
                     let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
                         &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
                             requested: gate.requested,
@@ -8437,7 +8440,8 @@ fn render(
                 state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
                 state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane
-                if let Some(ref card) = state.pending_delegation_card {
+                if let Some(card) = &state.pending_delegation_card
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Delegation) {
                     let card_width = 60u16.min(app_layout.chat_pane.width);
                     let card_height = 6u16.min(app_layout.chat_pane.height);
                     let card_area = Rect {
@@ -8459,7 +8463,8 @@ fn render(
                 // Story 11.2a: render the memory-consolidation review card as a
                 // bottom-anchored inline card over the chat pane (helpful review,
                 // never a modal interruption — UX).
-                if let Some(ref card) = state.pending_consolidation_card {
+                if let Some(card) = &state.pending_consolidation_card
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Consolidation) {
                     let card_lines = crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines(
                         card,
                         theme,
@@ -8472,7 +8477,8 @@ fn render(
 
                 // Story 11.4a: render the `/memory forget` confirm card, same
                 // bottom-anchored inline grammar as the consolidation card.
-                if let Some(ref card) = state.pending_forget_card {
+                if let Some(card) = &state.pending_forget_card
+                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Forget) {
                     let card_lines = crate::adapters::tui::widgets::forget_card::render_forget_card_lines(
                         card,
                         theme,
@@ -9521,9 +9527,309 @@ pub fn complete_bulk_delete(state: &mut TuiState) {
     notifications::success(state, NoticeSource::Session, "All conversations deleted");
 }
 
+// Small presentation arms shared by the live arrivals and their focus witnesses.
+fn arrive_delegation_card(
+    state: &mut TuiState,
+    card: crate::adapters::tui::state::PendingDelegationCard,
+) {
+    state.pending_delegation_card = Some(card);
+    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    state.needs_redraw = true;
+}
+
+fn arrive_deviation_card(
+    state: &mut TuiState,
+    plan_id: String,
+    kind: crate::domain::models::plan::PlanDeviationKind,
+) {
+    state.task_panel_state.pending_deviation = Some((plan_id, kind));
+    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    state.needs_redraw = true;
+}
+
+fn arrive_cancel_plan_confirmation(state: &mut TuiState, plan_id: String) {
+    state.task_panel_state.cancel_plan_confirm = Some(plan_id);
+    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+}
+
+fn arrive_consolidation_card(
+    state: &mut TuiState,
+    card: crate::adapters::tui::state::PendingConsolidationCard,
+) {
+    state.pending_consolidation_card = Some(card);
+    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    state.needs_redraw = true;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retained_card_arrival(mut arrive: impl FnMut(&mut TuiState), recovers_input: bool) {
+        use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
+        for (focus, draft, expected) in [
+            (FocusState::Input, "", FocusState::Chat),
+            (
+                FocusState::Input,
+                "  exact draft λ\nsecond line  ",
+                FocusState::Input,
+            ),
+            (
+                FocusState::Overlay(OverlayType::ModelSelector),
+                "overlay draft",
+                FocusState::Overlay(OverlayType::ModelSelector),
+            ),
+        ] {
+            let mut state = TuiState::new(80, 24);
+            state.focus = focus;
+            state.input_buffer = draft.into();
+            arrive(&mut state);
+            assert_eq!(state.focus, expected);
+            assert_eq!(state.input_buffer, draft);
+            if matches!(expected, FocusState::Overlay(_)) {
+                continue;
+            }
+            if state.focus == FocusState::Input {
+                handle_input(&mut state, &E::SpecialKey(K::Esc));
+                assert_eq!(state.focus, FocusState::Chat);
+            }
+            let action = handle_input(&mut state, &E::KeyPress('i'));
+            assert!(
+                matches!(action, InputAction::Consumed | InputAction::Ignored),
+                "i never decides"
+            );
+            assert_eq!(
+                state.focus,
+                if recovers_input {
+                    FocusState::Input
+                } else {
+                    FocusState::Chat
+                }
+            );
+            assert_eq!(
+                state.input_buffer, draft,
+                "i must recover or be swallowed, never enter the draft"
+            );
+            if recovers_input {
+                arrive(&mut state);
+                assert_eq!(
+                    state.focus, expected,
+                    "burst reclaims only an empty composer"
+                );
+                assert_eq!(state.input_buffer, draft);
+            }
+        }
+        // Exercise the decision front door, then the event application's retirement boundary.
+        let mut state = TuiState::new(80, 24);
+        arrive(&mut state);
+        let (key, expected) = match crate::adapters::tui::app::inline_card(&state).unwrap() {
+            crate::adapters::tui::app::InlineCard::Delegation => {
+                (E::KeyPress('l'), InputAction::RunTaskLocally)
+            }
+            crate::adapters::tui::app::InlineCard::Deviation => (
+                E::KeyPress('n'),
+                InputAction::PlanDeviationDecided(
+                    "p1".into(),
+                    crate::domain::models::plan::PlanDecision::Reject,
+                ),
+            ),
+            crate::adapters::tui::app::InlineCard::Spawn => {
+                (E::SpecialKey(K::Enter), InputAction::SpawnGateConfirm)
+            }
+            _ => return,
+        };
+        if !recovers_input {
+            handle_input(&mut state, &E::KeyPress('i'));
+            assert_eq!(state.focus, FocusState::Chat, "card still owns i");
+        }
+        assert_eq!(handle_input(&mut state, &key), expected);
+        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
+            state.pending_delegation_card = None;
+            state.task_panel_state.pending_deviation = None;
+            state.pending_spawn_gate = None;
+        });
+        assert_eq!(
+            state.focus,
+            FocusState::Input,
+            "last decision returns borrowed focus"
+        );
+    }
+
+    #[test]
+    fn story21_3_borrowed_focus_waits_for_last_local_card() {
+        use crate::domain::events::DomainInputEvent as E;
+        let mut state = TuiState::new(80, 24);
+        arrive_cancel_plan_confirmation(&mut state, "p1".into());
+        arrive_deviation_card(
+            &mut state,
+            "p1".into(),
+            crate::domain::models::plan::PlanDeviationKind::AutoSkipBlockedTasks { source_task: 1 },
+        );
+        assert_eq!(
+            handle_input(&mut state, &E::KeyPress('n')),
+            InputAction::PlanDeviationDecided(
+                "p1".into(),
+                crate::domain::models::plan::PlanDecision::Reject
+            )
+        );
+        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
+            state.task_panel_state.pending_deviation = None;
+        });
+        assert_eq!(state.focus, FocusState::Chat);
+        assert_eq!(
+            handle_input(&mut state, &E::KeyPress('n')),
+            InputAction::CancelPlanConfirm(false)
+        );
+        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
+            state.task_panel_state.cancel_plan_confirm = None;
+        });
+        assert_eq!(state.focus, FocusState::Input);
+    }
+
+    #[test]
+    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_delegation() {
+        use crate::domain::services::delegation_decider::{DelegationReason, DelegationSuggestion};
+        retained_card_arrival(
+            |state| {
+                arrive_delegation_card(
+                    state,
+                    crate::adapters::tui::state::PendingDelegationCard {
+                        conversation_id: "c1".into(),
+                        plan_id: "p1".into(),
+                        task_number: 1,
+                        suggestion: DelegationSuggestion {
+                            task_number: 1,
+                            agent_name: "worker".into(),
+                            reason: DelegationReason::ExplicitAgentMention,
+                            auto_proceed: false,
+                        },
+                    },
+                );
+                assert_eq!(
+                    state.pending_delegation_card.as_ref().unwrap().plan_id,
+                    "p1"
+                );
+            },
+            true,
+        );
+    }
+
+    #[test]
+    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_deviation() {
+        retained_card_arrival(
+            |state| {
+                arrive_deviation_card(
+                    state,
+                    "p1".into(),
+                    crate::domain::models::plan::PlanDeviationKind::AutoSkipBlockedTasks {
+                        source_task: 1,
+                    },
+                );
+                assert_eq!(
+                    state.task_panel_state.pending_deviation.as_ref().unwrap().0,
+                    "p1"
+                );
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_cancel_plan_confirm() {
+        retained_card_arrival(
+            |state| {
+                arrive_cancel_plan_confirmation(state, "p1".into());
+                assert_eq!(
+                    state.task_panel_state.cancel_plan_confirm.as_deref(),
+                    Some("p1")
+                );
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_consolidation() {
+        retained_card_arrival(
+            |state| {
+                arrive_consolidation_card(
+                    state,
+                    crate::adapters::tui::state::PendingConsolidationCard {
+                        conversation_id: "c1".into(),
+                        proposals: vec![(
+                            crate::domain::models::MemoryFact {
+                                category: "Preferences".into(),
+                                fact: "Keep exact drafts".into(),
+                                detail: None,
+                            },
+                            true,
+                        )],
+                    },
+                );
+                assert_eq!(
+                    state
+                        .pending_consolidation_card
+                        .as_ref()
+                        .unwrap()
+                        .proposals
+                        .len(),
+                    1
+                );
+            },
+            false,
+        );
+    }
+
+    #[test]
+    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_forget() {
+        retained_card_arrival(
+            |state| {
+                let entry = crate::domain::models::MemoryEntry {
+                    timestamp: chrono::Local::now(),
+                    summary: "forget me".into(),
+                    context: None,
+                };
+                assert!(
+                    handlers::forget_command::handle_forget_command(
+                        state,
+                        &"c1".into(),
+                        "forget me",
+                        Some(Ok(vec![(7, entry)]))
+                    )
+                    .is_empty()
+                );
+                assert_eq!(
+                    state.pending_forget_card.as_ref().unwrap().candidates[0].0,
+                    7
+                );
+            },
+            false,
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_spawn_gate() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (app_state, _rx) = transparency_bridge::bridge_app_state(workspace.path());
+        let config = AppConfig {
+            fanout_spawn_gate_threshold: 2,
+            ..AppConfig::default()
+        };
+        retained_card_arrival(
+            |state| {
+                transparency_bridge::fanout_command(
+                    state,
+                    "c1",
+                    Some("3 retained arrival"),
+                    false,
+                    &config,
+                    &app_state,
+                );
+                assert_eq!(state.pending_spawn_gate.as_ref().unwrap().requested, 3);
+            },
+            false,
+        );
+    }
 
     #[test]
     fn story21_1_a_delete_title_with_newlines_stays_one_line_in_the_pane() {

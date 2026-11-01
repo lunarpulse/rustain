@@ -347,7 +347,7 @@ fn the_painted_card_names_impact_wedge_risk_and_its_dispatch_keys() {
         // in `conformance_18_3a_f_resolution.rs`.
         "/artifact resolve <id> present|absent",
         "[y] Apply",
-        "[n] Cancel (Esc)",
+        "[n] Cancel",
     ] {
         assert!(rendered.contains(needle), "missing {needle:?}:\n{rendered}");
     }

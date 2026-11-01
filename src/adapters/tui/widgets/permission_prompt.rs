@@ -7,6 +7,10 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::{rail, rail_pair};
+use crate::adapters::tui::keymap::table_card::CardCmd;
+use crate::adapters::tui::keymap::table_permission::PermissionCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::delimited_body::{approval_body_rows, wrap_text};
@@ -290,7 +294,7 @@ fn always_label(tool_name: &str) -> String {
 /// Pack `(key, label)` items into rows of at most `width` cells; an item
 /// never splits across rows unless it alone is wider than a row.
 fn key_rows(
-    items: &[(&str, String, Color)],
+    items: &[(String, String, Color)],
     width: usize,
     prefix: &'static str,
     border: Style,
@@ -323,7 +327,7 @@ fn key_rows(
             row.push(Span::styled("  ", label));
             cells += 2;
         }
-        row.push(Span::styled((*key).to_owned(), Style::default().fg(*color)));
+        row.push(Span::styled(key.clone(), Style::default().fg(*color)));
         row.push(Span::styled(format!(" {text}"), label));
         cells += item_cells;
     }
@@ -497,9 +501,21 @@ pub fn render_permission_card_lines(
 
     lines.extend(key_rows(
         &[
-            ("[y]", "Allow".to_owned(), theme.colors.success),
-            ("[s]", "Session".to_owned(), theme.colors.accent),
-            ("[a]", always_label(card.tool_name), theme.colors.warning),
+            (
+                rail(Context::Permission, PermissionCmd::AllowOnce),
+                "Allow".to_owned(),
+                theme.colors.success,
+            ),
+            (
+                rail(Context::Permission, PermissionCmd::AllowSession),
+                "Session".to_owned(),
+                theme.colors.accent,
+            ),
+            (
+                rail(Context::Permission, PermissionCmd::AllowAlways),
+                always_label(card.tool_name),
+                theme.colors.warning,
+            ),
         ],
         width,
         CARD_BORDER,
@@ -508,13 +524,21 @@ pub fn render_permission_card_lines(
     ));
     lines.extend(key_rows(
         &[
-            ("[n]", "Deny".to_owned(), theme.colors.error),
             (
-                "[f]",
+                rail(Context::Permission, PermissionCmd::Deny),
+                "Deny".to_owned(),
+                theme.colors.error,
+            ),
+            (
+                rail(Context::Permission, PermissionCmd::DenyWithFeedback),
                 "Deny + feedback".to_owned(),
                 theme.colors.auto_sent_border,
             ),
-            ("[r]", "Review".to_owned(), theme.colors.accent),
+            (
+                rail(Context::Permission, PermissionCmd::Review),
+                "Review".to_owned(),
+                theme.colors.accent,
+            ),
         ],
         width,
         CARD_BORDER,
@@ -565,15 +589,35 @@ pub fn render_permission_review(
     };
     let footer = key_rows(
         &[
-            ("[y]", "Allow".to_owned(), theme.colors.success),
-            ("[n]", "Deny".to_owned(), theme.colors.error),
             (
-                "[f]",
+                rail(Context::Permission, PermissionCmd::AllowOnce),
+                "Allow".to_owned(),
+                theme.colors.success,
+            ),
+            (
+                rail(Context::Permission, PermissionCmd::Deny),
+                "Deny".to_owned(),
+                theme.colors.error,
+            ),
+            (
+                rail(Context::Permission, PermissionCmd::DenyWithFeedback),
                 "Deny + feedback".to_owned(),
                 theme.colors.auto_sent_border,
             ),
-            ("[Esc]", "Back".to_owned(), theme.colors.fg_secondary),
-            ("PgUp/PgDn", "scroll".to_owned(), theme.colors.fg_secondary),
+            (
+                rail(Context::Permission, PermissionCmd::BackOrCue),
+                "Back".to_owned(),
+                theme.colors.fg_secondary,
+            ),
+            (
+                rail_pair(
+                    Context::Permission,
+                    PermissionCmd::ReviewPageUp,
+                    PermissionCmd::ReviewPageDown,
+                ),
+                "scroll".to_owned(),
+                theme.colors.fg_secondary,
+            ),
         ],
         width,
         "",
@@ -614,9 +658,15 @@ pub fn render_feedback_input_lines<'a>(buffer: &str, theme: &'a Theme) -> Vec<Li
         // Line 2: [Enter] send  [Esc] cancel
         Line::from(vec![
             Span::styled("┃ ", border_style),
-            Span::styled("[Enter]", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(
+                rail(Context::Feedback, CardCmd::Send),
+                Style::default().fg(theme.colors.fg_secondary),
+            ),
             Span::styled(" send  ", Style::default().fg(theme.colors.fg_secondary)),
-            Span::styled("[Esc]", Style::default().fg(theme.colors.fg_secondary)),
+            Span::styled(
+                rail(Context::Feedback, CardCmd::Back),
+                Style::default().fg(theme.colors.fg_secondary),
+            ),
             Span::styled(" cancel", Style::default().fg(theme.colors.fg_secondary)),
             Span::styled(" ┃", border_style),
         ]),
@@ -713,10 +763,20 @@ mod tests {
         assert_eq!(rows[0], "┃ Bash  [2 more queued]");
         assert_eq!(rows[1], "┃ │ command: cargo test");
         assert_eq!(rows[4], "┃ │ line four");
-        assert_eq!(rows[5], "┃ … more not shown — [r] Review first");
+        assert_eq!(
+            rows[5],
+            format!(
+                "┃ … more not shown — {} Review first",
+                rail(Context::Permission, PermissionCmd::Review)
+            )
+        );
         assert!(!rows.iter().any(|row| row.contains("LATE-SUFFIX")));
         assert!(!rows.iter().any(|row| row.contains('{')), "{rows:?}");
-        assert!(rows.iter().any(|row| row.contains("[r] Review")));
+        let review = rail(Context::Permission, PermissionCmd::Review);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains(&format!("{review} Review")))
+        );
         let review = render_permission_review(&card, 80, &theme);
         let body = text(&review.body);
         assert_eq!(body.last().map(String::as_str), Some("│ LATE-SUFFIX"));

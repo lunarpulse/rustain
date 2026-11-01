@@ -111,13 +111,8 @@ def _modal_complete(screen):
 
 
 def status_ready(text):
-    """`Ready` on the status row. At 80 columns a long model segment plus the 8-cell
-    `^X menu` tail (Story 21.3 A10, reserved first) clips the state word, so a
-    prefix `Re`..`Rea`/`Read` directly before the tail still counts (documented clip);
-    a visible `Retry...` state never counts as ready."""
-    if "Retry" in text:
-        return False
-    return "Ready" in text or re.search(r"│ Re(?:a(?:d)?)? \^X menu\s*$", text, re.M) is not None
+    """A whole `Ready` state; optional key hints must yield before state text."""
+    return "Retry" not in text and "Ready" in text
 
 
 def _chrome_complete(screen):

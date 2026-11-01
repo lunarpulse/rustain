@@ -109,11 +109,14 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
                 // Naming the forbidden flags explicitly: an operator who tries
                 // one must be told it does not exist, not have it ignored.
                 if extra.starts_with("--yes") || extra.starts_with("--force") {
-                    return Err(
+                    return Err(format!(
                         "There is no way to skip the confirm: it is the trust gate, not a \
-                         formality. Compare the fingerprint, then answer [y]."
-                            .to_owned(),
-                    );
+                         formality. Compare the fingerprint, then answer {}.",
+                        crate::adapters::tui::keymap::render::rail(
+                            crate::adapters::tui::keymap::Context::Confirm,
+                            crate::adapters::tui::keymap::table_card::CardCmd::Yes,
+                        )
+                    ));
                 }
                 if extra == "--allow-local-addresses" {
                     allow_local_addresses = true;

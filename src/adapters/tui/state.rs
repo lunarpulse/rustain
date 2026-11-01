@@ -345,15 +345,21 @@ pub struct PinnedPeerCompose {
 impl PinnedPeerCompose {
     #[must_use]
     pub fn new(node_id: String, action: PeerComposeAction) -> Self {
+        use crate::adapters::tui::keymap::render::key_text;
+        use crate::adapters::tui::keymap::table_input::InputCmd;
+        let (send, back) = (
+            key_text(InputCmd::SubmitOrNewline),
+            key_text(InputCmd::ReturnToChat),
+        );
         let label = match action {
             PeerComposeAction::Respond => {
                 format!(
-                    "reply to {node_id} — Enter sends to this response; Esc returns to Chat (draft kept)"
+                    "reply to {node_id} — {send} sends to this response; {back} returns to Chat (draft kept)"
                 )
             }
             PeerComposeAction::Edit => {
                 format!(
-                    "edit reply to {node_id} — Enter sends the edited reply; Esc returns to Chat (draft kept)"
+                    "edit reply to {node_id} — {send} sends the edited reply; {back} returns to Chat (draft kept)"
                 )
             }
         };
@@ -2544,6 +2550,8 @@ impl WaveViewState {
 pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
+    /// Arrival-only provenance; explicit focus changes relinquish the borrow.
+    pub card_focus_borrowed_from: Option<FocusState>,
     pub recipient_surface: Option<RecipientSurface>,
     pub pinned_peer_compose: Option<PinnedPeerCompose>,
     pub recipient_actions: BTreeMap<
@@ -3161,6 +3169,7 @@ impl TuiState {
         Self {
             active_tab_id: 0,
             focus: FocusState::Input,
+            card_focus_borrowed_from: None,
             recipient_surface: None,
             pinned_peer_compose: None,
             recipient_actions: BTreeMap::new(),

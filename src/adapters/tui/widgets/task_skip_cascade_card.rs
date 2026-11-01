@@ -5,6 +5,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::SkipCascadePending;
 
 pub fn render(area: Rect, buf: &mut Buffer, pending: &SkipCascadePending) {
@@ -29,7 +32,12 @@ pub fn render(area: Rect, buf: &mut Buffer, pending: &SkipCascadePending) {
         buf.set_string(
             area.x,
             area.y + 2,
-            "│ [s] Skip them too  [c] Continue anyway  [n] Cancel skip",
+            format!(
+                "│ {} Skip them too  {} Continue anyway  {} Cancel skip",
+                rail(Context::SkipCascade, CardCmd::CascadeSkip),
+                rail(Context::SkipCascade, CardCmd::Continue),
+                rail(Context::SkipCascade, CardCmd::No)
+            ),
             style,
         );
     }

@@ -186,8 +186,8 @@ mod tests {
                     &StreamingState::default(),
                     &ViewState::default(),
                     &MockClock::at_wall_ms(1000),
-                    0,
-                    true,
+                    state.scroll_offset(),
+                    state.auto_scroll(),
                     &Theme::dark(),
                     &mut tab,
                     &HashMap::new(),
@@ -326,6 +326,48 @@ mod tests {
                     action
                 );
             }
+        }
+    }
+
+    #[test]
+    fn story21_3_plan_arrival_while_reading_does_not_activate_an_unseen_card() {
+        use crate::domain::models::FocusState;
+        for edited in [false, true] {
+            let mut conversation = Conversation {
+                id: "c".into(),
+                ..Default::default()
+            };
+            conversation.messages = (0..100)
+                .map(|i| row(&format!("row-{i}"), MessageRole::User))
+                .collect();
+            let mut state = TuiState::new(80, 24);
+            state.set_scroll_offset(100);
+            state.set_auto_scroll(false);
+            handle_plan_proposed(
+                &mut conversation,
+                &mut state,
+                "c",
+                plan("unseen"),
+                PermissionMode::Normal,
+                None,
+            );
+            if edited {
+                state.focus = FocusState::Input;
+                handle_plan_edit_completed(&mut conversation, &mut state, "unseen", None);
+            }
+            assert!(!painted(&conversation, &state).contains("plan unseen"));
+            assert_eq!(state.focus, FocusState::Input, "edited={edited}");
+            for key in ['y', 'n'] {
+                assert_eq!(
+                    handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
+                    InputAction::Consumed
+                );
+            }
+            assert_eq!(state.input_buffer, "yn");
+            assert_eq!(conversation.plans["unseen"].status, PlanStatus::Pending);
+            assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "unseen");
+            assert_eq!(state.scroll_offset(), 100);
+            assert!(!state.auto_scroll());
         }
     }
 

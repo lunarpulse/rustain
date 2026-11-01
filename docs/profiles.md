@@ -250,7 +250,7 @@ search, now or after any reindex.
 - **`/memory forget <text>`** fuzzy-matches your memory entries and shows a confirm card
   listing each match (with its stable key). Because there is no separate `/memory show`, this
   card doubles as the scoped "what's in memory" view. **Nothing is purged until you press
-  `[y]`** (`[n]`/`Esc` cancels).
+  `[y]`** (`[n]` cancels; `Esc` never decides the card: it posts a reminder and the card stays).
 - On confirm, a durable **redaction tombstone** is written to `…/.rustain/memory/redactions.bin`
   (a sibling of `index.bin`, **never** inside your `MEMORY.md`/daily-log source), then the
   vector index and the BM25 keyword index are purged of that entry.

@@ -440,29 +440,40 @@ pub fn render(
         });
     }
 
+    let key = |command: OverlayCmd| keymap::render::rail(Context::NotificationLog, command);
     let mut rail = vec![
-        Span::styled("[j/k]", accent),
+        Span::styled(
+            format!(
+                "[{}]",
+                keymap::render::rail_pair(
+                    Context::NotificationLog,
+                    OverlayCmd::NotifNext,
+                    OverlayCmd::NotifPrev
+                )
+            ),
+            accent,
+        ),
         Span::styled(" Move  ", normal),
-        Span::styled("[Enter]", accent),
+        Span::styled(key(OverlayCmd::NotifDetail), accent),
         Span::styled(if log.detail { " List  " } else { " Detail  " }, normal),
-        Span::styled("[c]", accent),
+        Span::styled(key(OverlayCmd::NotifCopy), accent),
         Span::styled(" Copy  ", normal),
     ];
     if current.is_some_and(|record| retry_eligible(record, facts)) {
-        rail.push(Span::styled("[r]", accent));
+        rail.push(Span::styled(key(OverlayCmd::NotifRetry), accent));
         rail.push(Span::styled(" Retry  ", normal));
     }
     if current.is_some_and(|record| compact_eligible(record, facts)) {
-        rail.push(Span::styled("[K]", accent));
+        rail.push(Span::styled(key(OverlayCmd::NotifCompact), accent));
         rail.push(Span::styled(" Compact…  ", normal));
     }
     if current.is_some_and(|record| fresh_eligible(record, facts)) {
-        rail.push(Span::styled("[n]", accent));
+        rail.push(Span::styled(key(OverlayCmd::NotifFresh), accent));
         rail.push(Span::styled(" Start fresh…  ", normal));
     }
-    rail.push(Span::styled("[x]", accent));
+    rail.push(Span::styled(key(OverlayCmd::NotifDismiss), accent));
     rail.push(Span::styled(" Dismiss  ", normal));
-    rail.push(Span::styled("[Esc]", accent));
+    rail.push(Span::styled(key(OverlayCmd::NotifClose), accent));
     rail.push(Span::styled(" Close", normal));
     parts.push(ModalPart::Footer(footer_lines(rail, inner_width)));
 

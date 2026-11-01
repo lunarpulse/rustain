@@ -196,14 +196,17 @@ def test_permission_prompt_displays_tool_input(tui_strict: RustainTUI):
 @pytest.mark.requires_api
 @pytest.mark.slow
 @pytest.mark.story_6_0c
-def test_esc_cancels_permission_prompt(tui_strict: RustainTUI):
-    """AC11: Esc sends Cancel (not Reject) to the runtime."""
+def test_esc_never_decides_permission_prompt(tui_strict: RustainTUI):
+    """21.3 AC16 (was AC11 "Esc sends Cancel"): Esc never decides a card. It posts the registry cue,
+    the prompt stays pending and only the explicit `n` denies it."""
     tui_strict.send_message("Use the Bash tool to run: echo cancel_test")
     if not tui_strict.wait_for_screen("[y]", timeout=30.0):
         pytest.skip("LLM did not trigger a Bash tool call")
     tui_strict.send(ESC)
-    tui_strict.wait_for_screen_not_contains("[y]", timeout=5.0)
-    tui_strict.assert_screen_not_contains("[y] Allow", msg="Esc should dismiss permission prompt")
+    assert tui_strict.wait_for_screen("never decide this card", timeout=5.0), "Esc should post the cue"
+    tui_strict.assert_screen_contains("[y] Allow", msg="Esc must leave the permission prompt pending")
+    tui_strict.send(Permission.DENY)
+    assert tui_strict.wait_for_screen("Ready", timeout=30.0), "the explicit `n` denies the prompt and the turn ends"
 
 
 @pytest.mark.requires_api

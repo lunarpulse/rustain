@@ -44,6 +44,19 @@ Help only: the stream is not interrupted and finishes (`Ready`, no `[interrupted
 carry no smoke witness in the portable-row fixture (only leader rows do), so the six bytes are declared here.
 The leg ends with the leader `Ctrl+X Ctrl+Q` row (fixture row `1811`): the process exits 0.
 
+Leg C (slice 3-C, AC19): in a fresh process a model-proposed plan card is pending.
+Arrival leaves Input focus unchanged; `y` is composer text (the card is not answered);
+`Esc` moves to Chat, where a second `Esc` posts the registry-generated
+cue and decides nothing, a raw `Ctrl+C` neither interrupts nor quits, and the explicit key `n` rejects the plan:
+the provider sees exactly one rejection.
+
+Leg D (3-C patch round, AC19, FR-21-3-c): a SEPARATE test (`test_keymap_truth_attached_permission_card_...`) drives the
+permission card natively: a daemon plus a rich attached terminal at 80x24 and a scripted loopback provider that streams a
+`Bash` tool call. `x` typed before the arrival is composer text; the approval arrives with an empty composer and focus
+moves to Chat; the card paints `[y] Allow  [n] Deny`; `Esc` posts the cue (which names `[y] Allow  [n] Deny` inside the
+clip) and the card stays pending; a raw `Ctrl+C` neither interrupts nor quits; `n` denies once (one tool result reaches
+the provider, the command never ran).
+
 Evidence (screens, raw PTY bytes sent, requests, runtime logs, binary hash)
 goes to `RUSTAIN_CAPTURE_EVIDENCE_DIR`. Every wait is a bounded screen
 condition.
@@ -58,6 +71,11 @@ from pathlib import Path
 import queue
 import re
 import tempfile
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
 import threading
 import traceback
 import time
@@ -68,8 +86,10 @@ import harness
 import pexpect
 import pytest
 from keys import LEFT, RIGHT
-from test_story_20_9a_ephemeral_rows import _event, _finish, _start_text
+from test_story_20_9a_ephemeral_rows import CARD, _event, _finish, _plan_stream, _start_text
 from test_story_21_2_shortcut_truth import _NativeTUI, _capture, _composer, _menu, _menu_painted, _wait
+from test_story_19_20c_exact_approval import Evidence as _Evidence
+from test_story_19_20c_exact_approval import _command, _finished, _world
 
 KEY = "sk-ant-21-3-loopback-key-canary"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "keymap_portable_rows.json"
@@ -131,6 +151,7 @@ HOLD_PROMPT = "hold-b please answer"
 HELD_PARTIAL = "B-LIVE-PARTIAL"
 HELD_TAIL = "B-TAIL-DONE"
 HELP = "183f"  # `Ctrl+X ?`: the Help overlay
+PLAN_PROMPT = "c propose the plan"
 
 
 def _fixture_rows():
@@ -271,6 +292,43 @@ def _chunk(data):
     return f"{len(data):x}\r\n".encode() + data + b"\r\n"
 
 
+def _cue(screen):
+    """The `Esc` / `Ctrl+C` cue toast of a decision card (A8); the card is named by its own words."""
+    return any("never decide this card" in row for row in harness.toast_rows(screen, 3))
+
+
+def _leg_c(tui, evidence, sent, rejections):
+    """Leg C (3-C, AC16/AC17): a pending plan card is never answered by typing, `Esc` or `Ctrl+C`;
+    the explicit key `n` rejects it once."""
+    _send(tui, sent, "type plan prompt", PLAN_PROMPT.encode())
+    _wait(tui, lambda s: _composer(s) == PLAN_PROMPT, "plan prompt typed")
+    _send(tui, sent, "Enter", b"\r")
+    screen = _wait(tui, lambda s: "Plan:" in s and CARD in s and "[y] Approve  [e] Edit  [n] Reject" in s
+                   and "Ready" in harness.status_row(s), "the plan card (full generated rail) is pending and the turn is idle")
+    _capture(tui, evidence, "c-01-plan-card", screen)
+    assert not tui._screen.cursor.hidden, screen
+    _send(tui, sent, "y in Input", b"y")
+    screen = _wait(tui, lambda s: _composer(s) == "y", "`y` is composer text while the plan card is pending")
+    assert "Plan:" in screen and CARD in screen, screen
+    _send(tui, sent, "Ctrl+U", CTRL_U)
+    _wait(tui, lambda s: _composer(s) == "", "composer cleared")
+    # `Esc` in Input goes to Chat; there the card owns the keys and `Esc` is a cue, never a decision.
+    _send(tui, sent, "Esc to Chat", b"\x1b")
+    _wait(tui, lambda _s: tui._screen.cursor.hidden, "Chat focus")
+    _send(tui, sent, "Esc on the card", b"\x1b")
+    screen = _wait(tui, _cue, "Esc posts the cue naming the explicit keys")
+    assert "Plan:" in screen and CARD in screen and tui._screen.cursor.hidden, screen
+    _capture(tui, evidence, "c-02-esc-cue", screen)
+    _send(tui, sent, "Ctrl+C on the card", b"\x03")
+    screen = _wait(tui, lambda s: "Plan:" in s and CARD in s, "Ctrl+C leaves the plan card pending")
+    assert tui.child.isalive() and "[interrupted]" not in screen and "System · Quit" not in screen, screen
+    # Ctrl+C decided nothing: the card is still pending, so the explicit `n` below is what rejects it.
+    _send(tui, sent, "n", b"n")
+    screen = _wait(tui, lambda s: "rejected" in s.lower() and "Ready" in harness.status_row(s) and bool(rejections),
+                   "the explicit key rejected the plan and the provider saw the rejection")
+    _capture(tui, evidence, "c-03-plan-rejected", screen)
+
+
 def _leg_b(tui, evidence, sent, release, turns, lock, row):
     """Leg B: raw readline bytes in the composer, then Ctrl+C in Help over a held stream."""
     def composer_is(expected, label):
@@ -357,11 +415,12 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
     errors = queue.Queue()
     posts = []
     turns = []  # leg B provider turns (held / auxiliary), never part of leg A's probe-only `posts`
+    rejections = []  # leg C: provider requests that carried the plan rejection
     release = threading.Event()  # lets the held leg B reply finish
     turn_phase = threading.Event()  # set when leg B starts: only then is a streamed request legitimate
     lock = threading.Lock()
-    ws_main, ws_panels, ws_edit = root / "wm", root / "wp", root / "we"
-    for ws in (ws_main, ws_panels, ws_edit):
+    ws_main, ws_panels, ws_edit, ws_plan = root / "wm", root / "wp", root / "we", root / "wc"
+    for ws in (ws_main, ws_panels, ws_edit, ws_plan):
         (ws / ".rustain").mkdir(parents=True)
         (ws / ".rustain" / "config.toml").write_text(CONFIG)
         (ws / ".env").write_text("")  # keep the shared harness from copying a developer .env
@@ -402,12 +461,19 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
                 if "stream" in body and turn_phase.is_set():
                     text = _user_text(body)
                     held = HOLD_PROMPT in text
+                    plan = PLAN_PROMPT in text
                     with lock:
                         turns.append({"held": held, "text": text[:80]})
+                        if "Plan rejected by user" in json.dumps(body.get("messages", [])[-1:]):
+                            rejections.append(text[:80])
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
+                    if plan:
+                        self.wfile.write(_chunk(_plan_stream()) + b"0\r\n\r\n")
+                        self.wfile.flush()
+                        return
                     self.wfile.write(_chunk(_start_text(HELD_PARTIAL if held else "B session")))
                     self.wfile.flush()
                     if held:
@@ -464,7 +530,7 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
             return env
 
         envs = {"main": environment("main", ws_main), "panels": environment("panels", ws_panels),
-                "edit": environment("edit", ws_edit)}
+                "edit": environment("edit", ws_edit), "plan": environment("plan", ws_plan)}
         terminals = {tag: stack.enter_context((evidence / f"{tag}.terminal.txt").open("w")) for tag in envs}
         screens = {tag: stack.enter_context((evidence / f"{tag}.screens.jsonl").open("w")) for tag in envs}
         original_spawn = harness.pexpect.spawn
@@ -480,9 +546,9 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
 
         monkeypatch.setattr(harness.pexpect, "spawn", spawn)
 
-        def start(tag, ws):
+        def start(tag, ws, **kwargs):
             spawn_tag["next"] = tag
-            tui = _NativeTUI(binary=binary, build=False, workspace=ws, env_overrides=envs[tag], fresh=True)
+            tui = _NativeTUI(binary=binary, build=False, workspace=ws, env_overrides=envs[tag], fresh=True, **kwargs)
             tui.screens, tui.check_server = screens[tag], check_server
             try:
                 tui.start()
@@ -585,6 +651,13 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         finally:
             edit.stop()
 
+        # ------------------------------------------------------ leg C (3-C): a pending plan card
+        plan_tui = start("plan", ws_plan, allowed_tools=["propose_plan"])
+        try:
+            _leg_c(plan_tui, evidence, sent, rejections)
+        finally:
+            plan_tui.stop()
+
         # ---------------------------------------------------------- evidence checks
         with lock:
             observed = list(posts)
@@ -592,6 +665,7 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         (evidence / "sent.json").write_text(json.dumps(sent, indent=2) + "\n")
         with lock:
             (evidence / "turns.json").write_text(json.dumps(turns, indent=2) + "\n")
+        assert len(rejections) == 1, f"the plan was rejected once, not {len(rejections)} times: {rejections}"
         assert all(post["max_tokens"] == 1 and not post["stream"] for post in observed), observed
         check_server()
         for handle in (*terminals.values(), *screens.values()):
@@ -632,3 +706,164 @@ def test_keymap_truth_leader_rows_local_80x24(monkeypatch):
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_21_3_EVIDENCE={evidence}", flush=True)
+
+
+def _stripped(text):
+    return "".join(text.split())
+
+
+def _permission_wait(tui, predicate, label, timeout=60):
+    """Leg D waits on PTY frames, never the approval helper's polling sleep."""
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = tui.get_screen_text()
+        if predicate(screen):
+            return screen
+        assert time.monotonic() < deadline, f"Timed out waiting for {label}:\n{screen}"
+
+
+class _PermissionTUI(_NativeTUI):
+    """Attached-only spawn into `_world`'s prepared workspace; no startup fallback sleep."""
+
+    def start(self):
+        self._binary = harness._resolve_binary()[0].resolve()
+        assert self._binary.is_file() and "debug" in self._binary.parts and "release" not in self._binary.parts
+        self._workspace_path = self.workspace
+        env = {**harness._load_env(), **self.env_overrides}
+        env.setdefault("RUST_LOG", "debug")
+        self._screen = harness.TerminalScreen(harness.TERM_COLS, harness.TERM_ROWS)
+        self._stream = harness.pyte.Stream(self._screen)
+        self._child = pexpect.spawn(str(self._binary), args=["daemon", "attach"], cwd=str(self.workspace),
+                                    env=env, timeout=self.timeout, encoding="utf-8",
+                                    dimensions=(harness.TERM_ROWS, harness.TERM_COLS))
+        self.child.delaybeforesend = 0
+        _permission_wait(self, lambda s: "Ready" in s, "attached terminal ready")
+        return self
+
+    def _sync_screen(self):
+        try:
+            data = self.child.read_nonblocking(size=65536, timeout=0.2)
+        except pexpect.TIMEOUT:
+            assert self.child.isalive(), "attached TUI exited unexpectedly"
+            return
+        except pexpect.EOF:
+            pytest.fail("attached TUI exited before the expected screen")
+        self._stream.feed(data)
+
+    def send(self, data):
+        os.write(self.child.child_fd, data.encode("utf-8"))
+
+
+def _permission_daemon(stack, ws, env, tmp_path):
+    """Bound readiness by a real daemon socket accepting and sending its challenge."""
+    binary = harness._resolve_binary()[0].resolve()
+    assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts
+    log = stack.enter_context((tmp_path / "daemon.log").open("w"))
+    proc = subprocess.Popen([str(binary), "daemon", "start", "--foreground"], cwd=ws, env=env,
+                            stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+
+    def stop():
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=5)
+
+    stack.callback(stop)
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        assert proc.poll() is None, (tmp_path / "daemon.log").read_text()
+        for path in (Path(env["RUSTAIN_DATA_DIR"]) / "daemons").glob("*.sock"):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(min(0.2, remaining))
+                try:
+                    probe.connect(str(path))
+                    if probe.recv(1):
+                        return
+                except (FileNotFoundError, ConnectionRefusedError, socket.timeout):
+                    pass
+    pytest.fail("Daemon socket did not become ready:\n" + (tmp_path / "daemon.log").read_text())
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(300)
+def test_keymap_truth_attached_permission_card_takes_chat_focus_80x24(tmp_path, monkeypatch):
+    """Leg D (3-C patch round, FR-21-3-c, AC19): the permission card natively, attached at 80x24."""
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    canary = tmp_path / "canary.txt"
+    invocation = {"command": "printf leg-d >> " + shlex.quote(str(canary))}
+    evidence = _Evidence("21-3-leg-d")
+    sent = []
+    with _world(tmp_path, "Bash", invocation, evidence) as (stack, ws, stub, env):
+        assert env["ANTHROPIC_API_KEY"] == "operator" and env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
+        # A daemon socket path must stay under SUN_LEN: the pytest tmp tree is too long on a deep TMPDIR.
+        data = Path(tempfile.mkdtemp(prefix="r213d-"))
+        stack.callback(shutil.rmtree, data, ignore_errors=True)
+        env["RUSTAIN_DATA_DIR"] = str(data)
+        _permission_daemon(stack, ws, env, tmp_path)
+        tui = _PermissionTUI(build=False, fresh=False, workspace=ws, allowed_tools=[], env_overrides=env)
+        stack.callback(tui.stop)
+        tui.start()
+        evidence.terminal(stack, tui, "writer.terminal.txt")
+
+        def wait(predicate, what):
+            return _permission_wait(tui, predicate, what)
+
+        # `x` typed before any card is text in the composer (Input focus), then erased.
+        sent.append("x")
+        tui.send("x")
+        wait(lambda s: _composer(s) == "x" and not tui._screen.cursor.hidden, "`x` is composer text in Input focus")
+        sent.append("Backspace")
+        tui.send("\x7f")
+        wait(lambda s: _composer(s) == "", "composer empty again")
+        # The approval arrives with an empty composer: the card takes Chat focus (cursor hidden)
+        # and paints the permission rail.
+        _command(tui)
+        screen = wait(lambda s: "[r] Review" in s and "[n] Deny" in s, "the approval card is painted")
+        evidence.text("d-01-card.screen.txt", screen)
+        assert tui._screen.cursor.hidden, f"the arrival took Chat focus:\n{screen}"
+        for rail in ("[y] Allow", "[s] Session", "[a] Always", "[n] Deny", "[f] Deny + feedback", "[r] Review"):
+            assert _stripped(rail) in _stripped(screen), (rail, screen)
+        assert not canary.exists()
+        # Esc: one cue naming the explicit keys inside the clip; the card stays pending.
+        sent.append("Esc")
+        tui.send("\x1b")
+        screen = wait(_cue, "Esc posts the cue")
+        evidence.text("d-02-esc-cue.screen.txt", screen)
+        cue_row = next(row for row in harness.toast_rows(screen, 3) if "never decide this card" in row)
+        assert "Press [y] Allow  [n] Deny" in cue_row, cue_row
+        assert "[y] Allow" in screen and not canary.exists(), screen
+        # Ctrl+C neither interrupts nor quits and decides nothing.
+        sent.append("Ctrl+C")
+        tui.send("\x03")
+        # The cue toast covers the card's second rail row at 80x24; the first row is the pending witness.
+        screen = wait(lambda s: "[y] Allow" in s and _cue(s), "Ctrl+C leaves the card pending")
+        assert tui.child.isalive() and "[interrupted]" not in screen and "System · Quit" not in screen, screen
+        assert not _finished(stub), "no decision was sent"
+        # The explicit key denies, once.
+        sent.append("n")
+        tui.send("n")
+        wait(lambda s: _finished(stub), "the provider receives the denial")
+        screen = wait(lambda s: "[y] Allow" not in s, "the card is gone")
+        evidence.text("d-03-denied.screen.txt", screen)
+        assert not canary.exists(), "denial must execute nothing"
+        results = [row for row in stub.rows() if row.get("turn") == 2 and row.get("tool_results") == 1]
+        assert len(results) == 1, f"the provider saw exactly one decision: {stub.rows()}"
+        evidence.text("sent.json", json.dumps(sent, indent=2))
+    for log in sorted(tmp_path.glob("runtime.log.*")) + [tmp_path / "daemon.log"]:
+        if log.is_file():
+            evidence.text(log.name, log.read_text(errors="replace"))
+    if evidence.root:
+        assert any(p.name.startswith("runtime.log.") for p in evidence.root.iterdir()), "dated runtime log missing"
+        # The persona name is the loopback "key"; a leak means a real developer credential.
+        secrets = [value for name, value in harness._load_env().items()
+                   if len(value) >= 16 and re.search(r"KEY|TOKEN|SECRET", name, re.I)]
+        for path in evidence.root.iterdir():
+            text = path.read_text(errors="replace")
+            assert not any(secret in text for secret in secrets), f"credential leaked to {path}"

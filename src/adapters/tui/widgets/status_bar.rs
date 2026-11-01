@@ -352,13 +352,19 @@ pub fn render(
         ));
     }
 
-    // Story 21.3 A10 — the status tail (`^X menu` / pending `^X…`, `z…`, `[…`,
-    // `]…`) is the rightmost segment and is reserved BEFORE every other
-    // right-edge segment (log reminder, `Needs you` cue, badge, hint), so none
-    // of them can cover it and it is never faded. It is dropped only when the
-    // bar is narrower than the tail itself; `StatusTail::Hidden` paints nothing.
+    let left_width = left_spans
+        .iter()
+        .map(|s| geom::cells(&s.content))
+        .sum::<usize>();
+    let reminder = log_reminder_text(log_awareness);
+    let cue = decision_pane::status_cue(badges.decisions);
+    let required_width = left_width
+        + reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
+        + cue.as_deref().map_or(0, |text| geom::cells(text) + 1);
+    // Key hints yield whole before state, tokens, mode/host, log or decision
+    // facts. Once admitted, the generated tail remains the rightmost segment.
     let area = match badges.tail.text() {
-        Some(tail) if usize::from(area.width) >= geom::cells(&tail) => {
+        Some(tail) if required_width + 1 + geom::cells(&tail) <= usize::from(area.width) => {
             let reserved = (geom::cells(&tail) + 1).min(usize::from(area.width)) as u16;
             let left = Rect {
                 width: area.width - reserved,
@@ -388,7 +394,7 @@ pub fn render(
     // reserved BEFORE the optional hint and the left content are laid out,
     // so neither can overwrite it; they clip on the left region instead. A bar
     // narrower than the segment omits it whole — never a partial number.
-    let area = match log_reminder_text(log_awareness) {
+    let area = match reminder {
         Some(reminder) if usize::from(area.width) >= reminder.width() => {
             let reserved = (reminder.width() + 1).min(usize::from(area.width)) as u16;
             let left = Rect {
@@ -419,7 +425,7 @@ pub fn render(
     // edge BEFORE the left content is laid out: a long model/token/context row
     // clips on the left instead of hiding it (omitted whole only when the bar is
     // narrower than the cue itself).
-    let area = match decision_pane::status_cue(badges.decisions) {
+    let area = match cue {
         Some(cue) if usize::from(area.width) >= geom::cells(&cue) => {
             let reserved = (geom::cells(&cue) + 1).min(usize::from(area.width)) as u16;
             let left = Rect {
@@ -451,10 +457,6 @@ pub fn render(
     // reminder (reserved above) first, then the hint, then the badge — the badge
     // is only painted when it still fits; the hint is the first thing truncated
     // if the terminal is too narrow.
-    let left_width = left_spans
-        .iter()
-        .map(|s| geom::cells(&s.content))
-        .sum::<usize>();
     let bar_width = area.width as usize;
     let hint = current_hint.filter(|hint| left_width + 1 + geom::cells(hint) <= bar_width);
     let hint_width = hint.map_or(0, geom::cells);
@@ -1118,12 +1120,9 @@ mod tests {
                 density,
                 LogAwareness::Unseen(7),
             );
-            assert_eq!(
-                right_edge(&buffer, 6 + TAIL.len() as u16),
-                format!("log: 7{TAIL}"),
-                "{density:?}"
-            );
-            for x in 106..112 {
+            assert_eq!(right_edge(&buffer, 6), "log: 7", "{density:?}");
+            assert!(!row_text(&buffer).contains("^X menu"), "{density:?}");
+            for x in 114..120 {
                 let cell = buffer.cell((x, 0)).unwrap();
                 assert_eq!(cell.fg, expected.fg.unwrap(), "{density:?}");
                 assert_eq!(cell.bg, theme.colors.status_bg, "{density:?}");
@@ -1156,11 +1155,11 @@ mod tests {
                         DensityMode::Focus,
                         awareness,
                     );
-                    assert_eq!(
-                        right_edge(&buffer, segment.len() as u16 + 1 + TAIL.len() as u16),
-                        format!(" {segment}{TAIL}"),
-                        "width {width}, {awareness:?}, {model}: {}",
-                        row_text(&buffer)
+                    let row = row_text(&buffer);
+                    let tail = if row.contains("^X menu") { TAIL } else { "" };
+                    assert!(
+                        row.ends_with(&format!(" {segment}{tail}")),
+                        "width {width}, {awareness:?}, {model}: {row}"
                     );
                 }
             }
@@ -1493,6 +1492,87 @@ mod tests {
     }
 
     #[test]
+    fn story21_3_state_and_counters_take_priority_over_whole_hint_tails() {
+        let usage = UsageInfo {
+            input_tokens: 109,
+            output_tokens: 19,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            reasoning_tokens: None,
+        };
+        for width in [60u16, 80, 130] {
+            for attached in [
+                None,
+                Some(crate::adapters::tui::state::AttachInfo::default()),
+            ] {
+                for hint in [None, Some("^X d detach · i type · ? help")] {
+                    let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render(
+                                frame,
+                                frame.area(),
+                                "(daemon)",
+                                None,
+                                &StatusState::Idle,
+                                &Theme::dark(),
+                                0,
+                                &[],
+                                0,
+                                20,
+                                PermissionMode::Normal,
+                                Some(&usage),
+                                0,
+                                false,
+                                None,
+                                false,
+                                true,
+                                0,
+                                hint,
+                                0,
+                                None,
+                                None,
+                                None,
+                                false,
+                                None,
+                                None,
+                                DensityMode::Focus,
+                                false,
+                                attached.as_ref(),
+                                LogAwareness::Unseen(5),
+                                NoticeBadges::default(),
+                            );
+                        })
+                        .unwrap();
+                    let row = row_text(terminal.backend().buffer());
+                    let core = if attached.is_some() {
+                        " (daemon) [F] │ attached │ Normal │ ↑109 ↓19 │ Ready"
+                    } else {
+                        " (daemon) [F] │ Normal │ ↑109 ↓19 │ Ready"
+                    };
+                    assert!(row.starts_with(core), "{width}: {row}");
+                    assert!(row.contains("log: 5"), "{width}: {row}");
+                    let menu_fits = geom::cells(core) + 7 + TAIL.len() <= width as usize;
+                    assert_eq!(row.contains("^X menu"), menu_fits, "{width}: {row}");
+                    let hint_fits = hint.is_some_and(|text| {
+                        geom::cells(core) + 7 + TAIL.len() + 1 + geom::cells(text) <= width as usize
+                    });
+                    assert_eq!(row.contains("^X d detach"), hint_fits, "{width}: {row}");
+                    assert_eq!(
+                        row.matches('^').count(),
+                        usize::from(menu_fits) + usize::from(hint_fits),
+                        "no partial hint: {width}: {row}"
+                    );
+                    if width == 130 {
+                        assert!(menu_fits, "{row}");
+                        assert_eq!(hint_fits, hint.is_some(), "{row}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn story21_3_tail_is_rightmost_and_covers_no_neighbour_at_60_80_130() {
         let cue = decision_pane::status_cue(2).unwrap();
         for width in [60u16, 80, 130] {
@@ -1563,13 +1643,14 @@ mod tests {
     }
 
     #[test]
-    fn story21_3_tail_is_dropped_only_when_it_cannot_fit_at_all() {
-        let fits = draw_tail_bar(7, LogAwareness::Hidden, NoticeBadges::default());
-        assert_eq!(fits, "^X menu");
-        let narrow = draw_tail_bar(6, LogAwareness::Hidden, NoticeBadges::default());
+    fn story21_3_tail_yields_whole_when_status_facts_need_the_space() {
+        let fits = draw_tail_bar(31, LogAwareness::Hidden, NoticeBadges::default());
+        assert!(fits.ends_with(TAIL) && fits.contains("Ready"), "{fits}");
+        let narrow = draw_tail_bar(30, LogAwareness::Hidden, NoticeBadges::default());
         assert!(
             !narrow.contains('^') && !narrow.contains("menu"),
             "{narrow}"
         );
+        assert!(narrow.contains("Ready"), "{narrow}");
     }
 }

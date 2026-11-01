@@ -78,6 +78,7 @@ pub fn handle_forget_command(
                 candidates: c.into_iter().map(|(k, e)| (k, e, true)).collect(),
                 focused_index: 0,
             });
+            crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
             Vec::new()
         }
     }
@@ -155,6 +156,87 @@ mod tests {
             summary: summary.to_string(),
             context: None,
         }
+    }
+
+    fn arrival_behind_surface(surface: char) {
+        use crate::adapters::tui::app::handle_input;
+        use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
+        use crate::domain::models::FocusState;
+        for draft in ["", "saved draft"] {
+            let mut state = TuiState::new(80, 24);
+            state.input_buffer = draft.into();
+            if surface != 'q' {
+                handle_input(&mut state, &E::SpecialKey(K::CtrlX));
+                handle_input(&mut state, &E::KeyPress(surface));
+            }
+            if surface == 'q' {
+                use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
+                assert_eq!(
+                    handle_input(&mut state, &E::SpecialKey(K::CtrlQ)),
+                    crate::adapters::tui::app::InputAction::Quit
+                );
+                let mut facts = QuitFacts::idle(QuitHost::Local);
+                facts.streams = 1;
+                quit_confirm::request(&mut state, facts);
+            }
+            let before = state.focus.clone();
+            assert!(
+                handle_forget_command(
+                    &mut state,
+                    &conv(),
+                    "memory",
+                    Some(Ok(vec![(7, entry("memory"))]))
+                )
+                .is_empty()
+            );
+            assert_eq!(state.focus, before, "surface keeps focus");
+            let key = |state: &mut TuiState, event: E| {
+                if state.notification_log.is_some() {
+                    crate::adapters::tui::app::with_card_focus_reconcile(state, |state| {
+                        crate::adapters::tui::notification_log::handle_domain_event(
+                            state,
+                            &event,
+                            &Default::default(),
+                        )
+                    });
+                } else {
+                    handle_input(state, &event);
+                }
+            };
+            key(&mut state, E::KeyPress('d'));
+            assert!(
+                state.pending_forget_card.is_some(),
+                "surface keeps its keys"
+            );
+            assert_eq!(state.input_buffer, draft);
+            key(&mut state, E::SpecialKey(K::Esc));
+            assert_eq!(
+                state.focus,
+                if draft.is_empty() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                }
+            );
+            assert!(
+                state.pending_forget_card.is_some(),
+                "dismissal never decides"
+            );
+            assert_eq!(state.input_buffer, draft);
+        }
+    }
+
+    #[test]
+    fn story21_3_arrival_behind_log_local() {
+        arrival_behind_surface('n');
+    }
+    #[test]
+    fn story21_3_arrival_behind_quit_local() {
+        arrival_behind_surface('q');
+    }
+    #[test]
+    fn story21_3_arrival_behind_help_local() {
+        arrival_behind_surface('?');
     }
 
     #[test]

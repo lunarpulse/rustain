@@ -25,8 +25,18 @@ use crate::domain::services::transparency::{
 /// The valid sub-verb set, named verbatim in every parser refusal.
 pub const USAGE: &str = "/team log [--filter=<direction=…|kind=…|peer=…|text>] [--json] [--export] | /team board [--last | --actions | --action <action-id> | <peer-id>] | /team view <item-id> | /team context [<item-id>] | /team context off <item-id> | /team ack <item-id> | /team remove <item-id> | /team retract <peer-id> <item-id> | /team send [--type <type>] [--subject <label>] [--stories <key>[=<alias>],…] <peer-id>[,<peer-id>…] <text…> | /team send [--type <type>] [--subject <label>] --holders-of <key>[,<key>…] <text…> | /team reply <item-id> <text…> | /team reply --accept <item-id> [<text…>] | /team reply --discuss <item-id> <text…> | /team defer <item-id> | /team thread <peer-id> <item-id> | /team followup <peer-id> <turn-id> <text…> | /team status | /team untrust <alias-or-peer-id>";
 
-/// Named refusal for the retired listing misnomer; granting stays card-only.
-pub const TRUST_REFUSAL: &str = "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.";
+/// Named refusal for the retired listing misnomer; granting stays card-only. The consent
+/// card's `Always allow` key is generated from the registry's `Consent` rows.
+#[must_use]
+pub fn trust_refusal() -> String {
+    format!(
+        "'/team trust' does not exist: standing trust is granted only from a sender's consent card ({} Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>.",
+        crate::adapters::tui::keymap::render::rail(
+            crate::adapters::tui::keymap::Context::Consent,
+            crate::adapters::tui::keymap::table_card::CardCmd::Always,
+        )
+    )
+}
 
 /// Three verbs retract three different objects (`…addendum-team-messaging.md:116`),
 /// so every refusal of one names the others **by object** (Story 19.16f
@@ -66,10 +76,15 @@ pub enum LogRail {
 }
 
 impl LogRail {
-    fn full_readers(self) -> &'static str {
+    fn full_readers(self) -> String {
         match self {
-            Self::Standalone => "`rustain team log` or Ctrl+X, L for all",
-            Self::Attached => "`rustain team log` for all",
+            Self::Standalone => format!(
+                "`rustain team log` or {} for all",
+                crate::adapters::tui::keymap::render::leader_follow_up_long(
+                    crate::adapters::tui::keymap::table::LeaderCmd::A2aLog
+                )
+            ),
+            Self::Attached => "`rustain team log` for all".to_owned(),
         }
     }
 }
@@ -559,7 +574,7 @@ pub fn parse_team_command(cmd_arg: Option<&str>) -> Result<TeamCommandArgs, Stri
                 item_id: item_id.to_owned(),
             })
         }
-        "trust" => Err(TRUST_REFUSAL.to_owned()),
+        "trust" => Err(trust_refusal()),
         "untrust" => {
             let target = tokens
                 .next()
@@ -1913,13 +1928,10 @@ mod tests {
     #[test]
     fn trust_is_refused_by_name_status_lists_untrust_revokes() {
         for input in ["trust", "trust x", "trust alice extra"] {
-            assert_eq!(
-                parse_team_command(Some(input)),
-                Err(TRUST_REFUSAL.to_owned())
-            );
+            assert_eq!(parse_team_command(Some(input)), Err(trust_refusal()));
         }
         assert_eq!(
-            TRUST_REFUSAL,
+            trust_refusal(),
             "'/team trust' does not exist: standing trust is granted only from a sender's consent card ([a] Always allow). See it with /team status; revoke it with /team untrust <alias-or-peer-id>."
         );
         assert_eq!(
@@ -1954,10 +1966,7 @@ mod tests {
         ];
         for (verb, input) in cases {
             if verb == "trust" {
-                assert_eq!(
-                    parse_team_command(Some(input)),
-                    Err(TRUST_REFUSAL.to_owned())
-                );
+                assert_eq!(parse_team_command(Some(input)), Err(trust_refusal()));
                 assert!(!USAGE.contains("/team trust"));
             } else {
                 assert!(parse_team_command(Some(input)).is_ok(), "{input}");

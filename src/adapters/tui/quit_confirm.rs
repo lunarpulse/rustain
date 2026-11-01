@@ -112,10 +112,12 @@ impl QuitFacts {
             }
             QuitHost::Attached => {
                 if self.streams > 0 || self.live_tools > 0 || self.agents > 0 {
-                    lines.push(
-                        "Daemon work in progress continues without this client (Ctrl+C stops it)."
-                            .to_string(),
-                    );
+                    lines.push(format!(
+                        "Daemon work in progress continues without this client ({} stops it).",
+                        keymap::render::key_text(
+                            crate::adapters::tui::keymap::table_chat::ChatCmd::CancelOrQuit
+                        )
+                    ));
                 }
             }
         }
@@ -314,10 +316,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QuitConfirmState, theme: &T
             inner_width,
         ));
     }
+    let stay = format!(
+        "[{}/{}/{}]",
+        keymap::render::rail_key(Context::QuitConfirm, OverlayCmd::QuitNo),
+        keymap::render::key_text_at(OverlayCmd::QuitNo, 2),
+        keymap::render::key_text_at(OverlayCmd::QuitNo, 4),
+    );
     let footer = vec![Line::from(vec![
-        Span::styled("[y]", warn),
+        Span::styled(
+            keymap::render::rail(Context::QuitConfirm, OverlayCmd::QuitYes),
+            warn,
+        ),
         Span::styled(" Quit   ", normal),
-        Span::styled("[n/Esc/Enter]", Style::default().fg(theme.colors.accent)),
+        Span::styled(stay, Style::default().fg(theme.colors.accent)),
         Span::styled(" Stay", normal),
     ])];
 

@@ -5,6 +5,7 @@
 
 Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.
+`Esc` and `Ctrl+C` never decide a decision card: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.
 
 ## Global
@@ -217,7 +218,7 @@ Also inherits: Append-only text field.
 | `n` | Deny tool call | local, attached | portable |  |
 | `f` | Deny + feedback — provide text guidance to the LLM | local, attached | portable |  |
 | `r` | Open the exact tool input for review | local, attached | portable |  |
-| `Esc` | Close the review when it is open; otherwise deny the tool call | local, attached | portable |  |
+| `Esc` | Close the review when it is open; otherwise remind which keys decide the tool call | local, attached | portable |  |
 | `PgUp` | Page the review reader up | local, attached | portable |  |
 | `PgDn` | Page the review reader down | local, attached | portable |  |
 | `j` | Scroll the chat down one line | local | portable |  |
@@ -225,7 +226,7 @@ Also inherits: Append-only text field.
 | `G` | Scroll the chat to the bottom | local | portable |  |
 | `g` | Scroll the chat to the top | local | portable |  |
 | `Ctrl+Q` | Ask to quit | attached | portable |  |
-| `Ctrl+C` | Decline the card (close the review first when it is open) | attached | portable |  |
+| `Ctrl+C` | Close the review when it is open; otherwise remind which keys decide the tool call | local, attached | portable |  |
 
 ## Append-only text field
 
@@ -326,7 +327,7 @@ Also inherits: Sidebar.
 | `c` | Open the agent's output in a read-only conversation tab | local | portable |  |
 | `j` | Scroll the inspector down one line | local | portable |  |
 | `k` | Scroll the inspector up one line | local | portable |  |
-| `Esc` | Close the inspector and return to the Agents list | local | portable |  |
+| `Esc` | Close the inspector and return to the Agents list (with the kill confirmation shown, Esc and Ctrl+C post a cue naming y and n instead) | local | portable |  |
 
 ## A2A log
 
@@ -569,3 +570,161 @@ A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit,
 | `c` | Copy the sign-in link or code (only while no field has focus) | local | portable |  |
 | `l` | Copy the launch link (only while no field has focus) | local | portable |  |
 | `u` | Copy the verification link (only while no field has focus) | local | portable |  |
+
+## Decision cards (shared)
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
+| `Ctrl+C` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
+
+## Permission feedback
+
+Also inherits: Append-only text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Send the feedback and deny the tool call | local, attached | portable |  |
+| `Esc` | Cancel the feedback and return to the permission card | local, attached | portable |  |
+| `Backspace` | Delete the last character of the feedback | local, attached | portable |  |
+
+## Question
+
+Also inherits: Decision cards (shared), Append-only text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Send the answer | local | portable |  |
+| `Ctrl+D` | Skip the question: the agent receives no answer | local | portable |  |
+| `Backspace` | Delete the last character of the answer | local | portable |  |
+
+## Skill trust
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Trust the skill and activate it | local | portable |  |
+| `n` | Decline the skill | local | portable |  |
+| `i` | Read the skill file before deciding | local | portable |  |
+| `j` | Scroll the chat down one line | local | portable |  |
+| `k` | Scroll the chat up one line | local | portable |  |
+
+## Skill trust (inspect)
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Return to the skill trust card | local | portable |  |
+
+## Plan approval
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Approve the plan | local | portable |  |
+| `a` | Approve the plan and auto-approve its edits | local | portable |  |
+| `n` | Reject the plan | local | portable |  |
+| `e` | Ask the agent to revise the plan | local | portable |  |
+
+## Plan card
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Approve the plan or the deviation | local | portable |  |
+| `e` | Ask the agent to revise it | local | portable |  |
+| `n` | Reject the plan or the deviation | local | portable |  |
+
+## Skip cascade
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `s` | Skip the task and everything that depends on it | local | portable |  |
+| `c` | Skip the task only and continue its dependants | local | portable |  |
+| `n` | Keep the task | local | portable |  |
+
+## Delegation
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `d` | Delegate the task to the suggested agent | local | portable |  |
+| `l` | Run the task in this session | local | portable |  |
+| `x` | Cancel the plan at this task | local | portable |  |
+
+## Spawn gate
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Confirm the spawn count | local | portable |  |
+| `c` | Cap the spawn at the threshold | local | portable |  |
+| `n` | Cancel the spawn: nothing is spawned | local | portable |  |
+| `Left` | Spawn one fewer | local | portable |  |
+| `Right` | Spawn one more | local | portable |  |
+
+## Confirmation card
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Confirm the pending action | local, attached | portable |  |
+| `n` | Decline: nothing is changed | local, attached | portable |  |
+
+## Forget
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Forget the selected memories | local | portable |  |
+| `n` | Cancel: nothing is forgotten | local | portable |  |
+| `Space` | Select or unselect the focused memory | local | portable |  |
+| `j` | Focus the next memory | local | portable |  |
+| `k` | Focus the previous memory | local | portable |  |
+| `Down` | Focus the next memory | local | portable |  |
+| `Up` | Focus the previous memory | local | portable |  |
+
+## Rewind
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Rewind the conversation to this message | local | portable |  |
+| `f` | Fork a new conversation at this message instead | local | portable |  |
+| `n` | Cancel the rewind | local | portable |  |
+
+## Export overwrite
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Overwrite the existing export file (Y too) | local | portable |  |
+| `n` | Keep the existing file (N too) | local | portable |  |
+
+## Team proposal
+
+Also inherits: Decision cards (shared).
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Send the proposed message | local, attached | portable |  |
+| `r` | Review the proposed message | local, attached | portable |  |
+| `n` | Dismiss the proposal | local, attached | portable |  |
+
+## Consent
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Allow the sender's request once | attached | portable |  |
+| `a` | Always allow this sender's tool and remember it | attached | portable |  |
+| `n` | Reject the sender's request | attached | portable |  |

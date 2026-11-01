@@ -50,6 +50,9 @@ mod k8_text_entry;
 #[path = "conformance_21_3_keymap/k10_modal_back.rs"]
 mod k10_modal_back;
 
+#[path = "conformance_21_3_keymap/k11_decisions.rs"]
+mod k11_decisions;
+
 #[path = "conformance_21_3_keymap/k20_review_items.rs"]
 mod k20_review_items;
 

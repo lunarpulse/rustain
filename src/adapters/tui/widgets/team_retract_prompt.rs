@@ -125,7 +125,7 @@ mod tests {
             "Retract on jun-dev's host\n\nitem         ri_V1StGXR8Z5jdHi6BmyTqWnEcZvPkLd8\n\n\
              This marks the item on their host. It does not delete it, and there is no \
              un-retract. What they already read, they already read.\n\n\
-             Awaiting your decision.  [y] Retract  [n] Cancel (Esc)",
+             Awaiting your decision.  [y] Retract  [n] Cancel",
         );
         let width = 40;
         let lines = texts(&render_team_retract_lines(
@@ -142,9 +142,7 @@ mod tests {
         let joined = lines.join(" ");
         assert!(joined.contains("ri_V1StGXR8Z5jdHi6BmyTqWnEcZ"), "{lines:?}");
         assert!(
-            lines
-                .last()
-                .is_some_and(|last| last.contains("Cancel (Esc)")),
+            lines.last().is_some_and(|last| last.contains("[n] Cancel")),
             "{lines:?}"
         );
 
@@ -152,7 +150,7 @@ mod tests {
         // no cluster is split, and no source character is lost.
         const G: &str = "👨\u{200d}👩\u{200d}👧";
         const C: &str = "界";
-        let keys = "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)";
+        let keys = "Awaiting your decision.  [y] Retract  [n] Cancel";
         for word in [
             C.repeat(40),
             G.repeat(30),
@@ -182,9 +180,7 @@ mod tests {
                 let want: String = source.split_whitespace().collect();
                 assert_eq!(kept, want, "width {width}: source lost");
                 assert!(
-                    lines
-                        .last()
-                        .is_some_and(|last| last.contains("Cancel (Esc)")),
+                    lines.last().is_some_and(|last| last.contains("[n] Cancel")),
                     "{lines:?}"
                 );
             }

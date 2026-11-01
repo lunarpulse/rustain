@@ -13,6 +13,9 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::PendingConsolidationCard;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -86,7 +89,11 @@ pub fn render_consolidation_card_lines<'a>(
     lines.push(Line::from(String::new()));
     // Key-hint footer (MVP floor: accept-all / decline-all).
     lines.push(Line::from(vec![Span::styled(
-        "    [y] promote all   [n] decline".to_string(),
+        format!(
+            "    {} promote all   {} decline",
+            rail(Context::Confirm, CardCmd::Yes),
+            rail(Context::Confirm, CardCmd::No)
+        ),
         Style::default().fg(theme.colors.fg_muted),
     )]));
 

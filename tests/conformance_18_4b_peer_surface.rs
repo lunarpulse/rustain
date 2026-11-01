@@ -1055,7 +1055,7 @@ fn the_confirm_card_states_what_a_pin_governs() {
         "not that",
         "never trust",
         "[y] Confirm and pin",
-        "[n] Cancel (Esc)",
+        "[n] Cancel",
     ] {
         assert!(card.contains(needle), "confirm card must state {needle:?}");
     }

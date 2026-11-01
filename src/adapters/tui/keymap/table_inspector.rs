@@ -58,5 +58,5 @@ pub const ROWS: &[Binding] = &[
     i(&[Key::Char('c')], InspectorCmd::Conversation, "Conversation tab").does("Open the agent's output in a read-only conversation tab"),
     i(&[Key::Char('j')], InspectorCmd::ScrollDown, "").does("Scroll the inspector down one line"),
     i(&[Key::Char('k')], InspectorCmd::ScrollUp, "").does("Scroll the inspector up one line"),
-    i(&[Key::Esc], InspectorCmd::Close, "Back").does("Close the inspector and return to the Agents list"),
+    i(&[Key::Esc], InspectorCmd::Close, "Back").does("Close the inspector and return to the Agents list (with the kill confirmation shown, Esc and Ctrl+C post a cue naming y and n instead)"),
 ];

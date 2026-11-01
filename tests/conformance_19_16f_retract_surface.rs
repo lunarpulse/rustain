@@ -491,7 +491,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
          this item.",
         "This marks the item on their host. It does not delete it, and there is no un-retract. \
          What they already read, they already read.",
-        "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)",
+        "Awaiting your decision.  [y] Retract  [n] Cancel",
     ] {
         assert!(
             card.card.contains(line),
@@ -613,20 +613,25 @@ async fn declining_the_card_clears_the_slot_and_sends_nothing() {
     let mut sender = sender(vec![server.peer("jun-dev")]).await;
 
     let mut state = TuiState::new(120, 40);
-    for decline in [
-        DomainInputEvent::KeyPress('n'),
-        DomainInputEvent::SpecialKey(DomainKey::Esc),
-    ] {
-        sender
-            .raise_card(&mut state, "/team retract jun-dev ri_keep")
-            .await;
-        assert_eq!(
-            handle_input(&mut state, &decline),
-            InputAction::TeamRetractDecline
-        );
-        assert!(resolve_team_retract_card(&mut state, false).is_none());
-        assert!(state.pending_team_retract.is_none());
-    }
+    // 3-C (A8): `Esc` never declines the card (it posts a cue); `n` does.
+    sender
+        .raise_card(&mut state, "/team retract jun-dev ri_keep")
+        .await;
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
+        InputAction::Consumed
+    );
+    assert!(state.pending_team_retract.is_some(), "Esc is not a decline");
+    assert!(resolve_team_retract_card(&mut state, false).is_none());
+    sender
+        .raise_card(&mut state, "/team retract jun-dev ri_keep")
+        .await;
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::KeyPress('n')),
+        InputAction::TeamRetractDecline
+    );
+    assert!(resolve_team_retract_card(&mut state, false).is_none());
+    assert!(state.pending_team_retract.is_none());
     assert_eq!(retract_records(&host).await, 0);
     assert!(sender.retract_dispatch_rows().await.is_empty());
     server.stop().await;
@@ -664,7 +669,7 @@ async fn an_unverified_read_raises_a_disarmed_card_that_consumes_y() {
     );
     assert!(
         card.card
-            .ends_with("Cannot verify on jun-dev's host.  [n] Cancel (Esc)"),
+            .ends_with("Cannot verify on jun-dev's host.  [n] Cancel"),
         "the key line stays last and paints no [y]: {}",
         card.card
     );
@@ -716,7 +721,7 @@ async fn a_removed_item_disarms_y_and_an_acknowledged_one_arms_it() {
     );
     assert!(
         card.card
-            .ends_with("Already removed on jun-dev's host — nothing to mark.  [n] Cancel (Esc)"),
+            .ends_with("Already removed on jun-dev's host — nothing to mark.  [n] Cancel"),
         "{}",
         card.card
     );

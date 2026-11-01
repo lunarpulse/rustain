@@ -27,7 +27,7 @@ mod k4_shell;
 mod k5a_cards;
 
 #[path = "conformance_21_11_display_width/k5b_cards.rs"]
-mod k5b_cards;
+pub(crate) mod k5b_cards;
 
 #[path = "conformance_21_11_display_width/k6_modal_login.rs"]
 mod k6_modal_login;

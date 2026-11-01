@@ -1728,7 +1728,7 @@ fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
                 "width {width}:\n{rendered}"
             );
             assert!(
-                rendered.contains("[n] Cancel (Esc)"),
+                rendered.contains("[n] Cancel"),
                 "width {width}:\n{rendered}"
             );
 

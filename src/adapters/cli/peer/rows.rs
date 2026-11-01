@@ -299,11 +299,12 @@ pub fn confirm_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerId) -> 
             sanitize_for_terminal(name)
         );
     }
-    out.push_str(
+    let _ = write!(
+        out,
         "\nA ticket conveys reachability and a candidate identity, never trust.\n\
          Confirming pins this key. It says who may reach this host — not that\n\
          what they send is true.\n\n\
-         Awaiting your decision.  [y] Confirm and pin  [n] Cancel (Esc)\n",
+         Awaiting your decision.  [y] Confirm and pin  [n] Cancel\n",
     );
     out
 }
@@ -646,10 +647,11 @@ pub fn reach_refresh_card_text(alias: &str, ticket: &PeerTicket, peer_id: &PeerI
         let _ = writeln!(out, "                 claimed: {address}");
     }
     let _ = writeln!(out, "  ticket expires {}", expiry_label(ticket.not_after));
-    out.push_str(
+    let _ = write!(
+        out,
         "\nThis changes only where this host dials them. Their key stays pinned\n\
          exactly as it is, and admission is unchanged.\n\n\
-         Awaiting your decision.  [y] Update the address  [n] Cancel (Esc)\n",
+         Awaiting your decision.  [y] Update the address  [n] Cancel\n",
     );
     out
 }

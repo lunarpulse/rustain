@@ -12,6 +12,9 @@
 
 use ratatui::prelude::*;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::PendingForgetCard;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -82,7 +85,12 @@ pub fn render_forget_card_lines<'a>(
     lines.push(Line::from(String::new()));
     // Key-hint footer. Honest, destructive-action wording.
     lines.push(Line::from(vec![Span::styled(
-        "    [↑/↓] navigate  [Space] toggle  [y] forget selected  [n] cancel".to_string(),
+        format!(
+            "    [↑/↓] navigate  {} toggle  {} forget selected  {} cancel",
+            rail(Context::Forget, CardCmd::Toggle),
+            rail(Context::Forget, CardCmd::Yes),
+            rail(Context::Forget, CardCmd::No)
+        ),
         Style::default().fg(theme.colors.fg_muted),
     )]));
 

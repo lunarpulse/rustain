@@ -562,14 +562,17 @@ fn peer_response_card_lines<'a>(
     let passive = read_only
         || (pending.item_address.is_none()
             && (!pending.node_resolvable || matches!(pending.stage, PeerResponseStage::Drafting)));
-    lines.push(Line::from(
-        match (pending.item_address.is_some(), passive) {
-            (true, false) => "[Tab] Item actions",
-            (false, false) => "[Tab] Response actions",
-            (true, true) => "[Tab] View item",
-            (false, true) => "[Tab] View response",
-        },
-    ));
+    let tab = crate::adapters::tui::keymap::render::rail(
+        crate::adapters::tui::keymap::Context::RecipientSurface,
+        crate::adapters::tui::keymap::table_overlay::OverlayCmd::RecipientToggle,
+    );
+    let action = match (pending.item_address.is_some(), passive) {
+        (true, false) => "Item actions",
+        (false, false) => "Response actions",
+        (true, true) => "View item",
+        (false, true) => "View response",
+    };
+    lines.push(Line::from(format!("{tab} {action}")));
     lines
 }
 
@@ -1117,7 +1120,17 @@ fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
     use ratatui::text::Line;
     vec![
         Line::from(format!("Retract this auto-sent message? {}", preview)),
-        Line::from("[y] Retract — marked in your log, never deleted  [n] Keep".to_owned()),
+        Line::from(format!(
+            "{} Retract — marked in your log, never deleted  {} Keep",
+            crate::adapters::tui::keymap::render::rail(
+                crate::adapters::tui::keymap::Context::Confirm,
+                crate::adapters::tui::keymap::table_card::CardCmd::Yes
+            ),
+            crate::adapters::tui::keymap::render::rail(
+                crate::adapters::tui::keymap::Context::Confirm,
+                crate::adapters::tui::keymap::table_card::CardCmd::No
+            )
+        )),
     ]
 }
 
@@ -1134,6 +1147,8 @@ struct AttachedApprovals {
     scroll: usize,
     scroll_max: usize,
     presentation: Option<AttachedApprovalPresentation>,
+    /// `Esc` / `Ctrl+C` answered with a cue (A8): the host posts it, never a decision.
+    cue: bool,
 }
 
 struct AttachedApproval {
@@ -1309,6 +1324,20 @@ impl AttachedApprovals {
         if self.painted.as_ref() != Some(&id) {
             return false;
         }
+        // `Ctrl+C` never decides the card (A8): back from Review, else one cue.
+        if key.code == KeyCode::Char('c')
+            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
+        {
+            if key.kind == KeyEventKind::Press {
+                if self.review.is_some() {
+                    self.review = None;
+                    self.scroll = 0;
+                } else if self.feedback.is_none() {
+                    self.cue = true;
+                }
+            }
+            return true;
+        }
         if key
             .modifiers
             .contains(crossterm::event::KeyModifiers::CONTROL)
@@ -1376,9 +1405,8 @@ impl AttachedApprovals {
                 let scope = ApprovalScope::Tool(self.pending[&id].tool.clone());
                 self.decide(id, ApprovalOutcome::AlwaysAndSave { scope }, tx);
             }
-            KeyCode::Char('n') | KeyCode::Esc => {
-                self.decide(id, ApprovalOutcome::Reject { feedback: None }, tx)
-            }
+            KeyCode::Char('n') => self.decide(id, ApprovalOutcome::Reject { feedback: None }, tx),
+            KeyCode::Esc => self.cue = true,
             _ => {}
         }
         true
@@ -1894,12 +1922,26 @@ fn attached_team_retract_key(
     let decision = if !key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('y') if pending.armed => Some(true),
-            KeyCode::Char('n') | KeyCode::Esc => Some(false),
+            KeyCode::Char('n') => Some(false),
             _ => None,
         }
     } else {
         None
     };
+    // `Esc` and `Ctrl+C` never decide the card (A8): one cue naming the keys that do.
+    if key.kind == crossterm::event::KeyEventKind::Press
+        && (key.code == KeyCode::Esc && key.modifiers.is_empty()
+            || key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
+    {
+        crate::adapters::tui::notifications::info(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Approval,
+            crate::adapters::tui::keymap::render::card_cue(
+                crate::adapters::tui::keymap::Context::Confirm,
+                crate::adapters::tui::keymap::Host::Attached,
+            ),
+        );
+    }
     if let Some(confirm) = decision {
         handler::resolve_team_retract_card(state, confirm);
         if let Some(request) = requests.open_retract.take() {
@@ -2218,6 +2260,143 @@ fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
     crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
 }
 
+/// The accepted bracketed-paste front door; composition never changes focus here.
+fn handle_attached_paste(state: &mut TuiState, input: &mut String, text: &str, card_pending: bool) {
+    if !card_pending
+        && state.recipient_surface.is_none()
+        && !attach_keys::paste_blocked(state)
+        && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
+        && state.pending_team_retract.is_none()
+    {
+        append_attached_paste(input, text);
+        state.autocomplete.dismiss();
+        state.needs_redraw = true;
+    }
+}
+
+/// FR-21-3-c: an approval, consent or consolidation card arrived. A writer with an empty
+/// composer takes Chat focus (where the card answers); a read-only client cannot answer
+/// and keeps its focus.
+fn attached_card_arrived(state: &mut TuiState, input: &str, read_only: bool) {
+    let mid_sentence = !attached_display_input(state, input).is_empty();
+    if !crate::adapters::tui::decision_pane::card_focus_blocked(state)
+        && crate::adapters::tui::decision_pane::take_chat_focus_for_card(
+            &mut state.focus,
+            &mut state.card_focus_borrowed_from,
+            !read_only,
+            mid_sentence,
+        )
+    {
+        state.needs_redraw = true;
+    }
+}
+
+/// Same pending owners for overlay-close arrival reconciliation and settlement.
+fn attached_card_pending(
+    approvals: &AttachedApprovals,
+    consent: &std::collections::VecDeque<PendingConsentApproval>,
+    consolidation: &Option<crate::adapters::daemon::protocol::ProposalToken>,
+    retract: &Option<(String, String)>,
+) -> bool {
+    !approvals.pending.is_empty()
+        || !consent.is_empty()
+        || consolidation.is_some()
+        || retract.is_some()
+}
+
+fn settle_attached_card_focus(
+    state: &mut TuiState,
+    read_only: bool,
+    approvals: &AttachedApprovals,
+    consent: &std::collections::VecDeque<PendingConsentApproval>,
+    consolidation: &Option<crate::adapters::daemon::protocol::ProposalToken>,
+    retract: &Option<(String, String)>,
+) {
+    if !read_only && state.card_focus_borrowed_from.is_some() {
+        crate::adapters::tui::decision_pane::settle_borrowed_card_focus(
+            state,
+            attached_card_pending(approvals, consent, consolidation, retract),
+        );
+    }
+}
+
+/// One approval frame (request, input chunk, close, refusal): the card state, its notice and,
+/// when a request arrived, the card's focus (FR-21-3-c).
+fn apply_attached_approval_frame(
+    state: &mut TuiState,
+    approvals: &mut AttachedApprovals,
+    frame: DaemonFrame,
+    input: &str,
+    read_only: bool,
+) {
+    let arrived = matches!(frame, DaemonFrame::ApprovalRequest { .. });
+    if let Some(notice) = approvals.apply(frame, read_only) {
+        notifications::warning(state, NoticeSource::Approval, notice);
+    }
+    if arrived && !approvals.pending.is_empty() {
+        attached_card_arrived(state, input, read_only);
+    }
+    state.needs_redraw = true;
+}
+
+fn attached_notice_badges(
+    state: &TuiState,
+    approvals: &AttachedApprovals,
+) -> crate::adapters::tui::widgets::status_bar::NoticeBadges {
+    crate::adapters::tui::widgets::status_bar::NoticeBadges {
+        unseen: state.notifications.unseen(),
+        decisions: approvals.pending.len(),
+        tail: attach_keys::status_tail(state),
+    }
+}
+
+fn apply_attached_consent_frame(
+    state: &mut TuiState,
+    pending: &mut std::collections::VecDeque<PendingConsentApproval>,
+    frame: DaemonFrame,
+    input: &str,
+    read_only: bool,
+) {
+    if let DaemonFrame::ApprovalRequest {
+        request_id,
+        tool,
+        summary,
+        ..
+    } = frame
+    {
+        pending.push_back(PendingConsentApproval {
+            request_id,
+            tool,
+            input_preview: summary,
+        });
+        attached_card_arrived(state, input, read_only);
+        state.needs_redraw = true;
+    }
+}
+
+fn apply_attached_consolidation_frame(
+    state: &mut TuiState,
+    card: &mut Option<crate::adapters::tui::state::PendingConsolidationCard>,
+    token: &mut Option<crate::adapters::daemon::protocol::ProposalToken>,
+    frame: DaemonFrame,
+    input: &str,
+    read_only: bool,
+) {
+    if let DaemonFrame::ConsolidationProposed {
+        token: arrived,
+        proposals,
+    } = frame
+    {
+        *card = Some(crate::adapters::tui::state::PendingConsolidationCard {
+            conversation_id: String::new(),
+            proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
+        });
+        *token = Some(arrived);
+        attached_card_arrived(state, input, read_only);
+        state.needs_redraw = true;
+    }
+}
+
 /// Paint the attached composer. The attached editor appends at the end of its
 /// own source buffer, so the caret is the end of `display_input` and the scroll
 /// window is the visual tail of the width-aware projection; both are derived at
@@ -2298,11 +2477,27 @@ fn attached_proposal_key(
     {
         return false;
     }
+    if key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('c')
+            && key.modifiers == KeyModifiers::CONTROL
+            && attached_display_input(state, input).is_empty())
+    {
+        // Keep pending, rather than detaching the approving surface: never a decision (A8).
+        // The cue names `y/r/n`, which are text while the composer holds a draft: no cue then.
+        if key.kind == KeyEventKind::Press && attached_display_input(state, input).is_empty() {
+            crate::adapters::tui::notifications::info(
+                state,
+                crate::adapters::tui::notifications::NoticeSource::Approval,
+                crate::adapters::tui::keymap::render::card_cue(
+                    crate::adapters::tui::keymap::Context::TeamProposal,
+                    crate::adapters::tui::keymap::Host::Attached,
+                ),
+            );
+        }
+        return true;
+    }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
-    }
-    if key.code == KeyCode::Esc {
-        return true; // Keep pending, rather than detaching the approving surface.
     }
     if !attached_display_input(state, input).is_empty() {
         return false;
@@ -3374,11 +3569,7 @@ pub async fn run_attached(
                 false,
                 Some(&attach_info),
                 state.log_awareness.display,
-                crate::adapters::tui::widgets::status_bar::NoticeBadges {
-                    unseen: state.notifications.unseen(),
-                    decisions: 0,
-                    tail: attach_keys::status_tail(&state),
-                },
+                attached_notice_badges(&state, &approvals),
             );
             let display_input = attached_display_input(&state, &input);
             render_attached_composer(
@@ -3525,19 +3716,9 @@ pub async fn run_attached(
                         }
                     }
                     Some(Ok(Event::Paste(text))) => {
-                        if state.recipient_surface.is_none()
-                            && !attach_keys::paste_blocked(&state)
-                            && crate::adapters::tui::handlers::recipient_actions::pending_composition(&state).is_none()
-                            && pending_consent_approvals.is_empty()
-                            && approvals.pending.is_empty()
-                            && pending_consolidation_card.is_none()
-                            && retract_confirm.is_none()
-                            && state.pending_team_retract.is_none()
-                        {
-                            append_attached_paste(&mut input, &text);
-                            state.autocomplete.dismiss();
-                            state.needs_redraw = true;
-                        }
+                        let pending = attached_card_pending(&approvals, &pending_consent_approvals,
+                            &pending_consolidation_token, &retract_confirm);
+                        handle_attached_paste(&mut state, &mut input, &text, pending);
                     }
                     Some(Ok(Event::Resize(w, h))) => {
                         state.terminal_width = w;
@@ -3629,40 +3810,18 @@ pub async fn run_attached(
                         | DaemonFrame::InterruptResult { .. }))) => {
                         apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
                     }
-                    Ok(Some(DaemonFrame::ApprovalRequest {
-                        tool,
-                        request_id,
-                        summary,
-                        ..
-                    })) if tool == "a2a/sender-consent" => {
-                        pending_consent_approvals.push_back(PendingConsentApproval {
-                            request_id,
-                            tool,
-                            input_preview: summary,
-                        });
-                        state.needs_redraw = true;
+                    Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. })) if matches!(&frame, DaemonFrame::ApprovalRequest { tool, .. } if tool == "a2a/sender-consent") => {
+                        apply_attached_consent_frame(&mut state, &mut pending_consent_approvals, frame, &input, read_only);
                     }
                     Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
                     | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
                     | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
                     | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
                     | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
-                        if let Some(notice) = approvals.apply(frame, read_only) {
-                            notifications::warning(&mut state, NoticeSource::Approval, notice);
-                        }
-                        state.needs_redraw = true;
+                        apply_attached_approval_frame(&mut state, &mut approvals, frame, &input, read_only);
                     }
-                    Ok(Some(DaemonFrame::ConsolidationProposed { token, proposals })) => {
-                        // Story 12.2d AC3 — store token + build the card for rendering.
-                        // Unwrap the per-item `ProposedFact` to the card's (MemoryFact, bool)
-                        // shape (the id is the AI-12.2d-2 handle; 12.2d toggles all-on).
-                        let card = crate::adapters::tui::state::PendingConsolidationCard {
-                            conversation_id: String::new(),
-                            proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
-                        };
-                        pending_consolidation_card = Some(card);
-                        pending_consolidation_token = Some(token);
-                        state.needs_redraw = true;
+                    Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
+                        apply_attached_consolidation_frame(&mut state, &mut pending_consolidation_card, &mut pending_consolidation_token, frame, &input, read_only);
                     }
                     Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
                     | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
@@ -3732,6 +3891,8 @@ pub async fn run_attached(
                     }
                     Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                 }
+                settle_attached_card_focus(&mut state, read_only, &approvals,
+                    &pending_consent_approvals, &pending_consolidation_token, &retract_confirm);
             }
             _ = tick.tick() => {
                 log_awareness.tick(&mut state.log_awareness);
@@ -4105,6 +4266,54 @@ mod tests {
             assert!(state.pending.contains_key(&RequestId("b".into())));
         }
 
+        /// 21-3 3-C (AC16, M12): `Esc` and `Ctrl+C` never decide an approval: no frame is sent,
+        /// the card stays pending and the host is asked for one cue; `n` still rejects once.
+        #[test]
+        fn story21_3_attached_esc_on_approval_is_a_noop_with_a_cue() {
+            let data = r#"{"command":"ok"}"#;
+            for pressed in [
+                key(KeyCode::Esc),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            ] {
+                let mut state = AttachedApprovals::default();
+                state.apply(request("a", data), false);
+                chunk(&mut state, "a", 0, data);
+                complete(&mut state, "a", 1);
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                paint(&mut state);
+                assert!(
+                    state.key(pressed, false, "", &tx),
+                    "{pressed:?} is consumed"
+                );
+                assert!(rx.try_recv().is_err(), "{pressed:?} sends no decision");
+                assert!(
+                    state.pending.contains_key(&RequestId("a".into())),
+                    "{pressed:?}"
+                );
+                assert!(
+                    std::mem::take(&mut state.cue),
+                    "{pressed:?} asks for the cue"
+                );
+                // With the review open the same key only goes back: no cue.
+                state.key(key(KeyCode::Char('r')), false, "", &tx);
+                paint(&mut state);
+                state.key(pressed, false, "", &tx);
+                assert!(
+                    state.review.is_none() && !state.cue,
+                    "{pressed:?} backs out of review"
+                );
+                paint(&mut state);
+                // Positive control: `n` rejects, once.
+                state.key(key(KeyCode::Char('n')), false, "", &tx);
+                assert!(matches!(
+                    rx.try_recv().unwrap(),
+                    ClientFrame::ApprovalResponse { request_id, outcome }
+                        if request_id.0 == "a" && outcome == ApprovalOutcome::Reject { feedback: None }
+                ));
+                assert!(rx.try_recv().is_err());
+            }
+        }
+
         #[test]
         fn always_deny_escape_and_refusal_lifecycle() {
             use crate::adapters::daemon::protocol::ApprovalRefusal;
@@ -4121,7 +4330,6 @@ mod tests {
                     KeyCode::Char('n'),
                     ApprovalOutcome::Reject { feedback: None },
                 ),
-                (KeyCode::Esc, ApprovalOutcome::Reject { feedback: None }),
             ] {
                 let mut state = AttachedApprovals::default();
                 state.apply(request("a", data), false);
@@ -4569,6 +4777,38 @@ mod tests {
                 assert!(surface.state.team_send_blocks.is_empty());
             }
             surface.assert_send();
+        }
+
+        /// 21-3 3-C (R4d, R13): `Esc` on an attached proposal posts the registry cue with an
+        /// empty composer only; with a draft `y/r/n` are text and the cue would lie.
+        #[test]
+        fn story21_3_attached_proposal_esc_cues_only_with_an_empty_composer() {
+            let cues = |surface: &Surface| -> Vec<String> {
+                surface
+                    .state
+                    .notifications
+                    .records()
+                    .filter(|record| record.source == NoticeSource::Approval)
+                    .map(|record| record.message.clone())
+                    .collect()
+            };
+            let mut empty = Surface::new("body");
+            empty.paint(80, 24, false, false);
+            assert!(empty.key(KeyCode::Esc, false, false));
+            assert_eq!(
+                cues(&empty),
+                vec![crate::adapters::tui::keymap::render::card_cue(
+                    crate::adapters::tui::keymap::Context::TeamProposal,
+                    crate::adapters::tui::keymap::Host::Attached,
+                )]
+            );
+            assert!(attached_proposal_pending(&empty.state).is_some());
+            let mut drafting = Surface::new("body");
+            drafting.input = "draft".into();
+            drafting.paint(80, 24, false, false);
+            assert!(drafting.key(KeyCode::Esc, false, false));
+            assert!(cues(&drafting).is_empty(), "no cue over a draft");
+            assert!(attached_proposal_pending(&drafting.state).is_some());
         }
 
         #[test]
@@ -8813,14 +9053,14 @@ mod tests {
 
     #[test]
     fn attached_trust_refusal_sends_no_frame_or_provider_input() {
-        use crate::adapters::tui::handlers::team_command::TRUST_REFUSAL;
+        use crate::adapters::tui::handlers::team_command::trust_refusal;
         use crossterm::event::KeyCode;
 
         for read_only in [false, true] {
             for line in ["/team trust", "/team trust x"] {
                 assert!(matches!(
                     attached_team_line(line),
-                    AttachedTeamLine::Refused(message) if message == TRUST_REFUSAL
+                    AttachedTeamLine::Refused(message) if message == trust_refusal()
                 ));
                 let mut state = TuiState::new(80, 24);
                 let (tx, mut rx) = mpsc::unbounded_channel();
@@ -10233,6 +10473,7 @@ mod attached_parity_tests {
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ] {
                 let mut state = TuiState::new(80, 24);
                 let mut requests = AttachedTeamRequests::default();
@@ -10250,7 +10491,7 @@ mod attached_parity_tests {
                 ));
                 let expected = match key.code {
                     KeyCode::Char('y') if armed => Some(true),
-                    KeyCode::Char('n') | KeyCode::Esc => Some(false),
+                    KeyCode::Char('n') => Some(false),
                     _ => None,
                 };
                 if let Some(confirm) = expected {
@@ -10277,6 +10518,12 @@ mod attached_parity_tests {
                 } else {
                     assert!(state.pending_team_retract.is_some());
                     assert_eq!(requests.open_retract.as_deref(), Some("retract"));
+                    let cue = matches!(key.code, KeyCode::Esc | KeyCode::Char('c'));
+                    assert_eq!(
+                        state.notifications.records().count(),
+                        usize::from(cue),
+                        "{key:?} posts the cue and decides nothing"
+                    );
                 }
                 assert!(rx.try_recv().is_err());
             }

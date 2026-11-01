@@ -11,6 +11,7 @@ pub mod render_help;
 pub mod render_tips;
 pub mod resolve;
 pub mod table;
+pub mod table_card;
 pub mod table_chat;
 pub mod table_input;
 pub mod table_inspector;

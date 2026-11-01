@@ -250,7 +250,7 @@ fn k5b_forget_summary_leaves_room_for_the_key_suffix_at_60_80_130() {
 
 // ── peer add / retract ──────────────────────────────────────────────────────
 
-fn peer_pending(alias: &str, suggested: Option<&str>) -> PendingPeerAdd {
+pub(crate) fn peer_pending(alias: &str, suggested: Option<&str>) -> PendingPeerAdd {
     let ticket = PeerTicket::mint(
         &SigningKey::from_bytes(&[7; 32]),
         vec![b"opaque-address-one".to_vec()],
@@ -312,7 +312,7 @@ fn k5b_peer_add_decision_line_is_whole_at_130() {
     let p = paint_card(130, lines, false);
     let screen = screen(&p.buffer);
     assert!(
-        screen.contains("Awaiting your decision.  [y] Confirm and pin  [n] Cancel (Esc)"),
+        screen.contains("Awaiting your decision.  [y] Confirm and pin  [n] Cancel"),
         "{screen}"
     );
 }
@@ -333,7 +333,7 @@ fn k5b_peer_add_decision_row_keeps_its_emphasis() {
     assert_eq!(cell.fg, theme.colors.accent);
 }
 
-fn retract_pending(card: &str) -> PendingTeamRetract {
+pub(crate) fn retract_pending(card: &str) -> PendingTeamRetract {
     PendingTeamRetract {
         conversation_id: "conv".to_owned(),
         peer: "jun-dev".to_owned(),
@@ -350,7 +350,7 @@ fn k5b_retract_card_wraps_long_words_and_loses_nothing_at_60_80_130() {
     let alias = format!("{}{G}{A}", C.repeat(20));
     let long_id = "ri_V1StGXR8Z5jdHi6BmyTqWnEcZvPkLd8".repeat(6);
     let wide_id = format!("{}{G}{A}{}", C.repeat(70), "x".repeat(60));
-    let keys = "Awaiting your decision.  [y] Retract  [n] Cancel (Esc)";
+    let keys = "Awaiting your decision.  [y] Retract  [n] Cancel";
     for id in [long_id, wide_id] {
         let card = format!(
             "Retract on {alias}'s host\n\nitem         {id}\n\n\
@@ -372,7 +372,7 @@ fn k5b_retract_card_wraps_long_words_and_loses_nothing_at_60_80_130() {
             let want: String = card.split_whitespace().collect();
             assert_eq!(flat, want, "width {width}");
             assert!(
-                painted.last().is_some_and(|r| r.contains("Cancel (Esc)")),
+                painted.last().is_some_and(|r| r.contains("[n] Cancel")),
                 "{painted:?}"
             );
             assert_whole_clusters(&p.buffer);
@@ -383,7 +383,7 @@ fn k5b_retract_card_wraps_long_words_and_loses_nothing_at_60_80_130() {
 
 // ── apply card ──────────────────────────────────────────────────────────────
 
-fn apply_pending(files: Vec<String>, predates: bool) -> PendingArtifactCard {
+pub(crate) fn apply_pending(files: Vec<String>, predates: bool) -> PendingArtifactCard {
     let hash = |seed: &str| ContentHash::parse_hex(&seed.repeat(64)).expect("hash");
     PendingArtifactCard {
         conversation_id: "conversation".to_owned(),
@@ -447,7 +447,7 @@ fn k5b_apply_card_never_clips_files_or_consequences_at_60_80_130() {
                 "Warning: interruption can leave this patch indeterminate.",
                 "Recover with: /artifact resolve <id> present|absent.",
                 "[y] Apply",
-                "[n] Cancel (Esc)",
+                "[n] Cancel",
             ] {
                 assert!(
                     flat.contains(needle),

@@ -5,8 +5,8 @@
 //! (`AttachedApprovals::key`, consent / consolidation / retract arms) lives next
 //! to `handle_attached_key` / `attach_loop`.
 //!
-//! The rows document TODAY's `Esc` = deny (slice 3-C replaces it with a no-op
-//! plus a cue and rewrites the `Esc` witness below).
+//! `Esc` and `Ctrl+C` never deny the card (3-C, A8): with Review closed they post one cue,
+//! with Review open they go back.
 
 use std::sync::Arc;
 
@@ -147,13 +147,14 @@ fn witness(cmd: PermissionCmd, keys: &[Key]) {
             assert_eq!(state.permission_reader.scroll, 0);
             assert_eq!(state.focus, card_focus(), "Review stays inside the card");
         }
-        PermissionCmd::BackOrDeny => {
-            // 3-A, as shipped: with Review closed Esc DENIES (3-C changes this).
+        PermissionCmd::BackOrCue => {
+            // 3-C (A8): with Review closed the key decides NOTHING: one inert answer, one cue,
+            // the card stays pending (K11 asserts the cue text and every other card).
             let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionDeny]
-            );
+            let id = pending_id(&state);
+            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
+            assert_eq!(pending_id(&state), id, "the key never decides the card");
+            assert_eq!(state.notifications.records().count(), 1, "one cue");
             // With Review open the same key only goes back, the card stays pending.
             let mut state = card_in_review();
             let id = pending_id(&state);
@@ -235,14 +236,14 @@ fn every_permission_row_resolves_to_its_command_by_value() {
         witnessed += 1;
     }
     assert_eq!(
-        witnessed, 13,
-        "y s a n f r Esc PgUp PgDn j k G g are the local card keys"
+        witnessed, 14,
+        "y s a n f r Esc Ctrl+C PgUp PgDn j k G g are the local card keys"
     );
 }
 
 /// The rows of one host only are exactly the ones this leg knows about.
 #[test]
-fn attached_only_permission_rows_are_ctrl_q_and_the_ctrl_c_decline() {
+fn the_only_attached_permission_row_is_ctrl_q() {
     let attached_only: Vec<_> = table()
         .iter()
         .filter(|row| row.context == Context::Permission && row.hosts == Hosts::Attached)
@@ -250,16 +251,10 @@ fn attached_only_permission_rows_are_ctrl_q_and_the_ctrl_c_decline() {
         .collect();
     assert_eq!(
         attached_only,
-        vec![
-            (
-                vec![Key::Ctrl('q')],
-                CommandId::Permission(PermissionCmd::QuitRequest)
-            ),
-            (
-                vec![Key::Ctrl('c')],
-                CommandId::Permission(PermissionCmd::BackOrDeny)
-            ),
-        ]
+        vec![(
+            vec![Key::Ctrl('q')],
+            CommandId::Permission(PermissionCmd::QuitRequest)
+        )]
     );
 }
 

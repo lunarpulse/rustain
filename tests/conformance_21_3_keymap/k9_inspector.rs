@@ -3,9 +3,11 @@
 //! for the open inspector) from a real decoded key, with the outcome and the salient state.
 
 use rustain::adapters::tui::agent_inspector_keys::{InspectorOutcome, on_key};
+use rustain::adapters::tui::keymap::table_inspector::InspectorCmd;
 use rustain::adapters::tui::keymap::{
-    CommandId, Context, Host, Key, Resolved, resolve, resolve::rows_of,
+    CommandId, Context, Host, Key, Resolved, render, resolve, resolve::rows_of,
 };
+use rustain::adapters::tui::notifications::NoticeSource;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{AgentId, AgentRowView, FocusState, NodeState, OwnershipKind};
@@ -131,7 +133,22 @@ fn k9_agent_inspector_kill_confirmation_answers_only_while_pending() {
     // A real `Enter` never confirms a cascade kill: it is no inspector row and passes through.
     assert_eq!(pressed(pending("spoke-1"), Key::Enter), format!("PassThrough | {}", at(true, 3, true)));
     assert_eq!(pressed(pending("spoke-1"), Key::Char('n')), format!("Consumed | {}", at(true, 3, false)));
-    assert_eq!(pressed(pending("spoke-1"), Key::Esc), format!("Consumed | {}", at(false, 0, false)));
+    // Esc and Ctrl+C never answer the confirmation (A8): one cue names y / n, the confirmation
+    // and the inspector stay open.
+    let cue = render::cue(&[
+        (Context::SidebarAgentInspector, CommandId::Inspector(InspectorCmd::ConfirmKill)),
+        (Context::SidebarAgentInspector, CommandId::Inspector(InspectorCmd::CancelKill)),
+    ]);
+    assert!(cue.ends_with("[y] Confirm  [n] Cancel"), "{cue}");
+    let cued = format!(
+        "Consumed | sidebar open=true scroll=3 kill=true notices=[{:?}]",
+        format!("{}/Info/{cue}x1", NoticeSource::Approval.label())
+    );
+    for key in [Key::Esc, Key::Ctrl('c')] {
+        assert_eq!(pressed(pending("spoke-1"), key), cued, "{key:?}");
+    }
+    // With no confirmation pending Esc is still "back".
+    assert_eq!(pressed(open(NodeState::Running), Key::Esc), format!("Consumed | {}", at(false, 0, false)));
     for key in [Key::Char('y'), Key::Enter, Key::Char('n')] {
         assert_eq!(pressed(pending("spoke-2"), key), format!("PassThrough | {}", at(true, 3, true)), "{key:?}");
     }

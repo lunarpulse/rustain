@@ -323,7 +323,11 @@ pub(crate) async fn load_received_thread(
     if omitted_before > 0 {
         let _ = writeln!(
             content,
-            "  {omitted_before} earlier turns not shown — [p] loads earlier turns from this host"
+            "  {omitted_before} earlier turns not shown — {} loads earlier turns from this host",
+            crate::adapters::tui::keymap::render::rail(
+                crate::adapters::tui::keymap::Context::RecipientSurface,
+                crate::adapters::tui::keymap::table_overlay::OverlayCmd::RecipientPrev,
+            )
         );
     }
     for &index in &selected {

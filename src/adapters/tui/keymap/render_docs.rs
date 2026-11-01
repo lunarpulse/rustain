@@ -89,6 +89,7 @@ pub fn markdown_reference() -> String {
     out.push_str(
         "Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.\n\
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.\n\
+`Esc` and `Ctrl+C` never decide a decision card: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.\n\
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.\n",
     );
     for context in Context::ALL {

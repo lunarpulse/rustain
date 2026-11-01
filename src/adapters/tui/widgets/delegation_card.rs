@@ -5,6 +5,9 @@ use ratatui::{
     widgets::Widget,
 };
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::state::PendingDelegationCard;
 use crate::adapters::tui::theme::Theme;
 
@@ -34,7 +37,12 @@ pub fn render(area: Rect, buf: &mut Buffer, card: &PendingDelegationCard, theme:
 
     let lines = [
         format!("  → {}  ({})", agent_name, reason_text),
-        "  [d] Delegate    [l] Run locally    [Esc] Cancel plan".to_string(),
+        format!(
+            "  {} Delegate    {} Run locally    {} Cancel plan",
+            rail(Context::Delegation, CardCmd::Delegate),
+            rail(Context::Delegation, CardCmd::RunLocal),
+            rail(Context::Delegation, CardCmd::CancelPlan)
+        ),
     ];
 
     for (i, line) in lines.iter().enumerate() {

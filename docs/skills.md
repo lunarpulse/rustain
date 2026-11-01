@@ -163,7 +163,8 @@ before it loads anything:
 - **`y`** — trust it and activate. The skill's instructions go into the system
   prompt and its `allowed-tools` starts filtering from the **next** message you
   send (see the note below).
-- **`n`** (or `Esc`) — decline. The model is told
+- **`n`** — decline. `Esc` never declines: it posts a reminder of these keys and the prompt
+  stays. The model is told
   `Skill '<name>' not trusted — activation declined.` and carries on without
   it; nothing about the skill reaches the prompt.
 - **`i`** — inspect. The SKILL.md file is shown verbatim, up to 20 lines, so

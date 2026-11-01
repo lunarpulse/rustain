@@ -1,4 +1,4 @@
-//! K12 (3-A part) — the RU-31 cutover gate over the production code of BOTH hosts (AC18, AC9).
+//! K12 — the RU-31 cutover gate over the production code of BOTH hosts (AC18, AC9; complete at 3-C).
 //!
 //! A scoped static ratchet, not behavioural proof (K1-K4 drive the real keymap):
 //!
@@ -6,7 +6,7 @@
 //!   arm outside `src/adapters/tui/keymap/` are ABSENT from every production part under `src/`;
 //! * no string literal in a production part outside `src/adapters/tui/keymap/` matches the
 //!   hard-coded key-hint grammar P1/P2 of AC18 unless its file is on the allowlist with an exact
-//!   hit count and a named owner (3-C, 21-4, or the permanent AC18 set).
+//!   hit count and a named owner (21-4 or the permanent AC18 set).
 //!
 //! Gate hygiene (21-1 K11 / 21-11 K7 pattern): production part only (an item gated by a
 //! column-0 `#[cfg(test)]` item is blanked, so test modules neither hide nor add hits and
@@ -19,7 +19,9 @@
 //! P1/P2 apply to string literals only. The literal extractor ignores `//`, `///`, `//!` and
 //! block comments and every non-literal token (so `v[i]` indexing is never a hit); a hit is a
 //! physical source line whose literal text matches. The tests read `src/**/*.rs` relative to
-//! `CARGO_MANIFEST_DIR` and nothing outside `rustain/`.
+//! `CARGO_MANIFEST_DIR` and nothing outside `rustain/`. Known limit (DF-21-3-K12-ONE-LITERAL-PER-LINE):
+//! a hit is one physical line, so several literals on one line count once, and a pin matches by
+//! `starts_with`: a second literal on a pinned line is not seen.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -62,60 +64,56 @@ const P2_RUNTIME_FILES: &[&str] = &[
     "src/infrastructure/runtime/attach_keys.rs",
 ];
 
-const OWNER_3C: &str = "21-3 slice 3-C";
 const OWNER_21_4: &str = "21-4";
 const OWNER_PERMANENT: &str = "AC18 permanent";
-const OWNERS: &[&str] = &[OWNER_3C, OWNER_21_4, OWNER_PERMANENT];
+const OWNERS: &[&str] = &[OWNER_21_4, OWNER_PERMANENT];
 
-/// `(file, exact literal-hit-line count, owner, reason)`. 3-B2 burned down every 3-B row
-/// (the footers and notices are generated from the registry); 3-C empties the card rows.
-type Allow = (&'static str, usize, &'static str, &'static str);
+/// `(file, literal prefixes, owner, reason)`: every hit of the file must start with one of
+/// the pinned prefixes (one pin per hit) and every pin must still match a hit, so a new
+/// literal in an allowlisted file fails and a pin never outlives its literal
+/// (DF-21-3-K12-LITERAL-PINNING). 3-C leaves no card row: every card rail is generated.
+type Allow = (
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    &'static str,
+);
 
 #[rustfmt::skip]
 const ALLOWLIST: &[Allow] = &[
     // permanent AC18 set: not TUI keys
-    ("src/adapters/cli/doctor/checks.rs", 1, OWNER_PERMANENT, "doctor note about a tmux prefix conflict, not a keymap row"),
-    ("src/adapters/cli/init.rs", 2, OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
-    ("src/adapters/cli/migrate.rs", 1, OWNER_PERMANENT, "migrate checklist marker `[x]`/`[ ]`, not a key"),
-    ("src/adapters/cli/profile/import.rs", 1, OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
-    ("src/adapters/cli/profile/install.rs", 1, OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
-    ("src/adapters/cli/profile/prompt.rs", 1, OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
-    ("src/adapters/daemon/response_modes.rs", 1, OWNER_PERMANENT, "line-client RAP text, not a TUI key"),
-    ("src/adapters/self_update/orchestrator.rs", 1, OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
-    ("src/adapters/tui/markdown/layout.rs", 1, OWNER_PERMANENT, "markdown task-list marker `[x]`, not a key"),
-    ("src/domain/services/approval_presentation.rs", 1, OWNER_PERMANENT, "domain `MORE_MARKER` (TM-09 T5), truth-checked by the card tests"),
-    ("src/domain/services/team_policy.rs", 1, OWNER_PERMANENT, "standing-trust doctrine text, truth-checked against the consent card"),
-    // 21-4
-    ("src/adapters/tui/widgets/login_dialog.rs", 12, OWNER_21_4, "login overlay literals"),
-    // 3-C: cards, decision surfaces, catalogue usage rows, attach card arms
-    // `Tab` here is a browser-style tab (P2 matches the word): read-only subagent tabs, tab saves
-    ("src/adapters/tui/agent_inspector_keys.rs", 1, OWNER_PERMANENT, "read-only subagent tab warning, not a key"),
-    ("src/infrastructure/runtime/event_loop.rs", 3, OWNER_3C, "two tab warnings (permanent, not keys) and the `[n]` deviation card string (3-C)"),
-    ("src/adapters/cli/peer/rows.rs", 2, OWNER_3C, "peer add / team retract prompt rows"),
-    ("src/adapters/command_registry.rs", 4, OWNER_3C, "catalogue usage rows kept verbatim (A11); 3-C generates their key text"),
-    ("src/adapters/tui/decision_pane.rs", 15, OWNER_3C, "decision pane rails"),
-    ("src/adapters/tui/handlers/peer_command.rs", 1, OWNER_3C, "peer add prompt text"),
-    ("src/adapters/tui/handlers/team_command.rs", 2, OWNER_3C, "consent-card `[a]` text and `Ctrl+X, L` pointer"),
-    ("src/adapters/tui/notification_log.rs", 8, OWNER_3C, "notification log footer"),
-    ("src/adapters/tui/quit_confirm.rs", 3, OWNER_3C, "quit confirm rail"),
-    ("src/adapters/tui/state.rs", 2, OWNER_3C, "recipient reply banners"),
-    ("src/adapters/tui/widgets/cancel_plan_confirm_card.rs", 1, OWNER_3C, "cancel-plan confirm card"),
-    ("src/adapters/tui/widgets/consolidation_card.rs", 2, OWNER_3C, "consolidation card (line 49 is a `[x]` checkbox marker, not a key)"),
-    ("src/adapters/tui/widgets/delegation_card.rs", 1, OWNER_3C, "delegation card"),
-    ("src/adapters/tui/widgets/forget_card.rs", 2, OWNER_3C, "forget card (line 49 is a `[x]` checkbox marker, not a key)"),
-    ("src/adapters/tui/widgets/fork_confirm.rs", 1, OWNER_3C, "fork confirm card"),
-    ("src/adapters/tui/widgets/permission_prompt.rs", 12, OWNER_3C, "permission prompt rails"),
-    ("src/adapters/tui/widgets/plan_approval.rs", 4, OWNER_3C, "plan approval rail"),
-    ("src/adapters/tui/widgets/plan_card.rs", 5, OWNER_3C, "plan card actions"),
-    ("src/adapters/tui/widgets/plan_deviation_card.rs", 1, OWNER_3C, "plan deviation card"),
-    ("src/adapters/tui/widgets/recipient_surface.rs", 22, OWNER_3C, "recipient surface actions"),
-    ("src/adapters/tui/widgets/rewind_confirm.rs", 1, OWNER_3C, "rewind confirm card"),
-    ("src/adapters/tui/widgets/skill_trust_prompt.rs", 4, OWNER_3C, "skill trust prompt"),
-    ("src/adapters/tui/widgets/task_skip_cascade_card.rs", 1, OWNER_3C, "skip-cascade card"),
-    ("src/adapters/tui/widgets/team_proposal_card.rs", 2, OWNER_3C, "team proposal card (`MORE` repeats the domain marker)"),
-    ("src/infrastructure/runtime/attach_loop.rs", 5, OWNER_3C, "recipient tab labels and team-retract prompt"),
-    ("src/infrastructure/runtime/recipient_view.rs", 1, OWNER_3C, "recipient view `[p]` hint"),
-    ("src/infrastructure/runtime/transparency_bridge.rs", 6, OWNER_3C, "consent / retract card text"),
+    ("src/adapters/cli/doctor/checks.rs", &["tmux detected: Ctrl+B prefix"], OWNER_PERMANENT, "doctor note about a tmux prefix conflict, not a keymap row"),
+    ("src/adapters/cli/init.rs", &["Sign in to a model provider now? [y/n] ", "{question} [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompts"),
+    ("src/adapters/cli/migrate.rs", &["[x][ ]"], OWNER_PERMANENT, "migrate checklist marker `[x]`/`[ ]`, not a key"),
+    ("src/adapters/cli/profile/import.rs", &["Profile '{}' already exists at {}. Overwrite? [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
+    ("src/adapters/cli/profile/install.rs", &["Profile '{}' already exists at {}. Overwrite? [y/n]: "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
+    ("src/adapters/cli/profile/prompt.rs", &["{} [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
+    ("src/adapters/daemon/response_modes.rs", &["[y] Approve  [e] Edit  [n] Reject  [write] My own "], OWNER_PERMANENT, "line-client RAP text, not a TUI key"),
+    ("src/adapters/self_update/orchestrator.rs", &["Update? [y/n] "], OWNER_PERMANENT, "non-TUI CLI `[y/n]` prompt"),
+    ("src/adapters/tui/markdown/layout.rs", &["[x] "], OWNER_PERMANENT, "markdown task-list marker `[x]`, not a key"),
+    ("src/domain/services/approval_presentation.rs", &["… more not shown — [r] Review first"], OWNER_PERMANENT, "domain `MORE_MARKER` (TM-09 T5), truth-checked by the card tests against the `r` row"),
+    ("src/domain/services/team_policy.rs", &["Standing trust is granted from a sender's consent card ([a] Always allow)"], OWNER_PERMANENT, "standing-trust doctrine text, truth-checked against the consent card"),
+    // `Tab` here is a browser-style tab (P2 matches the word), not a key
+    ("src/adapters/tui/agent_inspector_keys.rs", &["Tab is read-only (subagent output view)"], OWNER_PERMANENT, "read-only subagent tab warning, not a key"),
+    ("src/infrastructure/runtime/event_loop.rs", &["Tab is read-only (subagent output view)", "Tab save timed out"], OWNER_PERMANENT, "two tab warnings, not keys"),
+    ("src/adapters/cli/peer/rows.rs", &["         Awaiting your decision.  [y] Confirm and pin", "         Awaiting your decision.  [y] Update the address"], OWNER_PERMANENT, "shared CLI/TUI peer-add card copy: `cli` may not import `tui` (adapter ratchet); the keys are truth-checked against the Confirm rows by K11"),
+    // `[x]` / `[ ]` are checkbox markers, not keys
+    ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
+    ("src/adapters/tui/widgets/forget_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
+    // 21-4: the login overlay keeps `handlers::login::on_key` (security boundary)
+    ("src/adapters/tui/widgets/login_dialog.rs", &[
+        "Esc back", "Esc close", "↑↓ navigate · Enter select · Esc back", "↑↓ navigate · Enter select · Esc close",
+        "Continue in your browser. If it didn't open, press Alt+C", "Enter this code on the sign-in page",
+        "c copy link · l copy local link · Esc cancel", "c copy code · u copy link · Esc cancel",
+        "Enter submit · Alt+C copy link · Alt+L copy local link · Esc cancel", "Enter submit · Esc cancel",
+        "Enter submit · Alt+C copy code · Alt+U copy link · Esc cancel", "Esc cancel",
+    ], OWNER_21_4, "login overlay literals"),
+    // 21-4: a writer's action keys depend on the received item (NAMED EXCLUSION, K9 R5)
+    ("src/adapters/tui/widgets/recipient_surface.rs", &[
+        "[r] Respond", "[d] Discuss", "[b] Busy", "[a] Acknowledge", "[y] Approve", "[e] Edit", "[n] Reject",
+        "[n] Decline", "[s] Share status", "[n] Decline", "[c] Use as context", "[d] Discuss concerns",
+        "[y] Accept", "[s] Share", "[n] Decline", "[c] Stop using as context", "[s] Share with redactions",
+    ], OWNER_21_4, "per-item writer action keys of the recipient surface"),
 ];
 
 // ── scanner ───────────────────────────────────────────────────────────────────
@@ -284,47 +282,97 @@ fn literal_hits(path: &str, source: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Literal-gate violations over `files` (`src/…` path, source) against `allow`.
-fn literal_violations(files: &[(String, String)], allow: &[Allow]) -> Vec<String> {
+/// `(line, trimmed source line)` of every hand-written `Ctrl+W/U/H` handling in the production
+/// part of `path`: a `Key::Ctrl('w'|'u'|'h')` pattern or a `DomainKey::CtrlW|CtrlU|CtrlH` path.
+fn field_edit_hits(_path: &str, source: &str) -> Vec<(usize, String)> {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(CTRL_WUH).unwrap());
+    production_part(source)
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| RE.is_match(line))
+        .map(|(index, line)| (index + 1, line.trim().to_owned()))
+        .collect()
+}
+
+/// Pinned violations of `hit_fn`'s hits over `files` against `allow` (see [`Allow`]).
+fn pinned_violations(
+    files: &[(String, String)],
+    allow: &[Allow],
+    hit_fn: fn(&str, &str) -> Vec<(usize, String)>,
+    what: &str,
+) -> Vec<String> {
     let mut violations = Vec::new();
     let mut hits_by_file: BTreeMap<&str, Vec<(usize, String)>> = BTreeMap::new();
     for (path, source) in files {
         if path.starts_with(KEYMAP_DIR) {
             continue;
         }
-        let hits = literal_hits(path, source);
+        let hits = hit_fn(path, source);
         if !hits.is_empty() {
             hits_by_file.insert(path.as_str(), hits);
         }
     }
     for (path, hits) in &hits_by_file {
-        if allow.iter().any(|(file, ..)| file == path) {
-            continue;
-        }
-        for (line, text) in hits {
-            violations.push(format!("{path}:{line}: hard-coded key hint {text:?}"));
+        if !allow.iter().any(|(file, ..)| file == path) {
+            for (line, text) in hits {
+                violations.push(format!("{path}:{line}: {what} {text:?}"));
+            }
         }
     }
-    for (file, count, owner, _reason) in allow {
+    for (file, pins, owner, _reason) in allow {
         if !files.iter().any(|(path, _)| path.as_str() == *file) {
             violations.push(format!(
                 "stale allowlist entry {file} ({owner}): the file no longer exists"
             ));
             continue;
         }
-        let found = hits_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]);
-        if found.len() != *count {
-            let lines: Vec<String> = found
-                .iter()
-                .map(|(l, t)| format!("{file}:{l}: {t:?}"))
-                .collect();
+        let mut unused: Vec<&str> = pins.to_vec();
+        for (line, text) in hits_by_file.get(file).map(Vec::as_slice).unwrap_or(&[]) {
+            match unused.iter().position(|pin| text.starts_with(pin)) {
+                Some(index) => {
+                    unused.remove(index);
+                }
+                None => violations.push(format!(
+                    "{file}:{line}: unpinned {what} {text:?} in an allowlisted file ({owner})"
+                )),
+            }
+        }
+        for pin in unused {
             violations.push(format!(
-                "stale allowlist entry {file} ({owner}): expected {count} hit(s), found {}: {lines:?}",
-                found.len()
+                "stale allowlist entry {file} ({owner}): pin {pin:?} matches no hit"
             ));
         }
     }
     violations
+}
+
+/// Literal-gate violations over `files` (`src/…` path, source) against `allow`.
+fn literal_violations(files: &[(String, String)], allow: &[Allow]) -> Vec<String> {
+    pinned_violations(files, allow, literal_hits, "hard-coded key hint")
+}
+
+/// Hand-written `Ctrl+W/U/H` handling in a production part outside the keymap: the editing
+/// keys of a text field are `FieldEdit` rows (DF-21-3-K12-LITERAL-PINNING). Pinned by line.
+const CTRL_WUH: &str = r"Key::Ctrl\('[whu]'|DomainKey::Ctrl[WUH]\b";
+
+#[rustfmt::skip]
+const FIELD_EDIT_ALLOWLIST: &[Allow] = &[
+    ("src/adapters/tui/app.rs", &[
+        "let field_edit = matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h'));",
+        "FieldCmd::DeleteWordBack => DomainKey::CtrlW,", "FieldCmd::Clear => DomainKey::CtrlU,", "FieldCmd::DeleteBack => DomainKey::CtrlH,",
+        "DomainKey::CtrlW => text_edit::kill_word_back", "DomainKey::CtrlU => text_edit::kill_to_line_start",
+        "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlH));", "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlU));", "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlW));",
+    ], OWNER_PERMANENT, "the card text fields (feedback, answer: FR-21-3-b, deleted with 21-6), the FieldEdit executor and the decoder"),
+];
+
+/// The same line scanner as the literal gate, over the editing keys.
+fn field_edit_violations(files: &[(String, String)], allow: &[Allow]) -> Vec<String> {
+    pinned_violations(
+        files,
+        allow,
+        field_edit_hits,
+        "hand-written Ctrl+W/U/H handling",
+    )
 }
 
 /// PC-3 violations over `files`: a banned symbol anywhere in a production part, or a
@@ -456,17 +504,15 @@ fn k12_no_hard_coded_key_hint_literal_outside_the_registry_except_the_owned_allo
 #[test]
 fn k12_allowlist_is_well_formed_and_every_entry_names_an_owner() {
     let mut seen = std::collections::BTreeSet::new();
-    for (file, count, owner, reason) in ALLOWLIST {
+    for (file, pins, owner, reason) in ALLOWLIST {
         assert!(seen.insert(*file), "{file} is listed twice");
         assert!(file.starts_with("src/") && file.ends_with(".rs"), "{file}");
         assert!(
             !file.starts_with(KEYMAP_DIR),
             "{file}: the keymap dir is not scanned"
         );
-        assert!(
-            *count > 0,
-            "{file}: a zero-count entry is stale by definition"
-        );
+        assert!(!pins.is_empty(), "{file}: an entry without a pin is stale");
+        assert!(pins.iter().all(|pin| !pin.is_empty()), "{file}: empty pin");
         assert!(OWNERS.contains(owner), "{file}: unknown owner {owner:?}");
         assert!(!reason.is_empty(), "{file}: a reason is required");
     }
@@ -587,10 +633,25 @@ fn k12_positive_control_literal_scanner_production_part_and_allowlist() {
     let hit = "fn f() { s(\"Press Ctrl+B\"); }";
     let two = "fn f() { s(\"Press Ctrl+B\"); }\nfn g() { s(\"Alt+Q\"); }";
     let allow: &[Allow] = &[
-        ("src/a.rs", 1, OWNER_PERMANENT, "listed, exact"),
-        ("src/b.rs", 1, OWNER_3C, "listed, but the count changed"),
-        ("src/c.rs", 1, OWNER_3C, "listed, but now clean"),
-        ("src/gone.rs", 1, OWNER_21_4, "listed, file vanished"),
+        (
+            "src/a.rs",
+            &["Press Ctrl+B"],
+            OWNER_PERMANENT,
+            "listed, exact",
+        ),
+        (
+            "src/b.rs",
+            &["Press Ctrl+B"],
+            OWNER_21_4,
+            "listed, but a second literal appeared",
+        ),
+        (
+            "src/c.rs",
+            &["Press Ctrl+B"],
+            OWNER_21_4,
+            "listed, but now clean",
+        ),
+        ("src/gone.rs", &["x"], OWNER_21_4, "listed, file vanished"),
     ];
     let files = [
         src("src/a.rs", hit),
@@ -610,12 +671,11 @@ fn k12_positive_control_literal_scanner_production_part_and_allowlist() {
     let text = violations.join("\n");
     assert!(text.contains("src/new.rs:1: hard-coded key hint"), "{text}");
     assert!(
-        text.contains("stale allowlist entry src/b.rs")
-            && text.contains("expected 1 hit(s), found 2"),
+        text.contains("src/b.rs:2: unpinned hard-coded key hint"),
         "{text}"
     );
     assert!(
-        text.contains("stale allowlist entry src/c.rs") && text.contains("found 0"),
+        text.contains("stale allowlist entry src/c.rs") && text.contains("matches no hit"),
         "{text}"
     );
     assert!(
@@ -629,4 +689,43 @@ fn k12_positive_control_literal_scanner_production_part_and_allowlist() {
         "{text}"
     );
     assert_eq!(violations.len(), 4, "{text}");
+}
+
+#[test]
+fn k12_ctrl_w_u_h_handling_is_pinned_to_the_card_fields_and_the_editor() {
+    let (files, skipped) = production_sources();
+    assert_whole_tree_scanned(&files, &skipped);
+    let violations = field_edit_violations(&files, FIELD_EDIT_ALLOWLIST);
+    assert!(violations.is_empty(), "{}", violations.join("\n"));
+    // Positive control through the same scanner: a new hand-written arm and a stale pin fail.
+    let allow: &[Allow] = &[(
+        "src/a.rs",
+        &["let k = Key::Ctrl('w');", "gone"],
+        OWNER_PERMANENT,
+        "pinned",
+    )];
+    let files = [
+        src(
+            "src/a.rs",
+            "fn f() { let k = Key::Ctrl('w'); }\nfn g() {\n    let k = Key::Ctrl('w');\n}\n",
+        ),
+        src(
+            "src/b.rs",
+            "fn f() { match k { DomainKey::CtrlH => {} } }\n#[cfg(test)]\nmod t { fn x() { Key::Ctrl('u'); } }\n",
+        ),
+    ];
+    let text = field_edit_violations(&files, allow).join("\n");
+    assert!(
+        text.contains("src/b.rs:1: hand-written Ctrl+W/U/H handling"),
+        "{text}"
+    );
+    assert!(text.contains("src/a.rs:1: unpinned"), "{text}");
+    assert!(
+        text.contains("stale allowlist entry src/a.rs") && text.contains("\"gone\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("src/b.rs:3") && !text.contains("src/a.rs:3"),
+        "{text}"
+    );
 }

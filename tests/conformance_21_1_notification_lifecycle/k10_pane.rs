@@ -550,11 +550,15 @@ fn k10_the_cue_survives_beside_the_log_badge_at_sixty_and_eighty_columns() {
             let row = long_status_row(&state, width, long);
             let case = format!("{width} cols, long={long}: {row:?}");
             assert_eq!(row.matches(cue).count(), 1, "the cue is whole: {case}");
-            // Story 21.3 A10: the `^X menu` tail owns the edge; the cue is next to it.
-            assert!(
-                row.trim_end().ends_with(&format!("{cue} ^X menu")),
-                "the cue sits beside the tail at the right edge: {case}"
-            );
+            // The cue survives; the lower-priority menu tail yields to facts.
+            let menu_fits = !long && width == 80;
+            let suffix = if !menu_fits {
+                cue.to_owned()
+            } else {
+                format!("{cue} ^X menu")
+            };
+            assert!(row.trim_end().ends_with(&suffix), "{case}");
+            assert_eq!(row.contains("^X menu"), menu_fits, "{case}");
             assert!(row.width() <= usize::from(width), "{case}");
             let badge_at = row.find("Log !1");
             if let Some(at) = badge_at {

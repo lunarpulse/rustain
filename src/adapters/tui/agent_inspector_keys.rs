@@ -138,10 +138,19 @@ pub fn on_key(
         state.needs_redraw = true;
         return InspectorOutcome::PassThrough;
     }
+    // With the kill confirmation shown, `Esc` and `Ctrl+C` never answer it (A8): one cue
+    // names the keys that do and the confirmation stays open.
+    let kill_pending = state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id);
+    if kill_pending && matches!(Key::from_domain(event), Some(Key::Esc | Key::Ctrl('c'))) {
+        let answers = [InspectorCmd::ConfirmKill, InspectorCmd::CancelKill]
+            .map(|cmd| (Context::SidebarAgentInspector, CommandId::Inspector(cmd)));
+        notifications::info(state, NoticeSource::Approval, keymap::render::cue(&answers));
+        state.needs_redraw = true;
+        return InspectorOutcome::Consumed;
+    }
     let Some(cmd) = cmd else {
         return InspectorOutcome::PassThrough;
     };
-    let kill_pending = state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id);
     match cmd {
         InspectorCmd::Close => close(state),
         InspectorCmd::ScrollDown => scroll(state, true),

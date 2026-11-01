@@ -5,6 +5,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+use crate::adapters::tui::keymap::Context;
+use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::keymap::table_card::CardCmd;
+
 pub fn render(area: Rect, buf: &mut Buffer, plan_title: &str, n_pending: u32, n_completed: u32) {
     if area.width < 25 || area.height < 3 {
         return;
@@ -29,7 +33,11 @@ pub fn render(area: Rect, buf: &mut Buffer, plan_title: &str, n_pending: u32, n_
         buf.set_string(
             area.x,
             area.y + 3,
-            "│ [y] Cancel all   [n] Keep running",
+            format!(
+                "│ {} Cancel all   {} Keep running",
+                rail(Context::Confirm, CardCmd::Yes),
+                rail(Context::Confirm, CardCmd::No)
+            ),
             style,
         );
     }
