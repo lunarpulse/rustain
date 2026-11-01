@@ -36,6 +36,14 @@ row ends with `^X menu`, with `^X…` while the leader is open and again with
 `^X menu` after `Esc`; the local menu labels (`[E] Artifacts`, `[W] Monitor`,
 `[L] A2A log`, `(n/a)` panels, no `[F]`/`[D]`/`Dashboard`).
 
+Leg B (slice 3-B1, AC14): in a fresh process the six readline keys `0x01 0x05 0x17 0x15 0x0b 0x08`
+(Ctrl+A/E/W/U/K/H) are sent as raw bytes to the composer and each is asserted by the composer text it
+produces (the cursor and the kills move by grapheme: a combining accent goes with its letter). Then a
+turn is held mid-stream by the loopback provider, `Ctrl+X ?` opens Help and a raw `Ctrl+C` must close
+Help only: the stream is not interrupted and finishes (`Ready`, no `[interrupted]`). The readline rows
+carry no smoke witness in the portable-row fixture (only leader rows do), so the six bytes are declared here.
+The leg ends with the leader `Ctrl+X Ctrl+Q` row (fixture row `1811`): the process exits 0.
+
 Evidence (screens, raw PTY bytes sent, requests, runtime logs, binary hash)
 goes to `RUSTAIN_CAPTURE_EVIDENCE_DIR`. Every wait is a bounded screen
 condition.
@@ -52,11 +60,16 @@ import re
 import tempfile
 import threading
 import traceback
+import time
+import unicodedata
 from urllib.parse import urlsplit
 
 import harness
+import pexpect
 import pytest
-from test_story_21_2_shortcut_truth import _NativeTUI, _capture, _menu, _menu_painted, _wait
+from keys import LEFT, RIGHT
+from test_story_20_9a_ephemeral_rows import _event, _finish, _start_text
+from test_story_21_2_shortcut_truth import _NativeTUI, _capture, _composer, _menu, _menu_painted, _wait
 
 KEY = "sk-ant-21-3-loopback-key-canary"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "keymap_portable_rows.json"
@@ -94,13 +107,14 @@ PANELS = {
 DECISIONS = "1871"   # `Ctrl+X q`: Info toast, left visible for the `x` row to clear
 CLEAR = "1878"       # `Ctrl+X x`
 MONITOR = "1877"     # `Ctrl+X w`: density toggle, run LAST (it moves focus off the composer)
+QUIT = "1811"        # `Ctrl+X Ctrl+Q`: the process exits (leg B ends with it)
 SILENT = ("181b", "1803", "180d")  # Esc, Ctrl+C, Enter (empty composer): close the menu, say nothing
 EXPECTED_WITNESS = {
     **{hex_: spec[0] for hex_, spec in OVERLAYS.items()},
     **{hex_: PANEL_WITNESS for hex_ in PANELS},
     DECISIONS: "No decisions waiting",
     MONITOR: "Density: Monitor",
-    CLEAR: "", "181b": "", "1803": "", "180d": "",
+    CLEAR: "", "181b": "", "1803": "", "180d": "", QUIT: "",
 }
 MENU_PRESENT = (
     "[P] Profile", "[M] Model", "[I] Sign in", "[A] Adapters (n/a)", "[S] Agents (n/a)",
@@ -110,6 +124,13 @@ MENU_PRESENT = (
 )
 MENU_ABSENT = ("[F]", "[D]", "Dashboard", "Evidence", "Watch", "[L] Log", "Detach",
                "[U] Usage (n/a)", "[W] Monitor (n/a)", "[P] Profile (n/a)", "[M] Model (n/a)")
+
+# Leg B (slice 3-B1). The six readline rows, as raw PTY bytes: Ctrl+A, Ctrl+E, Ctrl+W, Ctrl+U, Ctrl+K, Ctrl+H.
+CTRL_A, CTRL_E, CTRL_W, CTRL_U, CTRL_K, CTRL_H = (bytes([code]) for code in (0x01, 0x05, 0x17, 0x15, 0x0B, 0x08))
+HOLD_PROMPT = "hold-b please answer"
+HELD_PARTIAL = "B-LIVE-PARTIAL"
+HELD_TAIL = "B-TAIL-DONE"
+HELP = "183f"  # `Ctrl+X ?`: the Help overlay
 
 
 def _fixture_rows():
@@ -235,14 +256,112 @@ def _overlay_row(tui, evidence, sent, hex_, row, label):
     _wait(tui, lambda s: needle not in s and _closed(s), f"{label}: overlay closed by Esc")
 
 
+def _user_text(body):
+    """Text of the last user message of a provider request body."""
+    for message in reversed(body.get("messages", [])):
+        if message.get("role") == "user":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            return " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+    return ""
+
+
+def _chunk(data):
+    return f"{len(data):x}\r\n".encode() + data + b"\r\n"
+
+
+def _leg_b(tui, evidence, sent, release, turns, lock, row):
+    """Leg B: raw readline bytes in the composer, then Ctrl+C in Help over a held stream."""
+    def composer_is(expected, label):
+        # NFC so a decomposed accent compares with its precomposed form; exact, never a substring.
+        return _wait(tui, lambda s: unicodedata.normalize("NFC", _composer(s)) == expected, label)
+
+    _send(tui, sent, "type", b"one two three")
+    composer_is("one two three", "composer holds the typed words")
+    _send(tui, sent, "Ctrl+W", CTRL_W)  # kills `three`, keeps the space (the row text is trimmed)
+    composer_is("one two", "Ctrl+W removed the word before the cursor")
+    _send(tui, sent, "Ctrl+A + X", CTRL_A)
+    _send(tui, sent, "Ctrl+A + X", b"X")
+    composer_is("Xone two", "Ctrl+A moved the cursor to the line start")
+    _send(tui, sent, "Ctrl+E + Y", CTRL_E)
+    _send(tui, sent, "Ctrl+E + Y", b"Y")
+    composer_is("Xone two Y", "Ctrl+E moved the cursor to the line end")
+    _send(tui, sent, "Ctrl+A, 3 x Right, Ctrl+K", CTRL_A + RIGHT.encode() * 3 + CTRL_K)
+    composer_is("Xon", "Ctrl+K killed from the cursor to the line end")
+    _send(tui, sent, "type", b"e rest")
+    composer_is("Xone rest", "text typed at the end")
+    _send(tui, sent, "5 x Left, Ctrl+U", LEFT.encode() * 5 + CTRL_U)
+    composer_is("rest", "Ctrl+U killed from the line start to the cursor")
+    _send(tui, sent, "Ctrl+E, a, e + combining acute", CTRL_E + "ae\u0301".encode())
+    composer_is("resta\u00e9", "the accented letter typed")
+    _send(tui, sent, "Ctrl+H", CTRL_H)
+    screen = composer_is("resta", "Ctrl+H deleted one grapheme (the letter with its accent)")
+    _capture(tui, evidence, "b-01-readline", screen)
+    _send(tui, sent, "Ctrl+A, Ctrl+K", CTRL_A + CTRL_K)
+    composer_is("", "composer cleared")
+
+    # A turn held mid-stream, then Help over it, then a raw Ctrl+C.
+    _send(tui, sent, "type held prompt", HOLD_PROMPT.encode())
+    composer_is(HOLD_PROMPT, "held prompt typed")
+    _send(tui, sent, "Enter", b"\r")
+    screen = _wait(tui, lambda s: _composer(s) == "" and HELD_PARTIAL in s and "Ready" not in harness.status_row(s),
+                   "the held stream is live: partial text painted, status not idle")
+    with lock:
+        assert [turn["held"] for turn in turns] == [True], turns
+    _capture(tui, evidence, "b-02-stream-held", screen)
+
+    witness, needle, footer, rail = OVERLAYS[HELP]
+    _open_leader(tui, sent, "Ctrl+X ?")
+    _send(tui, sent, "Ctrl+X ?", b"?")
+    screen = _wait(tui, lambda s: _box(s, needle, footer, rail) is not None and not _menu(s),
+                   f"{witness!r} overlay complete over the held stream")
+    _capture(tui, evidence, "b-03-help-over-stream", screen)
+    _send(tui, sent, "Ctrl+C in Help", b"\x03")
+    screen = _wait(tui, lambda s: needle not in s and footer not in s and HELD_PARTIAL in s
+                   and "Ready" not in harness.status_row(s),
+                   "Ctrl+C closed Help; the held stream is still live")
+    assert "[interrupted]" not in screen, screen
+    _capture(tui, evidence, "b-04-help-closed-stream-live", screen)
+    release.set()
+    screen = _wait(tui, lambda s: HELD_TAIL in s and "Ready" in harness.status_row(s),
+                   "the held stream finished after Ctrl+C in Help")
+    assert "[interrupted]" not in screen, screen
+    _capture(tui, evidence, "b-05-stream-finished", screen)
+    assert tui.child.isalive()
+
+    # `Ctrl+X Ctrl+Q` (3-B1 AC20a: the leader quits like a direct Ctrl+Q): the process exits 0, a
+    # `System · Quit` decision (work or a draft) is answered `y` once.
+    _open_leader(tui, sent, row["key"])
+    _send(tui, sent, row["key"], bytes.fromhex(QUIT)[1:])
+    deadline, answered = time.monotonic() + 30, False
+    while True:
+        try:
+            data = tui.child.read_nonblocking(size=65536, timeout=1)
+        except pexpect.TIMEOUT:
+            assert time.monotonic() < deadline, f"{row['key']}: the process did not exit"
+            continue
+        except pexpect.EOF:
+            break
+        tui._stream.feed(data)
+        if not answered and "System · Quit" in "\n".join(tui._screen.display):
+            _send(tui, sent, "y", b"y")
+            answered = True
+    tui.child.close()
+    assert (tui.child.exitstatus, tui.child.signalstatus) == (0, None)
+
+
 def _exercise(binary, evidence, root, monkeypatch, rows):
     monkeypatch.setattr(harness, "TERM_COLS", 80)
     monkeypatch.setattr(harness, "TERM_ROWS", 24)
     errors = queue.Queue()
     posts = []
+    turns = []  # leg B provider turns (held / auxiliary), never part of leg A's probe-only `posts`
+    release = threading.Event()  # lets the held leg B reply finish
+    turn_phase = threading.Event()  # set when leg B starts: only then is a streamed request legitimate
     lock = threading.Lock()
-    ws_main, ws_panels = root / "wm", root / "wp"
-    for ws in (ws_main, ws_panels):
+    ws_main, ws_panels, ws_edit = root / "wm", root / "wp", root / "we"
+    for ws in (ws_main, ws_panels, ws_edit):
         (ws / ".rustain").mkdir(parents=True)
         (ws / ".rustain" / "config.toml").write_text(CONFIG)
         (ws / ".env").write_text("")  # keep the shared harness from copying a developer .env
@@ -280,6 +399,27 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         def do_POST(self):
             try:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "stream" in body and turn_phase.is_set():
+                    text = _user_text(body)
+                    held = HOLD_PROMPT in text
+                    with lock:
+                        turns.append({"held": held, "text": text[:80]})
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(_chunk(_start_text(HELD_PARTIAL if held else "B session")))
+                    self.wfile.flush()
+                    if held:
+                        assert release.wait(90), "the held reply was never released"
+                        tail = {"type": "content_block_delta", "index": 0,
+                                "delta": {"type": "text_delta", "text": f" {HELD_TAIL}"}}
+                        self.wfile.write(_chunk(_event(tail) + _finish()))
+                    else:
+                        self.wfile.write(_chunk(_finish()))
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                    return
                 with lock:
                     posts.append({"path": self.path, "max_tokens": body.get("max_tokens"), "stream": "stream" in body})
                 if "stream" not in body and body.get("max_tokens") == 1:
@@ -299,6 +439,7 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
         thread.start()
 
         def close_server():
+            release.set()
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
@@ -322,7 +463,8 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
                        RUSTAIN_MODELS_DEV_URL=origin, NO_PROXY="*", no_proxy="*", TERM="xterm-256color")
             return env
 
-        envs = {"main": environment("main", ws_main), "panels": environment("panels", ws_panels)}
+        envs = {"main": environment("main", ws_main), "panels": environment("panels", ws_panels),
+                "edit": environment("edit", ws_edit)}
         terminals = {tag: stack.enter_context((evidence / f"{tag}.terminal.txt").open("w")) for tag in envs}
         screens = {tag: stack.enter_context((evidence / f"{tag}.screens.jsonl").open("w")) for tag in envs}
         original_spawn = harness.pexpect.spawn
@@ -435,11 +577,21 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
             finally:
                 panel.stop()
 
+        # ------------------------------------------------------ leg B (3-B1): readline bytes, Help over a held stream
+        turn_phase.set()
+        edit = start("edit", ws_edit)
+        try:
+            _leg_b(edit, evidence, sent, release, turns, lock, rows[QUIT])
+        finally:
+            edit.stop()
+
         # ---------------------------------------------------------- evidence checks
         with lock:
             observed = list(posts)
         (evidence / "requests.json").write_text(json.dumps(observed, indent=2) + "\n")
         (evidence / "sent.json").write_text(json.dumps(sent, indent=2) + "\n")
+        with lock:
+            (evidence / "turns.json").write_text(json.dumps(turns, indent=2) + "\n")
         assert all(post["max_tokens"] == 1 and not post["stream"] for post in observed), observed
         check_server()
         for handle in (*terminals.values(), *screens.values()):
@@ -450,7 +602,8 @@ def _exercise(binary, evidence, root, monkeypatch, rows):
                        for path in logs), f"dated {tag} debug log missing"
         for path in [*(evidence / f"{tag}.terminal.txt" for tag in envs),
                      *(evidence / f"{tag}.screens.jsonl" for tag in envs),
-                     evidence / "requests.json", evidence / "sent.json", *logs, *evidence.glob("*.screen.txt")]:
+                     evidence / "requests.json", evidence / "sent.json", evidence / "turns.json", *logs,
+                     *evidence.glob("*.screen.txt")]:
             assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
 
 

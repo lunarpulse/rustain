@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use crate::adapters::command_registry::CommandRegistry;
 use crate::adapters::tui::keymap::CommandId;
-use crate::adapters::tui::keymap::render::{shortcut_for, shortcut_for_slash};
+use crate::adapters::tui::keymap::render::{shortcut_for, shortcut_for_slash, shortcut_then};
 use crate::adapters::tui::keymap::table::LeaderCmd;
 use crate::adapters::tui::keymap::table_input::InputCmd;
+use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
 const PREFIX_SCOPE_MAP: &[(char, PaletteScope)] = &[
@@ -161,7 +162,10 @@ impl PaletteRegistry {
         self.slash_entries.push(PaletteEntry {
             name: "!cancel-plan".into(),
             description: "Cancel the current executing plan".into(),
-            shortcut: None,
+            shortcut: shortcut_then(
+                CommandId::Leader(LeaderCmd::Tasks),
+                CommandId::Panel(PanelCmd::TasksCancelPlan),
+            ),
             scope: PaletteScope::All,
             action: PaletteAction::ExecuteCommand("cancel-plan".into(), None),
         });
@@ -603,6 +607,10 @@ mod tests {
             shortcut_of(&reg, "paste image from clipboard").as_deref(),
             Some("Alt+V")
         );
-        assert_eq!(shortcut_of(&reg, "!cancel-plan"), None);
+        // AC20c: generated from the Leader `t` row and the Tasks `x` row, no literal.
+        assert_eq!(
+            shortcut_of(&reg, "!cancel-plan").as_deref(),
+            Some("Ctrl+X, T then x")
+        );
     }
 }

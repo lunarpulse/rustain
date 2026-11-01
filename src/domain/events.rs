@@ -622,6 +622,10 @@ pub enum DomainKey {
     /// leader's "No binding" notice can name the key.
     UnboundCtrl(char),
     UnboundAlt(char),
+    /// A character held with a modifier set the registry does not name (Ctrl+Shift,
+    /// Alt+Shift, Ctrl+Alt): bits 1 = Ctrl, 2 = Alt, 4 = Shift. It never aliases the
+    /// plain Ctrl or Alt key of the same letter (21-3 AC20).
+    UnboundCombo(char, u8),
     /// A function key: no binding anywhere, but the leader's "No binding" notice
     /// can name it (Story 21.3 AC2).
     UnboundFn(u8),

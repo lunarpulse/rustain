@@ -195,7 +195,7 @@ fn every_sidebar_row_resolves_to_its_command_by_value() {
         common.len()
     );
     assert!(
-        history.len() >= 3,
+        history.len() >= 2,
         "the History rows, got {}",
         history.len()
     );

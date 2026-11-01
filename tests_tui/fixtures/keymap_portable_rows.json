@@ -21,6 +21,7 @@
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Q", "pty_hex": "1871", "witness": "No decisions waiting"},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Enter", "pty_hex": "180d", "witness": ""},
     {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Esc", "pty_hex": "181b", "witness": ""},
-    {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Ctrl+C", "pty_hex": "1803", "witness": ""}
+    {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Ctrl+C", "pty_hex": "1803", "witness": ""},
+    {"context": "Leader", "host": "local, attached", "key": "Ctrl+X, Ctrl+Q", "pty_hex": "1811", "witness": ""}
   ]
 }

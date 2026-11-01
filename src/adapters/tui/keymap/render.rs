@@ -145,6 +145,16 @@ pub fn shortcut_for(command: CommandId) -> Option<String> {
         .map(|row| row.long_label())
 }
 
+/// A shortcut that is a leader chord followed by a panel key (`Ctrl+X, T then x`):
+/// the palette shortcut column of the Tasks panel commands (AC20c).
+pub fn shortcut_then(first: CommandId, then: CommandId) -> Option<String> {
+    Some(format!(
+        "{} then {}",
+        shortcut_for(first)?,
+        shortcut_for(then)?
+    ))
+}
+
 /// Long label of the first row that is the key route of the builtin slash
 /// command `name` (without the slash): `team` -> `Ctrl+X, L`.
 pub fn shortcut_for_slash(name: &str) -> Option<String> {

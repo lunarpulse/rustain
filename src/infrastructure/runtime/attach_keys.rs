@@ -46,6 +46,7 @@ use crate::adapters::tui::app::{cancel_autocomplete_popup, convert_crossterm_eve
 use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
 use crate::adapters::tui::keymap::resolve::no_binding_text;
 use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, LeaderCmd};
+use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{AvailCtx, CommandId, Host, Key, LeaderStep, leader_step};
 use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
@@ -459,8 +460,10 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             QuitKeyOutcome::Cancelled | QuitKeyOutcome::Consumed => KeyFlow::Continue,
         };
     }
-    // Ctrl+Q is a quit request from any focus.
-    if is_ctrl(&key, 'q') {
+    // Ctrl+Q is a quit request from any focus; with the leader open the shared
+    // leader step answers it (its own `QuitRequest` row), the same row the local
+    // host runs.
+    if is_ctrl(&key, 'q') && !ctx.state.which_key.active {
         close_surfaces(ctx.state);
         return request_quit(ctx);
     }
@@ -716,7 +719,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Enter, m) => return enter_key(ctx, m).await,
-        (KeyCode::Backspace, _) => {
+        (KeyCode::Backspace, _) | (KeyCode::Char('h'), KeyModifiers::CONTROL) => {
             if ctx.state.recipient_surface.is_some() || ctx.state.focus != FocusState::Input {
                 return KeyFlow::Continue;
             }
@@ -737,6 +740,15 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
                 ctx.scroll_offset,
                 ctx.auto_scroll,
             );
+        }
+        // TextEntry (Story 21.3 AC11): the attached composer is append-only (its cursor
+        // stays at the end), so Ctrl+W / Ctrl+U edit its tail and Ctrl+H is Backspace;
+        // Ctrl+A / Ctrl+E / Ctrl+K stay consumed no-ops.
+        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+            edit_composer(ctx, text_edit::kill_word_back);
+        }
+        (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+            edit_composer(ctx, text_edit::kill_to_line_start);
         }
         // Ctrl/Alt-modified characters are consumed no-ops, never text (Story 21.3
         // AC12): Alt+M (above) is the only Alt letter with a meaning here.
@@ -760,6 +772,19 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         _ => {}
     }
     KeyFlow::Continue
+}
+
+/// Edit the tail of the attached composer with a shared `text_edit` function.
+fn edit_composer(ctx: &mut KeyCtx<'_>, edit: fn(&mut String, usize) -> usize) {
+    if ctx.state.focus != FocusState::Input || ctx.composer_locked() {
+        return;
+    }
+    let end = ctx.input.chars().count();
+    edit(ctx.input, end);
+    if ctx.input.is_empty() {
+        ctx.state.pinned_peer_compose = None;
+    }
+    ctx.state.needs_redraw = true;
 }
 
 /// Plain `q` / `i` / `?` are commands only in Chat focus.
@@ -949,6 +974,9 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             ctx.info("No decisions waiting in this client");
         }
         LeaderCmd::Detach => return KeyFlow::Detach,
+        // The leader's own Ctrl+Q row (AC20a): the menu is closed above, the guarded
+        // quit request follows, exactly like the local host.
+        LeaderCmd::QuitRequest => return request_quit(ctx),
         // Portable multiline send: the same path as Enter, exactly once.
         LeaderCmd::Send if origin == FocusState::Input => {
             if !ctx.input.is_empty() {
@@ -1115,6 +1143,10 @@ async fn palette_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
         | KeyCode::Esc
         | KeyCode::Backspace
         | KeyCode::Tab => key.modifiers.is_empty(),
+        KeyCode::Char(c) if key.modifiers == KeyModifiers::CONTROL => {
+            // The FIELD readline rows the palette filter inherits (Ctrl+W/U/H).
+            matches!(c, 'w' | 'u' | 'h')
+        }
         KeyCode::Char(_) => !key
             .modifiers
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
@@ -2579,6 +2611,14 @@ mod tests {
             Key::PageDown => (KeyCode::PageDown, M::NONE),
             Key::F(n) => (KeyCode::F(n), M::NONE),
             Key::Other => (KeyCode::Insert, M::NONE),
+            Key::Combo(c, bits) => {
+                let held = [(1, M::CONTROL), (2, M::ALT), (4, M::SHIFT)];
+                let mods = held
+                    .iter()
+                    .filter(|(bit, _)| bits & bit != 0)
+                    .fold(M::NONE, |all, (_, m)| all | *m);
+                (KeyCode::Char(c), mods)
+            }
         }
     }
 
@@ -2838,6 +2878,10 @@ mod tests {
                     assert_eq!(rig.input, "draft", "{label}");
                     assert_eq!(rig.state.focus, FocusState::Input, "{label}");
                 }
+                LeaderCmd::QuitRequest => {
+                    assert!(rig.state.quit_confirm.is_some(), "{label}: asks first");
+                    assert!(rig.frames().is_empty(), "{label}: nothing is interrupted");
+                }
             }
             ran += 1;
         }
@@ -2916,10 +2960,17 @@ mod tests {
                     no_frames("newline");
                     assert_eq!(rig.input, "hi\n", "{row:?}");
                 }
-                InputCmd::LineEnd => {
-                    no_frames("Ctrl+E");
-                    assert_eq!(rig.input, "hi");
-                    assert!(!rig.state.multiline_mode, "end-of-line, never the toggle");
+                InputCmd::NoCursor => {
+                    no_frames("Ctrl+A/E/K");
+                    assert_eq!(
+                        rig.input, "hi",
+                        "no cursor: nothing moves, nothing is deleted"
+                    );
+                    assert!(!rig.state.multiline_mode);
+                }
+                InputCmd::DeleteWordBack | InputCmd::KillToLineStart => {
+                    no_frames("Ctrl+W/U");
+                    assert_eq!(rig.input, "", "the tail of the one-line draft goes");
                 }
                 InputCmd::ToggleMultiline => {
                     no_frames("Alt+M");
@@ -3058,11 +3109,12 @@ mod tests {
 
     /// AC12 (attached): a Ctrl/Alt-modified character is a consumed no-op in
     /// both foci: never typed, never a command (Ctrl+J does not scroll, Ctrl+Y
-    /// approves nothing, Alt+C/L/U type no letters).
+    /// approves nothing, Alt+C/L/U type no letters; Ctrl+A/K have no cursor to
+    /// move; Ctrl+W/U/H are the append-only editing rows, witnessed above).
     #[tokio::test]
     async fn story21_3_attached_truth_modified_characters_are_consumed_never_typed() {
         let mut events = Vec::new();
-        for c in ['a', 'w', 'k', 'u', 'h', 'j', 'y'] {
+        for c in ['a', 'k', 'j', 'y'] {
             events.push((KeyCode::Char(c), KeyModifiers::CONTROL));
         }
         for c in ['c', 'l', 'u', 'x', '/', '1'] {
@@ -3124,5 +3176,491 @@ mod tests {
         rig.ch('/').await;
         assert!(rig.state.autocomplete.active);
         assert_eq!(warnings(&rig), first, "no repeat in the same generation");
+    }
+
+    /// AC20a (attached leg): Ctrl+Q with the leader open closes it and asks the
+    /// guarded quit question, exactly like the local host: never a no-binding toast.
+    #[tokio::test]
+    async fn story21_3_attached_ctrl_q_with_the_leader_open_asks_to_quit() {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('x').await;
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+        assert!(!rig.state.which_key.active, "the leader is closed");
+        assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+        assert_eq!(rig.state.notifications.records().len(), 0, "no toast");
+        assert_eq!(rig.input, "draft");
+        assert!(rig.frames().is_empty());
+        // Idle and clean: the same keys leave the client.
+        let mut rig = Rig::at(FocusState::Input, "");
+        rig.ctrl('x').await;
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Quit);
+    }
+
+    /// AC20b (attached leg): an extra-modifier key is its own key, never Ctrl+C,
+    /// Ctrl+X, Ctrl+Q or Alt+M, with a live turn that Ctrl+C would interrupt.
+    #[tokio::test]
+    async fn story21_3_attached_extra_modifier_keys_never_alias_plain_keys() {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.interrupt.apply(&DaemonFrame::ActiveTurn {
+            generation: Some(TurnGeneration(7)),
+        });
+        rig.streaming.is_streaming = true;
+        for key in [
+            Key::Combo('c', 5),
+            Key::Combo('q', 5),
+            Key::Combo('x', 5),
+            Key::Combo('m', 6),
+        ] {
+            assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
+        }
+        assert!(rig.frames().is_empty(), "Ctrl+Shift+C never interrupts");
+        assert!(rig.state.quit_confirm.is_none(), "Ctrl+Shift+Q never quits");
+        assert!(!rig.state.which_key.active, "Ctrl+Shift+X opens no leader");
+        assert!(!rig.state.multiline_mode, "Alt+Shift+M toggles nothing");
+        assert_eq!(rig.input, "draft");
+        // Positive controls: the plain keys still act.
+        rig.key(Key::Alt('m')).await;
+        assert!(rig.state.multiline_mode);
+        rig.ctrl('c').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::InterruptTurn { .. }]
+        ));
+        // In the open leader the combined key is a named unknown follow-up.
+        rig.ctrl('x').await;
+        rig.key(Key::Combo('c', 5)).await;
+        assert_eq!(
+            rig.notice(NoticeSource::Chord),
+            Some("No binding for Ctrl+X Ctrl+Shift+C in Input")
+        );
+    }
+
+    /// K10 (attached leg, AC13): Ctrl+C in an open surface closes exactly that
+    /// surface and sends no `InterruptTurn`, with a live turn; the positive control
+    /// (no surface) interrupts.
+    #[tokio::test]
+    async fn story21_3_attached_ctrl_c_in_overlay_never_interrupts() {
+        async fn live_rig() -> Rig {
+            let mut rig = Rig::at(FocusState::Input, "draft");
+            rig.interrupt.apply(&DaemonFrame::ActiveTurn {
+                generation: Some(TurnGeneration(7)),
+            });
+            rig.streaming.is_streaming = true;
+            rig
+        }
+        // Help (leader `?`), the slash popup, S-LOG (leader `n`), S-QUIT (Ctrl+Q).
+        let mut rig = live_rig().await;
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        assert!(rig.state.help_overlay.active);
+        rig.ctrl('c').await;
+        assert!(!rig.state.help_overlay.active, "Help closed");
+        assert_eq!(rig.state.focus, FocusState::Input, "caller restored");
+        assert!(rig.frames().is_empty(), "Help: no interrupt");
+
+        let mut rig = live_rig().await;
+        rig.input.clear();
+        rig.ch('/').await;
+        assert!(rig.state.autocomplete.active);
+        rig.ctrl('c').await;
+        assert!(!rig.state.autocomplete.active, "popup closed");
+        assert!(rig.input.is_empty(), "the composer is restored");
+        assert!(rig.frames().is_empty(), "popup: no interrupt");
+
+        let mut rig = live_rig().await;
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        assert!(rig.state.notification_log.is_some());
+        rig.ctrl('c').await;
+        assert!(rig.state.notification_log.is_none(), "S-LOG closed");
+        assert!(rig.frames().is_empty(), "S-LOG: no interrupt");
+
+        let mut rig = live_rig().await;
+        rig.ctrl('q').await;
+        assert!(rig.state.quit_confirm.is_some());
+        rig.ctrl('c').await;
+        assert!(rig.state.quit_confirm.is_none(), "S-QUIT cancelled");
+        assert!(rig.frames().is_empty(), "S-QUIT: no interrupt");
+
+        let mut rig = live_rig().await;
+        rig.ctrl('c').await;
+        assert!(matches!(
+            rig.frames().as_slice(),
+            [ClientFrame::InterruptTurn { .. }]
+        ));
+    }
+
+    /// K8 (attached leg, AC11): the attached composer is append-only: Ctrl+W, Ctrl+U
+    /// and Ctrl+H edit its tail by grapheme; Ctrl+A / Ctrl+E / Ctrl+K change nothing.
+    #[tokio::test]
+    async fn story21_3_attached_composer_edits_its_tail_by_grapheme() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let mut rig = Rig::at(FocusState::Input, &format!("alpha beta {family}"));
+        rig.ctrl('w').await;
+        assert_eq!(rig.input, "alpha beta ", "the family is one word");
+        rig.ctrl('w').await;
+        assert_eq!(rig.input, "alpha ");
+        rig.input = "xe\u{301}".into();
+        rig.ctrl('h').await;
+        assert_eq!(rig.input, "x", "the accent goes with its letter");
+        rig.input = "one\ntwo three".into();
+        rig.ctrl('u').await;
+        assert_eq!(rig.input, "one\n", "Ctrl+U deletes the last logical line");
+        rig.input = "keep".into();
+        for c in ['a', 'e', 'k'] {
+            assert_eq!(rig.ctrl(c).await, KeyFlow::Continue);
+            assert_eq!(rig.input, "keep", "Ctrl+{c} has no cursor to move");
+        }
+        // Chat focus: the keys do not edit the unsent draft.
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        rig.ctrl('w').await;
+        assert_eq!(rig.input, "draft");
+    }
+
+    // ── Story 21.3 slice 3-B1: attached twins of the K4 overlay witnesses ────
+    // Per overlay: one witness per attached row (outcome by value, through `handle_attached_key`),
+    // then a sweep: every `Key::universe()` key without a row leaves the state alone (fresh rig per key).
+
+    /// One line of the state an overlay's rows move (compared by value).
+    type Digest = fn(&Rig) -> String;
+
+    fn attached_keys(context: Context) -> Vec<Key> {
+        rows_of(context, Host::Attached).map(single_key).collect()
+    }
+
+    /// Every attached row of `context` has a witness and yields its `flow | digest`, sending no frame.
+    #[rustfmt::skip]
+    async fn witness_rows<F, Fut>(context: Context, open: F, digest: Digest, cases: &[(Key, String)])
+    where F: Fn(Key) -> Fut, Fut: Future<Output = Rig>,
+    {
+        let rows = attached_keys(context);
+        for key in &rows {
+            assert!(cases.iter().any(|(k, _)| k == key), "{context:?}: row {key:?} has no witness");
+        }
+        for (key, expected) in cases {
+            assert!(rows.contains(key), "{context:?}: {key:?} is not an attached row");
+            let mut rig = open(*key).await;
+            let flow = rig.key(*key).await;
+            assert_eq!(&format!("{flow:?} | {}", digest(&rig)), expected, "{context:?} {key:?}");
+            assert!(rig.frames().is_empty(), "{context:?} {key:?} sent a frame");
+        }
+    }
+
+    /// Every non-`exempt` universe key without a row is inert (`Continue`, state, no frame); offenders are listed at once.
+    #[rustfmt::skip]
+    async fn witness_inert<F, Fut>(context: Context, open: F, digest: Digest, exempt: fn(Key) -> bool)
+    where F: Fn(Key) -> Fut, Fut: Future<Output = Rig>,
+    {
+        let rows = attached_keys(context);
+        let mut bad = Vec::new();
+        for key in Key::universe().into_iter().filter(|k| !rows.contains(k) && !exempt(*k)) {
+            let mut rig = open(key).await;
+            let before = (salient(&rig), digest(&rig));
+            let flow = rig.key(key).await;
+            let after = (salient(&rig), digest(&rig));
+            if flow != KeyFlow::Continue || before != after || !rig.frames().is_empty() {
+                bad.push(format!("{key:?}: {flow:?}\n  {}\n  {}", before.1, after.1));
+            }
+        }
+        assert!(bad.is_empty(), "{context:?}: keys without a row acted: {bad:#?}");
+    }
+
+    fn open_surface(rig: &Rig) -> String {
+        let s = &rig.state;
+        format!(
+            "quit={} focus={:?} input={}",
+            s.quit_confirm.is_some(),
+            s.focus,
+            rig.input
+        )
+    }
+
+    fn help_rig(_: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.state.help_overlay.open(FocusState::Input);
+        rig.state.help_overlay.scroll_offset = 5;
+        rig.state.focus = FocusState::Overlay(OverlayType::Help);
+        rig
+    }
+
+    #[rustfmt::skip]
+    fn help_digest(rig: &Rig) -> String {
+        let h = &rig.state.help_overlay;
+        let scroll = if h.scroll_offset > 1_000_000 { "bottom".to_owned() } else { h.scroll_offset.to_string() };
+        format!("help={} scroll={scroll} {}", h.active, open_surface(rig))
+    }
+
+    /// Catches a Help row that scrolls the wrong way, closes into the wrong focus or skips the quit question, or a rowless key that acts.
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_help() {
+        let at = |scroll: &str| format!("Continue | help=true scroll={scroll} quit=false focus=Overlay(Help) input=draft");
+        let closed = |quit: bool| format!("Continue | help=false scroll=5 quit={quit} focus=Input input=draft");
+        let cases = [
+            (Key::Char('j'), at("6")), (Key::Down, at("6")), (Key::Char('k'), at("4")), (Key::Up, at("4")),
+            (Key::Char('G'), at("bottom")), (Key::Char('g'), at("0")),
+            (Key::Char('?'), closed(false)), (Key::Esc, closed(false)), (Key::Ctrl('c'), closed(false)),
+            (Key::Ctrl('q'), closed(true)),
+        ];
+        let open = |k| std::future::ready(help_rig(k));
+        witness_rows(Context::Help, open, help_digest, &cases).await;
+        witness_inert(Context::Help, open, help_digest, |_| false).await;
+    }
+
+    async fn palette_rig(key: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('p').await;
+        match key {
+            Key::Enter | Key::Backspace => rig.type_text("ml").await,
+            _ => {
+                rig.key(Key::Down).await; // selection 1: Up and Down both move
+            }
+        }
+        rig
+    }
+
+    #[rustfmt::skip]
+    fn palette_digest(rig: &Rig) -> String {
+        let p = &rig.state.command_palette;
+        format!("palette={} sel={} filter={} ml={} {}", p.active, p.selected_index, p.filter_text, rig.state.multiline_mode, open_surface(rig))
+    }
+
+    /// Catches a palette row that runs the wrong entry, keeps the palette open, edits the filter wrongly or swallows Ctrl+Q.
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_command_palette() {
+        let open = |sel: u8, filter: &str, ml: bool| format!("Continue | palette=true sel={sel} filter={filter} ml={ml} quit=false focus=Overlay(CommandPalette) input=draft");
+        let closed = |ml: bool, quit: bool| format!("Continue | palette=false sel=0 filter= ml={ml} quit={quit} focus=Input input=draft");
+        let cases = [
+            (Key::Up, open(0, "", false)), (Key::Down, open(2, "", false)),
+            (Key::Enter, closed(true, false)), // "ml" is the first entry: toggles multiline, draft untouched
+            (Key::Esc, closed(false, false)), (Key::Ctrl('c'), closed(false, false)),
+            (Key::Backspace, open(0, "m", false)), (Key::Ctrl('q'), closed(false, true)),
+        ];
+        witness_rows(Context::CommandPalette, palette_rig, palette_digest, &cases).await;
+        // Plain printable keys type into the filter (allowed); Tab and every modified key are inert.
+        witness_inert(Context::CommandPalette, palette_rig, palette_digest, |k| matches!(k, Key::Char(_))).await;
+        // The inherited FIELD rows edit the filter like the local palette: Ctrl+W a word, Ctrl+U all, Ctrl+H one grapheme.
+        for (key, want) in [(Key::Ctrl('w'), "ab "), (Key::Ctrl('u'), ""), (Key::Ctrl('h'), "ab c")] {
+            let mut rig = Rig::at(FocusState::Input, "draft");
+            rig.ctrl('p').await;
+            rig.type_text("ab cd").await;
+            assert_eq!(rig.key(key).await, KeyFlow::Continue);
+            assert_eq!(rig.state.command_palette.filter_text, want, "{key:?}");
+            assert!(rig.state.command_palette.active && rig.input == "draft" && rig.frames().is_empty());
+        }
+        let mut typing = Rig::at(FocusState::Input, "draft");
+        typing.ctrl('p').await;
+        typing.ch('z').await;
+        assert_eq!(typing.state.command_palette.filter_text, "z");
+        assert!(typing.state.command_palette.active);
+        assert_eq!(typing.input, "draft", "the palette filter never touches the composer");
+        assert!(typing.frames().is_empty());
+    }
+
+    async fn slash_rig(key: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "");
+        rig.ch('/').await;
+        if key == Key::Up {
+            rig.key(Key::Down).await; // selection 1 ("team"): Up moves back to 0
+        }
+        rig
+    }
+
+    #[rustfmt::skip]
+    fn slash_digest(rig: &Rig) -> String {
+        let a = &rig.state.autocomplete;
+        format!("popup={} sel={} filter={} {}", a.active, a.selected_index, a.filter_text, open_surface(rig))
+    }
+
+    /// Catches a popup row that accepts the wrong suggestion, fails to restore the composer or leaks to it.
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_autocomplete_rows() {
+        let popup = |sel: u8| format!("Continue | popup=true sel={sel} filter= quit=false focus=Input input=/");
+        let shut = |input: &str| format!("Continue | popup=false sel=0 filter= quit=false focus=Input input={input}");
+        let cases = [
+            (Key::Up, popup(0)), (Key::Down, popup(1)),
+            (Key::Tab, shut("/clear")), (Key::Enter, shut("/clear")), // sends nothing: the popup consumed it
+            (Key::Esc, shut("")), (Key::Ctrl('c'), shut("")),
+            (Key::Backspace, shut("")), // at the trigger the `/` goes with the popup
+        ];
+        witness_rows(Context::Autocomplete, slash_rig, slash_digest, &cases).await;
+        // Inside the filter Backspace only deletes the last filter character.
+        let mut rig = slash_rig(Key::Esc).await;
+        rig.ch('c').await;
+        rig.key(Key::Backspace).await;
+        assert_eq!(slash_digest(&rig), "popup=true sel=0 filter= quit=false focus=Input input=/");
+    }
+
+    /// Catches a rowless popup key that leaves the popup open, sends a frame or quits (they dismiss it, then act normally).
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_autocomplete_rowless_keys_dismiss_then_act_normally() {
+        let rows = attached_keys(Context::Autocomplete);
+        let mut bad = Vec::new();
+        for key in Key::universe().into_iter().filter(|k| !rows.contains(k)) {
+            let mut rig = slash_rig(key).await;
+            let flow = rig.key(key).await;
+            let wrong = match key {
+                Key::Char(_) => false, // typed into the filter (or the composer once a space closes it)
+                // Ctrl+Q is the universal quit request, answered before the popup is consulted.
+                Key::Ctrl('q') => rig.state.quit_confirm.is_none(),
+                _ => rig.state.autocomplete.active,
+            };
+            // Ctrl+Enter submits the dismissed popup's composer like Ctrl+Enter anywhere.
+            let sent = key != Key::CtrlEnter && !rig.frames().is_empty();
+            if flow != KeyFlow::Continue || wrong || sent {
+                bad.push(format!("{key:?}: {flow:?} wrong={wrong} sent={sent}"));
+            }
+        }
+        assert!(bad.is_empty(), "rowless keys misbehaved with the popup open: {bad:#?}");
+    }
+
+    async fn log_rig(key: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        notifications::info(&mut rig.state, NoticeSource::Attached, "first");
+        notifications::info(&mut rig.state, NoticeSource::Attached, "second");
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        if matches!(key, Key::Char('k') | Key::Up) {
+            rig.ch('j').await; // selection on "first": k / Up move back to "second"
+        }
+        rig
+    }
+
+    #[rustfmt::skip]
+    fn log_digest(rig: &Rig) -> String {
+        use crate::adapters::tui::notifications::Presentation;
+        let s = &rig.state;
+        let (sel, detail, scroll) = match &s.notification_log {
+            Some(log) => (log.selected_id.and_then(|id| s.notifications.get(id)).map_or("-", |r| r.message.as_str()), log.detail, log.detail_scroll),
+            None => ("-", false, 0),
+        };
+        let archived = s.notifications.records().filter(|r| r.source == NoticeSource::Attached && r.presentation != Presentation::Visible).count();
+        let clip = rig.notice(NoticeSource::Clipboard).is_some();
+        format!("log={} sel={sel} detail={detail} scroll={scroll} archived={archived} records={} clip={clip} {}", s.notification_log.is_some(), s.notifications.len(), open_surface(rig))
+    }
+
+    /// Catches a log row that moves the selection wrongly, copies or dismisses the wrong record, or swallows Ctrl+Q.
+    // AC20 fixed: `Shift+Enter` (`Enter if plain`) and `Ctrl+Shift+C` (`Char('c') if CONTROL`) no longer alias
+    // Enter / Ctrl+C in `notification_log::handle_raw_key`. `c` really copies through the host clipboard helper.
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_notification_log() {
+        let on = |sel: &str, detail: bool, archived: u8, records: u8, clip: bool| format!("Continue | log=true sel={sel} detail={detail} scroll=0 archived={archived} records={records} clip={clip} quit=false focus=Input input=draft");
+        let off = |quit: bool| format!("Continue | log=false sel=- detail=false scroll=0 archived=0 records=2 clip=false quit={quit} focus=Input input=draft");
+        let cases = [
+            (Key::Esc, off(false)), (Key::Ctrl('c'), off(false)), (Key::Ctrl('q'), off(true)),
+            (Key::Char('j'), on("first", false, 0, 2, false)), (Key::Down, on("first", false, 0, 2, false)),
+            (Key::Char('k'), on("second", false, 0, 2, false)), (Key::Up, on("second", false, 0, 2, false)),
+            (Key::Enter, on("second", true, 0, 2, false)),
+            (Key::Char('c'), on("second", false, 0, 3, true)), // the copy result is a third (Clipboard) notice
+            (Key::Char('x'), on("second", false, 1, 2, false)),
+        ];
+        witness_rows(Context::NotificationLog, log_rig, log_digest, &cases).await;
+        // `r`, `K`, `n` are local-only rows: with no retry path and no decisions they are inert here.
+        witness_inert(Context::NotificationLog, log_rig, log_digest, |_| false).await;
+    }
+
+    async fn quit_rig(_: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('q').await;
+        rig
+    }
+
+    /// Catches a stray key confirming the quit, Enter that quits instead of staying, or a rowless key leaking underneath.
+    // AC20 fixed: `Shift+Enter` (`Enter if plain`) and `Ctrl+Shift+C` (`Char('c') if CONTROL`) no longer alias
+    // Enter / Ctrl+C in `quit_confirm::handle_raw_key`.
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_quit_confirm() {
+        let shut = |flow: &str| format!("{flow} | quit=false focus=Input input=draft");
+        let cases = [
+            (Key::Char('y'), shut("Quit")), (Key::Char('Y'), shut("Quit")),
+            (Key::Char('n'), shut("Continue")), (Key::Char('N'), shut("Continue")), (Key::Esc, shut("Continue")),
+            (Key::Ctrl('c'), shut("Continue")), (Key::Enter, shut("Continue")),
+        ];
+        witness_rows(Context::QuitConfirm, quit_rig, open_surface, &cases).await;
+        witness_inert(Context::QuitConfirm, quit_rig, open_surface, |_| false).await;
+    }
+
+    /// A node view at line 20 of an 11-row viewport over Chat (prior focus Input); read-only, so no action letter is live.
+    #[rustfmt::skip]
+    fn surface_rig(_: Key) -> Rig {
+        use crate::adapters::tui::state::{RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{SemanticMessageType, VerdictOffer};
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        rig.state.recipient_surface = Some(RecipientSurface {
+            target: RecipientSurfaceTarget::Node("n".into()), access: RecipientSurfaceAccess::ReadOnly,
+            can_toggle_target: false, root_id: None, first_non_pinned_ordinal: None,
+            last_non_pinned_ordinal: None, omitted_before: 2, omitted_after: 3, node_id: None,
+            item_state: None, context_available: false, context_selected: false,
+            prior_focus: FocusState::Input, scroll_offset: 20, viewport_rows: 11, content: String::new(),
+            message_type: SemanticMessageType::Unknown, verdict_offer: VerdictOffer::None, cached_width: 0,
+            cached_lines: Vec::new(), cached_header: Vec::new(), cached_footer: Vec::new(),
+            cached_action_mask: 0, results: Vec::new(),
+        });
+        rig
+    }
+
+    #[rustfmt::skip]
+    fn surface_digest(rig: &Rig) -> String {
+        let scroll = rig.state.recipient_surface.as_ref().map_or(0, |s| s.scroll_offset);
+        format!("surface={} scroll={scroll} {}", rig.state.recipient_surface.is_some(), open_surface(rig))
+    }
+
+    /// Catches a surface row that closes into the wrong focus, pages the wrong way or skips the quit question, or a key leaking below.
+    // LIMITATION: `p`/`l` (thread paging) and `Tab` (item/node toggle) need an item thread window and an a2a
+    // workspace; on this node view they are only witnessed as "surface survives, nothing sent".
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_3_attached_witness_recipient_surface() {
+        let up = |scroll: u8, focus: &str, surface: bool, quit: bool| format!("Continue | surface={surface} scroll={scroll} quit={quit} focus={focus} input=draft");
+        let cases = [
+            (Key::Char('p'), up(20, "Chat", true, false)), (Key::Char('l'), up(20, "Chat", true, false)), (Key::Tab, up(20, "Chat", true, false)),
+            (Key::Esc, up(0, "Input", false, false)), (Key::Ctrl('c'), up(0, "Input", false, false)),
+            (Key::PageUp, up(10, "Chat", true, false)), (Key::PageDown, up(30, "Chat", true, false)),
+            (Key::Ctrl('q'), up(20, "Chat", true, true)),
+        ];
+        let open = |k| std::future::ready(surface_rig(k));
+        witness_rows(Context::RecipientSurface, open, surface_digest, &cases).await;
+        // Ctrl+X passes through the surface to the leader (`dispatch_recipient_surface_key`): exempt, and checked here.
+        witness_inert(Context::RecipientSurface, open, surface_digest, |k| k == Key::Ctrl('x')).await;
+        let mut rig = surface_rig(Key::Esc);
+        rig.ctrl('x').await;
+        assert!(rig.state.which_key.active && rig.state.recipient_surface.is_some());
+        assert!(rig.frames().is_empty());
+    }
+
+    /// Catches a writer's item-surface action key (a named exclusion of the table) that sends nothing or the wrong frame.
+    #[tokio::test]
+    async fn story21_3_attached_recipient_action_key_sends_its_frame() {
+        use crate::adapters::tui::state::{RecipientSurfaceAccess, RecipientSurfaceTarget};
+        use crate::domain::models::{ItemAddress, ItemId, PeerId};
+        let mut rig = surface_rig(Key::Esc);
+        let peer = PeerId::from_public_key(&[91; 32]).unwrap();
+        let surface = rig.state.recipient_surface.as_mut().unwrap();
+        surface.target = RecipientSurfaceTarget::Item(ItemAddress::from_a2a_ingress(
+            peer,
+            ItemId::from_replay("ri-writer"),
+        ));
+        surface.access = RecipientSurfaceAccess::Writer;
+        surface.context_available = true;
+        assert_eq!(rig.key(Key::Char('x')).await, KeyFlow::Continue);
+        assert!(
+            rig.frames().is_empty(),
+            "a letter with no action sends nothing"
+        );
+        assert_eq!(rig.key(Key::Char('c')).await, KeyFlow::Continue);
+        let frames = rig.frames();
+        assert!(
+            matches!(frames.as_slice(), [ClientFrame::SetRecipientContext { item_id, selected: true }] if item_id == "ri-writer"),
+            "{frames:?}"
+        );
+        assert!(
+            rig.state.recipient_surface.is_some(),
+            "the surface stays open while the daemon answers"
+        );
     }
 }

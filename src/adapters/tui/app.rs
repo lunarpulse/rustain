@@ -1,4 +1,5 @@
 use crate::adapters::tui::handlers::login::LoginAction;
+use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
@@ -814,6 +815,9 @@ fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Ke
             notifications::info(state, NoticeSource::Chord, text);
             InputAction::Consumed
         }
+        // Ctrl+Q with the menu open: the menu is already closed; the guarded quit
+        // request follows, exactly like the attached host (AC20a).
+        LeaderCmd::QuitRequest => InputAction::Quit,
         // Attached-only: the local registry has no such row.
         LeaderCmd::Detach | LeaderCmd::Cancel => InputAction::Consumed,
     }
@@ -848,7 +852,7 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
             {
                 return InputAction::RecipientThreadPage { earlier: false };
             }
-            DomainInputEvent::SpecialKey(DomainKey::Esc) => {
+            DomainInputEvent::SpecialKey(DomainKey::Esc | DomainKey::CtrlC) => {
                 if let Some(surface) = state.recipient_surface.take() {
                     state.focus = surface.prior_focus;
                 }
@@ -867,7 +871,7 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
                         };
                 }
             }
-            DomainInputEvent::SpecialKey(DomainKey::CtrlC) => return InputAction::CancelOrQuit,
+            // Ctrl+C is back one frame like Esc (RU-20, 21-3 AC13): never CancelOrQuit.
             DomainInputEvent::SpecialKey(DomainKey::CtrlQ) => return InputAction::Quit,
             _ => {}
         }
@@ -2143,6 +2147,14 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         return match key {
             DomainKey::Enter => InputAction::FeedbackInputSubmit,
             DomainKey::Backspace => InputAction::FeedbackInputBackspace,
+            DomainKey::CtrlW | DomainKey::CtrlU | DomainKey::CtrlH => {
+                if let Some(fi) = state.pending_feedback_input.as_mut() {
+                    edit_field(&mut fi.buffer, key);
+                    fi.cursor = fi.buffer.chars().count();
+                    state.needs_redraw = true;
+                }
+                InputAction::Consumed
+            }
             DomainKey::Esc => InputAction::FeedbackInputCancel,
             _ => InputAction::Consumed,
         };
@@ -2165,13 +2177,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                     InputAction::Consumed
                 }
             }
-            DomainKey::Backspace => {
-                if let Some(ref mut aq) = state.ask_user_question {
-                    if aq.cursor_position > 0 {
-                        aq.cursor_position -= 1;
-                        aq.input_buffer.pop();
-                        state.needs_redraw = true;
-                    }
+            DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
+                if let Some(aq) = state.ask_user_question.as_mut() {
+                    edit_field(&mut aq.input_buffer, key);
+                    aq.cursor_position = aq.input_buffer.chars().count();
+                    state.needs_redraw = true;
                 }
                 InputAction::Consumed
             }
@@ -2328,7 +2338,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
 
     if state.focus == FocusState::Overlay(OverlayType::CrossSearch) {
         return match key {
-            DomainKey::Esc => InputAction::CloseCrossSearch,
+            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseCrossSearch,
             DomainKey::Enter => {
                 if !state.cross_search.results.is_empty() {
                     InputAction::OpenCrossSearchResult
@@ -2336,8 +2346,8 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
                     InputAction::Consumed
                 }
             }
-            DomainKey::Backspace => {
-                state.cross_search.query.pop();
+            DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
+                edit_field(&mut state.cross_search.query, key);
                 state.needs_redraw = true;
                 InputAction::CrossSearchQueryChanged
             }
@@ -2361,7 +2371,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Bookmark list panel special-key handling (Story 4-4 AC10).
     if state.focus == FocusState::Overlay(OverlayType::BookmarkList) {
         return match key {
-            DomainKey::Esc => InputAction::CloseBookmarkList,
+            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseBookmarkList,
             DomainKey::Enter => InputAction::JumpToBookmark,
             DomainKey::Delete | DomainKey::Backspace => InputAction::DeleteBookmark,
             DomainKey::Up => {
@@ -2384,7 +2394,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // them instead of the chat/input handlers.
     if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
         return match key {
-            DomainKey::Esc => InputAction::CloseWaveOverlay,
+            DomainKey::Esc | DomainKey::CtrlC => InputAction::CloseWaveOverlay,
             DomainKey::Enter => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
             DomainKey::Down => {
                 if let Some(ref handle) = state.wave_run {
@@ -2607,6 +2617,16 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
+        // TextEntry editing (Story 21.3 AC11, A4): readline keys of the composer; every
+        // step lands on a grapheme boundary (`keymap::text_edit`).
+        DomainKey::CtrlA if state.focus == FocusState::Input => {
+            state.cursor_position =
+                text_edit::line_start(&state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
+        }
+
         // Ctrl+R: activate reverse search
         // Covers: UX-DR74
         DomainKey::CtrlR if state.focus == FocusState::Input => {
@@ -2623,20 +2643,22 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
             InputAction::Consumed
         }
 
-        DomainKey::Backspace if state.focus == FocusState::Input => {
-            if state.cursor_position > 0 {
-                // Remove one whole grapheme cluster, never half of G or A.
-                let from = geom::prev_boundary(&state.input_buffer, state.cursor_position);
-                let to = geom::next_boundary(&state.input_buffer, from).max(state.cursor_position);
-                let (start, end) = (
-                    char_to_byte(&state.input_buffer, from),
-                    char_to_byte(&state.input_buffer, to),
-                );
-                state.input_buffer.replace_range(start..end, "");
-                state.cursor_position = from;
-                ensure_cursor_visible(state);
-                state.needs_redraw = true;
-            }
+        DomainKey::Backspace
+        | DomainKey::CtrlH
+        | DomainKey::CtrlW
+        | DomainKey::CtrlU
+        | DomainKey::CtrlK
+            if state.focus == FocusState::Input =>
+        {
+            let edit = match key {
+                DomainKey::CtrlW => text_edit::kill_word_back,
+                DomainKey::CtrlU => text_edit::kill_to_line_start,
+                DomainKey::CtrlK => text_edit::kill_to_line_end,
+                _ => text_edit::delete_back,
+            };
+            state.cursor_position = edit(&mut state.input_buffer, state.cursor_position);
+            ensure_cursor_visible(state);
+            state.needs_redraw = true;
             InputAction::Consumed
         }
 
@@ -2917,8 +2939,8 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
         // Ctrl+D — scroll half page down (Chat focus only). Story 16.8, AC1.
         DomainKey::CtrlD if state.focus == FocusState::Chat => InputAction::ScrollHalfPageDown,
-        // Ctrl+U — scroll half page up (Chat focus); clear-buffer in Input focus.
-        // Story 16.8, AC1.
+        // Ctrl+U scrolls half a page up in Chat focus (Story 16.8, AC1); in Input it
+        // deletes to the start of the line (the editing arm above, Story 21.3 AC11).
         DomainKey::CtrlU if state.focus == FocusState::Chat => InputAction::ScrollHalfPageUp,
         // Ctrl+B — scroll full page up (Chat focus only). Story 16.8, AC1.
         DomainKey::CtrlB if state.focus == FocusState::Chat => InputAction::ScrollFullPageUp,
@@ -3231,7 +3253,7 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             InputAction::Consumed
         }
         // Backspace: if cursor goes back to/before trigger position, dismiss
-        DomainKey::Backspace => {
+        DomainKey::Backspace | DomainKey::CtrlH => {
             if state.cursor_position == state.autocomplete.trigger_position.saturating_add(1) {
                 // Cursor is exactly one past trigger — remove the trigger character and dismiss
                 if state.cursor_position > 0 {
@@ -3298,9 +3320,12 @@ fn handle_autocomplete_key(state: &mut TuiState, key: DomainKey) -> InputAction 
                 InputAction::Consumed
             }
         }
+        // Ctrl+C is back one frame like Esc: closes only the popup and restores the
+        // slash rollback (21-3 AC13); it never stops a turn or asks to quit.
         DomainKey::CtrlC => {
-            state.autocomplete.dismiss();
-            InputAction::CancelOrQuit
+            cancel_autocomplete_popup(state);
+            state.needs_redraw = true;
+            InputAction::Consumed
         }
         // All other special keys dismiss autocomplete and fall through to normal handling
         _ => {
@@ -3407,6 +3432,18 @@ fn apply_autocomplete_selection(
     }
 }
 
+/// Edit an append-only text field (A4): the cursor sits at the end, so `Ctrl+W`
+/// kills the last word, `Ctrl+U` clears the last line, and `Backspace` / `Ctrl+H`
+/// delete the last grapheme. Every deletion is grapheme-safe.
+fn edit_field(text: &mut String, key: DomainKey) {
+    let end = text.chars().count();
+    match key {
+        DomainKey::CtrlW => text_edit::kill_word_back(text, end),
+        DomainKey::CtrlU => text_edit::kill_to_line_start(text, end),
+        _ => text_edit::delete_back(text, end),
+    };
+}
+
 /// Handle special keys while command palette is active.
 // Covers: UX-DR18
 fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputAction {
@@ -3439,9 +3476,9 @@ fn handle_command_palette_key(state: &mut TuiState, key: DomainKey) -> InputActi
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Backspace => {
+        DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
             if !state.command_palette.filter_text.is_empty() {
-                state.command_palette.filter_text.pop();
+                edit_field(&mut state.command_palette.filter_text, key);
                 // Reset scope if prefix character was deleted
                 if state.command_palette.filter_text.is_empty() {
                     state.command_palette.current_scope = None;
@@ -3518,11 +3555,12 @@ fn handle_help_overlay_key(state: &mut TuiState, key: DomainKey) -> InputAction 
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        // Ctrl+C: pass through to cancel streaming — help overlay is passive, not interactive
+        // Ctrl+C: back one frame (RU-20, 21-3 AC13): closes the overlay, never stops a
+        // turn or asks to quit.
         DomainKey::CtrlC => {
             state.focus = state.help_overlay.close();
             state.needs_redraw = true;
-            InputAction::CancelOrQuit
+            InputAction::Consumed
         }
         // Ctrl+Q: pass through to quit — same reasoning as Ctrl+C above, and the
         // overlay itself renders the `Ctrl+Q — Quit (any focus)` binding, so
@@ -3608,7 +3646,7 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
             }
             InputAction::Consumed
         }
-        DomainKey::Esc => {
+        DomainKey::Esc | DomainKey::CtrlC => {
             if state.model_selector.search_active {
                 state.model_selector.search_active = false;
                 state.model_selector.search_query.clear();
@@ -3628,11 +3666,6 @@ fn handle_model_selector_key(state: &mut TuiState, key: DomainKey) -> InputActio
                 return InputAction::Consumed;
             }
             InputAction::Ignored
-        }
-        DomainKey::CtrlC => {
-            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Consumed
         }
         _ => InputAction::Consumed,
     }
@@ -3832,7 +3865,7 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::Esc => {
+        DomainKey::Esc | DomainKey::CtrlC => {
             state.reverse_search.active = false;
             state.focus = FocusState::Input;
             state.needs_redraw = true;
@@ -3859,13 +3892,12 @@ fn handle_reverse_search_key(state: &mut TuiState, key: DomainKey) -> InputActio
             }
             InputAction::Consumed
         }
-        DomainKey::Backspace => {
-            state.reverse_search.query.pop();
+        DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW | DomainKey::CtrlU => {
+            edit_field(&mut state.reverse_search.query, key);
             update_reverse_search_matches(state);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        DomainKey::CtrlC => InputAction::CancelOrQuit,
         _ => InputAction::Consumed,
     }
 }
@@ -3898,25 +3930,24 @@ fn handle_search_overlay_key(state: &mut TuiState, key: DomainKey) -> InputActio
     use crate::adapters::tui::state::SearchSubstate;
     match (state.search_state.substate, key) {
         // Esc closes the overlay regardless of sub-state (AC4).
-        (_, DomainKey::Esc) => InputAction::CloseSearch,
+        (_, DomainKey::Esc | DomainKey::CtrlC) => InputAction::CloseSearch,
 
         // Enter in Typing: commit query → Navigating (if matches exist).
         // Enter in Navigating: no-op (already committed).
         (SearchSubstate::Typing, DomainKey::Enter) => InputAction::SearchCommit,
         (SearchSubstate::Navigating, DomainKey::Enter) => InputAction::Consumed,
 
-        // Backspace in Typing: pop query tail, re-scan.
-        // Backspace in Navigating: return to Typing and pop (refine).
-        (SearchSubstate::Typing, DomainKey::Backspace) => {
-            state.search_state.query.pop();
-            state.needs_redraw = true;
-            InputAction::SearchQueryChanged
-        }
-        (SearchSubstate::Navigating, DomainKey::Backspace) => {
+        // Backspace / Ctrl+H / Ctrl+W in Typing: edit the query tail, re-scan.
+        // The same keys in Navigating: return to Typing and edit (refine).
+        (substate, DomainKey::Backspace | DomainKey::CtrlH | DomainKey::CtrlW) => {
             state.search_state.substate = SearchSubstate::Typing;
-            state.search_state.query.pop();
+            edit_field(&mut state.search_state.query, key);
             state.needs_redraw = true;
-            InputAction::SearchReturnToTyping
+            if substate == SearchSubstate::Navigating {
+                InputAction::SearchReturnToTyping
+            } else {
+                InputAction::SearchQueryChanged
+            }
         }
 
         // Ctrl+U clears query in either sub-state, returns to Typing.
@@ -3990,13 +4021,13 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('b') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlB));
             }
-            // Ctrl+H → toggle history sidebar
-            // Covers: FR107, UX-DR20
+            // Ctrl+H → delete the character before the cursor, like Backspace (legacy
+            // terminals send 0x08 for Backspace; 21-3 AC11).
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('h') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlH));
             }
-            // Ctrl+K: reserved, unbound until 21-3 (RU-24). The key is still decoded so
-            // the terminal never sees it as text, but no handler acts on it.
+            // Ctrl+K → delete to the end of the logical line in the composer (21-3 AC11);
+            // a field with no cursor ignores it.
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('k') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlK));
             }
@@ -4061,17 +4092,25 @@ pub fn convert_crossterm_event(
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlW));
             }
             // Every other Ctrl/Alt-modified character is a consumed no-op key, never a
-            // bare letter (AC12): Ctrl+J cannot scroll, Ctrl+Y cannot approve a plan.
+            // bare letter (AC12): Ctrl+J cannot scroll, Ctrl+Y cannot approve a plan. A
+            // character held with more than one modifier is its own key (AC20):
+            // Ctrl+Shift+C is not Ctrl+C, Alt+Shift+M is not Alt+M.
             if let KeyCode::Char(c) = code {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    return Some(DomainInputEvent::SpecialKey(DomainKey::UnboundCtrl(
-                        c.to_ascii_lowercase(),
+                let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+                let alt = modifiers.contains(KeyModifiers::ALT);
+                let shift = modifiers.contains(KeyModifiers::SHIFT);
+                let letter = c.to_ascii_lowercase();
+                if (ctrl && (alt || shift)) || (alt && shift) {
+                    let mask = u8::from(ctrl) | (u8::from(alt) << 1) | (u8::from(shift) << 2);
+                    return Some(DomainInputEvent::SpecialKey(DomainKey::UnboundCombo(
+                        letter, mask,
                     )));
                 }
-                if modifiers.contains(KeyModifiers::ALT) {
-                    return Some(DomainInputEvent::SpecialKey(DomainKey::UnboundAlt(
-                        c.to_ascii_lowercase(),
-                    )));
+                if ctrl {
+                    return Some(DomainInputEvent::SpecialKey(DomainKey::UnboundCtrl(letter)));
+                }
+                if alt {
+                    return Some(DomainInputEvent::SpecialKey(DomainKey::UnboundAlt(letter)));
                 }
             }
 
@@ -4151,7 +4190,7 @@ fn handle_profile_switcher_key(state: &mut TuiState, key: DomainKey) -> InputAct
                 state.needs_redraw = true;
                 return InputAction::ConfirmProfileSwitch(profile_name);
             }
-            DomainKey::Esc => {
+            DomainKey::Esc | DomainKey::CtrlC => {
                 state.profile_switcher.exit_preview();
                 state.needs_redraw = true;
             }
@@ -4177,7 +4216,7 @@ fn handle_profile_switcher_key(state: &mut TuiState, key: DomainKey) -> InputAct
                 }
             }
         }
-        DomainKey::Esc => {
+        DomainKey::Esc | DomainKey::CtrlC => {
             if let Some(prev) = state.profile_switcher.dismiss() {
                 state.focus = prev;
             }
@@ -4890,9 +4929,9 @@ mod tests {
                     s.which_key.open(FocusState::Input);
                     s.focus = FocusState::Overlay(OverlayType::WhichKey);
                 }),
-                expect: CtrlQRowExpectation::Skip(
-                    "WhichKey: any special key dismisses the overlay; the key is spent dismissing",
-                ),
+                // The leader's own Ctrl+Q row (21-3 AC20a): the menu closes, then the
+                // guarded quit request follows, as in the attached host.
+                expect: CtrlQRowExpectation::Quit,
             },
             // Help was a documented Skip until the code review (D2): the overlay
             // RENDERS the `Ctrl+Q — Quit (any focus)` binding, so swallowing the
@@ -5751,16 +5790,20 @@ mod tests {
     }
 
     #[test]
-    fn story21_1_ctrl_k_is_unbound_and_the_next_c_is_literal_text() {
+    fn story21_1_ctrl_k_kills_the_line_tail_and_the_next_c_is_literal_text() {
         // Old: `Ctrl+K` then `c` dispatched FeedbackCompact and never typed.
-        // New (AC12): Ctrl+K arms nothing; `c` types into the composer.
+        // New (AC12, migrated by 21-3 AC11): Ctrl+K kills the line tail and arms
+        // nothing; `c` types into the composer.
         let mut state = make_state();
         state.focus = FocusState::Input;
+        state.input_buffer = "one".to_owned();
+        state.cursor_position = 1;
         let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);
         handle_input(&mut state, &ctrl_k);
+        assert_eq!(state.input_buffer, "o");
         let action = handle_char(&mut state, 'c');
         assert_eq!(action, InputAction::Consumed);
-        assert!(state.input_buffer.contains('c'), "c types as text");
+        assert_eq!(state.input_buffer, "oc", "c types as text");
     }
 
     #[test]
@@ -5810,7 +5853,7 @@ mod tests {
     #[test]
     fn story21_1_ctrl_k_then_z_is_literal_text_no_leader_is_pending() {
         // Old (16.5.5): Ctrl+K armed a chord leader and `z` was swallowed as an
-        // invalid feedback key. New (AC12): Ctrl+K is unbound until 21-3.
+        // invalid feedback key. New (AC12): Ctrl+K is a kill-line key, never a chord.
         let mut state = make_state();
         state.focus = FocusState::Input;
         let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);

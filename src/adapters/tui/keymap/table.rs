@@ -35,6 +35,8 @@ pub enum LeaderCmd {
     ClearToasts,
     Decisions,
     Send,
+    /// `Ctrl+Q` while the menu is open: close it, then ask to quit (guarded).
+    QuitRequest,
     Cancel,
 }
 
@@ -118,6 +120,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Enter], LeaderCmd::Send, "Send").help(C, "Ctrl+X, Enter", "Send the composer from any terminal (multi-line safe send)"),
     l(&[Key::Esc], LeaderCmd::Cancel, "Cancel").does("Close the menu without doing anything"),
     l(&[Key::Ctrl('c')], LeaderCmd::Cancel, "").does("Close the menu without doing anything"),
+    l(&[Key::Ctrl('q')], LeaderCmd::QuitRequest, "").does("Close the menu, then ask to quit (guarded by the quit confirmation), like Ctrl+Q anywhere"),
 ];
 
 /// What an 80x24 local screen shows after a sidebar-panel chord (the remedy toast).
@@ -138,8 +141,11 @@ pub fn all_rows() -> Vec<Binding> {
         GLOBAL,
         LEADER,
         super::table_input::ROWS,
+        super::table_input::FIELD,
         super::table_chat::ROWS,
         super::table_nav::ROWS,
+        super::table_panels::ROWS,
+        super::table_overlay::ROWS,
         super::table_permission::ROWS,
     ]
     .concat()

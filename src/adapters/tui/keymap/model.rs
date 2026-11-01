@@ -10,8 +10,10 @@ use crate::domain::models::visual::DensityMode;
 
 use super::table::{GlobalCmd, LeaderCmd};
 use super::table_chat::ChatCmd;
-use super::table_input::InputCmd;
+use super::table_input::{FieldCmd, InputCmd};
 use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use super::table_overlay::OverlayCmd;
+use super::table_panels::PanelCmd;
 use super::table_permission::PermissionCmd;
 
 // ── keys ──────────────────────────────────────────────────────────────────
@@ -41,6 +43,9 @@ pub enum Key {
     PageUp,
     PageDown,
     F(u8),
+    /// A character held with more than one modifier (Ctrl+Shift, Alt+Shift, Ctrl+Alt):
+    /// bits 1 = Ctrl, 2 = Alt, 4 = Shift. Never equal to the plain Ctrl/Alt key (AC20).
+    Combo(char, u8),
     /// Any key the registry has no name for (Insert, media keys, …).
     Other,
 }
@@ -152,6 +157,13 @@ impl Key {
             Key::PageUp => "PgUp".into(),
             Key::PageDown => "PgDn".into(),
             Key::F(n) => format!("F{n}"),
+            Key::Combo(c, mask) => {
+                let names = [(1, "Ctrl"), (2, "Alt"), (4, "Shift")];
+                let held = names.iter().filter(|(bit, _)| mask & bit != 0);
+                let mut label: String = held.map(|(_, name)| format!("{name}+")).collect();
+                label.push(c.to_ascii_uppercase());
+                label
+            }
             Key::Other => "this key".into(),
         }
     }
@@ -226,6 +238,7 @@ impl Key {
             DomainKey::UnboundCtrl(c) => Key::Ctrl(c.to_ascii_lowercase()),
             DomainKey::UnboundAlt(c) => Key::Alt(c.to_ascii_lowercase()),
             DomainKey::UnboundFn(n) => Key::F(n),
+            DomainKey::UnboundCombo(c, mask) => Key::Combo(c.to_ascii_lowercase(), mask),
         }
     }
 
@@ -237,6 +250,10 @@ impl Key {
         let alt = m.contains(KeyModifiers::ALT);
         let shift = m.contains(KeyModifiers::SHIFT);
         match key.code {
+            KeyCode::Char(c) if (ctrl && (alt || shift)) || (alt && shift) => {
+                let mask = u8::from(ctrl) | (u8::from(alt) << 1) | (u8::from(shift) << 2);
+                Key::Combo(c.to_ascii_lowercase(), mask)
+            }
             KeyCode::Char(c) if ctrl => Key::Ctrl(c.to_ascii_lowercase()),
             KeyCode::Char(c) if alt => Key::Alt(c.to_ascii_lowercase()),
             KeyCode::Char(c) if shift => Key::Char(c.to_ascii_uppercase()),
@@ -289,6 +306,11 @@ impl Key {
             Key::PageDown,
         ]);
         keys.extend((1..=12).map(Key::F));
+        // Combined-modifier forms of the keys with the most dangerous plain meaning.
+        keys.extend(
+            [('c', 5), ('x', 5), ('q', 5), ('p', 5), ('m', 6), ('a', 3)]
+                .map(|(c, m)| Key::Combo(c, m)),
+        );
         keys
     }
 }
@@ -329,10 +351,40 @@ pub enum Context {
     SearchNavigating,
     BookmarkList,
     Permission,
+    /// Rows shared by every append-only text field (A4): `Ctrl+W/U/H` act,
+    /// `Ctrl+A/E/K` are `(n/a)`. Parent of those fields' contexts.
+    FieldEdit,
+    /// The task-panel drill-down (focus Chat): its own keys plus only the
+    /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
+    ChatDrill,
+    /// Chat while a retained wave exists (no drill-down, no reorder).
+    ChatWave,
+    /// Chat while a task reorder is active.
+    ChatReorder,
+    SidebarTasks,
+    TasksReorder,
+    SidebarAgents,
+    SidebarA2aLog,
+    SidebarRoom,
+    SidebarArtifacts,
+    WaveOverlay,
+    Help,
+    CommandPalette,
+    ModelSelector,
+    ProfileSwitcher,
+    UsagePanel,
+    CrossSearch,
+    ReverseSearch,
+    Autocomplete,
+    NotificationLog,
+    QuitConfirm,
+    DecisionPane,
+    RecipientSurface,
+    Login,
 }
 
 impl Context {
-    pub const ALL: [Context; 11] = [
+    pub const ALL: [Context; 35] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -344,6 +396,30 @@ impl Context {
         Context::SearchNavigating,
         Context::BookmarkList,
         Context::Permission,
+        Context::FieldEdit,
+        Context::ChatDrill,
+        Context::ChatWave,
+        Context::ChatReorder,
+        Context::SidebarTasks,
+        Context::TasksReorder,
+        Context::SidebarAgents,
+        Context::SidebarA2aLog,
+        Context::SidebarRoom,
+        Context::SidebarArtifacts,
+        Context::WaveOverlay,
+        Context::Help,
+        Context::CommandPalette,
+        Context::ModelSelector,
+        Context::ProfileSwitcher,
+        Context::UsagePanel,
+        Context::CrossSearch,
+        Context::ReverseSearch,
+        Context::Autocomplete,
+        Context::NotificationLog,
+        Context::QuitConfirm,
+        Context::DecisionPane,
+        Context::RecipientSurface,
+        Context::Login,
     ];
 
     /// Name painted in the "No binding for Ctrl+X <key> in <context>" toast and docs.
@@ -360,6 +436,30 @@ impl Context {
             Context::SearchNavigating => "Search (navigating)",
             Context::BookmarkList => "Bookmarks",
             Context::Permission => "Permission",
+            Context::FieldEdit => "Append-only text field",
+            Context::ChatDrill => "Task drill-down",
+            Context::ChatWave => "Chat (wave)",
+            Context::ChatReorder => "Chat (reorder)",
+            Context::SidebarTasks => "Tasks",
+            Context::TasksReorder => "Tasks (reorder)",
+            Context::SidebarAgents => "Agents",
+            Context::SidebarA2aLog => "A2A log",
+            Context::SidebarRoom => "Room",
+            Context::SidebarArtifacts => "Artifacts",
+            Context::WaveOverlay => "Wave overlay",
+            Context::Help => "Help",
+            Context::CommandPalette => "Command palette",
+            Context::ModelSelector => "Model selector",
+            Context::ProfileSwitcher => "Profile switcher",
+            Context::UsagePanel => "Usage",
+            Context::CrossSearch => "Cross-search",
+            Context::ReverseSearch => "Reverse search",
+            Context::Autocomplete => "Autocomplete",
+            Context::NotificationLog => "Notification log",
+            Context::QuitConfirm => "Quit confirmation",
+            Context::DecisionPane => "Decisions",
+            Context::RecipientSurface => "Recipient surface",
+            Context::Login => "Login",
         }
     }
 
@@ -371,19 +471,50 @@ impl Context {
             Context::Global
             | Context::Leader
             | Context::Permission
-            | Context::SearchTyping
-            | Context::SearchNavigating
-            | Context::BookmarkList => &[],
+            | Context::BookmarkList
+            | Context::FieldEdit
+            | Context::WaveOverlay
+            | Context::Help
+            | Context::ModelSelector
+            | Context::ProfileSwitcher
+            | Context::UsagePanel
+            | Context::Autocomplete
+            | Context::NotificationLog
+            | Context::QuitConfirm
+            | Context::DecisionPane
+            | Context::RecipientSurface
+            | Context::Login => &[],
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
-            Context::SidebarHistory => &[Context::Sidebar],
+            Context::SidebarHistory
+            | Context::SidebarAgents
+            | Context::SidebarA2aLog
+            | Context::SidebarRoom
+            | Context::SidebarArtifacts
+            | Context::SidebarTasks => &[Context::Sidebar],
+            Context::TasksReorder => &[Context::SidebarTasks],
+            // Only the non-character keys of Chat are inherited (see `resolve_in`).
+            Context::ChatDrill | Context::ChatWave | Context::ChatReorder => &[Context::Chat],
+            // Fields that edit append-only text inherit the shared edit rows.
+            Context::CommandPalette
+            | Context::SearchTyping
+            | Context::SearchNavigating
+            | Context::CrossSearch
+            | Context::ReverseSearch => &[Context::FieldEdit],
         }
     }
 
-    /// Leader follow-up letters are case-insensitive; every other context is
-    /// case-sensitive (A2).
+    /// Contexts whose arms lower-case the key (the Leader follow-up letters, the
+    /// decision pane, the model selector's `H J K L Y N`, the profile preview's
+    /// `Y N`); every other context is case-sensitive (A2).
     pub const fn folds_case(self) -> bool {
-        matches!(self, Context::Leader)
+        matches!(
+            self,
+            Context::Leader
+                | Context::DecisionPane
+                | Context::ModelSelector
+                | Context::ProfileSwitcher
+        )
     }
 }
 
@@ -485,6 +616,9 @@ pub enum CommandId {
     Search(SearchCmd),
     Bookmark(BookmarkCmd),
     Permission(PermissionCmd),
+    Field(FieldCmd),
+    Panel(PanelCmd),
+    Overlay(OverlayCmd),
 }
 
 macro_rules! command_from {
@@ -505,6 +639,9 @@ command_from!(
     Search(SearchCmd),
     Bookmark(BookmarkCmd),
     Permission(PermissionCmd),
+    Field(FieldCmd),
+    Panel(PanelCmd),
+    Overlay(OverlayCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

@@ -206,8 +206,8 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
         }
         InputAction::FeedbackInputBackspace => {
             if let Some(fi) = state.pending_feedback_input.as_mut() {
-                fi.buffer.pop();
-                fi.cursor = fi.cursor.saturating_sub(1);
+                crate::adapters::tui::text_geometry::pop_grapheme(&mut fi.buffer);
+                fi.cursor = fi.buffer.chars().count();
                 state.needs_redraw = true;
             }
         }

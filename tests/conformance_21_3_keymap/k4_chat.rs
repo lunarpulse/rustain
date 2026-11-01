@@ -13,17 +13,13 @@
 //! consolidation, forget, spawn gate, team proposal, recipient surface) are
 //! Permission/3-C territory and are not exercised here.
 
-use std::sync::Arc;
-
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::table_chat::ChatCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
 use rustain::adapters::tui::state::{Direction, TuiState};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
-use rustain::domain::models::orchestration::{DrillId, ForkJoinOutcome, SynthesisView};
+use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::OverlayType;
-use rustain::domain::models::{AgentId, FocusState};
-use rustain::domain::ports::wave_handle::{DrillBody, WaveHandle, WaveSnapshot};
 
 use super::support::{assert_global_effect, decode, fresh, global_owned, is_inert, press};
 
@@ -53,49 +49,6 @@ fn drill_state(detail_scroll_offset: u16) -> TuiState {
     let mut state = chat_state();
     state.task_panel_state.drill_down_task = Some(3);
     state.task_panel_state.detail_scroll_offset = detail_scroll_offset;
-    state
-}
-
-#[derive(Debug)]
-struct StubWave;
-
-impl WaveHandle for StubWave {
-    fn snapshot(&self) -> WaveSnapshot {
-        WaveSnapshot {
-            spoke_count: 0,
-            completed: 0,
-            honest_empty: Some(true),
-            cancelled: false,
-            outcome: ForkJoinOutcome {
-                spokes: Vec::new(),
-                synthesis: SynthesisView::default(),
-            },
-            resolve_count: 0,
-            slots: Vec::new(),
-            rerun_counts: Vec::new(),
-        }
-    }
-    fn cancel(&self) {}
-    fn drill(&self, _slot: usize) -> Option<DrillBody> {
-        None
-    }
-    fn drill_id(&self, _slot: usize) -> Option<DrillId> {
-        None
-    }
-    fn slots(&self) -> Vec<AgentId> {
-        Vec::new()
-    }
-    fn rerun_count_for_slot(&self, _slot: usize) -> u8 {
-        0
-    }
-    fn resolve_count(&self) -> usize {
-        0
-    }
-}
-
-fn wave_state() -> TuiState {
-    let mut state = chat_state();
-    state.wave_run = Some(Arc::new(StubWave));
     state
 }
 
@@ -415,40 +368,6 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
             sequence(keys, b'[', InputAction::JumpProseAnchor(Direction::Up))
         }
         ChatCmd::LatestProseAnchor => sequence(keys, b']', InputAction::JumpToLatestProseAnchor),
-        ChatCmd::WaveDiverge => {
-            let mut state = wave_state();
-            assert_eq!(
-                one(&mut state, Key::Char('d')),
-                InputAction::OpenDivergeView
-            );
-            // Without a retained wave the same key does nothing (the arm is conditional).
-            let mut none = chat_state();
-            assert!(is_inert(&one(&mut none, Key::Char('d'))));
-        }
-        ChatCmd::WaveDivergeClose => {
-            let mut state = wave_state();
-            assert_eq!(
-                one(&mut state, Key::Char('s')),
-                InputAction::CloseDivergeView
-            );
-            let mut none = chat_state();
-            assert!(is_inert(&one(&mut none, Key::Char('s'))));
-        }
-        ChatCmd::WaveOverlay => {
-            let mut state = wave_state();
-            state.wave_overlay_selected = 3;
-            assert_eq!(
-                one(&mut state, Key::Char('r')),
-                InputAction::OpenWaveOverlay
-            );
-            assert_eq!(state.focus, FocusState::Overlay(OverlayType::WaveOverlay));
-            assert_eq!(
-                state.wave_overlay_selected, 0,
-                "the overlay opens on slot 0"
-            );
-            let mut none = chat_state();
-            assert!(is_inert(&one(&mut none, Key::Char('r'))));
-        }
     }
 }
 
@@ -476,7 +395,7 @@ fn every_row_resolves_to_its_command_by_value() {
     let rows: Vec<&'static Binding> =
         keymap::resolve::rows_of(Context::Chat, Host::Local).collect();
     assert!(
-        rows.len() > 50,
+        rows.len() > 45,
         "the Chat table is complete, got {}",
         rows.len()
     );

@@ -60,6 +60,12 @@ pub fn resolve(context: Context, host: Host, seq: &[Key]) -> Resolved {
 pub fn resolve_in(rows: &'static [Binding], context: Context, host: Host, seq: &[Key]) -> Resolved {
     let chain = chain(context);
     let in_text_entry = chain.contains(&Context::TextEntry);
+    // The drill-down and the task reorder are exclusive: the character keys of the
+    // contexts below them (`i`, `q`, `z`, `?`, `x`, `p`, …) never reach them; the
+    // non-character keys (Ctrl+P, Tab, Up, …) still do.
+    let char_exclusive = chain
+        .iter()
+        .any(|c| matches!(c, Context::ChatDrill | Context::TasksReorder));
     let mut pending = false;
     for ctx in chain {
         let inherited_through_text_entry =
@@ -71,6 +77,9 @@ pub fn resolve_in(rows: &'static [Binding], context: Context, host: Host, seq: &
             .filter(|r| r.context == ctx && r.hosts.includes(host))
         {
             if inherited_through_text_entry && !row.text_entry_ok {
+                continue;
+            }
+            if char_exclusive && ctx != context && matches!(row.keys.first(), Some(Key::Char(_))) {
                 continue;
             }
             let keys: Vec<Key> = row.keys.iter().map(|k| k.normalized(fold)).collect();

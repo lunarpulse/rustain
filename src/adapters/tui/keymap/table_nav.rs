@@ -128,8 +128,10 @@ pub const ROWS: &[Binding] = &[
     n(&[Key::Char('N')], SearchCmd::PrevMatch, "").local().does("Jump to the previous match"),
     t(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().help(SB, "Ctrl+U", "Clear search query"),
     t(&[Key::Esc], SearchCmd::Close, "").local().help(SB, "Esc (search)", "Close search, preserve scroll"),
+    t(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and keep the scroll position (back one frame)"),
     t(&[Key::Backspace], SearchCmd::DeleteBack, "").local().does("Delete the last query character and search again"),
     n(&[Key::Esc], SearchCmd::Close, "").local().does("Close search and keep the scroll position"),
+    n(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and keep the scroll position (back one frame)"),
     n(&[Key::Backspace], SearchCmd::DeleteBackToTyping, "").local().does("Return to typing and delete the last query character"),
     n(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().does("Clear the query and return to typing"),
     // ── BookmarkList ──
@@ -143,6 +145,7 @@ pub const ROWS: &[Binding] = &[
     b(&[Key::Up], BookmarkCmd::SelectPrev, "").local().does("Select the previous bookmark"),
     b(&[Key::Enter], BookmarkCmd::Jump, "").local().does("Jump to the selected bookmark"),
     b(&[Key::Esc], BookmarkCmd::Close, "").local().does("Close the bookmark list"),
+    b(&[Key::Ctrl('c')], BookmarkCmd::Close, "").local().does("Close the bookmark list (back one frame)"),
     // ── Sidebar (every panel) ──
     s(&[Key::Char('j')], SidebarCmd::SelectNext, "").local().does("Select the next entry"),
     s(&[Key::Char('k')], SidebarCmd::SelectPrev, "").local().does("Select the previous entry"),
@@ -154,8 +157,8 @@ pub const ROWS: &[Binding] = &[
     s(&[Key::Ctrl('p')], SidebarCmd::OpenPalette, "").local().does("Open the command palette"),
     s(&[Key::Ctrl('c')], SidebarCmd::CancelOrQuit, "").local().does("Stop active work; when idle, ask to quit"),
     s(&[Key::Alt('v')], SidebarCmd::PasteClipboard, "").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
+    s(&[Key::Enter], SidebarCmd::OpenConversation, "").local().does("Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts, the A2A log and Room have their own Enter"),
     // ── SidebarHistory ──
-    h(&[Key::Enter], SidebarCmd::OpenConversation, "").local().does("Open the selected conversation"),
     h(&[Key::Char('d')], SidebarCmd::DeleteConversation, "").local().does("Delete the selected conversation"),
     h(&[Key::Char('/')], SidebarCmd::OpenCrossSearch, "").local().help(SB, "/ (in sidebar)", "Cross-conversation search"),
 ];

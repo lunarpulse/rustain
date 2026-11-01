@@ -14,7 +14,10 @@ pub mod table;
 pub mod table_chat;
 pub mod table_input;
 pub mod table_nav;
+pub mod table_overlay;
+pub mod table_panels;
 pub mod table_permission;
+pub mod text_edit;
 
 pub use model::{
     AvailCtx, Availability, Binding, CommandId, Context, Help, HelpCat, Host, Hosts, Key, Reach,

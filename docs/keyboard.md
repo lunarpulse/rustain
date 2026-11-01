@@ -38,6 +38,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, Enter` | Send the composer from any terminal (multi-line safe send) | local, attached | portable |  |
 | `Ctrl+X, Esc` | Close the menu without doing anything | local, attached | portable |  |
 | `Ctrl+X, Ctrl+C` | Close the menu without doing anything | local, attached | portable |  |
+| `Ctrl+X, Ctrl+Q` | Close the menu, then ask to quit (guarded by the quit confirmation), like Ctrl+Q anywhere | local, attached | portable |  |
 
 ## Input
 
@@ -48,7 +49,15 @@ Also inherits: Text field.
 | `Enter` | Send message | local, attached | portable |  |
 | `Shift+Enter` | New line (multi-line mode) | local, attached | extended keyboard | portable alternative: Enter in multi-line mode (/ml) |
 | `Alt+Enter` | Insert newline (alternative when Shift+Enter is intercepted) | local, attached | Alt (meta) | portable alternative: Enter in multi-line mode (/ml) |
-| `Ctrl+E` | Move to the end of the current line | local, attached | portable |  |
+| `Ctrl+E` | Move to the end of the current line | local | portable |  |
+| `Ctrl+A` | Move to the start of the current line | local | portable |  |
+| `Ctrl+W` | Delete the word before the cursor | local, attached | portable |  |
+| `Ctrl+U` | Delete to the start of the current line | local, attached | portable |  |
+| `Ctrl+K` | Delete to the end of the current line | local | portable |  |
+| `Ctrl+H` | Delete the character before the cursor, like Backspace (legacy terminals send it for Backspace) | local, attached | portable |  |
+| `Ctrl+A` | Move to the start of the line: the attached composer has no cursor, so nothing moves | attached | portable | no cursor in this field |
+| `Ctrl+E` | Move to the end of the line: the attached composer has no cursor, so nothing moves | attached | portable | no cursor in this field |
+| `Ctrl+K` | Delete to the end of the line: the attached composer has no cursor, so nothing is deleted | attached | portable | no cursor in this field |
 | `Alt+M` | Toggle multi-line mode | local, attached | Alt (meta) | portable alternative: /ml |
 | `Ctrl+Enter` | Send (where the terminal distinguishes it from Enter) | local, attached | extended keyboard | portable alternative: Ctrl+X Enter |
 | `Esc` | Close popup / return to Chat — never sends; unsent text is kept | local, attached | portable |  |
@@ -129,9 +138,6 @@ Also inherits: Global.
 | `R` | Rewind the conversation to the focused message | local | portable |  |
 | `m` | Toggle bookmark on current message | local | portable |  |
 | `'` | Open bookmark list panel | local | portable |  |
-| `d` | Open the divergence view of a retained fan-out wave | local | portable |  |
-| `s` | Close the divergence view of a retained fan-out wave | local | portable |  |
-| `r` | Open the retained fan-out wave overlay | local | portable |  |
 
 ## Sidebar
 
@@ -149,6 +155,7 @@ Also inherits: Global.
 | `Ctrl+P` | Open the command palette | local | portable |  |
 | `Ctrl+C` | Stop active work; when idle, ask to quit | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
+| `Enter` | Open the selected entry (the event loop decides): a conversation in History, the inspector in Agents; Tasks, Artifacts, the A2A log and Room have their own Enter | local | portable |  |
 
 ## History
 
@@ -156,26 +163,31 @@ Also inherits: Sidebar.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Open the selected conversation | local | portable |  |
 | `d` | Delete the selected conversation | local | portable |  |
 | `/` | Cross-conversation search | local | portable |  |
 
 ## Search (typing)
+
+Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `Enter` | Commit query → enable n/N navigation | local | portable |  |
 | `Ctrl+U` | Clear search query | local | portable |  |
 | `Esc` | Close search, preserve scroll | local | portable |  |
+| `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
 | `Backspace` | Delete the last query character and search again | local | portable |  |
 
 ## Search (navigating)
+
+Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `n` | Next / previous match (Navigating mode) | local | portable |  |
 | `N` | Jump to the previous match | local | portable |  |
 | `Esc` | Close search and keep the scroll position | local | portable |  |
+| `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
 | `Backspace` | Return to typing and delete the last query character | local | portable |  |
 | `Ctrl+U` | Clear the query and return to typing | local | portable |  |
 
@@ -193,6 +205,7 @@ Also inherits: Sidebar.
 | `Up` | Select the previous bookmark | local | portable |  |
 | `Enter` | Jump to the selected bookmark | local | portable |  |
 | `Esc` | Close the bookmark list | local | portable |  |
+| `Ctrl+C` | Close the bookmark list (back one frame) | local | portable |  |
 
 ## Permission
 
@@ -213,3 +226,327 @@ Also inherits: Sidebar.
 | `g` | Scroll the chat to the top | local | portable |  |
 | `Ctrl+Q` | Ask to quit | attached | portable |  |
 | `Ctrl+C` | Decline the card (close the review first when it is open) | attached | portable |  |
+
+## Append-only text field
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Ctrl+W` | Delete the last word of the field | local, attached | portable |  |
+| `Ctrl+U` | Clear the field | local, attached | portable |  |
+| `Ctrl+H` | Delete the last character of the field, like Backspace | local, attached | portable |  |
+| `Ctrl+A` | Move to the start of the field: it has no cursor, so nothing moves | local, attached | portable | no cursor in this field |
+| `Ctrl+E` | Move to the end of the field: it has no cursor, so nothing moves | local, attached | portable | no cursor in this field |
+| `Ctrl+K` | Delete to the end of the field: it has no cursor, so nothing is deleted | local, attached | portable | no cursor in this field |
+
+## Task drill-down
+
+Also inherits: Chat.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `c` | Copy the drilled task's result | local | portable |  |
+| `r` | Retry the drilled task (the event loop checks its status) | local | portable |  |
+| `s` | Skip the drilled task (the event loop checks its status) | local | portable |  |
+| `e` | Edit the drilled task (the event loop checks its status) | local | portable |  |
+| `p` | Pause the drilled task (the event loop checks its status) | local | portable |  |
+| `j` | Scroll the task result down one line | local | portable |  |
+| `Down` | Scroll the task result down one line | local | portable |  |
+| `k` | Scroll the task result up one line | local | portable |  |
+| `Up` | Scroll the task result up one line | local | portable |  |
+| `g` | Scroll the task result to the top | local | portable |  |
+| `G` | Scroll the task result to the bottom | local | portable |  |
+| `Enter` | Toggle the task result between half and full height | local | portable |  |
+| `Esc` | Leave the drill-down and return to the Tasks panel | local | portable |  |
+
+## Chat (wave)
+
+Also inherits: Chat.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Close the divergence view, else dismiss the retained wave | local | portable |  |
+| `Enter` | Open the retained wave overlay | local | portable |  |
+| `d` | Open the divergence view of the retained wave | local | portable |  |
+| `s` | Close the divergence view of the retained wave | local | portable |  |
+| `r` | Open the retained wave overlay | local | portable |  |
+
+## Chat (reorder)
+
+Also inherits: Chat.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Cancel the task reorder (the event loop restores the original order) | local | portable |  |
+
+## Tasks
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Up` | Select the previous task | local | portable |  |
+| `Down` | Select the next task | local | portable |  |
+| `j` | Select the next task | local | portable |  |
+| `k` | Select the previous task | local | portable |  |
+| `x` | Cancel the whole plan (asks to confirm) | local | portable |  |
+| `p` | Pause the selected task | local | portable |  |
+| `s` | Skip the selected task | local | portable |  |
+| `Enter` | Open the selected task's result (the drill-down) | local | portable |  |
+
+## Tasks (reorder)
+
+Also inherits: Tasks.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `j` | Move the selected task down | local | portable |  |
+| `k` | Move the selected task up | local | portable |  |
+| `Enter` | Commit the new task order | local | portable |  |
+
+## Agents
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `p` | Pause or resume the selected agent | local | portable |  |
+
+## A2A log
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `/` | Search the log (typing filters; Enter keeps the filter) | local | portable |  |
+| `Backspace` | Delete the last search character | local | portable |  |
+| `Enter` | Open or close the selected row's details; commit the search while typing | local | portable |  |
+| `Esc` | Clear the search or details; otherwise return to the chat | local | portable |  |
+| `G` | Jump to the newest entry | local | portable |  |
+| `e` | Export the log | local | portable |  |
+| `j` | Select the next log row | local | portable |  |
+| `k` | Select the previous log row | local | portable |  |
+
+## Room
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Nothing: the durable Room is a read-only replay | local | portable |  |
+
+## Artifacts
+
+Also inherits: Sidebar.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Show the selected artifact (same as /artifact show) | local | portable |  |
+
+## Wave overlay
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `j` | Select the next spoke | local | portable |  |
+| `Down` | Select the next spoke | local | portable |  |
+| `k` | Select the previous spoke | local | portable |  |
+| `Up` | Select the previous spoke | local | portable |  |
+| `Enter` | Open the selected spoke | local | portable |  |
+| `Esc` | Close the wave overlay | local | portable |  |
+| `Ctrl+C` | Close the wave overlay (back one frame) | local | portable |  |
+| `r` | Re-run the selected spoke | local | portable |  |
+| `d` | Open the divergence view | local | portable |  |
+| `s` | Close the divergence view | local | portable |  |
+
+## Help
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `j` | Scroll the help down one line | local, attached | portable |  |
+| `Down` | Scroll the help down one line | local, attached | portable |  |
+| `k` | Scroll the help up one line | local, attached | portable |  |
+| `Up` | Scroll the help up one line | local, attached | portable |  |
+| `G` | Scroll the help to the bottom | local, attached | portable |  |
+| `g` | Scroll the help to the top | local, attached | portable |  |
+| `?` | Close the help | local, attached | portable |  |
+| `Esc` | Close the help | local, attached | portable |  |
+| `Ctrl+C` | Close the help (back one frame); it never stops a turn or quits | local, attached | portable |  |
+| `Ctrl+Q` | Close the help, then ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+
+## Command palette
+
+Also inherits: Append-only text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Up` | Select the previous entry | local, attached | portable |  |
+| `Down` | Select the next entry | local, attached | portable |  |
+| `Enter` | Run the selected entry | local, attached | portable |  |
+| `Esc` | Close the palette | local, attached | portable |  |
+| `Ctrl+C` | Close the palette (back one frame) | local, attached | portable |  |
+| `Backspace` | Delete the last filter character | local, attached | portable |  |
+| `Ctrl+Q` | Close the palette, then ask to quit (the local palette swallows Ctrl+Q) | attached | portable |  |
+
+## Model selector
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Left` | Select the previous provider column | local | portable |  |
+| `h` | Select the previous provider column | local | portable |  |
+| `Right` | Select the next provider column | local | portable |  |
+| `l` | Select the next provider column | local | portable |  |
+| `Up` | Select the previous model | local | portable |  |
+| `k` | Select the previous model (not while searching) | local | portable |  |
+| `Down` | Select the next model | local | portable |  |
+| `j` | Select the next model (not while searching) | local | portable |  |
+| `Enter` | Switch to the selected model; on a locked provider, start its sign-in | local | portable |  |
+| `Esc` | Leave the search, else close the selector | local | portable |  |
+| `Ctrl+C` | Leave the search, else close the selector (back one frame) | local | portable |  |
+| `Backspace` | Delete the last search character | local | portable |  |
+| `/` | Search the models | local | portable |  |
+| `y` | Compact the conversation, then switch (only while the context warning is shown) | local | portable |  |
+| `n` | Dismiss the context warning (only while it is shown) | local | portable |  |
+
+## Profile switcher
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Up` | Select the previous profile | local | portable |  |
+| `Down` | Select the next profile | local | portable |  |
+| `Enter` | Preview the selected profile; in the preview, switch to it | local | portable |  |
+| `Esc` | Leave the preview, else close the switcher | local | portable |  |
+| `Ctrl+C` | Leave the preview, else close the switcher (back one frame) | local | portable |  |
+| `y` | Switch to the previewed profile (only in the preview) | local | portable |  |
+| `n` | Leave the preview (only in the preview) | local | portable |  |
+
+## Usage
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Close the usage panel | local | portable |  |
+| `Ctrl+C` | Close the usage panel (back one frame) | local | portable |  |
+| `Up` | Select the previous section | local | portable |  |
+| `Down` | Select the next section | local | portable |  |
+
+## Cross-search
+
+Also inherits: Append-only text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Close the cross-conversation search | local | portable |  |
+| `Ctrl+C` | Close the cross-conversation search (back one frame) | local | portable |  |
+| `Enter` | Open the selected result | local | portable |  |
+| `Backspace` | Delete the last query character and search again | local | portable |  |
+| `Up` | Select the previous result | local | portable |  |
+| `k` | Select the previous result (k is never typed into the query) | local | portable |  |
+| `Down` | Select the next result | local | portable |  |
+| `j` | Select the next result (j is never typed into the query) | local | portable |  |
+
+## Reverse search
+
+Also inherits: Append-only text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Put the selected history entry in the composer | local | portable |  |
+| `Esc` | Close the history search | local | portable |  |
+| `Ctrl+C` | Close the history search (back one frame) | local | portable |  |
+| `Up` | Select the next older match | local | portable |  |
+| `Ctrl+R` | Select the next older match | local | portable |  |
+| `Down` | Select the next newer match | local | portable |  |
+| `Backspace` | Delete the last query character | local | portable |  |
+| `Ctrl+P` | Close the history search and open the command palette | local | portable |  |
+| `Ctrl+X` | Close the history search and open the Ctrl+X menu | local | portable |  |
+
+## Autocomplete
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Up` | Select the previous suggestion | local, attached | portable |  |
+| `Down` | Select the next suggestion | local, attached | portable |  |
+| `Tab` | Accept the selected suggestion | local, attached | portable |  |
+| `Enter` | Accept the selected suggestion | local, attached | portable |  |
+| `Esc` | Close the popup and restore the composer | local, attached | portable |  |
+| `Ctrl+C` | Close the popup and restore the composer (back one frame) | local, attached | portable |  |
+| `Backspace` | Delete the last filter character; at the trigger, close the popup | local, attached | portable |  |
+| `Ctrl+H` | Delete the last filter character, like Backspace | local | portable |  |
+| `Ctrl+Q` | Close the popup, then ask to quit (guarded by the quit confirmation) | local | portable |  |
+
+## Notification log
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Close the notification log | local, attached | portable |  |
+| `Ctrl+C` | Close the notification log (back one frame) | local, attached | portable |  |
+| `j` | Select the next record; scroll the details when open | local, attached | portable |  |
+| `Down` | Select the next record; scroll the details when open | local, attached | portable |  |
+| `k` | Select the previous record; scroll the details when open | local, attached | portable |  |
+| `Up` | Select the previous record; scroll the details when open | local, attached | portable |  |
+| `Enter` | Open or close the selected record's details | local, attached | portable |  |
+| `c` | Copy the selected record's message | local, attached | portable |  |
+| `x` | Dismiss the selected record | local, attached | portable |  |
+| `r` | Retry the selected record's action (when it has one) | local | portable |  |
+| `K` | Compact the conversation (context warnings) | local | portable |  |
+| `n` | Start fresh with a summary (context warnings) | local | portable |  |
+| `Ctrl+Q` | Ask to quit (the local log swallows Ctrl+Q) | attached | portable |  |
+
+## Quit confirmation
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Quit now | local, attached | portable |  |
+| `Y` | Quit now | local, attached | portable |  |
+| `n` | Stay | local, attached | portable |  |
+| `N` | Stay | local, attached | portable |  |
+| `Esc` | Stay | local, attached | portable |  |
+| `Ctrl+C` | Stay (back one frame) | local, attached | portable |  |
+| `Enter` | Stay | local, attached | portable |  |
+
+## Decisions
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Ctrl+C` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
+| `Enter` | Continue (a recovery decision) | local | portable |  |
+| `Esc` | Decide the safe default, or defer a deferrable decision | local | portable |  |
+| `y` | Accept, continue or confirm (by the decision's kind) | local | portable |  |
+| `n` | Decline, cancel or start fresh (by the decision's kind) | local | portable |  |
+| `s` | Switch to a cheaper model (a budget decision) | local | portable |  |
+| `p` | Pause (a budget decision) | local | portable |  |
+| `k` | Compact the conversation (a context warning) | local | portable |  |
+
+## Recipient surface
+
+A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit, use as context) depend on the received item and are listed in the view's own footer; they are not rows here.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `p` | Show the earlier part of the thread | local, attached | portable |  |
+| `l` | Show the later part of the thread | local, attached | portable |  |
+| `Esc` | Close the recipient view | local, attached | portable |  |
+| `Ctrl+C` | Close the recipient view (back one frame) | local, attached | portable |  |
+| `PgUp` | Scroll the recipient view up one page | local, attached | portable |  |
+| `PgDn` | Scroll the recipient view down one page | local, attached | portable |  |
+| `Tab` | Switch between the item and the node view | attached | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+
+## Login
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Esc` | Clear the search; go back a step; close the overlay | local | portable |  |
+| `Ctrl+C` | Clear the search; go back a step; close the overlay (back one frame) | local | portable |  |
+| `Enter` | Choose the selected provider or method | local | portable |  |
+| `Up` | Select the previous row | local | portable |  |
+| `Down` | Select the next row | local | portable |  |
+| `PgUp` | Move the selection up one page | local | portable |  |
+| `PgDn` | Move the selection down one page | local | portable |  |
+| `Backspace` | Delete the last search or field character | local | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
+| `Alt+C` | Copy the sign-in link or code | local | Alt (meta) | portable alternative: c while no field has focus |
+| `Alt+L` | Copy the launch link | local | Alt (meta) | portable alternative: l while no field has focus |
+| `Alt+U` | Copy the verification link | local | Alt (meta) | portable alternative: u while no field has focus |
+| `c` | Copy the sign-in link or code (only while no field has focus) | local | portable |  |
+| `l` | Copy the launch link (only while no field has focus) | local | portable |  |
+| `u` | Copy the verification link (only while no field has focus) | local | portable |  |

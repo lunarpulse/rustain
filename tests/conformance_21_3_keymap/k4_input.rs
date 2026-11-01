@@ -170,6 +170,37 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
             assert_eq!(state.input_buffer, "ab");
             assert_eq!(state.cursor_position, 2);
         }
+        InputCmd::LineStart => {
+            let mut state = composer("ab\ncd", 4);
+            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
+            assert_eq!(state.cursor_position, 3, "start of the SECOND logical line");
+            assert_eq!(state.input_buffer, "ab\ncd");
+        }
+        InputCmd::DeleteWordBack => {
+            let mut state = composer("ab cd", 5);
+            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
+            assert_eq!(
+                (state.input_buffer.as_str(), state.cursor_position),
+                ("ab ", 3)
+            );
+        }
+        InputCmd::KillToLineStart => {
+            let mut state = composer("ab\ncd", 4);
+            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
+            assert_eq!(
+                (state.input_buffer.as_str(), state.cursor_position),
+                ("ab\nd", 3)
+            );
+        }
+        InputCmd::KillToLineEnd => {
+            let mut state = composer("ab\ncd", 1);
+            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
+            assert_eq!(
+                (state.input_buffer.as_str(), state.cursor_position),
+                ("a\ncd", 1)
+            );
+        }
+        InputCmd::NoCursor => unreachable!("attached-only rows: story21_3_attached_composer_*"),
         InputCmd::DeleteForward => {
             let mut state = composer("abc", 1);
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
@@ -343,15 +374,11 @@ fn keys_without_an_input_row_are_inert_or_plain_typing() {
 }
 
 /// AC12: unbound Ctrl/Alt letters are consumed no-ops in Input, never the bare
-/// letter and never a command (Ctrl+A/W/K/U/H, Ctrl+J, Ctrl+Y, Alt+C/L/U).
+/// letter and never a command (Ctrl+J, Ctrl+Y, Alt+C/L/U). Ctrl+A/W/K/U/H became
+/// the readline rows of AC11 (`witness`, K8).
 #[test]
 fn unbound_ctrl_and_alt_letters_are_inert_in_input() {
     let keys = [
-        Key::Ctrl('a'),
-        Key::Ctrl('w'),
-        Key::Ctrl('k'),
-        Key::Ctrl('u'),
-        Key::Ctrl('h'),
         Key::Ctrl('j'),
         Key::Ctrl('y'),
         Key::Alt('c'),

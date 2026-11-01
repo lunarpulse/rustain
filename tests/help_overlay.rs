@@ -561,18 +561,19 @@ fn test_ctrl_p_blocked_from_help_overlay() {
 }
 
 // ============================================================
-// Integration: Ctrl+C passes through help overlay (P10)
+// Integration: Ctrl+C is back one frame in the help overlay (21-3 AC13, RU-20)
 // ============================================================
 
 #[test]
-fn test_ctrl_c_passes_through_help_overlay() {
+fn test_ctrl_c_closes_help_overlay_and_never_cancels() {
     let mut state = TuiState::new(80, 24);
     state.help_overlay.open(FocusState::Chat);
     state.focus = FocusState::Overlay(OverlayType::Help);
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlC));
-    // Ctrl+C should close overlay and signal cancel
-    assert_eq!(action, InputAction::CancelOrQuit);
+    // Ctrl+C closes the overlay and restores the caller; it no longer stops a turn
+    // or asks to quit (it returned CancelOrQuit before 21-3 AC13).
+    assert_eq!(action, InputAction::Consumed);
     assert!(!state.help_overlay.active);
     assert_eq!(state.focus, FocusState::Chat);
 }

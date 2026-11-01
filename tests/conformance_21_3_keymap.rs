@@ -35,5 +35,23 @@ mod k4_truth;
 #[path = "conformance_21_3_keymap/k6_docs.rs"]
 mod k6_docs;
 
+#[path = "conformance_21_3_keymap/witness.rs"]
+mod witness;
+
+#[path = "conformance_21_3_keymap/k4_panels.rs"]
+mod k4_panels;
+
+#[path = "conformance_21_3_keymap/k4_overlays.rs"]
+mod k4_overlays;
+
+#[path = "conformance_21_3_keymap/k8_text_entry.rs"]
+mod k8_text_entry;
+
+#[path = "conformance_21_3_keymap/k10_modal_back.rs"]
+mod k10_modal_back;
+
+#[path = "conformance_21_3_keymap/k20_review_items.rs"]
+mod k20_review_items;
+
 #[path = "conformance_21_3_keymap/k12_gate.rs"]
 mod k12_gate;

@@ -274,9 +274,15 @@ fn every_command_a_surface_displays_is_a_registered_row() {
         palette.populate_from_command_registry(&CommandRegistry::new());
         for entry in palette.all_entries() {
             if let Some(shortcut) = &entry.shortcut {
-                let found = find(&|r| &r.long_label() == shortcut);
-                assert!(!found.is_empty(), "palette shortcut {shortcut} has no row");
-                displayed.extend(found);
+                // `Ctrl+X, T then x` names two rows: the leader chord and the panel key.
+                for step in shortcut.split(" then ") {
+                    let found = find(&|r| r.long_label() == step);
+                    assert!(
+                        !found.is_empty(),
+                        "palette shortcut {shortcut}: {step} has no row"
+                    );
+                    displayed.extend(found);
+                }
             }
         }
     }

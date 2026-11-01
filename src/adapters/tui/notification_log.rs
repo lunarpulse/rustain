@@ -331,9 +331,9 @@ pub fn handle_raw_key(
     let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT);
     let log_key = match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => LogKey::CtrlC,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => LogKey::CtrlC,
         KeyCode::Char(c) if plain => LogKey::Char(c),
-        KeyCode::Enter if plain => LogKey::Enter,
+        KeyCode::Enter if key.modifiers.is_empty() => LogKey::Enter,
         KeyCode::Up => LogKey::Up,
         KeyCode::Down => LogKey::Down,
         KeyCode::Esc => LogKey::Esc,

@@ -13,8 +13,9 @@ pub(crate) enum PanelOpenOutcome {
 
 /// Quiet reveal (Story 21.3 A6, EV-9): Focus density hides the sidebar column,
 /// so a panel opened there would take focus invisibly. Opening any panel in
-/// Focus density moves to Monitor (user-chosen, so auto-density does not undo it)
-/// without a toast; the status density chip shows the change.
+/// Focus density moves to Monitor without a toast and records the move as the
+/// user's choice (`density_user_overridden`: no auto-density trigger reads it
+/// yet); the status density chip shows the change.
 fn reveal_sidebar(state: &mut TuiState) {
     if state.density_mode == DensityMode::Focus {
         state.density_mode = DensityMode::Monitor;

@@ -46,11 +46,11 @@ fn ctrl_and_alt_letters_never_type_or_command() {
     ));
 }
 
-/// The policy for combined modifiers (AC12, PC-4): any character with Ctrl is an
-/// unbound Ctrl key, else any with Alt an unbound Alt key, whatever else is held
-/// (the dispatch is by value: `Ctrl+Shift+C` is not `Ctrl+C`'s command here).
+/// The policy for combined modifiers (AC20b): a character held with more than one
+/// modifier is its own key (bits 1 Ctrl, 2 Alt, 4 Shift), never the plain Ctrl or
+/// Alt key of the same letter: `Ctrl+Shift+C` is not `Ctrl+C`.
 #[test]
-fn combined_modifier_characters_decode_to_unbound_keys() {
+fn combined_modifier_characters_decode_to_their_own_key() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers as M};
     use rustain::adapters::tui::app::convert_crossterm_event;
     use rustain::domain::models::MouseConfig;
@@ -62,26 +62,21 @@ fn combined_modifier_characters_decode_to_unbound_keys() {
     };
     for c in ['c', 'x', 'q', 'j', 'y', 'm', 'C', 'X'] {
         let lower = c.to_ascii_lowercase();
-        for mods in [
-            M::CONTROL | M::ALT,
-            M::CONTROL | M::SHIFT,
-            M::CONTROL | M::ALT | M::SHIFT,
+        for (mods, bits) in [
+            (M::CONTROL | M::ALT, 3),
+            (M::CONTROL | M::SHIFT, 5),
+            (M::CONTROL | M::ALT | M::SHIFT, 7),
+            (M::ALT | M::SHIFT, 6),
         ] {
             assert!(
                 matches!(
                     decode_mods(c, mods),
-                    Some(DomainInputEvent::SpecialKey(DomainKey::UnboundCtrl(k))) if k == lower
+                    Some(DomainInputEvent::SpecialKey(DomainKey::UnboundCombo(k, b)))
+                        if k == lower && b == bits
                 ),
                 "{mods:?}+{c}"
             );
         }
-        assert!(
-            matches!(
-                decode_mods(c, M::ALT | M::SHIFT),
-                Some(DomainInputEvent::SpecialKey(DomainKey::UnboundAlt(k))) if k == lower
-            ),
-            "ALT|SHIFT+{c}"
-        );
     }
     // Positive controls: the same keys alone keep their own meaning.
     assert!(matches!(

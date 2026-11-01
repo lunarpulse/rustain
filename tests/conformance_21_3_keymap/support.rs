@@ -44,6 +44,18 @@ pub fn key_event(key: Key) -> KeyEvent {
         Key::PageDown => KeyEvent::new(KeyCode::PageDown, none),
         Key::F(n) => KeyEvent::new(KeyCode::F(n), none),
         Key::Other => KeyEvent::new(KeyCode::Insert, none),
+        Key::Combo(c, bits) => {
+            let held = [
+                (1, KeyModifiers::CONTROL),
+                (2, KeyModifiers::ALT),
+                (4, KeyModifiers::SHIFT),
+            ];
+            let mods = held
+                .iter()
+                .filter(|(bit, _)| bits & bit != 0)
+                .fold(KeyModifiers::NONE, |all, (_, m)| all | *m);
+            KeyEvent::new(KeyCode::Char(c), mods)
+        }
     }
 }
 
@@ -92,5 +104,44 @@ pub fn assert_global_effect(state: &mut TuiState, key: Key) {
         Key::Ctrl('x') => assert!(state.which_key.active, "Ctrl+X opens the leader"),
         Key::Ctrl('q') => assert_eq!(action, InputAction::Quit, "Ctrl+Q quits"),
         other => panic!("{other:?} is not a Global key"),
+    }
+}
+
+/// A retained fan-out wave of `.0` spokes, for the wave witnesses.
+#[derive(Debug)]
+pub struct StubWave(pub usize);
+
+impl rustain::domain::ports::wave_handle::WaveHandle for StubWave {
+    fn snapshot(&self) -> rustain::domain::ports::wave_handle::WaveSnapshot {
+        use rustain::domain::models::orchestration::{ForkJoinOutcome, SynthesisView};
+        rustain::domain::ports::wave_handle::WaveSnapshot {
+            spoke_count: self.0,
+            completed: 0,
+            honest_empty: Some(self.0 == 0),
+            cancelled: false,
+            outcome: ForkJoinOutcome {
+                spokes: Vec::new(),
+                synthesis: SynthesisView::default(),
+            },
+            resolve_count: 0,
+            slots: Vec::new(),
+            rerun_counts: Vec::new(),
+        }
+    }
+    fn cancel(&self) {}
+    fn drill(&self, _slot: usize) -> Option<rustain::domain::ports::wave_handle::DrillBody> {
+        None
+    }
+    fn drill_id(&self, _slot: usize) -> Option<rustain::domain::models::orchestration::DrillId> {
+        None
+    }
+    fn slots(&self) -> Vec<rustain::domain::models::AgentId> {
+        Vec::new()
+    }
+    fn rerun_count_for_slot(&self, _slot: usize) -> u8 {
+        0
+    }
+    fn resolve_count(&self) -> usize {
+        0
     }
 }

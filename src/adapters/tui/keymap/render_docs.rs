@@ -48,17 +48,31 @@ fn availability_note(row: &Binding) -> String {
         notes.push("needs a terminal of 120+ columns");
     }
     if row.hosts.includes(Host::Attached)
-        && matches!(
-            row.availability(&AvailCtx::attached(130, false)),
-            Availability::Unavailable(_)
-        )
+        && let Availability::Unavailable(why) = row.availability(&AvailCtx::attached(130, false))
     {
-        notes.push("not available in an attached session");
+        // The host is the reason only when the row runs locally; otherwise the
+        // row names its own remedy (`Ctrl+A` in the attached composer: no cursor).
+        let local = row.availability(&AvailCtx::local(130, DensityMode::Monitor));
+        notes.push(if row.hosts.includes(Host::Local) && local.is_available() {
+            "not available in an attached session"
+        } else {
+            why
+        });
     }
     if !row.alt.is_empty() {
         return format!("portable alternative: {}", row.alt);
     }
     notes.join("; ")
+}
+
+/// Keys a context leaves out of the table on purpose (a named, documented exclusion).
+fn exclusion(context: Context) -> Option<&'static str> {
+    match context {
+        Context::RecipientSurface => Some(
+            "A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit, use as context) depend on the received item and are listed in the view's own footer; they are not rows here.",
+        ),
+        _ => None,
+    }
 }
 
 /// `docs/keyboard.md`, generated from the registry (all contexts, both hosts).
@@ -86,6 +100,9 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
         if !context.parents().is_empty() {
             let parents: Vec<&str> = context.parents().iter().map(|p| p.name()).collect();
             let _ = writeln!(out, "Also inherits: {}.\n", parents.join(", "));
+        }
+        if let Some(note) = exclusion(context) {
+            let _ = writeln!(out, "{note}\n");
         }
         out.push_str("| Keys | Does | Hosts | Reach | Notes |\n|---|---|---|---|---|\n");
         for row in rows {
@@ -211,8 +228,8 @@ mod tests {
     #[test]
     fn story21_3_lint_rejects_a_retired_binding_and_accepts_a_true_one() {
         assert_eq!(
-            unresolved_key_tokens("Ctrl+H toggles history"),
-            vec!["Ctrl+H".to_string()]
+            unresolved_key_tokens("Ctrl+J toggles history"),
+            vec!["Ctrl+J".to_string()]
         );
         assert!(unresolved_key_tokens("Press Ctrl+X, h or Ctrl+P to browse.").is_empty());
         assert_eq!(

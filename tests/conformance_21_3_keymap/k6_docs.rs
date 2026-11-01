@@ -99,12 +99,12 @@ fn relative(path: &Path) -> String {
 fn the_lint_has_a_positive_control_independent_of_the_scanned_files() {
     // An in-memory doc naming a retired binding fails the same scanner...
     assert_eq!(
-        unresolved_key_tokens("Ctrl+H toggles history"),
-        vec!["Ctrl+H".to_string()]
+        unresolved_key_tokens("Ctrl+J toggles history"),
+        vec!["Ctrl+J".to_string()]
     );
     assert_eq!(
-        unresolved_key_tokens("`Ctrl+K` is unbound"),
-        vec!["Ctrl+K".to_string()],
+        unresolved_key_tokens("`Ctrl+Y` is unbound"),
+        vec!["Ctrl+Y".to_string()],
         "an unbound key sentence is not exempt until it is rewritten"
     );
     // ...and a true sentence passes.

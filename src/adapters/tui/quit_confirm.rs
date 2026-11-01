@@ -254,9 +254,9 @@ pub fn handle_raw_key(state: &mut TuiState, key: crossterm::event::KeyEvent) -> 
     let plain = !key.modifiers.contains(KeyModifiers::CONTROL)
         && !key.modifiers.contains(KeyModifiers::ALT);
     let quit_key = match key.code {
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => QuitKey::CtrlC,
+        KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => QuitKey::CtrlC,
         KeyCode::Char(c) if plain => QuitKey::Char(c),
-        KeyCode::Enter if plain => QuitKey::Enter,
+        KeyCode::Enter if key.modifiers.is_empty() => QuitKey::Enter,
         KeyCode::Esc => QuitKey::Esc,
         _ => QuitKey::Other,
     };

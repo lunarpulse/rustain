@@ -98,12 +98,6 @@ pub enum ChatCmd {
     PrevProseAnchor,
     /// `] P`: latest assistant-prose turn.
     LatestProseAnchor,
-    /// `d` (a retained wave exists): open the diverge view.
-    WaveDiverge,
-    /// `s` (a retained wave exists): close the diverge view.
-    WaveDivergeClose,
-    /// `r` (a retained wave exists): open the wave overlay.
-    WaveOverlay,
 }
 
 const fn c(keys: &'static [Key], cmd: ChatCmd, label: &'static str) -> Binding {
@@ -173,10 +167,7 @@ const CHAT: &[Binding] = &[
     c(&[Key::Char('R')], ChatCmd::RewindAtMessage, "").local().does("Rewind the conversation to the focused message"),
     c(&[Key::Char('m')], ChatCmd::ToggleBookmark, "").local().help(HelpCat::Search, "m", "Toggle bookmark on current message"),
     c(&[Key::Char('\'')], ChatCmd::OpenBookmarkList, "").local().help(HelpCat::Search, "'", "Open bookmark list panel"),
-    // ── fan-out wave keys: live only while a retained wave exists ──
-    c(&[Key::Char('d')], ChatCmd::WaveDiverge, "").local().does("Open the divergence view of a retained fan-out wave"),
-    c(&[Key::Char('s')], ChatCmd::WaveDivergeClose, "").local().does("Close the divergence view of a retained fan-out wave"),
-    c(&[Key::Char('r')], ChatCmd::WaveOverlay, "").local().does("Open the retained fan-out wave overlay"),
+    // The fan-out wave keys (`d` `s` `r`, live only while a retained wave exists) are rows of ChatWave.
 ];
 
 pub const ROWS: &[Binding] = CHAT;

@@ -344,6 +344,9 @@ fn literal_violations(files: &[(String, String)], allow: &[Allow]) -> Vec<String
     violations
 }
 
+/// Files whose `CtrlH`/`CtrlK` arms are the TextEntry editing dispatch (path, arm count).
+const TEXT_ENTRY_ARMS: (&str, usize) = ("src/adapters/tui/app.rs", 8);
+
 /// PC-3 violations over `files`: a banned symbol anywhere in a production part, or a
 /// `DomainKey::CtrlH`/`CtrlK` match arm outside `src/adapters/tui/keymap/`.
 fn symbol_violations(files: &[(String, String)]) -> Vec<String> {
@@ -364,7 +367,17 @@ fn symbol_violations(files: &[(String, String)]) -> Vec<String> {
                 ));
             }
         }
-        if !path.starts_with(KEYMAP_DIR) {
+        let arms = arm.find_iter(&production).count();
+        if path == TEXT_ENTRY_ARMS.0 {
+            // The hand-written TextEntry editing arms (21-3 AC11); 3-B2 moves them under
+            // the resolver. The exact count means a new arm cannot hide among them.
+            if arms != TEXT_ENTRY_ARMS.1 {
+                violations.push(format!(
+                    "{path}: {arms} `DomainKey::CtrlH`/`CtrlK` arms, expected {}",
+                    TEXT_ENTRY_ARMS.1
+                ));
+            }
+        } else if !path.starts_with(KEYMAP_DIR) {
             for m in arm.find_iter(&production) {
                 violations.push(format!(
                     "{path}:{}: `DomainKey::CtrlH`/`CtrlK` match arm outside the keymap",
@@ -526,9 +539,11 @@ fn k12_positive_control_symbol_scanner() {
     let arm = "fn g(k: DomainKey) { match k { DomainKey::CtrlK => kill(), _ => {} } }";
     let both = "match k { DomainKey::CtrlH | DomainKey::CtrlK => x(), _ => {} }";
     assert_eq!(
-        symbol_violations(&[src("src/adapters/tui/app.rs", arm)]).len(),
+        symbol_violations(&[src("src/adapters/tui/state.rs", arm)]).len(),
         1
     );
+    // The TextEntry editing file may hold exactly its pinned arm count, no more or less.
+    assert_eq!(symbol_violations(&[src(TEXT_ENTRY_ARMS.0, arm)]).len(), 1);
     assert_eq!(
         symbol_violations(&[src("src/infrastructure/runtime/attach_keys.rs", both)]).len(),
         1
@@ -540,7 +555,7 @@ fn k12_positive_control_symbol_scanner() {
         "fn f() {}\n#[cfg(test)]\nmod tests {\n    fn t() { match k { DomainKey::CtrlH => a(), _ => {} } }\n}\n",
     ] {
         assert!(
-            symbol_violations(&[src("src/adapters/tui/app.rs", ok)]).is_empty(),
+            symbol_violations(&[src("src/adapters/tui/state.rs", ok)]).is_empty(),
             "{ok}"
         );
     }
