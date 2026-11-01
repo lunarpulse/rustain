@@ -37,6 +37,8 @@ fn facts(active: &str, running: bool, retry: bool) -> LogFacts {
         active_messages: FAILED_AT,
         turn_running: running,
         retry_supported: retry,
+        decisions_supported: false,
+        context_warning: false,
         titles: vec![("conv-bg".into(), "Research".into())],
     }
 }

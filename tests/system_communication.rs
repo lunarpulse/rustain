@@ -16,8 +16,8 @@ use rustain::adapters::tui::widgets::ask_user_question::{
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, feedback_block, status_bar};
 use rustain::domain::models::{
-    ChatMessage, Conversation, FeedbackAction, FeedbackBlock, FeedbackLevel, MessageRole,
-    StatusState, StreamingState, UsageInfo, next_delay,
+    ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, MessageRole, StatusState,
+    StreamingState, UsageInfo, next_delay,
 };
 
 fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
@@ -49,7 +49,7 @@ fn test_error_feedback_block_in_conversation() {
         id: "fb-1".to_string(),
         level: FeedbackLevel::Error,
         message: "Couldn't reach Anthropic API".to_string(),
-        actions: vec![FeedbackAction::Retry],
+        seq: 0,
     };
     feedback_blocks.insert("fb-1".to_string(), fb);
 
@@ -103,10 +103,8 @@ fn test_error_feedback_block_in_conversation() {
     }
 
     assert!(content.contains('✗'), "Error symbol should be present");
-    assert!(
-        content.contains("[Ctrl+K r]"),
-        "Retry action should be present"
-    );
+    // Old: `[Ctrl+K r]` Retry chip. New (21.1 S2 AC12): a block advertises no key.
+    assert!(!content.contains("Ctrl+K"), "no action chip is painted");
 }
 
 /// AC2: Warning FeedbackBlock max 3 lines.
@@ -118,7 +116,7 @@ fn test_warning_feedback_max_lines() {
         id: "w-1".to_string(),
         level: FeedbackLevel::Warning,
         message: "Running low on context. Consider compacting or starting a fresh conversation to avoid losing quality.".to_string(),
-        actions: vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
+        seq: 0,
     };
     let lines = feedback_block::render_feedback_lines(&fb, 50, &theme);
     assert!(
@@ -267,13 +265,6 @@ fn test_status_state_complete_lifecycle() {
     };
     assert!(status.display_text().contains("2/5"));
     assert!(status.is_active());
-
-    status = StatusState::Flash {
-        message: "Done".to_string(),
-        remaining_ms: 1000,
-    };
-    assert_eq!(status.display_text(), "Done");
-    assert!(!status.is_active());
 
     status = StatusState::Idle;
     assert_eq!(status.display_text(), "Ready");

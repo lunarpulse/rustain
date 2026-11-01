@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 import harness
 import pexpect
 import pytest
-from keys import CTRL_X, ENTER, SHIFT_TAB
+from keys import BACKSPACE, CTRL_X, ENTER, ESC, SHIFT_TAB
 from test_story_20_9a_ephemeral_rows import _finish, _start_text
 
 KEY = "sk-ant-21-1-loopback-key-canary"
@@ -85,12 +85,15 @@ class _NativeTUI(harness.RustainTUI):
             pytest.fail("native TUI exited before the expected screen")
         self._stream.feed(data)
         screen = "\n".join(self._screen.display)
+        for hint in self.forbidden:
+            assert hint not in screen, f"retired prompt text {hint!r} painted:\n{screen}"
         if screen != self._last_recorded:
             self._last_recorded = screen
             self.screens.write(json.dumps({"screen": screen}) + "\n")
             self.screens.flush()
 
     _last_recorded = None
+    forbidden = ()  # screen text that must never be painted (set by the S2 leg)
 
     def wait_for_screen(self, text, timeout=60, poll_interval=0.5):
         _wait(self, lambda screen: text in screen, repr(text), timeout)
@@ -565,3 +568,426 @@ def test_s1_toasts_expire_and_notification_log_local_and_attached_80x24(monkeypa
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_21_1_S1_EVIDENCE={evidence}", flush=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S2 leg (K12b): the interim decision pane through the real binary at 80x24.
+#
+# * recovery - a first TUI run completes one turn and is `kill -9`ed; a restart
+#   on the same data directory paints the recovery pane
+#   (`[Enter/Esc] Continue  [n] New session`); `Esc` (retried structurally: rail
+#   keys are inert for 500 ms after the first paint and are never replayed)
+#   continues the SAME conversation and the composer is not swallowed.
+# * budget - a tiny `[budget] daily_limit_usd` crosses its limit when a turn
+#   completes while a draft sits in the composer: the decision is NOT painted
+#   over the draft (the draft is intact and keeps taking keys), the status row
+#   shows `Needs you (1) ^X q`, `Ctrl+X q` focuses the pane, `Esc` defers it
+#   (the cue stays), `Ctrl+X q` reopens it and `y` resolves it.
+# * the retired prompt texts (`[y/n]`, `Ctrl+K`) are never painted.
+# Every wait is a bounded structural predicate; no sleeps.
+# ═══════════════════════════════════════════════════════════════════════════
+
+S2_CONFIG = CONFIG
+BUDGET_CONFIG = (
+    S2_CONFIG
+    + '\n[budget]\ndaily_limit_usd = 0.000001\n'
+    + '\n[pricing."claude-sonnet-4-6"]\ninput_per_million = 3.0\noutput_per_million = 15.0\n'
+)
+RETIRED_HINTS = ("[y/n]", "Ctrl+K")
+WAITING_TOAST = "Decision waiting — Ctrl+X q"
+_CUE = re.compile(r"Needs you \((\d+)\) \^X q")
+
+
+def _pane_lines(screen, title):
+    """The frame titled `System · <title>` (top border row index and the lines), else None."""
+    lines = screen.split("\n")
+    marker = f"System · {title} "
+    top = next((i for i, line in enumerate(lines) if "┌" in line and marker in line), None)
+    return None if top is None else (top, lines)
+
+
+def _pane(screen, title):
+    """Whitespace-normalised interior text of the decision frame, '' while it is
+    only partly drawn, None when no such frame is painted."""
+    found = _pane_lines(screen, title)
+    if found is None:
+        return None
+    top, lines = found
+    left, right = lines[top].index("┌"), lines[top].rfind("┐")
+    bottom = next((i for i in range(top + 1, len(lines)) if len(lines[i]) > left and lines[i][left] == "└"), None)
+    if bottom is None or right <= left:
+        return ""
+    return " ".join(" ".join(line[left + 1:right] for line in lines[top + 1:bottom]).split())
+
+
+def _pane_open(screen, title, *rail):
+    """The frame is fully painted with every rail pair (positional: inside the frame)."""
+    text = _pane(screen, title)
+    return bool(text) and all(item in text for item in rail)
+
+
+def _cue(screen):
+    """The `Needs you (N) ^X q` status cue count, else None (status row only)."""
+    match = _CUE.search(harness.status_row(screen))
+    return int(match.group(1)) if match else None
+
+
+def _clear_composer(tui, label):
+    """Backspace the single-line draft away (Ctrl+U is not bound in Input focus)."""
+    text = _composer(tui.get_screen_text())
+    tui.send(BACKSPACE * len(text))
+    _wait(tui, lambda s: _composer(s) == "", label)
+
+
+def _answer(tui, key, title, tries=8):
+    """Press `key` until the pane titled `title` is gone. Rail keys are inert for
+    500 ms after the first paint and are never replayed, so a key pressed inside
+    that window is dropped: re-press, one press per observed second of frames
+    (structural, no sleep), until the frame disappears."""
+    for _ in range(tries):
+        tui.send(key)
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            screen = tui.get_screen_text()
+            if _pane_lines(screen, title) is None:
+                return screen
+    raise AssertionError(f"the {title!r} pane never accepted {key!r}:\n{tui.get_screen_text()}")
+
+
+def _await_exit(tui, timeout=30):
+    """Read until EOF (answering a System/Quit decision with `y` once)."""
+    deadline = time.monotonic() + timeout
+    answered = False
+    while True:
+        try:
+            data = tui.child.read_nonblocking(size=65536, timeout=1)
+        except pexpect.TIMEOUT:
+            assert time.monotonic() < deadline, "process did not exit"
+            continue
+        except pexpect.EOF:
+            break
+        tui._stream.feed(data)
+        if not answered and "System · Quit" in "\n".join(tui._screen.display):
+            tui.send("y")
+            answered = True
+    tui.child.close()
+    return tui.child.exitstatus, tui.child.signalstatus
+
+
+def _exercise_s2(binary, evidence, root, monkeypatch):
+    monkeypatch.setattr(harness, "TERM_COLS", 80)
+    monkeypatch.setattr(harness, "TERM_ROWS", 24)
+    errors = queue.Queue()
+    requests = []
+    holds = {}  # marker -> Event: a turn whose user text contains the marker waits for the event
+    lock = threading.Lock()
+    workspaces = {"r": root / "wr", "b": root / "wb"}
+    for name, ws in workspaces.items():
+        (ws / ".rustain").mkdir(parents=True)
+        (ws / ".rustain" / "config.toml").write_text(BUDGET_CONFIG if name == "b" else S2_CONFIG)
+        (ws / ".env").write_text("")
+    (root / "home").mkdir()
+
+    def check_server():
+        try:
+            error = errors.get_nowait()
+        except queue.Empty:
+            return
+        raise AssertionError(f"loopback handler failed:\n{error}")
+
+    def user_text(body):
+        for message in reversed(body.get("messages", [])):
+            if message.get("role") == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content
+                return " ".join(block.get("text", "") for block in content if isinstance(block, dict))
+        return ""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *_args):
+            pass
+
+        def respond(self, content, kind="application/json"):
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+
+        def do_GET(self):
+            try:
+                path = urlsplit(self.path).path
+                assert path in ("/api.json", "/v1/models", "/models"), path
+                self.respond(b"{}" if path == "/api.json" else b'{"data":[],"has_more":false}')
+            except Exception:
+                errors.put(traceback.format_exc())
+                self.close_connection = True
+
+        def do_POST(self):
+            try:
+                assert urlsplit(self.path).path == "/v1/messages", self.path
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if "stream" not in body and body.get("max_tokens") == 1:
+                    self.respond(b'{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}')
+                    return
+                text = user_text(body)
+                with lock:
+                    requests.append({"kind": "turn", "text": text})
+                for marker, event in list(holds.items()):
+                    if marker in text:
+                        assert event.wait(90), f"held reply {marker!r} was never released"
+                first = text.split()[0] if text.split() else "?"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(_chunk(_start_text(f"S2 reply {first}") + _finish()))
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                errors.put(traceback.format_exc())
+            except Exception:
+                errors.put(traceback.format_exc())
+                self.close_connection = True
+
+    with ExitStack() as stack:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        def close_server():
+            for event in holds.values():
+                event.set()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+
+        stack.callback(close_server)
+        origin = f"http://127.0.0.1:{server.server_port}"
+        loaded = harness._load_env()
+        cleared = {name for name in loaded if re.search(
+            r"(?:API_KEY|AUTH_TOKEN|ACCESS_TOKEN|BASE_URL|ENDPOINT|PROXY|CREDENTIALS|PROJECT|PROJECT_ID)$", name, re.I)
+            or name.startswith("RUSTAIN_")
+            or name in {"OLLAMA_HOST", "OPENAI_CODEX_OAUTH_TOKEN"}}
+
+        def environment(tag, ws, data):
+            env = {name: "" for name in cleared}
+            env.update(HOME=str(root / "home"), XDG_CONFIG_HOME=str(root / "home" / "xdg-config"),
+                       XDG_DATA_HOME=str(root / "home" / "xdg-data"), XDG_CACHE_HOME=str(root / "home" / "xdg-cache"),
+                       RUSTAIN_CONFIG_DIR=str(ws / ".rustain"), RUSTAIN_DATA_DIR=str(data),
+                       RUSTAIN_LOG_PATH=str(evidence / f"{tag}.runtime.log"), RUST_LOG="debug",
+                       ANTHROPIC_API_KEY=KEY, ANTHROPIC_AUTH_TOKEN="", ANTHROPIC_BASE_URL=origin,
+                       RUSTAIN_MODELS_DEV_URL=origin, NO_PROXY="*", no_proxy="*", TERM="xterm-256color")
+            return env
+
+        data_r, data_b = root / "dr", root / "db"
+        data_r.mkdir()
+        data_b.mkdir()
+        tags = {"r1": ("r", data_r), "r2": ("r", data_r), "b": ("b", data_b)}
+        envs = {tag: environment(tag, workspaces[ws], data) for tag, (ws, data) in tags.items()}
+        terminals = {tag: stack.enter_context((evidence / f"{tag}.terminal.txt").open("w")) for tag in tags}
+        screens = {tag: stack.enter_context((evidence / f"{tag}.screens.jsonl").open("w")) for tag in tags}
+        original_spawn = harness.pexpect.spawn
+        spawn_tag = {}
+
+        def spawn(command, *args, **kwargs):
+            tag = spawn_tag["next"]
+            actual = kwargs["env"]
+            assert Path(command).resolve() == binary and kwargs["dimensions"] == (24, 80)
+            assert actual["ANTHROPIC_BASE_URL"] == origin and actual["ANTHROPIC_API_KEY"] == KEY
+            kwargs["logfile"] = terminals[tag]
+            return original_spawn(command, *args, **kwargs)
+
+        monkeypatch.setattr(harness.pexpect, "spawn", spawn)
+
+        def start(tag, **kwargs):
+            spawn_tag["next"] = tag
+            tui = _NativeTUI(binary=binary, build=False, workspace=workspaces[tags[tag][0]],
+                             env_overrides=envs[tag], **kwargs)
+            tui.screens, tui.check_server, tui.forbidden = screens[tag], check_server, RETIRED_HINTS
+            stack.callback(tui.stop)
+            tui.start()
+            tui.child.delaybeforesend = 0
+            return tui
+
+        def sent_to_provider():
+            with lock:
+                return [request["text"] for request in requests]
+
+        # ------------------------------------------------ recovery: crash + restart
+        tui = start("r1", fresh=True)
+        _wait(tui, lambda s: "Ready" in harness.status_row(s) and not _toasts(s) and _cue(s) is None,
+              "an idle first run", timeout=20)
+        tui.send("crash seed")
+        _wait(tui, lambda s: "crash seed" in _composer(s), "the seed message typed")
+        tui.send(ENTER)
+        _wait(tui, lambda s: "S2 reply crash" in s and "Ready" in harness.status_row(s), "the first reply")
+
+        sessions = workspaces["r"] / ".claude" / "sessions"  # `paths::sessions_dir(workspace)`
+
+        def persisted(_screen):
+            return any(b"S2 reply crash" in path.read_bytes() for path in sessions.rglob("*.json"))
+
+        _wait(tui, persisted, "the conversation on disk before the crash", timeout=20)
+        os.kill(tui.child.pid, signal.SIGKILL)  # an unclean exit: no clean-exit marker is written
+        tui.child.close(force=True)
+        assert not tui.child.isalive()
+
+        tui = start("r2", fresh=False)
+        rail = ("[Enter/Esc] Continue", "[n] New session")
+        screen = _wait(tui, lambda s: _pane_open(s, "Session recovery", *rail),
+                       "the recovery pane with its Continue/New session rail", timeout=20)
+        _capture(tui, evidence, "21-recovery-pane", screen)
+        assert "[y]" not in _pane(screen, "Session recovery"), "recovery paints no `y` key"
+        assert "Ready" in harness.status_row(screen), "the status row is untouched by the pane"
+        screen = _answer(tui, ESC, "Session recovery")  # Esc = Continue (RU-5), never New session
+        screen = _wait(tui, lambda s: "S2 reply crash" in s and "crash seed" in s,
+                       "the SAME conversation continues after Esc")
+        assert _cue(screen) is None, "an answered decision leaves no cue"
+        _capture(tui, evidence, "22-recovery-continued", screen)
+        tui.send("ok")  # the composer is live again: the pane no longer swallows keys
+        _wait(tui, lambda s: _composer(s) == "ok", "typing reaches the composer after Continue")
+        _clear_composer(tui, "the composer cleared")
+
+        # Owner-screenshot storm tail: a Warning toast still expires on its own TTL.
+        tui.send("/nope ")
+        _wait(tui, lambda s: "/nope" in _composer(s), "the unknown slash typed")
+        started = time.monotonic()
+        tui.send(ENTER)
+        _wait(tui, lambda s: "/nope" not in _composer(s), "the unknown slash consumed")
+        screen, seen = _expect_toast(tui, evidence, "23-storm-warning", "Warning", UNKNOWN)
+        screen = _expect_gone(tui, seen, WARNING_GONE_WITHIN, started)
+        assert _cue(screen) is None and _pane(screen, "Session recovery") is None
+        tui.send("\x11")
+        assert _await_exit(tui) == (0, None)
+        check_server()
+
+        # ------------------------------------------------ budget: arrival while typing
+        tui = start("b", fresh=True)
+        _wait(tui, lambda s: "Ready" in harness.status_row(s) and not _toasts(s) and _cue(s) is None,
+              "an idle budget run", timeout=20)
+
+        def turn(number):
+            marker = f"hold-{number}"
+            holds[marker] = hold = threading.Event()
+            tui.send(f"{marker} please answer")
+            _wait(tui, lambda s: marker in _composer(s), f"{marker} typed")
+            tui.send(ENTER)
+            _wait(tui, lambda s: _composer(s) == "", f"{marker} submitted")
+            _wait(tui, lambda _s: any(marker in text for text in sent_to_provider()),
+                  f"{marker} to reach the provider (held)")
+            draft = f"draft {number} keep"
+            tui.send(draft)  # typed while the reply is held
+            _wait(tui, lambda s: _composer(s) == draft, "the draft typed during the held turn")
+            hold.set()
+            _wait(tui, lambda s: f"S2 reply {marker}" in s,
+                  f"the {marker} reply")
+            return draft
+
+        def cue_within(seconds):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                screen = tui.get_screen_text()
+                if _cue(screen):
+                    return screen
+            return None
+
+        draft = turn(1)
+        # The ledger write may land one turn late (event_loop: "1-turn lag at the threshold
+        # crossing"), so the limit can be crossed by turn 1's or by turn 2's completion.
+        screen = cue_within(3)
+        if screen is None:
+            _clear_composer(tui, "the first draft cleared")
+            draft = turn(2)
+            screen = cue_within(20)
+        assert screen is not None, "the budget decision never arrived:\n" + tui.get_screen_text()
+        assert _cue(screen) == 1, harness.status_row(screen)
+        assert _pane(screen, "Daily budget") is None, "an arrival never paints over a draft"
+        assert _composer(screen) == draft, f"the draft was hijacked: {_composer(screen)!r}"
+        _capture(tui, evidence, "31-budget-waiting", screen)
+        tui.send("yn")  # the rail letters are the composer's text while the decision is hidden (EV-3)
+        screen = _wait(tui, lambda s: _composer(s) == draft + "yn", "typing continues in the composer")
+        assert _pane(screen, "Daily budget") is None
+        assert _cue(screen) == 1, "typed rail letters answered nothing: " + harness.status_row(screen)
+        _clear_composer(tui, "the draft cleared")
+
+        tui.send(CTRL_X)
+        _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu lists Decisions")
+        tui.send("q")
+        budget_rail = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
+        screen = _wait(tui, lambda s: _pane_open(s, "Daily budget", *budget_rail),
+                       "Ctrl+X q focuses the budget decision with its rail")
+        assert "reached" in _pane(screen, "Daily budget"), _pane(screen, "Daily budget")
+        _capture(tui, evidence, "32-budget-pane", screen)
+        screen = _answer(tui, ESC, "Daily budget")  # Esc = Later: defers, never resolves
+        screen = _wait(tui, lambda s: _cue(s) == 1, "a deferred decision keeps its status cue")
+        assert _composer(screen) == "", "the deferred decision left the composer alone"
+        _capture(tui, evidence, "33-budget-deferred", screen)
+        tui.send("y")  # a deferred decision is still hidden: `y` is text, never Continue
+        screen = _wait(tui, lambda s: _composer(s) == "y", "typing reaches the composer after Later")
+        assert _cue(screen) == 1, "Later kept the decision pending: " + harness.status_row(screen)
+        _clear_composer(tui, "the probe key cleared")
+
+        tui.send(CTRL_X)
+        _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu before the second q")
+        tui.send("q")
+        _wait(tui, lambda s: _pane_open(s, "Daily budget", *budget_rail), "Ctrl+X q reopens the deferred decision")
+        screen = _answer(tui, "y", "Daily budget")  # Continue: the effect runs once
+        screen = _wait(tui, lambda s: _cue(s) is None, "an answered decision clears the cue")
+        _capture(tui, evidence, "34-budget-answered", screen)
+
+        screen = _open_log(tui, evidence, "35-budget-log", attached=False)
+        rows = harness.notification_log_rows(screen)
+        pattern = rf"Info · \d{{2}}:\d{{2}}:\d{{2}} · \S+ · {re.escape(WAITING_TOAST)}"
+        assert any(re.match(pattern, row) for row in rows), rows
+        tui.close_notification_log()
+        _wait(tui, lambda s: not tui._screen.cursor.hidden, "Input focus restored after S-LOG")
+        tui.send("\x11")
+        assert _await_exit(tui) == (0, None)
+        check_server()
+
+        # ------------------------------------------------ evidence checks
+        observed = sent_to_provider()
+        (evidence / "requests.json").write_text(json.dumps(observed, indent=2) + "\n")
+        assert any("crash seed" in text for text in observed) and any("hold-1" in text for text in observed)
+        for handle in (*terminals.values(), *screens.values()):
+            handle.flush()
+        logs = sorted(evidence.glob("*.runtime.log.*"))
+        for tag in tags:
+            assert any(path.name.startswith(f"{tag}.runtime.log.") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.suffix[1:])
+                       for path in logs), f"dated {tag} debug log missing"
+        for path in [*(evidence / f"{tag}.terminal.txt" for tag in tags),
+                     *(evidence / f"{tag}.screens.jsonl" for tag in tags),
+                     evidence / "requests.json", *logs, *evidence.glob("*.screen.txt")]:
+            assert KEY not in path.read_text(errors="replace"), f"credential leaked to {path}"
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(400)
+def test_s2_decision_pane_recovery_and_arrival_protection_80x24(monkeypatch):
+    binary = harness._resolve_binary()[0].resolve()
+    assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
+    parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix="21-1-s2-", dir=parent))
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
+                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="r212-", dir="/tmp") as root:
+            _exercise_s2(binary, evidence, Path(root), monkeypatch)
+        assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
+        manifest["result"] = "PASS"
+    except BaseException:
+        manifest["result"] = "FAIL"
+        (evidence / "failure.txt").write_text(traceback.format_exc())
+        raise
+    finally:
+        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(f"NATIVE_21_1_S2_EVIDENCE={evidence}", flush=True)

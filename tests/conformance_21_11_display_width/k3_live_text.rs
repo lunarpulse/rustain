@@ -74,7 +74,6 @@ fn paint_chat(
             liveness,
             None, // open_prose
             None, // current_focus
-            None, // active_feedback_id
         );
         total_height = result.total_content_height;
     });

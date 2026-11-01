@@ -489,7 +489,7 @@ fn test_feedback_block_visible_with_auto_scroll() {
             id: "fb1".to_string(),
             level: FeedbackLevel::Info,
             message: "Crash recovery notice".to_string(),
-            actions: vec![],
+            seq: 0,
         },
     );
 
@@ -816,7 +816,6 @@ fn focus_probe_with_view(
                 None, // liveness
                 None, // open_prose
                 current_focus,
-                None,
             );
             *out.borrow_mut() = (
                 result.focused_tool_id,

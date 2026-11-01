@@ -1,6 +1,17 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rustain::adapters::tui::app::{self, InputAction};
+use rustain::adapters::tui::decision_pane::{
+    Arrival, DecisionDraft, DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise,
+};
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
 use rustain::adapters::tui::state::TuiState;
+use rustain::domain::clock::MockClock;
+use rustain::domain::events::DomainInputEvent;
+use rustain::domain::models::NotificationsConfig;
 use rustain::domain::models::{FocusState, ImageAttachment};
 use rustain::domain::services::approval_runtime::{ApprovalRuntimeEvent, ReviewScope};
 use rustain::infrastructure::runtime::approval_bridge;
@@ -160,6 +171,18 @@ async fn k05_review_feedback_escape_and_queue_keep_request_ownership() {
     assert!(f.tools.executed.lock().is_empty());
 }
 
+/// The event loop's pane dispatch, as the loop calls it: `Some` when the pane owned the key.
+fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
+    match handle_domain_event(
+        state,
+        &DomainInputEvent::KeyPress(key),
+        &LogFacts::default(),
+    )? {
+        PaneOutcome::Effect(effect) => Some(effect.into_action()),
+        _ => Some(InputAction::Consumed),
+    }
+}
+
 #[tokio::test]
 async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
     let mut f = Fixture::new(64).await;
@@ -175,8 +198,26 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
         media_type: "image/png".into(),
         data: "confirmation-fixture".into(),
     });
+    // Old (19.20c): `handle_input` mapped Chat-focus `y` to ImageConfirmAttach itself.
+    // New (21.1 S2, AC9/AC12): the confirmation is a decision-pane item that owns its
+    // keys before approval does (the event loop's pane dispatch runs first), inert for
+    // its first 500 ms; `handle_input` no longer maps the key.
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    f.state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    raise(
+        &mut f.state,
+        DecisionDraft::new(DecisionKind::LargeImage, "Large image. Attach it?"),
+        Arrival::Requested,
+    );
+    note_painted(&mut f.state);
     assert!(matches!(
-        f.key(KeyCode::Char('y')).await,
+        pane_key(&mut f.state, 'y'),
+        Some(InputAction::Consumed)
+    ));
+    clock.advance(Duration::from_millis(501));
+    assert!(matches!(
+        pane_key(&mut f.state, 'y'),
         Some(InputAction::ImageConfirmAttach)
     ));
     assert_eq!(f.current_id(), id);

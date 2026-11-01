@@ -310,6 +310,26 @@ error_ttl_secs = 60    # default 60
 
 Notifications are session-local and are never written to disk.
 
+### Decisions that need an answer
+
+A few prompts are decisions, not notices, so they never expire: the startup
+recovery prompt, a context-window warning (`Compact` / `Start fresh`), the
+daily budget limit, carrying a summary into a fresh conversation, attaching a
+large image, and deleting conversations. They share one decision pane at the
+bottom of the chat pane and the answer keys are painted in it (for example
+`[y] Delete  [n] Cancel  [Esc] Cancel`). An automatically raised decision never
+takes the keyboard while you are typing (a non-empty composer, or a printable key within the last
+second), while an overlay or the Notification Log is open, or within 60 s of a
+`Later`; it then waits behind a `Decision waiting — Ctrl+X q` toast and a
+`Needs you (N) ^X q` cue in the status row. `Ctrl+X q` focuses the oldest
+waiting decision. Answer keys are ignored for the first 500 ms after a decision
+first paints and are never replayed. `Esc` defers a decision (`Later`), except
+that it continues on the recovery prompt and cancels a delete. In the
+Notification Log, `K` on a context-warning record raises the Compact decision
+and `n` on a context-warning or compaction-failure record raises the
+carry-over decision. `Ctrl+K` is unbound; the old `[Ctrl+K x]` action chips no
+longer exist.
+
 ### Field-level merge
 
 Setting `[pricing."my-model"]` in user TOML *adds* to the built-in pricing catalog — it does not replace it. The same holds for `[provider.X]` and `[router.step_tiers]`.

@@ -136,16 +136,13 @@ pub fn render_role_list(
 
 /// Put one `/room role` result in the transcript as a replaceable block.
 pub(crate) fn show_room_message(state: &mut TuiState, message: String) {
-    state.feedback_blocks.insert(
-        ROOM_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: ROOM_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::Room,
+        ROOM_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(ROOM_BLOCK_ID.to_owned());
     state.needs_redraw = true;
 }
 

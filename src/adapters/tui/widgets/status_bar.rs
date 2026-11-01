@@ -2,6 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr as _;
 
+use crate::adapters::tui::decision_pane;
 use crate::adapters::tui::state::{DailyBudgetState, LogAwareness};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -43,8 +44,10 @@ pub fn render(
     tab_read_only: bool,
     attached: Option<&crate::adapters::tui::state::AttachInfo>,
     log_awareness: LogAwareness,
-    unseen_notices: u64,
+    badges: impl Into<NoticeBadges>,
 ) {
+    let badges: NoticeBadges = badges.into();
+    let unseen_notices = badges.unseen;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -380,6 +383,38 @@ pub fn render(
         _ => area,
     };
 
+    // Story 21.1 S2 AC10 — `Needs you (N) ^X q` while decisions wait. A question
+    // nobody sees is lost, so like the log reminder it is reserved at the right
+    // edge BEFORE the left content is laid out: a long model/token/context row
+    // clips on the left instead of hiding it (omitted whole only when the bar is
+    // narrower than the cue itself).
+    let area = match decision_pane::status_cue(badges.decisions) {
+        Some(cue) if usize::from(area.width) >= geom::cells(&cue) => {
+            let reserved = (geom::cells(&cue) + 1).min(usize::from(area.width)) as u16;
+            let left = Rect {
+                width: area.width - reserved,
+                ..area
+            };
+            let right = Rect {
+                x: area.x + left.width,
+                width: reserved,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    cue,
+                    Style::default()
+                        .fg(theme.colors.accent)
+                        .add_modifier(Modifier::BOLD),
+                )))
+                .alignment(Alignment::Right)
+                .style(Style::default().bg(theme.colors.status_bg)),
+                right,
+            );
+            left
+        }
+        _ => area,
+    };
     // Contextual hint and the Story 21.1 `Log !N` notice badge: right-aligned in
     // the remaining space (UX-DR93, UX-DR96). Admission order: the `log: N`
     // reminder (reserved above) first, then the hint, then the badge — the badge
@@ -429,6 +464,24 @@ pub fn render(
     let line = Line::from(left_spans);
     let widget = Paragraph::new(line).style(Style::default().bg(theme.colors.status_bg));
     frame.render_widget(widget, area);
+}
+
+/// What the status row's right edge may add beside the hint: the unseen
+/// warning/error badge and the waiting-decision cue. A bare `u64` is a badge
+/// with no decisions (the attached client, which has no decision producers).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoticeBadges {
+    pub unseen: u64,
+    pub decisions: usize,
+}
+
+impl From<u64> for NoticeBadges {
+    fn from(unseen: u64) -> Self {
+        Self {
+            unseen,
+            decisions: 0,
+        }
+    }
 }
 
 /// Story 21.1 A12: the status fact painted while YOLO is the permission mode.
@@ -738,14 +791,6 @@ mod tests {
             .display_text(),
             "Retrying (2/5) in 4.0s"
         );
-        assert_eq!(
-            StatusState::Flash {
-                message: "Config error".to_string(),
-                remaining_ms: 1000,
-            }
-            .display_text(),
-            "Config error"
-        );
     }
 
     #[test]
@@ -764,13 +809,6 @@ mod tests {
                 attempt: 1,
                 max: 5,
                 next_in_ms: 1000,
-            }
-            .is_active()
-        );
-        assert!(
-            !StatusState::Flash {
-                message: "test".to_string(),
-                remaining_ms: 1000,
             }
             .is_active()
         );

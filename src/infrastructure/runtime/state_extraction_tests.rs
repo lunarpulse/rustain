@@ -202,33 +202,23 @@ fn story21_1_tick_requests_a_redraw_only_when_a_toast_deadline_passed() {
 }
 
 #[test]
-fn status_flash_is_not_decremented_by_ticks() {
-    // The delete-confirmation Flash is the one status flash left: sticky, and
-    // the tick leaves it (and its `remaining_ms`) alone.
+fn story21_1_ticks_leave_the_typed_status_facts_alone() {
+    // Old (S1): the delete-confirmation Flash was the one status flash left and
+    // the tick left it alone. New (S2, AC13): `StatusState::Flash` is deleted and
+    // the tick never rewrites a status fact either.
     let conversation = conversation();
     let mut state = TuiState::new(160, 24);
-    state.status = StatusState::Flash {
-        message: "sticky".into(),
-        remaining_ms: u64::MAX,
-    };
-    tick_status(&mut state, &conversation, 250);
-    assert!(matches!(
-        state.status,
-        StatusState::Flash {
-            remaining_ms: u64::MAX,
-            ..
-        }
-    ));
-    state.status = StatusState::Flash {
-        message: "finite".into(),
-        remaining_ms: 200,
-    };
-    tick_status(&mut state, &conversation, 250);
-    assert!(matches!(
-        state.status,
-        StatusState::Flash {
-            remaining_ms: 200,
-            ..
-        }
-    ));
+    for status in [
+        StatusState::Idle,
+        StatusState::Streaming,
+        StatusState::Retrying {
+            attempt: 1,
+            max: 5,
+            next_in_ms: 1_000,
+        },
+    ] {
+        state.status = status.clone();
+        tick_status(&mut state, &conversation, 250);
+        assert_eq!(state.status, status);
+    }
 }

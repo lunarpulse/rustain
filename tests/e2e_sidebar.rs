@@ -396,72 +396,117 @@ fn test_resize_keeps_sidebar_when_wide_enough() {
     assert!(state.sidebar_visible);
 }
 
-// ── AC5/AC6: Delete confirmation flow ───────────────────────────────────────
+// ── AC5/AC6: Delete confirmation flow (Story 21.1 S2: interim decision pane) ──
+//
+// Old (S1): the prompt was a 30 s status flash plus `Overlay(Confirmation(
+// DeleteConfirmation))`, and `handle_input` mapped `y`/`n`/`Esc` on that focus.
+// New (AC9, D5): `begin_delete_confirmation` raises a pane item; ONLY the
+// focused pane answers (the same `decision_pane::handle_domain_event` the event
+// loop calls), after the 500 ms inert window, exactly once.
+
+use rustain::adapters::tui::decision_pane::{self, DecisionEffect, DecisionKind, PaneOutcome};
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::domain::clock::MockClock;
+use rustain::domain::models::NotificationsConfig;
+use rustain::infrastructure::runtime::event_loop::{
+    begin_delete_confirmation, complete_bulk_delete,
+};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+fn pane_state() -> (TuiState, Arc<MockClock>) {
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = make_state();
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    (state, clock)
+}
+
+/// First paint, then the 500 ms inert window passes.
+fn ready(state: &mut TuiState, clock: &MockClock) {
+    decision_pane::note_painted(state);
+    clock.advance(Duration::from_millis(500));
+}
+
+fn press(state: &mut TuiState, event: DomainInputEvent) -> Option<PaneOutcome> {
+    decision_pane::handle_domain_event(state, &event, &LogFacts::default())
+}
+
+fn single() -> DeleteConfirmTarget {
+    DeleteConfirmTarget::Single {
+        id: "conv-123".to_string(),
+        title: "Test".to_string(),
+    }
+}
 
 #[test]
 fn test_delete_confirmation_y_confirms() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
+    let (mut state, clock) = pane_state();
+    begin_delete_confirmation(&mut state, single());
+    assert!(
+        state.decisions.is_focused(),
+        "the user's own delete takes the pane"
+    );
+    assert!(state.decisions.holds(DecisionKind::DeleteConversations));
+    ready(&mut state, &clock);
 
-    let mut state = make_state();
-    let target = DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-    state.pending_delete = Some(DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    });
-
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
-    assert_eq!(action, InputAction::ConfirmDelete);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete))
+    );
+    assert_eq!(
+        DecisionEffect::ConfirmDelete.into_action(),
+        InputAction::ConfirmDelete
+    );
+    assert!(state.decisions.is_empty(), "resolved exactly once");
+    assert!(
+        press(&mut state, DomainInputEvent::KeyPress('y')).is_none(),
+        "a second y has no pane to answer"
+    );
+    assert_eq!(
+        state.pending_delete,
+        Some(single()),
+        "the effect arm takes the target"
+    );
 }
 
 #[test]
 fn test_delete_confirmation_n_cancels() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
-    let target = DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-    state.pending_delete = Some(DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    });
-
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert_eq!(action, InputAction::CancelDelete);
+    let (mut state, clock) = pane_state();
+    begin_delete_confirmation(&mut state, single());
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('n'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelDelete))
+    );
+    assert_eq!(
+        DecisionEffect::CancelDelete.into_action(),
+        InputAction::CancelDelete
+    );
 }
 
 #[test]
 fn test_delete_confirmation_esc_cancels() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
-    let target = DeleteConfirmTarget::Bulk { count: 5 };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-    state.pending_delete = Some(DeleteConfirmTarget::Bulk { count: 5 });
-
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert_eq!(action, InputAction::CancelDelete);
+    // Esc is the non-destructive default (RU-7): Cancel, never Later.
+    let (mut state, clock) = pane_state();
+    begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 5 });
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelDelete))
+    );
+    assert!(state.decisions.is_empty());
 }
 
 // F3: Additional E2E tests for confirmation flows
 
 #[test]
 fn test_e2e_delete_with_confirmation() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
+    let (mut state, clock) = pane_state();
     state.sidebar_visible = true;
     state.sidebar_entry_count = 3;
     state.sidebar_selected = 0;
@@ -470,127 +515,155 @@ fn test_e2e_delete_with_confirmation() {
         selected: 0,
     };
 
-    // Step 1: Press 'd' to initiate delete
+    // Step 1: press 'd' to initiate the delete (the sidebar key is unchanged).
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
     assert_eq!(action, InputAction::DeleteSidebarConversation);
+    assert!(
+        state.decisions.is_empty(),
+        "nothing is asked until the host raises it"
+    );
 
-    // Simulate event loop setting up confirmation (would happen in real app)
-    let target = DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test Chat".to_string(),
-    };
-    state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-
-    // Step 2: Press 'y' to confirm
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
-    assert_eq!(action, InputAction::ConfirmDelete);
+    // Step 2: the event loop's arm raises the confirmation; step 3: `y` confirms.
+    begin_delete_confirmation(&mut state, single());
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete))
+    );
 }
 
 #[test]
-fn test_e2e_delete_confirmation_clears_status() {
-    use rustain::domain::models::StatusState;
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
-    // Set up a pending delete
-    let target = DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    };
-    state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-    state.status = StatusState::Flash {
-        message: "Delete \"Test\"? This cannot be undone. [y/n]".to_string(),
-        remaining_ms: 30000,
-    };
-
-    // Cancel the delete
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert_eq!(action, InputAction::CancelDelete);
-
-    // U1: Status should be cleared immediately (set to Idle by CancelDelete handler)
-    // Note: In the real event loop, CancelDelete sets status to Idle
+fn test_e2e_delete_confirmation_leaves_the_status_row_alone() {
+    // Old: the prompt overwrote the status with a Flash and Cancel reset it to
+    // Idle. New: the prompt is not a status at all, so a running turn's status
+    // survives both the question and the answer.
+    let (mut state, clock) = pane_state();
+    state.status = StatusState::Streaming;
+    begin_delete_confirmation(&mut state, single());
+    assert_eq!(
+        state.status,
+        StatusState::Streaming,
+        "asking changes no status"
+    );
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('n'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelDelete))
+    );
+    assert_eq!(
+        state.status,
+        StatusState::Streaming,
+        "answering changes no status"
+    );
 }
 
 #[test]
 fn test_e2e_delete_cancel() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
-    let target = DeleteConfirmTarget::Single {
-        id: "conv-123".to_string(),
-        title: "Test".to_string(),
-    };
-    state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert_eq!(action, InputAction::CancelDelete);
+    let (mut state, clock) = pane_state();
+    begin_delete_confirmation(&mut state, single());
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('n'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelDelete))
+    );
 }
 
 #[test]
 fn test_e2e_bulk_delete_with_confirmation() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    let mut state = make_state();
-    // Simulate having conversations
+    let (mut state, clock) = pane_state();
     state.sidebar_entry_count = 5;
-
-    // Set up bulk delete confirmation
-    let target = DeleteConfirmTarget::Bulk { count: 5 };
-    state.pending_delete = Some(target.clone());
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(target),
-    ));
-
-    // Confirm bulk delete
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
-    assert_eq!(action, InputAction::ConfirmDelete);
+    begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 5 });
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete))
+    );
 }
 
-/// Story 21.1 S1-1: the bulk-delete `[y/n]` prompt is a Flash that nothing
-/// ticks any more, so the confirmed delete must clear it (the Single arm and
-/// the cancel path already do). `DeleteAllConversations` with two
-/// conversations, then `y`.
+/// AC9 / RU-6: the rail keys are inert for 500 ms after the first paint and a
+/// key pressed inside the window is dropped — it is never replayed, so the
+/// delete cannot be confirmed by a key that arrived before the user saw it.
 #[test]
-fn test_e2e_bulk_delete_confirmation_clears_the_prompt_flash() {
-    use rustain::infrastructure::runtime::event_loop::{
-        begin_bulk_delete_confirmation, complete_bulk_delete,
-    };
+fn story21_1_delete_keys_are_inert_for_500ms_and_never_replayed() {
+    let (mut state, clock) = pane_state();
+    begin_delete_confirmation(&mut state, single());
+    // Before the first paint nothing may answer.
+    assert_eq!(
+        press(&mut state, DomainInputEvent::KeyPress('y')),
+        Some(PaneOutcome::Consumed)
+    );
+    decision_pane::note_painted(&mut state);
+    clock.advance(Duration::from_millis(499));
+    assert_eq!(
+        press(&mut state, DomainInputEvent::KeyPress('y')),
+        Some(PaneOutcome::Consumed),
+        "499 ms after first paint is still inert"
+    );
+    assert!(
+        state.decisions.holds(DecisionKind::DeleteConversations),
+        "dropped, not replayed"
+    );
+    clock.advance(Duration::from_millis(1));
+    assert_eq!(
+        press(&mut state, DomainInputEvent::KeyPress('y')),
+        Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete)),
+        "positive control: the same key at 500 ms answers"
+    );
+}
 
+/// The sidebar `y` with no pane is not an answer (the old overlay arm is gone).
+#[test]
+fn story21_1_a_stray_y_without_a_pane_never_confirms_a_delete() {
     let mut state = make_state();
+    state.focus = FocusState::Sidebar {
+        panel: PanelType::History,
+        selected: 0,
+    };
+    state.pending_delete = Some(single());
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
+    assert_ne!(action, InputAction::ConfirmDelete);
+}
+
+/// Story 21.1 S1-1 → S2: the bulk-delete question is a pane item (no status
+/// flash exists), the confirmed delete ends in one Success notice and the
+/// answered question leaves no `[y/n]` text anywhere.
+#[test]
+fn test_e2e_bulk_delete_confirmation_is_a_pane_item_and_ends_in_one_notice() {
+    let (mut state, clock) = pane_state();
     state.sidebar_entry_count = 2;
-    begin_bulk_delete_confirmation(&mut state, 2);
-    match &state.status {
-        StatusState::Flash { message, .. } => {
-            assert!(
-                message.contains("Delete 2 conversations? [y/n]"),
-                "{message}"
-            );
-        }
-        other => panic!("the prompt is a flash, got {other:?}"),
-    }
+    begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 2 });
+    let item = state
+        .decisions
+        .items()
+        .next()
+        .expect("the question is held");
+    assert_eq!(item.kind, DecisionKind::DeleteConversations);
+    assert!(
+        item.detail.contains("Delete 2 conversations?"),
+        "{}",
+        item.detail
+    );
+    assert!(item.detail.contains("cannot be undone"), "{}", item.detail);
+    assert!(!item.detail.contains("[y/n]"), "{}", item.detail);
+    assert_eq!(state.status, StatusState::Idle, "no status flash");
     assert_eq!(
         state.pending_delete,
         Some(DeleteConfirmTarget::Bulk { count: 2 })
     );
 
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
-    assert_eq!(action, InputAction::ConfirmDelete);
+    ready(&mut state, &clock);
+    let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::ConfirmDelete))
+    );
     complete_bulk_delete(&mut state);
 
     assert_eq!(state.status, StatusState::Idle);
-    assert!(
-        !matches!(state.status, StatusState::Flash { .. }),
-        "the prompt must not outlive the confirmation"
-    );
     let notices: Vec<&str> = state
         .notifications
         .visible()

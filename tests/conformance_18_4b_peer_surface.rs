@@ -1031,9 +1031,12 @@ fn neither_peer_surface_routes_through_the_apply_card_key_table() {
         alarm.contains("FeedbackLevel::Error"),
         "the alarm must be a never-truncated Error block: {alarm}"
     );
+    // Old: `actions: vec![]` literal. New (21.1 S2, AC12): views carry no actions at
+    // all (`FeedbackBlock.actions` is deleted), so the alarm is written through the
+    // single view writer and no action list can be attached to it.
     assert!(
-        alarm.contains("actions: vec![]"),
-        "the alarm must carry no actions: {alarm}"
+        alarm.contains("views::show_view(") && !alarm.contains("actions"),
+        "the alarm must be a keyless view: {alarm}"
     );
 }
 

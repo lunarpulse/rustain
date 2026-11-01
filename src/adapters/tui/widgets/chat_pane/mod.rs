@@ -1631,7 +1631,6 @@ pub fn render(
         None, // liveness
         None, // open_prose
         None, // current_focus (test-only wrapper; keystones use render_with_search)
-        None, // active_feedback_id
     )
 }
 
@@ -1652,7 +1651,6 @@ pub fn render_attached(
     tab_render_state: &mut TabRenderState,
     tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
-    active_feedback_id: Option<&str>,
     withheld_tool_inputs: &HashMap<String, ToolInputWithheld>,
 ) -> RenderResult {
     render_with_search_impl(
@@ -1678,7 +1676,6 @@ pub fn render_attached(
         None, // open_prose
         None, // current_focus
         true,
-        active_feedback_id,
         Some(withheld_tool_inputs),
     )
 }
@@ -1727,7 +1724,6 @@ pub fn render_with_search(
     // Story 19.9 A3: `state.focused_tool_id` from the caller. See
     // `find_focused_tool_id` for the rule this feeds.
     current_focus: Option<&str>,
-    active_feedback_id: Option<&str>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1752,7 +1748,6 @@ pub fn render_with_search(
         open_prose,
         current_focus,
         false,
-        active_feedback_id,
         None,
     )
 }
@@ -1784,7 +1779,6 @@ fn render_with_search_impl(
     // rows but that block is still visible — the `Tab` cycle depends on it.
     current_focus: Option<&str>,
     show_terminal_origin_prefix: bool,
-    active_feedback_id: Option<&str>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> RenderResult {
     let bookmarks = live_bookmarks(conversation, bookmarks);
@@ -2567,12 +2561,7 @@ fn render_with_search_impl(
             }
             line_offset += spacing;
         }
-        for fb in feedback_blocks
-            .iter()
-            .filter(|(id, _)| Some(id.as_str()) != active_feedback_id)
-            .map(|(_, block)| block)
-            .chain(active_feedback_id.and_then(|id| feedback_blocks.get(id)))
-        {
+        for fb in crate::adapters::tui::views::in_render_order(feedback_blocks) {
             let fb_lines = feedback_lines(fb, area.width, theme, tab_render_state);
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
@@ -2862,7 +2851,6 @@ mod parts_aware_tests {
                             &mut tab,
                             &HashMap::new(),
                             &BTreeMap::new(),
-                            None,
                             &inputs,
                         );
                     })
@@ -3876,7 +3864,6 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
-                    None, // active_feedback_id
                 );
             })
             .unwrap();
@@ -3913,7 +3900,6 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
-                    None, // active_feedback_id
                 );
             })
             .unwrap();
@@ -3952,7 +3938,6 @@ mod parts_aware_tests {
                     None, // liveness
                     None, // open_prose
                     None, // current_focus
-                    None, // active_feedback_id
                 );
             })
             .unwrap();
@@ -4404,7 +4389,6 @@ mod parts_aware_tests {
                         &mut tab,
                         &HashMap::new(),
                         &BTreeMap::new(),
-                        None,
                         &HashMap::new(),
                     )
                 } else {
@@ -4426,7 +4410,6 @@ mod parts_aware_tests {
                         None,
                         &[],
                         &[],
-                        None,
                         None,
                         None,
                         None,

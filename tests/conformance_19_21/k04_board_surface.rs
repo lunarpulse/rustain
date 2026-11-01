@@ -22,7 +22,7 @@ fn render_info_at_60(message: &str) -> String {
         id: "k04-width".to_owned(),
         level: rustain::domain::models::FeedbackLevel::Info,
         message: message.to_owned(),
-        actions: Vec::new(),
+        seq: 0,
     };
     let lines = rustain::adapters::tui::widgets::feedback_block::render_feedback_lines(
         &block,

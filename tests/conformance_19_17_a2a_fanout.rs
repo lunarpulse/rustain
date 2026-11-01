@@ -659,7 +659,6 @@ async fn first_answers_render_per_recipient_and_waiting_tasks_remain_owned_by_re
         .get(TEAM_SEND_BLOCK_ID)
         .expect("single outcome block");
     assert_eq!(block.level, FeedbackLevel::Info);
-    assert_eq!(block.actions.len(), 0);
     assert_eq!(
         block.message,
         concat!(

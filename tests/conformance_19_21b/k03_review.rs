@@ -79,7 +79,6 @@ fn paint_chat_surface(f: &mut ProposalFixture, width: u16, height: u16) -> Vec<S
                 None,
                 None,
                 None,
-                f.state.active_feedback_id.as_deref(),
             );
         })
         .unwrap();
@@ -92,15 +91,17 @@ fn paint_chat_surface(f: &mut ProposalFixture, width: u16, height: u16) -> Vec<S
         .collect()
 }
 
+fn newest_view_id(state: &rustain::adapters::tui::state::TuiState) -> Option<String> {
+    rustain::adapters::tui::views::in_render_order(&state.feedback_blocks)
+        .last()
+        .map(|block| block.id.clone())
+}
+
 fn rekey_review(
     f: &mut ProposalFixture,
     replacement: &str,
 ) -> Arc<rustain::domain::models::TeamProposal> {
-    let original = f
-        .state
-        .active_feedback_id
-        .take()
-        .expect("real Review feedback");
+    let original = newest_view_id(&f.state).expect("real Review feedback");
     let mut feedback = f.state.feedback_blocks.remove(&original).unwrap();
     feedback.id = replacement.to_owned();
     f.state
@@ -114,7 +115,7 @@ fn rekey_review(
         .team_proposal_reviews;
     let proposal = reviews.remove(&original).unwrap();
     reviews.insert(replacement.to_owned(), proposal.clone());
-    f.state.active_feedback_id = Some(replacement.to_owned());
+    // The rekeyed block keeps its insertion sequence, so it is still the newest view.
     proposal
 }
 
@@ -226,7 +227,7 @@ async fn k03_review_from_task_drilldown_restores_full_body_without_sending() {
         "{after:#?}"
     );
     let review = &f.state.tab_render_states[&f.state.active_tab_id].team_proposal_reviews
-        [f.state.active_feedback_id.as_ref().unwrap()];
+        [&newest_view_id(&f.state).unwrap()];
     assert!(Arc::ptr_eq(review, &pending));
     assert_eq!(review.body, body);
     assert!(Arc::ptr_eq(

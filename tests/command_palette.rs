@@ -256,7 +256,10 @@ fn test_which_key_valid_chord_lookup() {
 fn test_which_key_invalid_chord_lookup() {
     let wk = WhichKeyState::new();
     assert!(wk.lookup_chord('z').is_none());
-    assert!(wk.lookup_chord('q').is_none());
+    assert!(wk.lookup_chord('j').is_none());
+    // Story 21.1 slice S2: `Ctrl+X q` brings the oldest decision back, so `q`
+    // is a bound chord now (it was the invalid-key probe before).
+    assert!(wk.lookup_chord('q').is_some());
     assert!(wk.lookup_chord('1').is_none());
 }
 

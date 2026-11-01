@@ -101,6 +101,7 @@ pub enum NoticeSource {
     Peer,
     Attached,
     Daemon,
+    Context,
 }
 
 impl NoticeSource {
@@ -138,6 +139,7 @@ impl NoticeSource {
             Self::Peer => "peer",
             Self::Attached => "attached",
             Self::Daemon => "daemon",
+            Self::Context => "context",
         }
     }
 }
@@ -154,6 +156,9 @@ pub enum NoticeAction {
     RetryTurn { messages: usize },
     /// A compaction failure: re-trigger compaction.
     RetryCompaction,
+    /// A context-window warning: S-LOG `K` (Compact…) and `n` (Start fresh…)
+    /// raise the matching interim decision — they never act on their own.
+    ContextDecision,
 }
 
 /// What a producer asks the store to record.

@@ -153,13 +153,14 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
 
 /// Push one block of `peer` output into the transcript.
 pub fn show_peer_message(state: &mut TuiState, message: String) {
-    let block = crate::domain::models::FeedbackBlock {
-        id: format!("peer-{}", state.feedback_blocks.len() + 1),
-        level: crate::domain::models::FeedbackLevel::Info,
+    let id = format!("peer-{}", state.feedback_blocks.len() + 1);
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::Peer,
+        id,
+        crate::domain::models::FeedbackLevel::Info,
         message,
-        actions: vec![crate::domain::models::FeedbackAction::Dismiss],
-    };
-    state.feedback_blocks.insert(block.id.clone(), block);
+    );
     state.needs_redraw = true;
 }
 
@@ -170,13 +171,14 @@ pub fn show_peer_message(state: &mut TuiState, message: String) {
 /// two-verb remedy must survive at the 60×16 layout floor. ⛔ It carries **no**
 /// actions, so no keystroke resolves it into an accept.
 pub fn show_peer_alarm(state: &mut TuiState, message: String) {
-    let block = crate::domain::models::FeedbackBlock {
-        id: format!("peer-alarm-{}", state.feedback_blocks.len() + 1),
-        level: crate::domain::models::FeedbackLevel::Error,
+    let id = format!("peer-alarm-{}", state.feedback_blocks.len() + 1);
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::Peer,
+        id,
+        crate::domain::models::FeedbackLevel::Error,
         message,
-        actions: vec![],
-    };
-    state.feedback_blocks.insert(block.id.clone(), block);
+    );
     state.needs_redraw = true;
 }
 

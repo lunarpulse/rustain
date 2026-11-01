@@ -23,7 +23,6 @@ fn paint(conversation: &Conversation) -> Vec<String> {
                 &mut tab,
                 &HashMap::new(),
                 &BTreeMap::new(),
-                None,
                 &HashMap::new(),
             );
         })

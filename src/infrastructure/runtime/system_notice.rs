@@ -548,4 +548,189 @@ mod tests {
             painted.split_whitespace().collect::<Vec<_>>().join(" ")
         );
     }
+
+    /// AC14 — the owner-screenshot storm, replayed through the production
+    /// consumer on a `MockClock`: a startup recovery prompt, two discovery
+    /// warnings, a model switch, a login result, an unknown-slash Advisory, a
+    /// compaction failure and five identical errors. 61 s after the last event
+    /// the notice area is empty, every fact is in the log with the right count,
+    /// `Log !N` counts the warning/error occurrences, the recovery decision is
+    /// still pending in the pane and no `[y/n]` / `Ctrl+K` text was ever painted.
+    #[tokio::test]
+    async fn story21_1_owner_screenshot_storm_leaves_an_empty_notice_area_and_every_fact_in_the_log()
+     {
+        use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
+        use crate::adapters::tui::layout::compute_layout;
+        use crate::adapters::tui::notification_log::LogFacts;
+        use crate::adapters::tui::notifications::{self, NotificationStore, begin_draw};
+        use crate::adapters::tui::widgets::toast_layer;
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::NotificationsConfig;
+        use crate::domain::models::visual::DensityMode;
+        use ratatui::layout::Rect;
+        use ratatui::widgets::Paragraph;
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut f = live_stream();
+        f.state.notifications =
+            NotificationStore::new(clock.clone(), NotificationsConfig::default().clamped());
+        let layout = compute_layout(
+            Rect::new(0, 0, 80, 24),
+            &f.state.theme,
+            "",
+            1,
+            false,
+            DensityMode::Focus,
+        )
+        .unwrap();
+        f.state
+            .notifications
+            .set_capacity(toast_layer::capacity_for(layout.chat_pane.height));
+        let facts = LogFacts {
+            active_conversation_id: Some(f.conversation.id.clone()),
+            decisions_supported: true,
+            ..LogFacts::default()
+        };
+
+        // One draw the way the local host does it: sweep, stage, toasts, pane.
+        let paint = |f: &mut Fixture, toasts: bool, pane: bool| -> String {
+            begin_draw(&mut f.state);
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            let theme = f.state.theme.clone();
+            terminal
+                .draw(|frame| {
+                    let chat = layout.chat_pane;
+                    let rows: Vec<String> = (0..chat.height)
+                        .map(|row| format!("stage row {row:02} ").repeat(8))
+                        .collect();
+                    frame.render_widget(Paragraph::new(rows.join("\n")), chat);
+                    if toasts {
+                        toast_layer::render(frame, chat, &f.state.notifications, &theme, &facts);
+                    }
+                    if pane {
+                        decision_pane::render(frame, chat, &f.state.decisions, &facts, &theme);
+                    }
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut every_screen = String::new();
+
+        // The storm. A startup recovery prompt first (0→1, empty composer: it takes focus).
+        decision_pane::raise(
+            &mut f.state,
+            DecisionDraft::new(DecisionKind::Recovery, "Recovered chat · 1234 tokens"),
+            Arrival::Automatic,
+        );
+        let tick = Duration::from_millis(200);
+        clock.advance(tick);
+        apply(
+            &mut f,
+            NoticeLevel::Warning,
+            "Discovery: 2 skills skipped (a)",
+        );
+        clock.advance(tick);
+        apply(
+            &mut f,
+            NoticeLevel::Warning,
+            "Discovery: 1 agent skipped (b)",
+        );
+        clock.advance(tick);
+        notifications::success(
+            &mut f.state,
+            NoticeSource::Model,
+            "Switched to claude-opus-4",
+        );
+        clock.advance(tick);
+        notifications::success(&mut f.state, NoticeSource::Login, "Signed in to Anthropic");
+        clock.advance(tick);
+        apply(
+            &mut f,
+            NoticeLevel::Advisory,
+            "Unknown command: /nope — not a built-in or a custom command.",
+        );
+        clock.advance(tick);
+        notifications::notify_draft(
+            &mut f.state,
+            NoticeDraft::new(
+                NoticeSource::Compaction,
+                NoticeSeverity::Error,
+                "Compaction failed: provider error",
+            )
+            .action(NoticeAction::RetryCompaction),
+        );
+        for _ in 0..5 {
+            clock.advance(tick);
+            apply(&mut f, NoticeLevel::Error, "Provider failed: 503");
+        }
+
+        // Positive control: right after the storm the notice area is NOT empty.
+        let during = paint(&mut f, true, true);
+        every_screen.push_str(&during);
+        let stage_only = paint(&mut f, false, false);
+        assert_ne!(during, stage_only, "the storm paints toasts and the pane");
+        assert!(f.state.notifications.visible().count() > 0);
+
+        // 61 s after the last event: no toast is left, nothing else changed.
+        clock.advance(Duration::from_secs(61));
+        let toasts_only = paint(&mut f, true, false);
+        assert_eq!(
+            toasts_only,
+            paint(&mut f, false, false),
+            "an empty notice area leaves every stage cell untouched"
+        );
+        assert_eq!(f.state.notifications.visible().count(), 0);
+        let last = paint(&mut f, true, true);
+        every_screen.push_str(&last);
+
+        // Every fact is in the log; repeated errors are one record counted ×5.
+        let facts_in_log: Vec<(String, u32)> = f
+            .state
+            .notifications
+            .records()
+            .map(|r| (r.message.clone(), r.count))
+            .collect();
+        for (message, count) in [
+            ("Discovery: 2 skills skipped (a)", 1),
+            ("Discovery: 1 agent skipped (b)", 1),
+            ("Switched to claude-opus-4", 1),
+            ("Signed in to Anthropic", 1),
+            (
+                "Unknown command: /nope — not a built-in or a custom command.",
+                1,
+            ),
+            ("Compaction failed: provider error", 1),
+            ("Provider failed: 503", 5),
+        ] {
+            assert!(
+                facts_in_log.contains(&(message.to_owned(), count)),
+                "{message} ×{count} missing from {facts_in_log:?}"
+            );
+        }
+        // `Log !N`: warning/error occurrences nobody presented (2 + 1 advisory + 1 + 5).
+        assert_eq!(f.state.notifications.unseen(), 9);
+
+        // The recovery decision is still pending, focused, and painted with its own rail.
+        assert_eq!(f.state.decisions.len(), 1);
+        assert!(f.state.decisions.is_focused());
+        assert!(
+            last.contains("[Enter/Esc] Continue") && last.contains("[n] New session"),
+            "{last}"
+        );
+        assert!(
+            !every_screen.contains("[y/n]") && !every_screen.contains("Ctrl+K"),
+            "retired prompt text was painted"
+        );
+    }
 }

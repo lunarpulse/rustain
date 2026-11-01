@@ -392,9 +392,10 @@ client only; `Esc`, `Ctrl+D` and `Ctrl+C` never detach — `Ctrl+C` stops the ac
 terminal turn, or asks before quitting when idle, and `Ctrl+Q` / `q` in Chat ask
 before leaving when work or a draft exists). Quitting exits this client only; the
 daemon keeps running. `Ctrl+X` opens the same untimed, complete chord menu as the
-local TUI (`?` help, `l` log, `n` Notifications, `x` Clear toasts, `Enter` send;
-panels that are local to a standalone session answer with an explicit unavailable
-result and the real remedy), and a bare
+local TUI (`?` help, `l` log, `n` Notifications, `x` Clear toasts, `q` Decisions,
+`Enter` send; panels that are local to a standalone session answer with an
+explicit unavailable result and the real remedy; the attached client has no
+decision pane, so `q` answers "No decisions waiting in this client"), and a bare
 `?` types a question mark in the composer. Notices (daemon errors, read-only
 refusals, connection results) are toasts that expire on their own and stay in
 the Notification Log (`Ctrl+X n` or `/notifications`); `Ctrl+X x` clears the

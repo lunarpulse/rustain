@@ -2,7 +2,7 @@ use crate::adapters::daemon::protocol::{
     ClientFrame, RecipientAction, RecipientActionOutcome, RecipientActionTarget,
 };
 use crate::adapters::tui::state::{RecipientActionState, RecipientSurfaceTarget, TuiState};
-use crate::domain::models::{FeedbackBlock, FeedbackLevel};
+use crate::domain::models::FeedbackLevel;
 use crate::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
 use std::{borrow::Cow, collections::BTreeMap};
 
@@ -230,17 +230,13 @@ pub(crate) fn apply_context_state(
         }
     }
     if show_inventory {
-        let id = "recipient-context".to_owned();
-        state.feedback_blocks.insert(
-            id.clone(),
-            FeedbackBlock {
-                id: id.clone(),
-                level: FeedbackLevel::Info,
-                message: inventory,
-                actions: Vec::new(),
-            },
+        crate::adapters::tui::views::show_view(
+            &mut state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::RecipientOutcome,
+            "recipient-context",
+            FeedbackLevel::Info,
+            inventory,
         );
-        state.active_feedback_id = Some(id);
     }
     state.needs_redraw = true;
 }
@@ -395,20 +391,14 @@ pub(crate) fn refresh_action_notices(state: &mut TuiState, visible_changed: bool
     let id = "recipient-actions";
     if message.is_empty() {
         state.feedback_blocks.remove(id);
-        if state.active_feedback_id.as_deref() == Some(id) {
-            state.active_feedback_id = None;
-        }
     } else {
-        state.feedback_blocks.insert(
-            id.to_owned(),
-            FeedbackBlock {
-                id: id.to_owned(),
-                level: FeedbackLevel::Info,
-                message,
-                actions: Vec::new(),
-            },
+        crate::adapters::tui::views::show_view(
+            &mut state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::RecipientOutcome,
+            id,
+            FeedbackLevel::Info,
+            message,
         );
-        state.active_feedback_id = Some(id.to_owned());
     }
     state.needs_redraw = true;
 }
@@ -477,17 +467,13 @@ pub(crate) fn show_notice(
         surface.results.push(message);
         surface.scroll_offset = usize::MAX;
     } else {
-        let id = "recipient-actions".to_owned();
-        state.feedback_blocks.insert(
-            id.clone(),
-            FeedbackBlock {
-                id: id.clone(),
-                level: FeedbackLevel::Info,
-                message,
-                actions: Vec::new(),
-            },
+        crate::adapters::tui::views::show_view(
+            &mut state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::RecipientOutcome,
+            "recipient-actions",
+            FeedbackLevel::Info,
+            message,
         );
-        state.active_feedback_id = Some(id);
     }
     state.needs_redraw = true;
 }

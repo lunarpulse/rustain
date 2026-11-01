@@ -1,6 +1,18 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_pane::{
+    Arrival, DecisionDraft, DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise,
+};
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::adapters::tui::state::TuiState;
+use rustain::domain::clock::MockClock;
+use rustain::domain::events::DomainInputEvent;
+use rustain::domain::models::NotificationsConfig;
 use rustain::domain::models::{
     FocusState, ImageAttachment, JournalRecord, PermissionMode, ResponseMode, RoomEvent,
     TeamProposalDecision,
@@ -75,6 +87,18 @@ async fn send_once(fixture: &mut ProposalFixture, host: &ObservedHost) {
     assert_eq!(dispatches, 1);
 }
 
+/// The event loop's pane dispatch, as the loop calls it: `Some` when the pane owned the key.
+fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
+    match handle_domain_event(
+        state,
+        &DomainInputEvent::KeyPress(key),
+        &LogFacts::default(),
+    )? {
+        PaneOutcome::Effect(effect) => Some(effect.into_action()),
+        _ => Some(InputAction::Consumed),
+    }
+}
+
 #[tokio::test]
 async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
@@ -84,20 +108,39 @@ async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
         data: "large-base64-image".into(),
     });
 
-    // Even a proposal visibility marker from the preceding paint cannot own y.
+    // Old (19.21b): `handle_input` mapped `y`/`n` to ImageConfirmAttach/Cancel. New
+    // (21.1 S2, AC9/AC12): the confirmation is a decision-pane item and the event
+    // loop's pane dispatch owns its keys before any proposal action, inert for 500 ms.
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    fixture.state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    let ask = |state: &mut TuiState| {
+        raise(
+            state,
+            DecisionDraft::new(DecisionKind::LargeImage, "Large image. Attach it?"),
+            Arrival::Requested,
+        );
+        note_painted(state);
+    };
+    ask(&mut fixture.state);
+    // Even a proposal visibility marker from the preceding paint cannot own y; the
+    // inert window swallows it first, so nothing is attached or sent.
     assert!(matches!(
-        fixture
-            .raw_key(press(KeyCode::Char('y'), KeyModifiers::NONE))
-            .await,
+        pane_key(&mut fixture.state, 'y'),
+        Some(InputAction::Consumed)
+    ));
+    clock.advance(Duration::from_millis(501));
+    assert!(matches!(
+        pane_key(&mut fixture.state, 'y'),
         Some(InputAction::ImageConfirmAttach)
     ));
     let rows = fixture.paint(60, 16);
     assert!(fixture.state.team_proposal_visible.is_none());
     assert!(!rows.iter().any(|row| row.contains("[y] Send")));
+    ask(&mut fixture.state);
+    clock.advance(Duration::from_millis(501));
     assert!(matches!(
-        fixture
-            .raw_key(press(KeyCode::Char('n'), KeyModifiers::NONE))
-            .await,
+        pane_key(&mut fixture.state, 'n'),
         Some(InputAction::ImageConfirmCancel)
     ));
     assert_not_sent(&fixture, &host).await;

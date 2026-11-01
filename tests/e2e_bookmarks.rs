@@ -120,7 +120,6 @@ fn render_chat_pane_with_bookmarks(
                 None,
                 None, // open_prose
                 None, // current_focus
-                None,
             );
         })
         .unwrap();

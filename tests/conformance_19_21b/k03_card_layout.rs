@@ -183,7 +183,6 @@ async fn k03_review_keeps_tab_bar_visible_above_chat() {
                 None,
                 None,
                 None,
-                f.state.active_feedback_id.as_deref(),
             );
             team_proposal_card::render(card, frame.buffer_mut(), &f.state.theme);
         })
@@ -284,7 +283,6 @@ async fn k03_overflow_review_stays_readable_while_streaming_and_scrolled() {
                     None,
                     None,
                     None,
-                    f.state.active_feedback_id.as_deref(),
                 );
                 f.state.viewport_height = layout.chat_pane.height;
                 f.state.total_content_height = result.total_content_height;

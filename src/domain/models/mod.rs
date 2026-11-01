@@ -201,8 +201,8 @@ pub use node_journal::{
 #[allow(unused_imports)]
 pub use node_state::{NodeState, NodeStateError};
 pub use notice::{
-    FeedbackAction, FeedbackBlock, FeedbackLevel, LogVisitCandidate, NoticeLevel, RetryState,
-    StatusState, next_delay,
+    FeedbackBlock, FeedbackLevel, LogVisitCandidate, NoticeLevel, RetryState, StatusState,
+    next_delay,
 };
 #[allow(unused_imports)]
 pub use orchestration::{

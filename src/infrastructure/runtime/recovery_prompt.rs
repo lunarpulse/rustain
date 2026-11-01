@@ -1,112 +1,85 @@
-//! Startup crash-recovery prompt: producer copy and key routing (Story 21.2 AC11, RU-5).
+//! Startup crash-recovery prompt copy (Story 21.2 AC11, RU-5; Story 21.1 S2 AC9).
 //!
-//! Extracted from `event_loop::run` so the producer and its interceptor are
-//! reachable by tests exactly as the runtime calls them. The block carries NO
-//! severity glyph of its own: `feedback_block::render_feedback_lines*` owns the
-//! one level icon (D10 — the producer used to prepend U+2139 and the renderer
-//! added a second one).
+//! The prompt is a `Recovery` item of the interim decision pane: this module
+//! owns only its producer copy, reachable by tests exactly as the runtime calls
+//! it. The keys (`[Enter/Esc] Continue  [n] New session`) belong to the pane's
+//! rail, and its `Esc` is Continue — never New, never quit (RU-5).
 
-use crate::domain::events::{DomainInputEvent, DomainKey};
-use crate::domain::models::{FeedbackAction, FeedbackBlock, FeedbackLevel};
-
-/// Feedback-block id the runtime interceptor keys on.
-pub(crate) const RECOVERY_BLOCK_ID: &str = "recovery";
-
-/// The recovery prompt block: title and token count in the body, the real
-/// response keys as its action row (`[Enter/Esc] Continue  [n] New session`).
-pub(crate) fn recovery_block(title: &str, token_count: u32) -> FeedbackBlock {
-    FeedbackBlock {
-        id: RECOVERY_BLOCK_ID.to_string(),
-        level: FeedbackLevel::Info,
-        message: format!("Recovered: '{title}' (partial response, {token_count} tokens)."),
-        actions: vec![
-            FeedbackAction::Custom("[Enter/Esc] Continue".to_string()),
-            FeedbackAction::Custom("[n] New session".to_string()),
-        ],
-    }
-}
-
-/// What a keystroke means while the recovery prompt is the active feedback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecoveryChoice {
-    /// Keep the recovered conversation (Enter / Esc / `y`).
-    Continue,
-    /// Start a fresh session (`n`).
-    NewSession,
-    /// The existing Ctrl+C / Ctrl+Q escape hatch: nothing is running yet.
-    Quit,
-    /// Every other key is swallowed while the prompt is up.
-    Swallow,
-}
-
-/// Classify a key for the recovery interceptor. Esc is Continue, never New and
-/// never quit (RU-5).
-pub(crate) fn recovery_choice(event: &DomainInputEvent) -> RecoveryChoice {
-    match event {
-        DomainInputEvent::SpecialKey(DomainKey::Enter | DomainKey::Esc)
-        | DomainInputEvent::KeyPress('y') => RecoveryChoice::Continue,
-        DomainInputEvent::KeyPress('n') => RecoveryChoice::NewSession,
-        DomainInputEvent::SpecialKey(DomainKey::CtrlC | DomainKey::CtrlQ) => RecoveryChoice::Quit,
-        _ => RecoveryChoice::Swallow,
-    }
+/// The recovery prompt body: the recovered title and token count. The pane
+/// frame carries the title and the real response keys.
+pub(crate) fn recovery_detail(title: &str, token_count: u32) -> String {
+    format!("Recovered: '{title}' (partial response, {token_count} tokens).")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::tui::theme::Theme;
-    use crate::adapters::tui::widgets::feedback_block::render_feedback_lines;
+    use crate::adapters::tui::decision_pane::{
+        Arrival, DecisionDraft, DecisionEffect, DecisionKind, PaneKey, PaneOutcome, handle_key,
+        note_painted, raise,
+    };
+    use crate::adapters::tui::notification_log::LogFacts;
+    use crate::adapters::tui::state::TuiState;
+    use crate::domain::clock::MockClock;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    fn rendered(block: &FeedbackBlock, width: u16) -> String {
-        render_feedback_lines(block, width, &Theme::dark())
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    fn pane_state() -> (TuiState, Arc<MockClock>) {
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut state = TuiState::new(80, 24);
+        state.notifications = crate::adapters::tui::notifications::NotificationStore::from_config(
+            &crate::domain::models::NotificationsConfig::default(),
+            clock.clone(),
+        );
+        (state, clock)
     }
 
     #[test]
-    fn story21_2_recovery_prompt_paints_exactly_one_level_glyph() {
-        let block = recovery_block("Fix the parser", 1234);
-        let text = rendered(&block, 200);
-        assert_eq!(text.matches('ℹ').count(), 1, "one level icon: {text}");
-        assert!(text.contains("Fix the parser") && text.contains("1234 tokens"));
-        assert!(text.contains("[Enter/Esc] Continue"));
-        assert!(text.contains("[n] New session"));
-        // Positive control: an ordinary unprefixed Info block keeps its renderer icon.
-        let plain = FeedbackBlock {
-            id: "plain".into(),
-            level: FeedbackLevel::Info,
-            message: "i is a literal body letter".into(),
-            actions: Vec::new(),
-        };
-        let plain_text = rendered(&plain, 80);
-        assert_eq!(plain_text.matches('ℹ').count(), 1);
-        assert!(plain_text.contains("i is a literal body letter"));
+    fn story21_2_recovery_detail_names_the_title_and_token_count() {
+        let text = recovery_detail("Fix the parser", 1234);
+        assert!(
+            text.contains("Fix the parser") && text.contains("1234 tokens"),
+            "{text}"
+        );
     }
 
     #[test]
-    fn story21_2_recovery_esc_continues_and_n_starts_new() {
-        let esc = DomainInputEvent::SpecialKey(DomainKey::Esc);
-        let enter = DomainInputEvent::SpecialKey(DomainKey::Enter);
-        assert_eq!(recovery_choice(&esc), RecoveryChoice::Continue);
-        assert_eq!(recovery_choice(&enter), RecoveryChoice::Continue);
-        assert_eq!(
-            recovery_choice(&DomainInputEvent::KeyPress('n')),
-            RecoveryChoice::NewSession
-        );
-        assert_eq!(
-            recovery_choice(&DomainInputEvent::SpecialKey(DomainKey::CtrlC)),
-            RecoveryChoice::Quit
-        );
-        assert_eq!(
-            recovery_choice(&DomainInputEvent::KeyPress('x')),
-            RecoveryChoice::Swallow
-        );
+    fn story21_1_recovery_esc_continues_and_n_starts_new_through_the_pane() {
+        // RU-5: Esc is Continue, `n` is New, an unrelated key never swallows the
+        // pane forever (it is consumed once, then Esc still works).
+        for (key, expected) in [
+            (PaneKey::Esc, Some(DecisionEffect::RecoveryContinue)),
+            (PaneKey::Enter, Some(DecisionEffect::RecoveryContinue)),
+            (PaneKey::Char('n'), Some(DecisionEffect::RecoveryNewSession)),
+            (PaneKey::Char('x'), None),
+        ] {
+            let (mut state, clock) = pane_state();
+            let facts = LogFacts::default();
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Recovery, recovery_detail("t", 1)),
+                Arrival::Automatic,
+            );
+            assert!(state.decisions.is_focused(), "startup recovery takes focus");
+            note_painted(&mut state);
+            clock.advance(Duration::from_millis(500));
+            let outcome = handle_key(&mut state, key, &facts);
+            match expected {
+                Some(effect) => {
+                    assert_eq!(outcome, PaneOutcome::Effect(effect), "{key:?}");
+                    assert!(state.decisions.is_empty(), "resolved exactly once");
+                }
+                None => {
+                    assert_eq!(outcome, PaneOutcome::Consumed, "{key:?}");
+                    assert_eq!(
+                        state.decisions.len(),
+                        1,
+                        "an unrelated key never resolves it"
+                    );
+                    let again = handle_key(&mut state, PaneKey::Esc, &facts);
+                    assert_eq!(again, PaneOutcome::Effect(DecisionEffect::RecoveryContinue));
+                }
+            }
+        }
     }
 }

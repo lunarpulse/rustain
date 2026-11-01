@@ -6,9 +6,11 @@ use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 
 /// Render a FeedbackBlock as styled lines for the chat pane.
 ///
-/// - Error: bold red border `┃`, `✗` symbol, red text, action keys
-/// - Warning: yellow thin border `│`, `⚠` symbol, yellow text, action keys (max 3 lines)
-/// - Info: blue thin border `│`, `ℹ` symbol, blue text, no action keys
+/// - Error: bold red border `┃`, `✗` symbol, red text
+/// - Warning: yellow thin border `│`, `⚠` symbol, yellow text (max 3 lines)
+/// - Info: blue thin border `│`, `ℹ` symbol, blue text
+///
+/// Views carry no actions (Story 21.1 S2): nothing here advertises a key.
 pub fn render_feedback_lines(
     block: &FeedbackBlock,
     width: u16,
@@ -39,17 +41,9 @@ pub fn render_feedback_lines_with_review(
         border_style
     };
 
-    // Build action string
-    let action_text = if block.actions.is_empty() {
-        String::new()
-    } else {
-        let labels: Vec<&str> = block.actions.iter().map(|a| a.key_label()).collect();
-        format!(" {}", labels.join("  "))
-    };
-
     // Available width for message text: total - borders - symbol - spacing
-    // Layout: "┃ ✗ message text  [r] Retry ┃"
-    let overhead = 2 /* left border + space */ + 2 /* symbol + space */ + action_text.len() + 2 /* space + right border */;
+    // Layout: "┃ ✗ message text ┃"
+    let overhead = 2 /* left border + space */ + 2 /* symbol + space */ + 2 /* space + right border */;
     let max_text_width = (width as usize).saturating_sub(overhead);
 
     // Wrap message text if needed
@@ -81,37 +75,6 @@ pub fn render_feedback_lines_with_review(
             msg_line.clone(),
             Style::default().fg(text_color),
         ));
-
-        // Action keys on last line only
-        if i == max_lines - 1 && !block.actions.is_empty() {
-            // Pad to push actions to the right
-            let current_len = 2 + 2 + msg_line.width();
-            let actions_len = action_text.width();
-            let pad = (width as usize).saturating_sub(current_len + actions_len + 2);
-            spans.push(Span::raw(" ".repeat(pad)));
-
-            // Render each action key with green highlight
-            for action in &block.actions {
-                let label = action.key_label();
-                // Split "[x]" from rest
-                if let Some(bracket_end) = label.find(']') {
-                    spans.push(Span::styled(
-                        label[..=bracket_end].to_string(),
-                        Style::default().fg(theme.colors.success),
-                    ));
-                    spans.push(Span::styled(
-                        label[bracket_end + 1..].to_string(),
-                        Style::default().fg(text_color),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        label.to_string(),
-                        Style::default().fg(text_color),
-                    ));
-                }
-                spans.push(Span::raw(" "));
-            }
-        }
 
         // Right border
         spans.push(Span::styled(border_char.to_string(), bold_border_style));
@@ -218,7 +181,7 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::adapters::tui::theme::Theme;
-    use crate::domain::models::{FeedbackAction, FeedbackBlock, FeedbackLevel};
+    use crate::domain::models::{FeedbackBlock, FeedbackLevel};
 
     fn test_theme() -> Theme {
         Theme::dark()
@@ -230,7 +193,7 @@ mod tests {
             id: "err-1".to_string(),
             level: FeedbackLevel::Error,
             message: "Couldn't reach Anthropic API".to_string(),
-            actions: vec![FeedbackAction::Retry],
+            seq: 0,
         };
         let lines = render_feedback_lines(&block, 80, &test_theme());
         assert!(!lines.is_empty());
@@ -242,7 +205,10 @@ mod tests {
             .collect();
         assert!(first_line_text.contains('✗'));
         assert!(first_line_text.contains('┃'));
-        assert!(first_line_text.contains("[Ctrl+K r]"));
+        assert!(
+            !first_line_text.contains("Ctrl+K"),
+            "a block advertises no key"
+        );
     }
 
     #[test]
@@ -251,7 +217,7 @@ mod tests {
             id: "warn-1".to_string(),
             level: FeedbackLevel::Warning,
             message: "Running low on context (92%)".to_string(),
-            actions: vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
+            seq: 0,
         };
         let lines = render_feedback_lines(&block, 80, &test_theme());
         assert!(!lines.is_empty());
@@ -270,7 +236,7 @@ mod tests {
             id: "info-1".to_string(),
             level: FeedbackLevel::Info,
             message: "Session restarted".to_string(),
-            actions: vec![],
+            seq: 0,
         };
         let lines = render_feedback_lines(&block, 80, &test_theme());
         assert!(!lines.is_empty());
@@ -289,7 +255,7 @@ mod tests {
             id: "warn-2".to_string(),
             level: FeedbackLevel::Warning,
             message: "This is a very long warning message that should be wrapped across multiple lines to test the max 3 line limit for warnings and info blocks".to_string(),
-            actions: vec![],
+            seq: 0,
         };
         let lines = render_feedback_lines(&block, 40, &test_theme());
         assert!(lines.len() <= 3);
@@ -307,35 +273,33 @@ mod tests {
         assert_eq!(next_delay(5), 16000);
     }
 
+    /// Story 21.1 S2 (AC12): a view never advertises a key — the `[Ctrl+K x]`
+    /// chips (old behavior: painted on the last line) are gone with the chord.
     #[test]
-    fn feedback_block_renders_chord_prefix_chips() {
-        let block = FeedbackBlock {
-            id: "fb-1".to_string(),
-            level: FeedbackLevel::Warning,
-            message: "Auto-skipped task 3".to_string(),
-            actions: vec![
-                FeedbackAction::Retry,
-                FeedbackAction::Compact,
-                FeedbackAction::Dismiss,
-            ],
-        };
-        let lines = render_feedback_lines(&block, 80, &test_theme());
-        assert!(!lines.is_empty());
-        // Actions appear on the last rendered line
-        let last_line_text: String = lines
-            .last()
-            .unwrap()
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(
-            last_line_text.contains("[Ctrl+K r]")
-                && last_line_text.contains("[Ctrl+K c]")
-                && last_line_text.contains("[Ctrl+K x]"),
-            "all action chips should use chord-prefix: {}",
-            last_line_text
-        );
+    fn a_view_block_paints_no_action_chips() {
+        for level in [
+            FeedbackLevel::Error,
+            FeedbackLevel::Warning,
+            FeedbackLevel::Info,
+        ] {
+            let block = FeedbackBlock {
+                id: "fb-1".to_string(),
+                level,
+                message: "Auto-skipped task 3".to_string(),
+                seq: 0,
+            };
+            let text: String = render_feedback_lines(&block, 80, &test_theme())
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+                .collect();
+            assert!(
+                !text.contains("Ctrl+K")
+                    && !text.contains("] Retry")
+                    && !text.contains("] Dismiss"),
+                "no action chip may be painted: {text}"
+            );
+            assert!(text.contains("Auto-skipped task 3"));
+        }
     }
 
     fn message_texts(block: &FeedbackBlock, width: u16) -> Vec<String> {
@@ -354,7 +318,7 @@ mod tests {
             id: "info-structured".to_string(),
             level: FeedbackLevel::Info,
             message: message.to_string(),
-            actions: vec![],
+            seq: 0,
         }
     }
 

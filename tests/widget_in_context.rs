@@ -232,7 +232,7 @@ fn test_feedback_block_in_full_layout() {
             id: "fb-1".to_string(),
             level: FeedbackLevel::Error,
             message: "Connection lost".to_string(),
-            actions: vec![],
+            seq: 0,
         },
     );
 

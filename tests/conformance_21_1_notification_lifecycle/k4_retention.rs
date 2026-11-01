@@ -21,7 +21,7 @@ use rustain::domain::models::{PermissionMode, StatusState};
 use super::support::{advance, clocked, draw, notify, row_text};
 
 /// The real status row, drawn the way both hosts call it.
-fn status_row(state: &TuiState, width: u16, hint: Option<&str>) -> String {
+pub(super) fn status_row(state: &TuiState, width: u16, hint: Option<&str>) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
     let theme = Theme::dark();
     terminal
@@ -57,7 +57,10 @@ fn status_row(state: &TuiState, width: u16, hint: Option<&str>) -> String {
                 false,
                 None,
                 LogAwareness::Hidden,
-                state.notifications.unseen(),
+                status_bar::NoticeBadges {
+                    unseen: state.notifications.unseen(),
+                    decisions: state.decisions.len(),
+                },
             );
         })
         .unwrap();

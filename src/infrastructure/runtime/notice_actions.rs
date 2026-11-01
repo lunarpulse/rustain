@@ -1,9 +1,10 @@
-//! Local-host execution of notice actions (Story 21.1 AC5, A8).
+//! Local-host execution of notice actions and decision effects (Story 21.1
+//! AC5, AC9, A8).
 //!
-//! S-LOG (`notification_log`) decides *what* the user asked for; this module
-//! runs it with the local host's facts. The same two helpers back the
-//! Ctrl+K `FeedbackRetry`/`FeedbackCompact` arms, so there is one retry path and
-//! one compaction trigger.
+//! S-LOG (`notification_log`) and the interim decision pane (`decision_pane`)
+//! decide *what* the user asked for; this module runs it with the local host's
+//! facts. S-LOG `r`, the pane's Compact and the carryover decision share the
+//! same two helpers, so there is one retry path and one compaction trigger.
 
 use std::sync::Arc;
 
@@ -32,12 +33,15 @@ pub(crate) fn log_facts(
     conversation: &Conversation,
     streaming: &StreamingState,
     tab_manager: Option<&TabManager>,
+    context_warning: bool,
 ) -> LogFacts {
     LogFacts {
         active_conversation_id: Some(conversation.id.clone()),
         active_messages: conversation.messages.len(),
         turn_running: streaming.is_streaming,
         retry_supported: true,
+        decisions_supported: true,
+        context_warning,
         titles: tab_manager
             .map(|tm| {
                 tm.tabs()
@@ -117,7 +121,8 @@ pub(crate) fn retry_last_turn(
     });
 }
 
-/// Trigger an inline compaction of `conversation` (memory flush first).
+/// Trigger a compaction of `conversation` for `purpose` (memory flush first):
+/// `Inline` for Compact/Retry, `Carryover` for the carried-summary decision.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn trigger_compaction(
     state: &mut TuiState,
@@ -125,6 +130,7 @@ pub(crate) fn trigger_compaction(
     streaming: &StreamingState,
     provider: &Arc<dyn StreamingProvider>,
     config: &AppConfig,
+    purpose: CompactionPurpose,
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
     app_state: &AppState,
     router: &crate::adapters::provider::ProviderRouter,
@@ -137,7 +143,7 @@ pub(crate) fn trigger_compaction(
         provider,
         config,
         domain_tx,
-        CompactionPurpose::Inline,
+        purpose,
         &app_context,
     ) {
         HandlerOutcome::Quiet => {}
@@ -149,6 +155,41 @@ pub(crate) fn trigger_compaction(
         }
         _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
     }
+}
+
+/// Daily-budget `Pause`: persist `dismissed_until_unix` = next local midnight
+/// and suppress the warning until then (Story 7.5 AC5/AC7).
+pub(crate) async fn budget_pause(
+    state: &mut TuiState,
+    app_state: &AppState,
+    conversation_id: &str,
+) {
+    let next_midnight = crate::infrastructure::clock_util::next_midnight_unix();
+    let new_state = crate::adapters::budget::BudgetState {
+        dismissed_until_unix: next_midnight,
+    };
+    match app_state.budget_state_store.save(&new_state).await {
+        Ok(()) => {
+            if let Some(db) = state.daily_budget.as_mut() {
+                db.dismissed_until_unix = next_midnight;
+            }
+            handlers::budget::handle_clear_daily_budget_warning(state);
+            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                conversation_id: Some(conversation_id.to_owned()),
+                level: crate::domain::models::NoticeLevel::Info,
+                message: "Budget warning paused until tomorrow.".to_string(),
+            });
+        }
+        Err(e) => {
+            tracing::error!("Failed to persist budget pause: {e}");
+            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                conversation_id: Some(conversation_id.to_owned()),
+                level: crate::domain::models::NoticeLevel::Warning,
+                message: "Couldn't persist budget pause state.".to_string(),
+            });
+        }
+    }
+    state.needs_redraw = true;
 }
 
 /// Execute what S-LOG asked for. `Consumed`/`Closed` need nothing.
@@ -186,10 +227,12 @@ pub(crate) fn execute_log_outcome(
                     streaming,
                     provider,
                     config,
+                    CompactionPurpose::Inline,
                     domain_tx,
                     app_state,
                     router,
                 ),
+                NoticeAction::ContextDecision => {}
             }
         }
     }
@@ -274,6 +317,7 @@ mod tests {
             &conversation,
             &StreamingState::default(),
             Some(&tab_manager),
+            false,
         );
         assert_eq!(
             facts.active_conversation_id.as_deref(),

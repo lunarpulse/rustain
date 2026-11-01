@@ -3338,7 +3338,6 @@ pub async fn run_attached(
                 &mut tab_render_state,
                 &tool_block_states,
                 &state.feedback_blocks,
-                state.active_feedback_id.as_deref(),
                 &tool_inputs.reasons,
             )
             .visible_feedback_ids;
@@ -4319,7 +4318,6 @@ mod tests {
                             &mut self.tab,
                             &HashMap::new(),
                             &self.state.feedback_blocks,
-                            self.state.active_feedback_id.as_deref(),
                             &HashMap::new(),
                         );
                         render_attached_composer(
@@ -8015,7 +8013,6 @@ mod tests {
                     &mut tab,
                     &HashMap::new(),
                     &BTreeMap::new(),
-                    None,
                     &inputs.reasons,
                 );
             })
@@ -9321,7 +9318,6 @@ mod tests {
                 &mut trs,
                 &tbs,
                 &fbs,
-                None,
                 &HashMap::new(),
             );
         })
@@ -9761,7 +9757,6 @@ mod tests {
                     &mut tab,
                     &tools,
                     &state.feedback_blocks,
-                    state.active_feedback_id.as_deref(),
                     &HashMap::new(),
                 )
                 .visible_feedback_ids;

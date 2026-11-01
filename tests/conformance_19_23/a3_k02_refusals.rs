@@ -777,9 +777,9 @@ async fn a3_k02_standalone_unresolvable_selector_paints_no_row_and_records_nothi
             "/team send --type design_update --holders-of S9-99 a3-k02 standalone refused body",
         )
         .await;
-    let block = state
-        .active_feedback_id
-        .clone()
+    let block = rustain::adapters::tui::views::in_render_order(&state.feedback_blocks)
+        .last()
+        .map(|block| block.id.clone())
         .expect("the refusal is shown");
     assert_eq!(
         state.feedback_blocks[&block].message,
@@ -804,9 +804,9 @@ async fn a3_k02_standalone_unresolvable_selector_paints_no_row_and_records_nothi
             &format!("/team send --type design_update --holders-of S9-01 {body}"),
         )
         .await;
-    let selected_block = state
-        .active_feedback_id
-        .clone()
+    let selected_block = rustain::adapters::tui::views::in_render_order(&state.feedback_blocks)
+        .last()
+        .map(|block| block.id.clone())
         .expect("selected send block");
     assert_eq!(
         state

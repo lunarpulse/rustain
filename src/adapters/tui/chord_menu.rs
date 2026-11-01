@@ -36,6 +36,9 @@ pub enum AttachedRoute {
     NotificationLog,
     /// Archives every visible toast (Story 21.1); sources are untouched.
     ClearToasts,
+    /// Focuses the oldest waiting decision (Story 21.1 S2): the attached client
+    /// has no decision producers and says so.
+    Decisions,
 }
 
 /// One retained chord.
@@ -135,6 +138,11 @@ pub const RETAINED_CHORDS: &[ChordSpec] = &[
         key: 'x',
         name: "Clear toasts",
         attached: AttachedRoute::ClearToasts,
+    },
+    ChordSpec {
+        key: 'q',
+        name: "Decisions",
+        attached: AttachedRoute::Decisions,
     },
 ];
 

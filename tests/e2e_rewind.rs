@@ -245,12 +245,10 @@ fn test_e2e_rewind_status_hint_shows_counts() {
         std::time::Duration::from_secs(4),
         "Completed action toast = 4 s Success lifetime"
     );
-    assert!(
-        !matches!(
-            state.status,
-            rustain::domain::models::StatusState::Flash { .. }
-        ),
-        "the status row holds no flash"
+    assert_eq!(
+        state.status,
+        rustain::domain::models::StatusState::Idle,
+        "the status row holds no status fact from the rewind"
     );
 }
 

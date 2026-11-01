@@ -65,7 +65,8 @@ pub(crate) fn local_facts(
         + usize::from(plan_decision_is_open(state, conversation, tabs))
         + usize::from(state.pending_delegation_card.is_some())
         + usize::from(state.pending_consolidation_card.is_some())
-        + usize::from(state.ask_user_question.is_some());
+        + usize::from(state.ask_user_question.is_some())
+        + state.decisions.len();
     facts
 }
 
@@ -130,6 +131,7 @@ pub(crate) fn quit_from_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
     use crate::adapters::tui::quit_confirm::{QuitKey, QuitKeyOutcome, handle_key};
     use crate::domain::models::FocusState;
     use crate::domain::models::ImageAttachment;
@@ -378,31 +380,31 @@ mod tests {
         )
     }
 
-    /// One scenario per banner interceptor: the banner is up AND there is other
+    /// One scenario per decision-pane kind: the item is pending AND there is other
     /// work (an inactive tab streaming) or an unsent draft; Ctrl+Q must open
-    /// System/Quit, keep the banner and never set `should_quit`.
-    fn assert_banner_quit_asks(banner: &str, arm: impl Fn(&mut Host)) {
+    /// System/Quit, keep the item and never set `should_quit`. The item itself is
+    /// counted as a pending decision (AC10), so even an otherwise idle host asks.
+    fn assert_pane_quit_asks(kind: DecisionKind, arm: impl Fn(&mut Host)) {
         let mut h = host();
-        h.state.active_feedback_id = Some(banner.to_owned());
-        arm(&mut h);
-        assert!(!banner_quit(&mut h), "{banner}: Ctrl+Q must ask first");
-        assert!(!h.state.should_quit, "{banner}: no silent exit");
-        assert!(h.state.quit_confirm.is_some(), "{banner}: System/Quit open");
-        assert_eq!(
-            h.state.active_feedback_id.as_deref(),
-            Some(banner),
-            "{banner}: the banner stays"
+        decision_pane::raise(
+            &mut h.state,
+            DecisionDraft::new(kind, "pending"),
+            Arrival::Requested,
         );
-        // Positive control: the same banner on an idle host exits.
+        arm(&mut h);
+        assert!(!banner_quit(&mut h), "{kind:?}: Ctrl+Q must ask first");
+        assert!(!h.state.should_quit, "{kind:?}: no silent exit");
+        assert!(h.state.quit_confirm.is_some(), "{kind:?}: System/Quit open");
+        assert!(h.state.decisions.holds(kind), "{kind:?}: the item stays");
+        // Positive control: the same host with the item resolved exits.
         let mut idle = host();
-        idle.state.active_feedback_id = Some(banner.to_owned());
-        assert!(banner_quit(&mut idle), "{banner}: idle host exits");
+        assert!(banner_quit(&mut idle), "{kind:?}: idle host exits");
         assert!(idle.state.should_quit);
     }
 
     #[test]
     fn story21_2_recovery_prompt_ctrl_q_asks_when_other_work_exists() {
-        assert_banner_quit_asks("recovery", |h| {
+        assert_pane_quit_asks(DecisionKind::Recovery, |h| {
             h.tabs.create_tab();
             h.tabs.switch_to_index(1);
             h.tabs.tabs_mut()[1].streaming.is_streaming = true;
@@ -411,34 +413,95 @@ mod tests {
 
     #[test]
     fn story21_2_carryover_prompt_ctrl_q_asks_when_a_draft_exists() {
-        assert_banner_quit_asks("carryover", |h| h.state.input_buffer = "unsent".into());
-    }
-
-    #[test]
-    fn story21_2_override_banner_ctrl_q_asks_when_the_active_tab_streams() {
-        assert_banner_quit_asks("override-status-memory", |h| {
-            h.streaming.is_streaming = true
+        assert_pane_quit_asks(DecisionKind::Carryover, |h| {
+            h.state.input_buffer = "unsent".into()
         });
     }
 
-    /// The remaining banner interceptors (recovery, carryover) must call the shared
-    /// helper — never set `should_quit` on their own again. Story 21.1 A11 deleted
-    /// the third (override-status) interceptor: its banner was a dead prompt whose
-    /// block never set `active_feedback_id`, so it could never fire (S2 deletes the
-    /// other two with the pane).
     #[test]
-    fn story21_2_every_banner_ctrl_q_interceptor_uses_the_quit_guard() {
-        let source = include_str!("event_loop.rs");
-        let production = source;
-        assert!(
-            production.matches("quit_guard::quit_from_banner(").count() >= 2,
-            "recovery and carryover banners both route through the guard"
+    fn story21_2_budget_decision_ctrl_q_asks_when_the_active_tab_streams() {
+        // Was the override-status banner (dead prompt, deleted in S1/A11): the
+        // third scenario now exercises the daily-budget item.
+        assert_pane_quit_asks(DecisionKind::Budget, |h| h.streaming.is_streaming = true);
+    }
+
+    #[test]
+    fn story21_1_every_pane_kind_is_counted_as_a_pending_decision() {
+        for kind in [
+            DecisionKind::Recovery,
+            DecisionKind::Carryover,
+            DecisionKind::Budget,
+            DecisionKind::ContextWarning,
+            DecisionKind::LargeImage,
+            DecisionKind::DeleteConversations,
+        ] {
+            let mut h = host();
+            decision_pane::raise(
+                &mut h.state,
+                DecisionDraft::new(kind, "x"),
+                Arrival::Requested,
+            );
+            let facts = local_facts(
+                &h.state,
+                &h.conversation,
+                &h.tabs,
+                &h.streaming,
+                &h.lifecycle,
+                &h.queue,
+            );
+            assert_eq!(facts.pending_decisions, 1, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn story21_1_a_closed_conversations_decision_no_longer_blocks_quitting() {
+        let mut h = host();
+        decision_pane::raise(
+            &mut h.state,
+            DecisionDraft::new(DecisionKind::ContextWarning, "low").conversation("c1"),
+            Arrival::Automatic,
         );
-        let carryover = production
-            .split("the prompt does not bypass S-QUIT")
+        let pending = |h: &Host| {
+            local_facts(
+                &h.state,
+                &h.conversation,
+                &h.tabs,
+                &h.streaming,
+                &h.lifecycle,
+                &h.queue,
+            )
+            .pending_decisions
+        };
+        assert_eq!(pending(&h), 1, "positive control: the live item counts");
+        // The tab holding c1 was closed: the host's draw prunes the orphan.
+        let remaining = crate::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some("c2".into()),
+            titles: vec![("c2".into(), "two".into())],
+            ..Default::default()
+        };
+        decision_pane::prune_closed(&mut h.state, &remaining);
+        assert_eq!(pending(&h), 0, "an orphaned item never makes quit ask");
+        assert_eq!(
+            decision_pane::status_cue(decision_pane::waiting(&h.state)),
+            None
+        );
+    }
+
+    /// The pane's Ctrl+C / Ctrl+Q arm must call the shared helper — never set
+    /// `should_quit` on its own. Story 21.1 deleted the recovery and carryover
+    /// interceptors (and the override-status one in S1) in favour of that one arm.
+    #[test]
+    fn story21_2_the_pane_ctrl_q_arm_uses_the_quit_guard() {
+        let source = include_str!("event_loop.rs");
+        assert!(
+            source.matches("quit_guard::quit_from_banner(").count() >= 1,
+            "the pane routes Ctrl+C/Ctrl+Q through the guard"
+        );
+        let arm = source
+            .split("go through the same S-QUIT guard as every route")
             .nth(1)
             .and_then(|rest| rest.split("continue;").next())
             .unwrap();
-        assert!(!carryover.contains("should_quit = true"), "{carryover}");
+        assert!(!arm.contains("should_quit = true"), "{arm}");
     }
 }

@@ -662,17 +662,13 @@ pub async fn team_command(
             )
             .await
             {
-                let id = "recipient-view".to_owned();
-                state.feedback_blocks.insert(
-                    id.clone(),
-                    crate::domain::models::FeedbackBlock {
-                        id: id.clone(),
-                        level: crate::domain::models::FeedbackLevel::Info,
-                        message: error.to_string(),
-                        actions: Vec::new(),
-                    },
+                crate::adapters::tui::views::show_view(
+                    &mut state.feedback_blocks,
+                    crate::adapters::tui::views::ViewKind::RecipientOutcome,
+                    "recipient-view",
+                    crate::domain::models::FeedbackLevel::Info,
+                    error.to_string(),
                 );
-                state.active_feedback_id = Some(id);
                 state.needs_redraw = true;
             }
         }
@@ -1002,14 +998,12 @@ pub fn team_thread_ready(
     if conversation_id == active_conversation_id {
         show_team_thread(state, message);
     } else if let Some(tab) = tab_manager.find_by_conversation_mut(conversation_id) {
-        tab.feedback_blocks.insert(
-            TEAM_THREAD_BLOCK_ID.to_owned(),
-            crate::domain::models::FeedbackBlock {
-                id: TEAM_THREAD_BLOCK_ID.to_owned(),
-                level: crate::domain::models::FeedbackLevel::Info,
-                message,
-                actions: Vec::new(),
-            },
+        crate::adapters::tui::views::show_view(
+            &mut tab.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::TeamThread,
+            TEAM_THREAD_BLOCK_ID,
+            crate::domain::models::FeedbackLevel::Info,
+            message,
         );
         state.needs_redraw = true;
     }
@@ -2415,7 +2409,7 @@ mod tests {
             id: BLOCK_ID.to_owned(),
             level: FeedbackLevel::Info,
             message: render_team_send_rows(std::slice::from_ref(&sending_row)),
-            actions: Vec::new(),
+            seq: 0,
         };
         let issuing_tab = tabs
             .find_by_conversation_mut(&issuing_conversation_id)
@@ -2502,7 +2496,7 @@ mod tests {
                     id: BLOCK_ID.to_owned(),
                     level: FeedbackLevel::Info,
                     message: render_team_send_rows(&rows),
-                    actions: Vec::new(),
+                    seq: 0,
                 },
             );
             let mut blocks = std::collections::BTreeMap::new();
@@ -3921,7 +3915,6 @@ mod log_awareness_tests {
                         &mut tab,
                         &tools,
                         &state.feedback_blocks,
-                        state.active_feedback_id.as_deref(),
                         &HashMap::new(),
                     )
                     .visible_feedback_ids;

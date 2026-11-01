@@ -1,5 +1,5 @@
 //! Story 21.1 conformance: notification lifecycle (slice S1 keystones K1-K4,
-//! K7, K8, K11a; slice S2 grows K10/K11 here).
+//! K7, K8, K11a; slice S2 adds K10 and turns K11a into the K11 gate).
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Every
 //! assertion reads a real rendered `Buffer` or enters through a public front
@@ -32,5 +32,8 @@ mod k7_log;
 #[path = "conformance_21_1_notification_lifecycle/k8_chords.rs"]
 mod k8_chords;
 
-#[path = "conformance_21_1_notification_lifecycle/k11a_gate.rs"]
-mod k11a_gate;
+#[path = "conformance_21_1_notification_lifecycle/k10_pane.rs"]
+mod k10_pane;
+
+#[path = "conformance_21_1_notification_lifecycle/k11_gate.rs"]
+mod k11_gate;

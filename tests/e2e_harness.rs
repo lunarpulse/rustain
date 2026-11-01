@@ -250,6 +250,11 @@ impl TestHarness {
         let auto_scroll = self.state.auto_scroll();
         let status = &self.state.status;
         let unseen_notices = self.state.notifications.unseen();
+        let decisions = &self.state.decisions;
+        let pane_facts = rustain::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(self.conversation.id.clone()),
+            ..Default::default()
+        };
         let input_buffer = &self.state.input_buffer;
         let cursor_position = self.state.cursor_position;
         let focus = self.state.focus.clone();
@@ -310,7 +315,10 @@ impl TestHarness {
                         false,
                         None,
                         rustain::adapters::tui::state::LogAwareness::Hidden,
-                        unseen_notices,
+                        rustain::adapters::tui::widgets::status_bar::NoticeBadges {
+                            unseen: unseen_notices,
+                            decisions: decisions.len(),
+                        },
                     );
 
                     input_box::render(
@@ -323,6 +331,15 @@ impl TestHarness {
                         multiline_mode,
                         input_scroll_offset,
                         None,
+                    );
+
+                    // Story 21.1 S2: the interim decision pane paints over the chat pane.
+                    rustain::adapters::tui::decision_pane::render(
+                        frame,
+                        app_layout.chat_pane,
+                        decisions,
+                        &pane_facts,
+                        theme,
                     );
                 }
             })

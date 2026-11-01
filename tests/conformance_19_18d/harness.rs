@@ -1720,7 +1720,6 @@ impl Sender {
         team_thread_ready("conv", state, &mut tabs, &conversation_id, message);
         let block = &state.feedback_blocks[TEAM_THREAD_BLOCK_ID];
         assert_eq!(block.level, FeedbackLevel::Info);
-        assert!(block.actions.is_empty());
         block.message.clone()
     }
 }

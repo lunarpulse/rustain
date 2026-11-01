@@ -322,7 +322,11 @@ scrolling follow the same wrapped rows. The supported terminal floor is
 unchanged (60×16). Notices appear as short toasts that expire on their own
 (errors within 60 s) and stay reviewable in the Notification Log
 (`Ctrl+X n`, `/notifications`); a `Log !N` badge counts warnings and errors you
-have not looked at yet.
+have not looked at yet. Prompts that need an answer (recovery, daily budget,
+context warning, large image, delete) wait in a decision pane instead of a
+toast; an automatically raised one never steals the keyboard while you type
+(one you asked for, such as delete, takes focus at once), and `Ctrl+X q` brings the
+oldest one back (`Needs you (N)` in the status row).
 
 **Tool execution** — seven-state FSM per tool call (`Validating → Scheduled →
 AwaitingApproval → Executing → Success/Error/Cancelled`). Parallel batching for

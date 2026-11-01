@@ -74,8 +74,17 @@ fn k8_the_menu_paints_n_and_x_in_both_hosts_and_every_painted_chord_routes() {
             spec.key
         );
     }
-    for key in ['n', 'x'] {
+    for key in ['n', 'x', 'q'] {
         assert!(chord_menu::spec_for(key).is_some() && wk.chord_map.contains_key(&key));
+    }
+    for host in [ChordHost::Local, ChordHost::Attached] {
+        let items = chord_menu::menu_items(&wk, host);
+        let q = items.iter().find(|i| i.key == "Q").expect("[Q]");
+        assert_eq!(q.name, "Decisions", "{host:?}");
+        assert!(
+            q.available,
+            "{host:?}: attached answers honestly instead of n/a"
+        );
     }
 }
 
@@ -85,7 +94,7 @@ fn k8_help_lists_the_new_chords_and_the_slash_command() {
         .iter()
         .flat_map(|c| c.bindings.iter())
         .collect();
-    for key in ["Ctrl+X, N", "Ctrl+X, X", "/notifications"] {
+    for key in ["Ctrl+X, N", "Ctrl+X, X", "Ctrl+X, Q", "/notifications"] {
         assert!(all.iter().any(|b| b.key == key && b.available), "{key}");
     }
 }

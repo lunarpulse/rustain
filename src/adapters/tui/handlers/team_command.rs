@@ -681,16 +681,13 @@ pub(crate) fn team_command(
         None => {}
     }
 
-    state.feedback_blocks.insert(
-        TEAM_LOG_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: TEAM_LOG_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message: render_rows(&rows, args.json, input.rail),
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamLog,
+        TEAM_LOG_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        render_rows(&rows, args.json, input.rail),
     );
-    state.active_feedback_id = Some(TEAM_LOG_BLOCK_ID.to_owned());
     // Story 19.16g: the visit travels with the block it replaced — a newer
     // command discards the older, unpresented one, and a filtered view is
     // never a full visit. `TuiState::log_visits_presented` consumes it only
@@ -814,16 +811,13 @@ pub fn render_team_status(
 
 pub(crate) fn show_team_status(state: &mut TuiState, message: String) {
     const TEAM_STATUS_BLOCK_ID: &str = "team-status";
-    state.feedback_blocks.insert(
-        TEAM_STATUS_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: TEAM_STATUS_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamStatus,
+        TEAM_STATUS_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(TEAM_STATUS_BLOCK_ID.to_owned());
     state.needs_redraw = true;
 }
 
@@ -837,16 +831,13 @@ pub const TEAM_BOARD_BLOCK_ID: &str = "team-board";
 /// level. The board is not a warning about anything: it is the answer to a
 /// question the operator asked.
 pub(crate) fn show_team_board(state: &mut TuiState, message: String) {
-    state.feedback_blocks.insert(
-        TEAM_BOARD_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: TEAM_BOARD_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamBoard,
+        TEAM_BOARD_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(TEAM_BOARD_BLOCK_ID.to_owned());
     state.needs_redraw = true;
 }
 
@@ -1136,30 +1127,24 @@ pub fn render_team_thread(
 
 /// Replace the stable `team-thread` block, at Info level, keyless.
 pub fn show_team_thread(state: &mut TuiState, message: String) {
-    state.feedback_blocks.insert(
-        TEAM_THREAD_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: TEAM_THREAD_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamThread,
+        TEAM_THREAD_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(TEAM_THREAD_BLOCK_ID.to_owned());
     state.needs_redraw = true;
 }
 
 pub fn show_team_send(state: &mut TuiState, block_id: &str, message: String) {
-    state.feedback_blocks.insert(
-        block_id.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: block_id.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamSend,
+        block_id,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(block_id.to_owned());
     state.needs_redraw = true;
 }
 
@@ -1175,16 +1160,13 @@ pub const TEAM_RETRACT_SENDING: &str = "  sending…";
 
 /// Replace the stable `team-retract` block, at Info level, keyless.
 pub fn show_team_retract(state: &mut TuiState, message: String) {
-    state.feedback_blocks.insert(
-        TEAM_RETRACT_BLOCK_ID.to_owned(),
-        crate::domain::models::FeedbackBlock {
-            id: TEAM_RETRACT_BLOCK_ID.to_owned(),
-            level: crate::domain::models::FeedbackLevel::Info,
-            message,
-            actions: Vec::new(),
-        },
+    crate::adapters::tui::views::show_view(
+        &mut state.feedback_blocks,
+        crate::adapters::tui::views::ViewKind::TeamRetract,
+        TEAM_RETRACT_BLOCK_ID,
+        crate::domain::models::FeedbackLevel::Info,
+        message,
     );
-    state.active_feedback_id = Some(TEAM_RETRACT_BLOCK_ID.to_owned());
     state.needs_redraw = true;
 }
 
@@ -1871,7 +1853,12 @@ mod tests {
         assert!(format!("{events:?}").contains("sequence gap"));
         let block = &state.feedback_blocks[TEAM_LOG_BLOCK_ID];
         assert!(block.message.contains("peer-a"), "{}", block.message);
-        assert_eq!(state.active_feedback_id.as_deref(), Some(TEAM_LOG_BLOCK_ID));
+        assert_eq!(
+            crate::adapters::tui::views::in_render_order(&state.feedback_blocks)
+                .last()
+                .map(|b| b.id.as_str()),
+            Some(TEAM_LOG_BLOCK_ID)
+        );
     }
 
     #[test]

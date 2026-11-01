@@ -660,7 +660,6 @@ fn render(conversation: &Conversation, state: &TuiState) -> String {
                 None,
                 None,
                 None,
-                None,
             );
         })
         .unwrap();

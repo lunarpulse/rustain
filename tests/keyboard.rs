@@ -1135,32 +1135,98 @@ fn test_large_image_confirm_attach() {
     }
 }
 
-// AC4: 'y' key in Chat focus with pending_large_image returns ImageConfirmAttach
-#[test]
-fn test_large_image_y_confirms() {
+// Story 21.1 S2 (AC9, AC12). Old: `y` / `n` in Chat focus with a `pending_large_image`
+// returned ImageConfirmAttach / ImageConfirmCancel straight from `handle_input`
+// (a key arm in app.rs that any focus-Chat `y` could reach). New: the confirmation is
+// a decision-pane item, answered through the pane dispatch the event loop runs
+// (`decision_pane::handle_domain_event`), inert for 500 ms after its first paint, and
+// `handle_input` no longer owns the key at all.
+fn large_image_pane() -> (TuiState, std::sync::Arc<rustain::domain::clock::MockClock>) {
+    use rustain::adapters::tui::decision_pane::{
+        Arrival, DecisionDraft, DecisionKind, note_painted, raise,
+    };
+    let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
     let mut state = TuiState::new(80, 24);
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
     state.focus = FocusState::Chat;
     state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
         media_type: "image/png".to_string(),
         data: "large_base64_data".to_string(),
     });
-
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
-    assert_eq!(action, InputAction::ImageConfirmAttach);
+    raise(
+        &mut state,
+        DecisionDraft::new(DecisionKind::LargeImage, "Large image (5.3 MB). Attach it?"),
+        Arrival::Requested,
+    );
+    note_painted(&mut state);
+    (state, clock)
 }
 
-// AC4: 'n' key in Chat focus with pending_large_image returns ImageConfirmCancel
+fn answer_large_image(key: char) -> (Option<InputAction>, Option<InputAction>) {
+    use rustain::adapters::tui::decision_pane::{PaneOutcome, handle_domain_event};
+    use rustain::adapters::tui::notification_log::LogFacts;
+    let (mut state, clock) = large_image_pane();
+    assert!(
+        state.decisions.is_focused(),
+        "a requested decision is focused"
+    );
+    let facts = LogFacts::default();
+    let event = DomainInputEvent::KeyPress(key);
+    // Inside the 500 ms window the key is dropped and never replayed.
+    let early = match handle_domain_event(&mut state, &event, &facts) {
+        Some(PaneOutcome::Effect(effect)) => Some(effect.into_action()),
+        _ => None,
+    };
+    clock.advance(std::time::Duration::from_millis(501));
+    let late = match handle_domain_event(&mut state, &event, &facts) {
+        Some(PaneOutcome::Effect(effect)) => Some(effect.into_action()),
+        _ => None,
+    };
+    (early, late)
+}
+
+// AC4: 'y' on the large-image decision attaches (once the rail is live)
+#[test]
+fn test_large_image_y_confirms() {
+    let (early, late) = answer_large_image('y');
+    assert_eq!(
+        early, None,
+        "the rail is inert for 500 ms after first paint"
+    );
+    assert_eq!(late, Some(InputAction::ImageConfirmAttach));
+}
+
+// AC4: 'n' on the large-image decision cancels (once the rail is live)
 #[test]
 fn test_large_image_n_cancels() {
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Chat;
-    state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "large_base64_data".to_string(),
-    });
+    let (early, late) = answer_large_image('n');
+    assert_eq!(
+        early, None,
+        "the rail is inert for 500 ms after first paint"
+    );
+    assert_eq!(late, Some(InputAction::ImageConfirmCancel));
+}
 
-    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert_eq!(action, InputAction::ImageConfirmCancel);
+// AC12: the retired key arm — `y`/`n` in Chat focus with a pending image reach
+// nothing through `handle_input` (the pane owns them).
+#[test]
+fn test_chat_focus_y_and_n_no_longer_answer_a_pending_large_image() {
+    for key in ['y', 'n'] {
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Chat;
+        state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "large_base64_data".to_string(),
+        });
+        let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
+        assert_ne!(action, InputAction::ImageConfirmAttach, "{key}");
+        assert_ne!(action, InputAction::ImageConfirmCancel, "{key}");
+    }
 }
 
 // AC4: 'y' key in Chat focus without pending_large_image does NOT trigger confirm

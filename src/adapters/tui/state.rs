@@ -1120,6 +1120,8 @@ pub enum ChordAction {
     OpenNotificationLog,
     /// Archive every visible toast (Story 21.1 AC5); sources are untouched.
     ClearToasts,
+    /// Focus the oldest waiting decision (Story 21.1 S2 AC10).
+    FocusDecisions,
     /// Not yet implemented — show feedback.
     Noop(String),
 }
@@ -2530,6 +2532,7 @@ impl WhichKeyState {
         chord_map.insert('?', ChordAction::ShowHelp);
         chord_map.insert('n', ChordAction::OpenNotificationLog);
         chord_map.insert('x', ChordAction::ClearToasts);
+        chord_map.insert('q', ChordAction::FocusDecisions);
 
         Self {
             active: false,
@@ -2703,11 +2706,13 @@ pub struct TuiState {
     pub team_send_blocks:
         BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
     pub team_send_next_id: u64,
-    /// The ID of the most recent active (actionable) feedback block.
-    pub active_feedback_id: Option<String>,
-    /// Whether a Ctrl+K chord leader has been pressed and the next character key
-    /// should be dispatched through FeedbackAction::dispatch_key().
-    pub chord_leader_active: bool,
+    /// Interim decision pane (Story 21.1 S2, AC9): the six response-key prompts
+    /// (recovery, carryover, budget, context warning, large image, delete).
+    /// A bounded presentation state; 21-4 migrates it onto the modal stack.
+    pub decisions: crate::adapters::tui::decision_pane::DecisionPane,
+    /// When the last printable key was typed, from the injected clock (RU-6: an
+    /// arriving decision never takes focus from someone who is typing).
+    pub last_printable_at: Option<Instant>,
     /// Story 16.6: pending vim `z`-prefix chord (za/zc/zo/zM/zR/zs/zz). AC10
     pub pending_z: bool,
     /// Story 16.6: pending vim `]`/`[` bracket chord (]]/[[/]P).
@@ -3269,8 +3274,8 @@ impl TuiState {
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
             team_send_next_id: 0,
-            active_feedback_id: None,
-            chord_leader_active: false,
+            decisions: Default::default(),
+            last_printable_at: None,
             pending_z: false,
             pending_bracket: None,
             pending_g: false,

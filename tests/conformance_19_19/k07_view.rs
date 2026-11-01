@@ -363,11 +363,13 @@ async fn k07_view_reads_http_received_type_and_raw_body_after_restart() {
         missing.recipient_surface.is_none(),
         "unknown ids do not open a fabricated item"
     );
+    let newest = rustain::adapters::tui::views::in_render_order(&missing.feedback_blocks)
+        .last()
+        .expect("the refusal is shown as the newest view");
+    assert_eq!(newest.id, "recipient-view", "the refusal block's id");
     assert!(
-        missing
-            .active_feedback_id
-            .as_ref()
-            .is_some_and(|id| missing.feedback_blocks.contains_key(id))
+        !newest.message.trim().is_empty(),
+        "the refusal block carries the refusal message"
     );
     assert_eq!(
         refused_view_requests.lock().len(),

@@ -23,7 +23,7 @@
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::DomainEventPayload;
 use crate::domain::events::DomainKey;
-use crate::domain::models::{FeedbackBlock, FeedbackLevel, PeerRail, RoomEvent};
+use crate::domain::models::{FeedbackLevel, PeerRail, RoomEvent};
 use crate::domain::services::transparency::{
     TransparencyKind, TransparencyRow, sanitize_disclosable,
 };
@@ -57,42 +57,41 @@ pub fn apply_domain_event(state: &mut TuiState, payload: &DomainEventPayload) ->
                 let rail = row
                     .rail
                     .or((row.kind == TransparencyKind::AwaitingApproval).then_some(PeerRail::A2a));
-                let block = FeedbackBlock {
-                    id: match rail {
-                        Some(rail) => format!(
-                            "{NOTICE_BLOCK_PREFIX}{}-{}-{}",
-                            rail.as_str(),
-                            row.peer,
-                            row.task.as_deref().unwrap_or("-")
-                        ),
-                        None => format!(
-                            "{NOTICE_BLOCK_PREFIX}{}-{}",
-                            row.peer,
-                            row.task.as_deref().unwrap_or("-")
-                        ),
-                    },
-                    level: feedback_level(row.kind),
-                    message: row.one_line(),
-                    actions: Vec::new(),
+                let id = match rail {
+                    Some(rail) => format!(
+                        "{NOTICE_BLOCK_PREFIX}{}-{}-{}",
+                        rail.as_str(),
+                        row.peer,
+                        row.task.as_deref().unwrap_or("-")
+                    ),
+                    None => format!(
+                        "{NOTICE_BLOCK_PREFIX}{}-{}",
+                        row.peer,
+                        row.task.as_deref().unwrap_or("-")
+                    ),
                 };
-                state.feedback_blocks.insert(block.id.clone(), block);
+                crate::adapters::tui::views::show_view(
+                    &mut state.feedback_blocks,
+                    crate::adapters::tui::views::ViewKind::Transparency,
+                    id,
+                    feedback_level(row.kind),
+                    row.one_line(),
+                );
                 true
             }
             None => false,
         },
         DomainEventPayload::TransparencyJournalFailed { failures, detail } => {
-            state.feedback_blocks.insert(
-                JOURNAL_FAILURE_BLOCK_ID.to_owned(),
-                FeedbackBlock {
-                    id: JOURNAL_FAILURE_BLOCK_ID.to_owned(),
-                    level: FeedbackLevel::Error,
-                    message: format!(
-                        "⚠ transparency journal is failing — {failures} record(s) missing from \
-                         the audit log; A2A accepts are being refused until it recovers ({})",
-                        sanitize_disclosable(detail, 200)
-                    ),
-                    actions: Vec::new(),
-                },
+            crate::adapters::tui::views::show_view(
+                &mut state.feedback_blocks,
+                crate::adapters::tui::views::ViewKind::TransparencyJournal,
+                JOURNAL_FAILURE_BLOCK_ID,
+                FeedbackLevel::Error,
+                format!(
+                    "⚠ transparency journal is failing — {failures} record(s) missing from \
+                     the audit log; A2A accepts are being refused until it recovers ({})",
+                    sanitize_disclosable(detail, 200)
+                ),
             );
             true
         }

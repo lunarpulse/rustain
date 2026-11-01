@@ -47,14 +47,6 @@ pub enum InputAction {
     FeedbackInputSubmit,
     /// Feedback input: user pressed Esc (AC5 — cancel feedback, restore prompt).
     FeedbackInputCancel,
-    /// Feedback block: user pressed r to retry (Ctrl+K r).
-    FeedbackRetry,
-    /// Feedback block: user pressed c to compact (Ctrl+K c).
-    FeedbackCompact,
-    /// Feedback block: user pressed x to dismiss (Ctrl+K x).
-    FeedbackDismiss,
-    /// Feedback block: user pressed n to start fresh (Ctrl+K n).
-    FeedbackStartFresh,
     /// Story 8.5 AC-6 — apply a session-scoped adapter override.
     ApplyAdapterOverride {
         port: crate::domain::models::PortDimension,
@@ -427,12 +419,11 @@ pub enum InputAction {
     },
     /// Open the usage/cost panel overlay (Story 7.5 AC3).
     OpenUsagePanel,
-    /// Daily-budget warning — user picked "Continue anyway" (Story 7.5 AC5).
-    FeedbackBudgetContinue,
-    /// Daily-budget warning — user picked "Switch to cheaper model" (Story 7.5 AC5).
-    FeedbackBudgetSwitchCheaper,
-    /// Daily-budget warning — user picked "Pause until tomorrow" (Story 7.5 AC5/AC7).
-    FeedbackBudgetPause,
+    /// A rail key of the interim decision pane (Story 21.1 S2 AC9): the effect
+    /// was already resolved once by the pane; the host runs it.
+    Decision(crate::adapters::tui::decision_pane::DecisionEffect),
+    /// `Ctrl+X q`: focus the oldest waiting decision (Story 21.1 S2 AC10).
+    FocusDecisions,
     /// Story 14.3a: rerun the spoke at this slot.
     WaveRerunSpoke(usize),
     /// Story 14.3a: drill into spoke body at this slot.
@@ -476,26 +467,6 @@ impl InputAction {
                 | InputAction::PlanCardApprove
                 | InputAction::PlanCardReject
         )
-    }
-}
-
-/// Bridge FeedbackAction → InputAction. Compiler-enforced exhaustiveness:
-/// every new FeedbackAction variant must have a mapping arm here or the match
-/// won't compile — this is the adapter-layer half of the single-source-of-truth contract.
-fn feedback_action_to_input_action(action: crate::domain::models::FeedbackAction) -> InputAction {
-    use crate::domain::models::FeedbackAction;
-    match action {
-        FeedbackAction::Retry => InputAction::FeedbackRetry,
-        FeedbackAction::Compact => InputAction::FeedbackCompact,
-        FeedbackAction::StartFresh => InputAction::FeedbackStartFresh,
-        FeedbackAction::Dismiss => InputAction::FeedbackDismiss,
-        FeedbackAction::BudgetContinue => InputAction::FeedbackBudgetContinue,
-        FeedbackAction::BudgetSwitchCheaper => InputAction::FeedbackBudgetSwitchCheaper,
-        FeedbackAction::BudgetPause => InputAction::FeedbackBudgetPause,
-        FeedbackAction::Custom(_) => {
-            tracing::warn!("Custom feedback action dispatched via chord key — ignoring");
-            InputAction::Consumed
-        }
     }
 }
 
@@ -764,18 +735,19 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
         state.needs_redraw = true;
         return InputAction::Consumed;
     }
-    // Cancel pending chord leader on any event that isn't a character key or Ctrl+K.
-    if !matches!(
-        event,
-        DomainInputEvent::KeyPress(_) | DomainInputEvent::SpecialKey(DomainKey::CtrlK)
-    ) {
-        state.chord_leader_active = false;
+    // Cancel pending vim chords on any event that isn't a character key.
+    if !matches!(event, DomainInputEvent::KeyPress(_)) {
         state.pending_z = false;
         state.pending_bracket = None;
         state.pending_g = false;
     }
     match event {
-        DomainInputEvent::KeyPress(c) => handle_char(state, *c),
+        DomainInputEvent::KeyPress(c) => {
+            if !c.is_control() {
+                state.last_printable_at = Some(state.notifications.now());
+            }
+            handle_char(state, *c)
+        }
         DomainInputEvent::SpecialKey(key) => handle_special_key(state, *key),
         DomainInputEvent::MouseScroll(delta) => {
             state.needs_redraw = true;
@@ -896,19 +868,6 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
-    // Ctrl+K chord-prefix dispatch (FeedbackAction arbiter — UX-DR-GLOBAL-CHORD-PREFIX).
-    // Fires BEFORE any focus/overlay checks so it works regardless of keyboard focus.
-    if state.chord_leader_active {
-        state.chord_leader_active = false;
-        if let Some(action) = crate::domain::models::FeedbackAction::dispatch_key(c)
-            .map(feedback_action_to_input_action)
-        {
-            return action;
-        }
-        state.needs_redraw = true;
-        return InputAction::Consumed;
-    }
-
     if state.pending_spawn_gate.is_some() {
         return match c {
             'c' => InputAction::SpawnGateCap,
@@ -980,6 +939,10 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 }
                 ChordAction::ClearToasts => {
                     state.notifications.clear_toasts();
+                }
+                ChordAction::FocusDecisions => {
+                    state.which_key.dismiss();
+                    return InputAction::FocusDecisions;
                 }
                 ChordAction::ShowHelp => {
                     // Open help overlay
@@ -1575,13 +1538,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                     state.needs_redraw = true;
                     InputAction::Consumed
                 }
-                // AC4: Large image confirmation
-                'y' if state.pending_large_image.is_some() => {
-                    return InputAction::ImageConfirmAttach;
-                }
-                'n' if state.pending_large_image.is_some() => {
-                    return InputAction::ImageConfirmCancel;
-                }
                 'i' => {
                     state.focus = FocusState::Input;
                     state.needs_redraw = true;
@@ -1907,13 +1863,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
                 _ => InputAction::Ignored,
             }
         }
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::DeleteConfirmation(_))) => {
-            match c {
-                'y' | 'Y' => InputAction::ConfirmDelete,
-                'n' | 'N' => InputAction::CancelDelete,
-                _ => InputAction::Consumed,
-            }
-        }
         // Fork confirmation: y = confirm, n = cancel (Story 4-3a, AC1)
         FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) => match c {
             'y' => InputAction::ForkConfirm,
@@ -2031,43 +1980,12 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 }
 
 fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
-    // Cancel pending chord on any special key other than Ctrl+K itself.
-    if state.chord_leader_active && key != DomainKey::CtrlK {
-        state.chord_leader_active = false;
-        state.needs_redraw = true;
-    }
     // Cancel pending vim chords on any special key.
     if state.pending_z || state.pending_bracket.is_some() || state.pending_g {
         state.pending_z = false;
         state.pending_bracket = None;
         state.pending_g = false;
         state.needs_redraw = true;
-    }
-
-    // Ctrl+K chord leader: set flag and consume, regardless of overlay.
-    // UX-DR-GLOBAL-CHORD-PREFIX — the next char key dispatches through
-    // FeedbackAction::dispatch_key().
-    if key == DomainKey::CtrlK {
-        if state.which_key.active {
-            state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
-        }
-        state.chord_leader_active = true;
-        state.needs_redraw = true;
-        return InputAction::Consumed;
-    }
-
-    // Delete confirmation: Esc → Cancel
-    if matches!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::DeleteConfirmation(_)
-        ))
-    ) {
-        return match key {
-            DomainKey::Esc => InputAction::CancelDelete,
-            _ => InputAction::Consumed,
-        };
     }
 
     // Fork confirmation: Esc → Cancel (Story 4-3a, AC1)
@@ -4028,8 +3946,8 @@ pub fn convert_crossterm_event(
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('h') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlH));
             }
-            // Ctrl+K → feedback-action chord-prefix leader key.
-            // UX-DR-GLOBAL-CHORD-PREFIX authorizes Ctrl+K as the global chord prefix.
+            // Ctrl+K: reserved, unbound until 21-3 (RU-24). The key is still decoded so
+            // the terminal never sees it as text, but no handler acts on it.
             if *modifiers == KeyModifiers::CONTROL && *code == KeyCode::Char('k') {
                 return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlK));
             }
@@ -5000,18 +4918,6 @@ mod tests {
                 ),
             },
             Row {
-                label: "Overlay(Confirmation(DeleteConfirmation))",
-                setup: confirmation(ConfirmationType::DeleteConfirmation(
-                    crate::domain::models::visual::DeleteConfirmTarget::Single {
-                        id: "conv-1".to_string(),
-                        title: "t".to_string(),
-                    },
-                )),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(DeleteConfirmation): destructive modal Esc cancels first",
-                ),
-            },
-            Row {
                 label: "Overlay(Confirmation(Fork))",
                 setup: confirmation(ConfirmationType::Fork),
                 expect: CtrlQRowExpectation::Skip("Confirmation(Fork): modal Esc cancels first"),
@@ -5768,34 +5674,28 @@ mod tests {
     fn bare_c_in_input_focus_with_feedback_inserts_text_not_compact() {
         let mut state = make_state();
         state.focus = FocusState::Input;
-        state.active_feedback_id = Some("fb-1".to_string());
         let action = handle_char(&mut state, 'c');
         assert_eq!(action, InputAction::Consumed);
         assert!(state.input_buffer.contains('c'));
     }
 
     #[test]
-    fn chord_ctrl_k_c_with_feedback_dispatches_compact() {
+    fn story21_1_ctrl_k_is_unbound_and_the_next_c_is_literal_text() {
+        // Old: `Ctrl+K` then `c` dispatched FeedbackCompact and never typed.
+        // New (AC12): Ctrl+K arms nothing; `c` types into the composer.
         let mut state = make_state();
         state.focus = FocusState::Input;
-        state.active_feedback_id = Some("fb-1".to_string());
-        // Press Ctrl+K to set chord leader
         let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);
-        let action1 = handle_input(&mut state, &ctrl_k);
-        assert_eq!(action1, InputAction::Consumed);
-        assert!(state.chord_leader_active);
-        // Press 'c' — chord dispatch fires through
-        let action2 = handle_char(&mut state, 'c');
-        assert_eq!(action2, InputAction::FeedbackCompact);
-        assert!(!state.chord_leader_active);
-        assert!(
-            !state.input_buffer.contains('c'),
-            "chord 'c' must not leak into input buffer"
-        );
+        handle_input(&mut state, &ctrl_k);
+        let action = handle_char(&mut state, 'c');
+        assert_eq!(action, InputAction::Consumed);
+        assert!(state.input_buffer.contains('c'), "c types as text");
     }
 
     #[test]
-    fn chord_dispatch_pierces_focus() {
+    fn story21_1_ctrl_k_chord_is_gone_in_every_focus() {
+        // Old: `Ctrl+K c` dispatched FeedbackCompact in any focus. New (AC12):
+        // the chord is deleted — the next `c` is whatever it is without Ctrl+K.
         for focus in [
             FocusState::Input,
             FocusState::Chat,
@@ -5806,25 +5706,23 @@ mod tests {
         ] {
             let mut state = make_state();
             state.focus = focus.clone();
-            state.active_feedback_id = Some("fb-1".to_string());
             let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);
             handle_input(&mut state, &ctrl_k);
             let action = handle_char(&mut state, 'c');
-            assert_eq!(
-                action,
-                InputAction::FeedbackCompact,
-                "chord dispatch should fire in {:?} focus",
-                focus
+            assert!(
+                !matches!(
+                    action,
+                    InputAction::Decision(_) | InputAction::FocusDecisions
+                ),
+                "Ctrl+K arms nothing in {focus:?}: {action:?}"
             );
         }
     }
 
     #[test]
-    fn chat_focus_bare_c_without_feedback_still_copies() {
+    fn chat_focus_bare_c_still_copies() {
         let mut state = make_state();
         state.focus = FocusState::Chat;
-        // No active feedback — bare 'c' should still copy to clipboard
-        assert!(state.active_feedback_id.is_none());
         let action = handle_char(&mut state, 'c');
         assert_eq!(action, InputAction::CopyToClipboard(String::new()));
     }
@@ -5839,16 +5737,16 @@ mod tests {
     }
 
     #[test]
-    fn chord_leader_then_invalid_key_is_consumed() {
+    fn story21_1_ctrl_k_then_z_is_literal_text_no_leader_is_pending() {
+        // Old (16.5.5): Ctrl+K armed a chord leader and `z` was swallowed as an
+        // invalid feedback key. New (AC12): Ctrl+K is unbound until 21-3.
         let mut state = make_state();
         state.focus = FocusState::Input;
-        state.active_feedback_id = Some("fb-1".to_string());
         let ctrl_k = DomainInputEvent::SpecialKey(DomainKey::CtrlK);
         handle_input(&mut state, &ctrl_k);
-        // 'z' is not a valid feedback key
         let action = handle_char(&mut state, 'z');
         assert_eq!(action, InputAction::Consumed);
-        assert!(!state.chord_leader_active);
+        assert!(state.input_buffer.contains('z'), "z types as text");
     }
 
     // ── Story 16.6: Vim keymap unit tests (Task 11) ──

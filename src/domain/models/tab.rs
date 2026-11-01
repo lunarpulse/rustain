@@ -48,7 +48,6 @@ pub struct TabState {
     /// Story 19.17: inactive tabs retain typed send rows with their blocks.
     pub team_send_blocks:
         BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
-    pub active_feedback_id: Option<String>,
     /// Story 19.16g — the unpresented seen-through boundary of this tab's
     /// `team-log` block. Moves with the block, so an inactive tab's visit is
     /// committed only when that tab actually presents it.
@@ -135,7 +134,6 @@ impl TabState {
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
-            active_feedback_id: None,
             pending_log_visit: None,
             total_content_height: 0,
             pending_anchor: None,
@@ -208,7 +206,6 @@ impl TabState {
             focused_tool_id: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
-            active_feedback_id: None,
             pending_log_visit: None,
             total_content_height: 0,
             pending_anchor: None,

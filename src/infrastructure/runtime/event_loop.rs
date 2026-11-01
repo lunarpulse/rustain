@@ -213,10 +213,9 @@ use crate::domain::models::visual::{
 };
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
-    FeedbackAction, FeedbackBlock, FeedbackLevel, FocusState, ImageAttachment, MessageRole,
-    NoticeLevel, PermissionMode, PlanStatus, PlanTaskStatus, SessionManager, SessionState,
-    StatusState, StreamChunk, StreamingState, UsageInfo, UserMessage, ViewState,
-    generate_conversation_id,
+    FocusState, ImageAttachment, MessageRole, NoticeLevel, PermissionMode, PlanStatus,
+    PlanTaskStatus, SessionManager, SessionState, StatusState, StreamChunk, StreamingState,
+    UsageInfo, UserMessage, ViewState, generate_conversation_id,
 };
 use crate::domain::ports::{
     ClipboardPort, PersonaPort, SecurityPort, StoragePort, StreamingProvider, ToolSetPort,
@@ -1020,139 +1019,34 @@ pub async fn run(
                             // Story 21.1 AC5: S-LOG owns every user key while open (after
                             // S-QUIT, before every lower interceptor); resize/focus events flow on.
                             if state.notification_log.is_some() {
-                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager));
+                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
                                 if let Some(outcome) = notification_log::handle_domain_event(&mut state, &domain_event, &facts) {
                                     notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
                                     continue;
                                 }
                             }
-                            // Intercept input when recovery prompt is active
-                            if state.active_feedback_id.as_deref() == Some(recovery_prompt::RECOVERY_BLOCK_ID) {
-                                match recovery_prompt::recovery_choice(&domain_event) {
-                                    recovery_prompt::RecoveryChoice::Continue => {
-                                        // Continue: dismiss recovery block, keep conversation
-                                        state.feedback_blocks.remove("recovery");
-                                        state.active_feedback_id = None;
-                                        state.focus = FocusState::Input;
-                                        state.needs_redraw = true;
+                            // Story 21.1 S2 AC9: the interim decision pane owns every user key
+                            // while it is focused (after S-QUIT and S-LOG). A waiting or deferred
+                            // item never sees a key, so no stray `y`/`n` can answer it.
+                            let mut pane_action: Option<InputAction> = None;
+                            if state.decisions.is_focused() {
+                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
+                                match crate::adapters::tui::decision_pane::handle_domain_event(&mut state, &domain_event, &facts) {
+                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Consumed) => continue,
+                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Quit) => {
+                                        // Ctrl+C / Ctrl+Q go through the same S-QUIT guard as every route.
+                                        quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue);
                                         continue;
                                     }
-                                    recovery_prompt::RecoveryChoice::Quit => {
-                                        // Quit escape hatch, but through the same guard as every other route.
-                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
-                                            state.feedback_blocks.remove("recovery");
-                                            state.active_feedback_id = None;
-                                        }
-                                        continue;
+                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Effect(effect)) => {
+                                        pane_action = Some(effect.into_action());
                                     }
-                                    recovery_prompt::RecoveryChoice::NewSession => {
-                                        // New session: dismiss block, reset conversation
-                                        state.feedback_blocks.remove("recovery");
-                                        state.active_feedback_id = None;
-                                        conversation.messages.clear();
-                                        conversation.title = String::new();
-                                        conversation.id = generate_conversation_id();
-                                        conversation.session_id = Some(generate_conversation_id());
-                                        conversation.created_at = crate::domain::models::session_meta::now_unix();
-                                        conversation.updated_at = crate::domain::models::session_meta::now_unix();
-                                        conversation.last_response_at = None;
-                                        conversation.usage = None;
-                                        state.focus = FocusState::Input;
-                                        state.needs_redraw = true;
-                                        // Persist the fresh conversation with clean_exit = true
-                                        // (avoids phantom crash detection on next startup)
-                                        let fs_ref = fs_storage.clone();
-                                        let conv_clone = conversation.clone();
-                                        if let Some(prev) = _pending_save.take() {
-                                            let _ = prev.await;
-                                        }
-                                        _pending_save = Some(tokio::spawn(async move {
-                                            match tokio::time::timeout(
-                                                BACKGROUND_TASK_TIMEOUT,
-                                                fs_ref.save_conversation_with_exit(&conv_clone, true),
-                                            ).await {
-                                                Ok(Ok(())) => {}
-                                                Ok(Err(e)) => tracing::error!("Failed to persist new session: {}", e),
-                                                Err(_) => tracing::warn!("Background task 'new_session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
-                                            }
-                                        }));
-                                        continue;
-                                    }
-                                    recovery_prompt::RecoveryChoice::Swallow => {
-                                        // Block all other input while recovery prompt is active
-                                        continue;
-                                    }
+                                    None => {}
                                 }
                             }
 
-                            // Story 7.4 AC10: carryover prompt bespoke interceptor
-                            if state.active_feedback_id.as_deref() == Some("carryover") {
-                                use crate::domain::events::DomainInputEvent;
-                                match &domain_event {
-                                    DomainInputEvent::KeyPress('y') | DomainInputEvent::KeyPress('Y') => {
-                                        state.feedback_blocks.remove("carryover");
-                                        state.active_feedback_id = None;
-                                        state.compacting = true;
-                                        state.needs_redraw = true;
-                                        let app_context = AppContext::new(&app_state, &router);
-                                        match handlers::compaction::handle_trigger_compaction(
-                                            &conversation,
-                                            &streaming,
-                                            &mut state,
-                                            &provider,
-                                            config,
-                                            &domain_tx,
-                                            CompactionPurpose::Carryover,
-                                            &app_context,
-                                        ) {
-                                            HandlerOutcome::Quiet => {}
-                                            HandlerOutcome::RequestCompaction(payload) => {
-                                                tokio::spawn(handlers::compaction::flush_then_compact(app_state.agent_core.memory.load_full().as_ref().clone(), payload));
-                                            }
-                                            _ => unreachable!("compaction handler only returns Quiet or RequestCompaction"),
-                                        }
-                                        continue;
-                                    }
-                                    DomainInputEvent::KeyPress('n') | DomainInputEvent::KeyPress('N')
-                                    | DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::Esc) => {
-                                        state.feedback_blocks.remove("carryover");
-                                        state.active_feedback_id = None;
-                                        // Story 7.4 AC10: open fresh tab immediately (no carryover)
-                                        turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
-                                        streaming = StreamingState::default();
-                                        save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
-                                        tab_manager.create_tab();
-                                        load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
-                                        state.input_buffer.clear();
-                                        state.cursor_position = 0;
-                                        state.focus = FocusState::Input;
-                                        state.status = StatusState::Idle;
-                                        state.active_agent_name = None;
-                                        session_index.set_open(&conversation.id, true);
-                                        session_index.set_active(Some(&conversation.id));
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                    // Story 19.3 (code review D1): Ctrl+Q means quit,
-                                    // and the carryover prompt must not eat it. Esc above
-                                    // DECLINES carryover (fresh tab) rather than quitting,
-                                    // so this cannot be folded into that arm.
-                                    DomainInputEvent::SpecialKey(crate::domain::events::DomainKey::CtrlQ) => {
-                                        // Story 21.2 AC7: the prompt does not bypass S-QUIT.
-                                        if quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue) {
-                                            state.feedback_blocks.remove("carryover");
-                                            state.active_feedback_id = None;
-                                        }
-                                        continue;
-                                    }
-                                    _ => {
-                                        // Block all other input while carryover prompt is active
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            if state.sidebar_visible
+                            if pane_action.is_none()
+                                && state.sidebar_visible
                                 && matches!(state.focus, FocusState::Sidebar { .. })
                                 && state.sidebar_panel == Some(crate::domain::models::visual::PanelType::Agents)
                                 && state.agent_panel_state.drill_down_agent.is_some()
@@ -1326,7 +1220,13 @@ pub async fn run(
                                     }
                             }
 
-                            let Some(action) = crate::adapters::tui::app::handle_operator_input(&mut state, &event, &domain_event) else { continue };
+                            let action = match pane_action {
+                                Some(action) => action,
+                                None => {
+                                    let Some(action) = crate::adapters::tui::app::handle_operator_input(&mut state, &event, &domain_event) else { continue };
+                                    action
+                                }
+                            };
 
                             // AC-10-4-10: Reject mutations on read-only tabs
                             if tab_manager.active_tab().read_only && action.is_mutation() {
@@ -1863,41 +1763,85 @@ pub async fn run(
                                     ));
                                     state.needs_redraw = true;
                                 }
-                                InputAction::FeedbackRetry => {
-                                    // Clear the feedback block and retry the last user message
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
-                                    }
-                                    notice_actions::retry_last_turn(&mut state, &mut conversation, &domain_tx);
+                                InputAction::FocusDecisions => {
+                                    let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
+                                    crate::adapters::tui::decision_pane::open_waiting(&mut state, &facts);
                                 }
-                                InputAction::FeedbackCompact => {
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
-                                    }
+                                InputAction::Decision(effect) => {
+                                    use crate::adapters::tui::decision_pane::DecisionEffect;
+                                    // The pane resolved the item before returning the effect, so a
+                                    // second key can never run it twice.
                                     state.needs_redraw = true;
-                                    notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
-                                }
-                                InputAction::FeedbackDismiss => {
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
+                                    match effect {
+                                        DecisionEffect::RecoveryContinue => {
+                                            state.focus = FocusState::Input;
+                                        }
+                                        DecisionEffect::RecoveryNewSession => {
+                                            conversation.messages.clear();
+                                            conversation.title = String::new();
+                                            conversation.id = generate_conversation_id();
+                                            conversation.session_id = Some(generate_conversation_id());
+                                            conversation.created_at = crate::domain::models::session_meta::now_unix();
+                                            conversation.updated_at = crate::domain::models::session_meta::now_unix();
+                                            conversation.last_response_at = None;
+                                            conversation.usage = None;
+                                            state.focus = FocusState::Input;
+                                            // Persist the fresh conversation with clean_exit = true
+                                            // (avoids phantom crash detection on next startup)
+                                            let fs_ref = fs_storage.clone();
+                                            let conv_clone = conversation.clone();
+                                            if let Some(prev) = _pending_save.take() {
+                                                let _ = prev.await;
+                                            }
+                                            _pending_save = Some(tokio::spawn(async move {
+                                                match tokio::time::timeout(
+                                                    BACKGROUND_TASK_TIMEOUT,
+                                                    fs_ref.save_conversation_with_exit(&conv_clone, true),
+                                                ).await {
+                                                    Ok(Ok(())) => {}
+                                                    Ok(Err(e)) => tracing::error!("Failed to persist new session: {}", e),
+                                                    Err(_) => tracing::warn!("Background task 'new_session_save' timed out after {}s", BACKGROUND_TASK_TIMEOUT.as_secs()),
+                                                }
+                                            }));
+                                        }
+                                        DecisionEffect::CarryoverAccept => {
+                                            state.compacting = true;
+                                            notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, CompactionPurpose::Carryover, &domain_tx, &app_state, &router);
+                                        }
+                                        DecisionEffect::CarryoverDecline => {
+                                            // Story 7.4 AC10: open a fresh tab immediately (no carryover).
+                                            turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                            streaming = StreamingState::default();
+                                            save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
+                                            tab_manager.create_tab();
+                                            load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
+                                            state.input_buffer.clear();
+                                            state.cursor_position = 0;
+                                            state.focus = FocusState::Input;
+                                            state.status = StatusState::Idle;
+                                            state.active_agent_name = None;
+                                            session_index.set_open(&conversation.id, true);
+                                            session_index.set_active(Some(&conversation.id));
+                                        }
+                                        DecisionEffect::BudgetContinue => {
+                                            // One-time dismiss: the next turn's recompute may raise it again if still over.
+                                        }
+                                        DecisionEffect::BudgetSwitchCheaper => {
+                                            handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
+                                        }
+                                        DecisionEffect::BudgetPause => {
+                                            notice_actions::budget_pause(&mut state, &app_state, &conversation.id).await;
+                                        }
+                                        DecisionEffect::ContextCompact => {
+                                            notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, CompactionPurpose::Inline, &domain_tx, &app_state, &router);
+                                        }
+                                        DecisionEffect::AttachLargeImage
+                                        | DecisionEffect::CancelLargeImage
+                                        | DecisionEffect::ConfirmDelete
+                                        | DecisionEffect::CancelDelete => {
+                                            unreachable!("DecisionEffect::into_action maps these to their own arms");
+                                        }
                                     }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::FeedbackStartFresh => {
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
-                                    }
-                                    // Story 7.4 AC10: show carryover prompt instead of immediate reset
-                                    let carryover_fb = FeedbackBlock {
-                                        id: "carryover".to_string(),
-                                        level: FeedbackLevel::Info,
-                                        message: "Carry over context summary? [y/n]".to_string(),
-                                        actions: vec![],
-                                    };
-                                    state.feedback_blocks.insert(carryover_fb.id.clone(), carryover_fb);
-                                    state.active_feedback_id = Some("carryover".to_string());
-                                    state.focus = FocusState::Chat;
-                                    state.needs_redraw = true;
                                 }
                                 InputAction::ApplyAdapterOverride { port, adapter } => {
                                     let outcome = handlers::adapter_override::handle_apply_adapter_override(
@@ -2045,7 +1989,8 @@ pub async fn run(
                                                 }
                                             }));
                                         }
-                                        // Create fresh conversation
+                                        // Fresh conversation: the old id scopes the decisions it withdraws.
+                                        let previous_conversation_id = conversation.id.clone();
                                         conversation = Conversation {
                                             id: generate_conversation_id(),
                                             title: String::new(),
@@ -2081,7 +2026,8 @@ pub async fn run(
                                         state.tool_block_states.clear();
                                         state.clear_tool_selection();
                                         state.feedback_blocks.clear();
-                                        state.active_feedback_id = None;
+                                        crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::Carryover, &previous_conversation_id);
+                                        crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::ContextWarning, &previous_conversation_id);
                                         state.autocomplete.dismiss();
                                         state.resolved_mentions.clear();
                                         state.token_usage = None;
@@ -2986,18 +2932,14 @@ pub async fn run(
                                         data,
                                     };
                                     state.pending_large_image = Some(attachment);
-                                    let fb = FeedbackBlock {
-                                        id: generate_conversation_id(),
-                                        message: warning,
-                                        level: FeedbackLevel::Warning,
-                                        actions: vec![
-                                            FeedbackAction::Custom("[y] Attach anyway".to_string()),
-                                            FeedbackAction::Custom("[n] Cancel".to_string()),
-                                        ],
-                                    };
-                                    state.active_feedback_id = Some(fb.id.clone());
-                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                    state.focus = FocusState::Chat;
+                                    crate::adapters::tui::decision_pane::raise(
+                                        &mut state,
+                                        crate::adapters::tui::decision_pane::DecisionDraft::new(
+                                            crate::adapters::tui::decision_pane::DecisionKind::LargeImage,
+                                            warning,
+                                        ),
+                                        crate::adapters::tui::decision_pane::Arrival::Requested,
+                                    );
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ImageConfirmAttach => {
@@ -3010,20 +2952,12 @@ pub async fn run(
                                             state.pending_images.iter().fold(0usize, |acc, i| acc.saturating_add(i.data.len() / 1024)),
                                         ));
                                     }
-                                    // Clear the feedback block
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
-                                    }
                                     restore_focus_after_modal(&mut state);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ImageConfirmCancel => {
                                     // AC4: User cancelled the large image attachment
                                     state.pending_large_image = None;
-                                    // Clear the feedback block
-                                    if let Some(fb_id) = state.active_feedback_id.take() {
-                                        state.feedback_blocks.remove(&fb_id);
-                                    }
                                     notifications::info(&mut state, NoticeSource::Image, "Image attachment cancelled");
                                     restore_focus_after_modal(&mut state);
                                     state.needs_redraw = true;
@@ -3047,18 +2981,14 @@ pub async fn run(
                                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                                     let attachment = ImageAttachment { media_type, data };
                                                     state.pending_large_image = Some(attachment);
-                                                    let fb = FeedbackBlock {
-                                                        id: generate_conversation_id(),
-                                                        message: warning,
-                                                        level: FeedbackLevel::Warning,
-                                                        actions: vec![
-                                                            FeedbackAction::Custom("[y] Attach anyway".to_string()),
-                                                            FeedbackAction::Custom("[n] Cancel".to_string()),
-                                                        ],
-                                                    };
-                                                    state.active_feedback_id = Some(fb.id.clone());
-                                                    state.feedback_blocks.insert(fb.id.clone(), fb);
-                                                    state.focus = FocusState::Chat;
+                                                    crate::adapters::tui::decision_pane::raise(
+                                                        &mut state,
+                                                        crate::adapters::tui::decision_pane::DecisionDraft::new(
+                                                            crate::adapters::tui::decision_pane::DecisionKind::LargeImage,
+                                                            warning,
+                                                        ),
+                                                        crate::adapters::tui::decision_pane::Arrival::Requested,
+                                                    );
                                                     state.needs_redraw = true;
                                                 }
                                                 _ => {} // Consumed or other — already mutated state
@@ -3444,20 +3374,10 @@ pub async fn run(
                                         } else {
                                             // Show confirmation prompt (AC5)
                                             let display_title = if title.is_empty() { "Untitled".to_string() } else { title };
-                                            state.pending_delete = Some(DeleteConfirmTarget::Single {
+                                            begin_delete_confirmation(&mut state, DeleteConfirmTarget::Single {
                                                 id: conv_id.clone(),
-                                                title: display_title.clone()
+                                                title: display_title,
                                             });
-                                            state.status = StatusState::Flash {
-                                                message: format!("Delete \"{}\"? This cannot be undone. [y/n]", display_title),
-                                                remaining_ms: 30_000, // Long timeout for confirmation
-                                            };
-                                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                                ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Single {
-                                                    id: conv_id.clone(),
-                                                    title: display_title
-                                                })
-                                            ));
                                         }
                                         state.needs_redraw = true;
                                     }
@@ -3468,7 +3388,7 @@ pub async fn run(
                                     if count == 0 {
                                         notifications::info(&mut state, NoticeSource::Session, "No conversations to delete");
                                     } else {
-                                        begin_bulk_delete_confirmation(&mut state, count);
+                                        begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count });
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -3522,8 +3442,6 @@ pub async fn run(
                                                 } else {
                                                     state.sidebar_selected = 0;
                                                 }
-                                                // U1: Clear status bar immediately after successful delete
-                                                state.status = StatusState::Idle;
                                             }
                                             DeleteConfirmTarget::Bulk { .. } => {
                                                 #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_all(&mut state, &app_state).await;
@@ -3575,8 +3493,6 @@ pub async fn run(
                                 InputAction::CancelDelete => {
                                     // Cancel the pending delete - U1: Clear status bar immediately
                                     state.pending_delete = None;
-                                    // U1: Clear status bar immediately on cancel (don't restore previous status)
-                                    state.status = StatusState::Idle;
                                     state.focus = if state.sidebar_visible {
                                         FocusState::Sidebar {
                                             panel: crate::domain::models::visual::PanelType::History,
@@ -4749,57 +4665,6 @@ pub async fn run(
                                     )
                                     .await;
                                 }
-                                InputAction::FeedbackBudgetContinue => {
-                                    // Story 7.5 AC5/AC7: one-time dismiss. The next
-                                    // turn's recompute may re-insert if still over.
-                                    handlers::budget::handle_clear_daily_budget_warning(&mut state);
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::FeedbackBudgetSwitchCheaper => {
-                                    // Story 7.5 AC5/AC7: reuse the model-selector overlay.
-                                    handlers::budget::handle_clear_daily_budget_warning(&mut state);
-                                    handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
-                                }
-                                InputAction::FeedbackBudgetPause => {
-                                    // Story 7.5 AC5/AC7: persist dismissed_until_unix
-                                    // = next local midnight, suppress warning till then.
-                                    let next_midnight =
-                                        crate::infrastructure::clock_util::next_midnight_unix();
-                                    let new_state =
-                                        crate::adapters::budget::BudgetState {
-                                            dismissed_until_unix: next_midnight,
-                                        };
-                                    match app_state
-                                        .budget_state_store
-                                        .save(&new_state)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            if let Some(db) = state.daily_budget.as_mut() {
-                                                db.dismissed_until_unix = next_midnight;
-                                            }
-                                            handlers::budget::handle_clear_daily_budget_warning(&mut state);
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Info,
-                                                message:
-                                                    "Budget warning paused until tomorrow.".to_string(),
-                                            });
-                                        }
-                                        Err(e) => {
-                                            tracing::error!(
-                                                "Failed to persist budget pause: {e}"
-                                            );
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conversation.id.clone()),
-                                                level: NoticeLevel::Warning,
-                                                message:
-                                                    "Couldn't persist budget pause state.".to_string(),
-                                            });
-                                        }
-                                    }
-                                    state.needs_redraw = true;
-                                }
                                 InputAction::OpenProfileSwitcher => {
                                     let resolver = app_state.profile_resolver.load_full();
                                     let profiles = resolver.list_profiles();
@@ -5259,29 +5124,29 @@ pub async fn run(
                                         match state.context_warn_level {
                                             crate::adapters::tui::state::ContextWarnLevel::None => {
                                                 if (80..95).contains(&pct) {
-                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, &conversation.id, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Warn;
                                                 } else if pct >= 95 {
-                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, &conversation.id, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Crit;
                                                 }
                                             }
                                             crate::adapters::tui::state::ContextWarnLevel::Warn => {
                                                 if pct >= 95 {
-                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, pct);
+                                                    handlers::context_warning::handle_upsert_context_warning(&mut state, &conversation.id, pct);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::Crit;
                                                 } else if pct < 80 {
-                                                    handlers::context_warning::handle_clear_context_warning(&mut state);
+                                                    handlers::context_warning::handle_clear_context_warning(&mut state, &conversation.id);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::None;
                                                 }
                                             }
                                             crate::adapters::tui::state::ContextWarnLevel::Crit => {
                                                 if pct < 80 {
-                                                    handlers::context_warning::handle_clear_context_warning(&mut state);
+                                                    handlers::context_warning::handle_clear_context_warning(&mut state, &conversation.id);
                                                     state.context_warn_level =
                                                         crate::adapters::tui::state::ContextWarnLevel::None;
                                                 }
@@ -5289,11 +5154,7 @@ pub async fn run(
                                         }
                                     }
 
-                                    // Clear stale feedback/retry state on successful turn
-                                    // Preserve ctxwarn blocks so the user can interact with them
-                                    if state.active_feedback_id.as_deref().is_none_or(|id| !id.starts_with("ctxwarn-")) {
-                                        state.active_feedback_id = None;
-                                    }
+                                    // Clear stale retry state on successful turn
                                     state.retry_state = None;
                                     state.needs_redraw = true;
 
@@ -6272,7 +6133,7 @@ pub async fn run(
                                                 crate::adapters::tui::widgets::model_selector::humanize_ctx(summary_tokens + kept_tokens)),
                                         );
                                         // Clear context warning
-                                        handlers::context_warning::handle_clear_context_warning(&mut state);
+                                        handlers::context_warning::handle_clear_context_warning(&mut state, &conversation_id);
                                         state.context_warn_level = crate::adapters::tui::state::ContextWarnLevel::None;
                                     }
                                     state.compacting = false;
@@ -6455,10 +6316,14 @@ pub async fn run(
                         // Silently drop if conversation not found (tab closed)
                     }
                     AppEvent::RecoveryPrompt { title, token_count, .. } => {
-                        let fb = recovery_prompt::recovery_block(&title, token_count);
-                        state.feedback_blocks.insert(fb.id.clone(), fb);
-                        state.active_feedback_id = Some(recovery_prompt::RECOVERY_BLOCK_ID.to_string());
-                        state.focus = FocusState::Chat;
+                        crate::adapters::tui::decision_pane::raise(
+                            &mut state,
+                            crate::adapters::tui::decision_pane::DecisionDraft::new(
+                                crate::adapters::tui::decision_pane::DecisionKind::Recovery,
+                                recovery_prompt::recovery_detail(&title, token_count),
+                            ),
+                            crate::adapters::tui::decision_pane::Arrival::Automatic,
+                        );
                         state.needs_redraw = true;
                     }
                     AppEvent::CrossSearchResultsReady {
@@ -7681,7 +7546,6 @@ fn save_active_tab(
     tab.focused_tool_id = state.focused_tool_id.clone();
     tab.feedback_blocks = state.feedback_blocks.clone();
     tab.team_send_blocks = state.team_send_blocks.clone();
-    tab.active_feedback_id = state.active_feedback_id.clone();
     tab.pending_log_visit = state.pending_log_visit;
     tab.total_content_height = state.total_content_height;
     tab.pending_anchor = state.pending_anchor;
@@ -7723,14 +7587,12 @@ fn load_active_tab(
     state.selected_tool_id = None;
     state.feedback_blocks = tab.feedback_blocks.clone();
     state.team_send_blocks = tab.team_send_blocks.clone();
-    state.active_feedback_id = tab.active_feedback_id.clone();
     state.pending_log_visit = tab.pending_log_visit;
     state.total_content_height = tab.total_content_height;
     state.pending_anchor = tab.pending_anchor;
     state.pending_context_carryover = tab.pending_context_carryover.clone();
     state.context_warn_level = tab.context_warn_level;
     state.active_tab_id = tab_manager.active_tab_id();
-    state.chord_leader_active = false;
     // tool_block_states is global (cleared on tab switch); version resets for new tab
     state.tool_block_states.clear();
     if let Some(trs) = state
@@ -8018,7 +7880,14 @@ fn render(
     agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
     notifications::begin_draw(state);
-    let log_facts = notice_actions::log_facts(conversation, streaming, tab_manager_for_bar);
+    let log_facts = notice_actions::log_facts(
+        conversation,
+        streaming,
+        tab_manager_for_bar,
+        state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None,
+    );
+    // Items of a conversation that no longer exists can never be decided.
+    crate::adapters::tui::decision_pane::prune_closed(state, &log_facts);
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
     let mut content_height = 0usize;
@@ -8081,6 +7950,7 @@ fn render(
 
     let display_model = selected_model.as_deref().unwrap_or(config_model);
 
+    let mut decision_painted = false;
     terminal.draw(|frame| {
         let area = frame.area();
 
@@ -8570,7 +8440,6 @@ fn render(
                         liveness_ref,
                         open_prose_ref,
                         state.focused_tool_id.as_deref(),
-                        state.active_feedback_id.as_deref(),
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;
@@ -9063,7 +8932,10 @@ fn render(
                     tab_manager_for_bar.is_some_and(|tm| tm.active_tab().read_only),
                     None, // Story 12.2c — local TUI is not an attach client
                     state.log_awareness.display,
-                    state.notifications.unseen(),
+                    crate::adapters::tui::widgets::status_bar::NoticeBadges {
+                        unseen: state.notifications.unseen(),
+                        decisions: state.decisions.len(),
+                    },
 );
                 input_box::render(
                     frame,
@@ -9154,6 +9026,11 @@ fn render(
                     profile_switcher::render(frame, area, profile_switcher, theme);
                 }
 
+                // Interim decision pane (Story 21.1 S2 AC9): bottom-anchored over the chat
+                // pane, below S-LOG and S-QUIT, reserving no layout rows. Only the focused
+                // item paints; waiting items are carried by the status-row cue.
+                decision_painted = crate::adapters::tui::decision_pane::render(frame, app_layout.chat_pane, &state.decisions, &log_facts, theme);
+
                 // S-LOG (Story 21.1 AC5): above the status row, below only S-QUIT.
                 if let Some(log) = state.notification_log.as_ref() {
                     let above_status = Rect::new(
@@ -9180,6 +9057,10 @@ fn render(
             }
         }
     })?;
+    // The 500 ms inert window runs from a frame the user could really see.
+    if decision_painted {
+        crate::adapters::tui::decision_pane::note_painted(state);
+    }
 
     state.total_content_height = content_height;
     state.block_boundaries = block_bounds;
@@ -9724,30 +9605,59 @@ fn resolve_command_context(
     )
 }
 
-/// `DeleteAllConversations` with `count` conversations: show the `[y/n]`
-/// prompt and move focus to the confirmation overlay (AC6).
-pub fn begin_bulk_delete_confirmation(state: &mut TuiState, count: usize) {
-    state.pending_delete = Some(DeleteConfirmTarget::Bulk { count });
-    state.status = StatusState::Flash {
-        message: format!("Delete {} conversations? [y/n]", count),
-        remaining_ms: 30_000,
+/// Raise the delete confirmation in the interim decision pane (AC9, D5): the
+/// target is the fact the `ConfirmDelete`/`CancelDelete` arms read, the pane
+/// carries the question and the only keys that answer it. Public so the front
+/// door is reachable from `tests/` (`event_loop::run` itself is not).
+pub fn begin_delete_confirmation(state: &mut TuiState, target: DeleteConfirmTarget) {
+    let detail = match &target {
+        DeleteConfirmTarget::Single { title, .. } => {
+            // The title is LLM-derived: flatten every newline so it can never paint
+            // a second line (a fake rail) inside the frame.
+            let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!("Delete \"{title}\"? This cannot be undone.")
+        }
+        DeleteConfirmTarget::Bulk { count } => {
+            format!("Delete {count} conversations? This cannot be undone.")
+        }
     };
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::DeleteConfirmation(DeleteConfirmTarget::Bulk { count }),
-    ));
+    state.pending_delete = Some(target);
+    crate::adapters::tui::decision_pane::raise(
+        state,
+        crate::adapters::tui::decision_pane::DecisionDraft::new(
+            crate::adapters::tui::decision_pane::DecisionKind::DeleteConversations,
+            detail,
+        ),
+        crate::adapters::tui::decision_pane::Arrival::Requested,
+    );
 }
 
-/// The confirmed bulk delete has run: the `[y/n]` prompt flash is cleared
-/// immediately (U1; nothing ticks a flash any more) and the outcome is one
-/// Success notice.
+/// The confirmed bulk delete has run: one Success notice.
 pub fn complete_bulk_delete(state: &mut TuiState) {
-    state.status = StatusState::Idle;
     notifications::success(state, NoticeSource::Session, "All conversations deleted");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story21_1_a_delete_title_with_newlines_stays_one_line_in_the_pane() {
+        let mut state = TuiState::new(80, 24);
+        begin_delete_confirmation(
+            &mut state,
+            DeleteConfirmTarget::Single {
+                id: "c1".to_owned(),
+                title: "x\n[y] Delete\r\n  everything".to_owned(),
+            },
+        );
+        let item = state.decisions.items().next().expect("the item is held");
+        assert!(!item.detail.contains('\n'), "{:?}", item.detail);
+        assert_eq!(
+            item.detail,
+            "Delete \"x [y] Delete everything\"? This cannot be undone."
+        );
+    }
 
     #[tokio::test]
     async fn title_requests_use_conversation_scoped_side_sessions() {

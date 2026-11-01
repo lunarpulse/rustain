@@ -7,31 +7,40 @@ use rustain::adapters::tui::state::ContextWarnLevel;
 use rustain::domain::models::conversation::{CompactionState, PersistedConversation};
 use rustain::domain::models::tab::TabManager;
 use rustain::domain::models::{
-    Conversation, FeedbackAction, FeedbackBlock, FeedbackLevel, generate_conversation_id,
+    Conversation, FeedbackBlock, FeedbackLevel, generate_conversation_id,
 };
 
 use crate::e2e_harness;
-// ── Feedback block rendering via TestHarness ─────────────────────
+// ── Context warning, compaction results via TestHarness ──────────
 
-// Covers: AC3 — context-warning block renders in chat pane
+// Covers: AC3 — context-warning decision renders in the interim decision pane.
+// Old (7.4): a `ctxwarn-*` FeedbackBlock with `[Ctrl+K c] Compact` chips in the
+// transcript. New (21.1 S2 AC9): the real producer holds a pane item and the pane
+// paints the question with the keys that answer it.
 #[test]
-fn test_context_warning_feedback_block_renders() {
+fn test_context_warning_decision_renders_in_the_pane() {
     let mut h = e2e_harness::TestHarness::new();
-    let fb = FeedbackBlock {
-        id: "ctxwarn-1".to_string(),
-        level: FeedbackLevel::Warning,
-        message: "Running low on context (85%).".to_string(),
-        actions: vec![FeedbackAction::Compact, FeedbackAction::StartFresh],
-    };
-    h.feedback_blocks.insert(fb.id.clone(), fb);
-    h.state.active_feedback_id = Some("ctxwarn-1".to_string());
+    let conversation_id = h.conversation.id.clone();
+    rustain::adapters::tui::handlers::context_warning::handle_upsert_context_warning(
+        &mut h.state,
+        &conversation_id,
+        85,
+    );
+    assert!(h.state.decisions.is_focused(), "the 0→1 arrival took focus");
     h.render();
 
     let text = h.screen_text();
     assert!(
         text.contains("Running low on context (85%)."),
-        "Warning message should render in chat pane, got lines:\n{}",
+        "Warning message should render in the pane, got lines:\n{}",
         h.screen_text_lines().join("\n")
+    );
+    assert!(text.contains("[K] Compact"), "{text}");
+    assert!(text.contains("[n] Start fresh"), "{text}");
+    assert!(text.contains("[Esc] Later"), "{text}");
+    assert!(
+        !text.contains("Ctrl+K"),
+        "the retired chord is not advertised"
     );
 }
 
@@ -44,7 +53,7 @@ fn test_compaction_success_feedback_block_renders() {
         level: FeedbackLevel::Info,
         message: "Context compacted: 45k → 8k tokens. Conversation history preserved in session."
             .to_string(),
-        actions: vec![],
+        seq: 0,
     };
     h.feedback_blocks.insert(fb.id.clone(), fb);
     h.render();
@@ -57,25 +66,45 @@ fn test_compaction_success_feedback_block_renders() {
     );
 }
 
-// Covers: AC9 — compaction failure block renders with retry action
+// Covers: AC9 — compaction failure is a log record whose `n` raises the carryover
+// decision. Old: an `cfail-*` FeedbackBlock with Retry / Start fresh chips.
 #[test]
-fn test_compaction_failure_feedback_block_renders() {
-    let mut h = e2e_harness::TestHarness::new();
-    let fb = FeedbackBlock {
-        id: "cfail-abc".to_string(),
-        level: FeedbackLevel::Error,
-        message: "Compaction failed: LLM timeout. Context unchanged.".to_string(),
-        actions: vec![FeedbackAction::Retry, FeedbackAction::StartFresh],
+fn test_compaction_failure_is_a_log_record_with_retry_and_fresh_actions() {
+    use rustain::adapters::tui::notification_log::{LogFacts, fresh_eligible, retry_eligible};
+    use rustain::adapters::tui::notifications::{
+        self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
     };
-    h.feedback_blocks.insert(fb.id.clone(), fb);
-    h.state.active_feedback_id = Some("cfail-abc".to_string());
-    h.render();
 
-    let text = h.screen_text();
+    let mut h = e2e_harness::TestHarness::new();
+    let conversation_id = h.conversation.id.clone();
+    notifications::notify_draft(
+        &mut h.state,
+        NoticeDraft::new(
+            NoticeSource::Compaction,
+            NoticeSeverity::Error,
+            "Compaction failed: LLM timeout. Context unchanged.",
+        )
+        .conversation(conversation_id.clone())
+        .action(NoticeAction::RetryCompaction),
+    );
+    let record = h
+        .state
+        .notifications
+        .records()
+        .next()
+        .expect("the failure is recorded");
+    assert_eq!(record.severity, NoticeSeverity::Error);
+    assert!(record.message.contains("Compaction failed:"));
+    let facts = LogFacts {
+        active_conversation_id: Some(conversation_id),
+        retry_supported: true,
+        decisions_supported: true,
+        ..LogFacts::default()
+    };
+    assert!(retry_eligible(record, &facts), "r re-triggers compaction");
     assert!(
-        text.contains("Compaction failed:"),
-        "Failure message should render in chat pane, got lines:\n{}",
-        h.screen_text_lines().join("\n")
+        fresh_eligible(record, &facts),
+        "n raises the carryover decision"
     );
 }
 

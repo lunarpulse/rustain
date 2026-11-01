@@ -4,6 +4,7 @@ pub mod chord_menu;
 pub mod clipboard;
 #[allow(dead_code)]
 pub mod color_detect;
+pub mod decision_pane;
 pub mod editor_suspend;
 pub mod fanout_spec;
 pub mod handlers;
@@ -28,4 +29,5 @@ pub mod text_geometry;
 #[allow(dead_code)]
 pub mod theme;
 pub mod version_info;
+pub mod views;
 pub mod widgets;

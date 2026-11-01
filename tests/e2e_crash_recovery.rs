@@ -7,10 +7,45 @@
 use crate::e2e_harness;
 use e2e_harness::TestHarness;
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::domain::models::{
-    ChatMessage, CompletionOptions, Conversation, FeedbackAction, FeedbackBlock, FeedbackLevel,
-    FocusState, MessageRole, SessionManager, SessionState, StopReason, generate_conversation_id,
+use rustain::adapters::tui::decision_pane::{
+    self, Arrival, DecisionDraft, DecisionEffect, DecisionKind, PaneOutcome,
 };
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::adapters::tui::state::TuiState;
+use rustain::domain::clock::MockClock;
+use rustain::domain::events::{DomainInputEvent, DomainKey};
+use rustain::domain::models::NotificationsConfig;
+use rustain::domain::models::{
+    ChatMessage, CompletionOptions, Conversation, FocusState, MessageRole, SessionManager,
+    SessionState, StopReason, generate_conversation_id,
+};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+fn raise_recovery(state: &mut TuiState, title: &str) {
+    decision_pane::raise(
+        state,
+        DecisionDraft::new(
+            DecisionKind::Recovery,
+            format!("Recovered: '{title}' (partial response, 42 tokens)."),
+        ),
+        Arrival::Automatic,
+    );
+}
+
+fn clocked_pane_state() -> (TuiState, Arc<MockClock>) {
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = TuiState::new(80, 24);
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    (state, clock)
+}
+
+fn ready(state: &mut TuiState, clock: &MockClock) {
+    decision_pane::note_painted(state);
+    clock.advance(Duration::from_millis(500));
+}
 use rustain::domain::ports::StoragePort;
 use rustain::domain::services::history_rebuild::build_history_context;
 
@@ -18,7 +53,7 @@ use rustain::domain::services::history_rebuild::build_history_context;
 // CRASH RECOVERY E2E TESTS
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// E2E: Recovery FeedbackBlock renders correctly on screen after crash detection.
+/// E2E: the recovery decision renders on screen after crash detection.
 // Covers: FR10 (session persistence), FR15 (history rebuild)
 #[test]
 fn test_e2e_recovery_prompt_renders() {
@@ -61,24 +96,13 @@ fn test_e2e_recovery_prompt_renders() {
     });
     h.conversation.title = "Test Chat".to_string();
 
-    // Inject recovery FeedbackBlock (as event_loop does on RecoveryPrompt event)
-    let msg = format!(
-        "\u{2139} Recovered: '{}' (partial response, {} tokens). [Enter/y] continue [n] new",
-        h.conversation.title, 42
+    // The real producer raises the recovery decision (as the event loop does on the
+    // RecoveryPrompt event); the harness state carries the pane.
+    raise_recovery(&mut h.state, &h.conversation.title.clone());
+    assert!(
+        h.state.decisions.is_focused(),
+        "startup recovery takes the pane"
     );
-    let fb = FeedbackBlock {
-        id: "recovery".to_string(),
-        level: FeedbackLevel::Info,
-        message: msg,
-        actions: vec![
-            FeedbackAction::Custom("[Enter] continue".to_string()),
-            FeedbackAction::StartFresh,
-        ],
-    };
-    // Insert into harness feedback_blocks (used by render), not state.feedback_blocks
-    h.feedback_blocks.insert("recovery".to_string(), fb);
-    h.state.active_feedback_id = Some("recovery".to_string());
-    h.state.focus = FocusState::Chat;
 
     h.render();
 
@@ -129,27 +153,28 @@ fn test_e2e_recovery_enter_continues() {
         retracted_at_ms: None,
         history_source: Default::default(),
     });
-    h.state.feedback_blocks.insert(
-        "recovery".to_string(),
-        FeedbackBlock {
-            id: "recovery".to_string(),
-            level: FeedbackLevel::Info,
-            message: "Recovery prompt".to_string(),
-            actions: vec![],
-        },
-    );
-    h.state.active_feedback_id = Some("recovery".to_string());
-    h.state.focus = FocusState::Chat;
+    // Old: a `recovery` FeedbackBlock + `active_feedback_id` interceptor. New
+    // (21.1 S2 AC9): a pane item; Enter and Esc both Continue (RU-5).
+    let mut pane = clocked_pane_state();
+    for key in [
+        DomainInputEvent::SpecialKey(DomainKey::Esc),
+        DomainInputEvent::SpecialKey(DomainKey::Enter),
+    ] {
+        raise_recovery(&mut pane.0, "Recovered chat");
+        assert!(pane.0.decisions.is_focused());
+        ready(&mut pane.0, &pane.1);
+        let outcome = decision_pane::handle_domain_event(&mut pane.0, &key, &LogFacts::default());
+        assert_eq!(
+            outcome,
+            Some(PaneOutcome::Effect(DecisionEffect::RecoveryContinue)),
+            "{key:?}"
+        );
+    }
 
-    // Simulate what event_loop does: check active_feedback_id, handle Enter
-    assert_eq!(h.state.active_feedback_id.as_deref(), Some("recovery"));
-
-    // After Enter: dismiss block, keep conversation
-    h.state.feedback_blocks.remove("recovery");
-    h.state.active_feedback_id = None;
+    // After Enter the host keeps the conversation and returns focus to Input.
     h.state.focus = FocusState::Input;
 
-    assert!(h.state.active_feedback_id.is_none(), "Recovery dismissed");
+    assert!(pane.0.decisions.is_empty(), "Recovery dismissed");
     assert!(
         !h.conversation.messages.is_empty(),
         "Conversation should be preserved"
@@ -185,14 +210,26 @@ fn test_e2e_recovery_n_starts_fresh() {
         history_source: Default::default(),
     });
     h.conversation.title = "Old Title".to_string();
-    h.state.active_feedback_id = Some("recovery".to_string());
+    // The pane's `n` (the front door) asks the host for a fresh session.
+    let mut pane = clocked_pane_state();
+    raise_recovery(&mut pane.0, &h.conversation.title);
+    ready(&mut pane.0, &pane.1);
+    let outcome = decision_pane::handle_domain_event(
+        &mut pane.0,
+        &DomainInputEvent::KeyPress('n'),
+        &LogFacts::default(),
+    );
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::RecoveryNewSession))
+    );
+    assert!(pane.0.decisions.is_empty(), "answered exactly once");
 
-    // Simulate 'n' press: reset conversation (as event_loop does)
+    // Simulate what the event loop's RecoveryNewSession arm does: reset conversation.
     h.conversation.messages.clear();
     h.conversation.title = String::new();
     h.conversation.id = generate_conversation_id();
     h.conversation.session_id = Some(generate_conversation_id());
-    h.state.active_feedback_id = None;
     h.state.focus = FocusState::Input;
 
     assert!(

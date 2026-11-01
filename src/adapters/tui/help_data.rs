@@ -494,6 +494,11 @@ static HELP_CATEGORIES: LazyLock<Vec<HelpCategory>> = LazyLock::new(|| {
                     available: true,
                 },
                 HelpBinding {
+                    key: "Ctrl+X, Q",
+                    description: "Decisions: focus the oldest waiting decision (status cue: Needs you)",
+                    available: true,
+                },
+                HelpBinding {
                     key: "Ctrl+X, Enter",
                     description: "Send the composer from any terminal (multi-line safe send)",
                     available: true,

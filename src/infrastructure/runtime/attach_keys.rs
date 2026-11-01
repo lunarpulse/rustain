@@ -57,8 +57,7 @@ use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggesti
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::visual::OverlayType;
 use crate::domain::models::{
-    Conversation, FeedbackBlock, FeedbackLevel, FocusState, MouseConfig, SessionManager,
-    StreamingState,
+    Conversation, FeedbackLevel, FocusState, MouseConfig, SessionManager, StreamingState,
 };
 use crate::infrastructure::runtime::attach_interrupt::{AttachedInterrupt, nothing_to_stop_notice};
 use crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle;
@@ -296,14 +295,12 @@ impl KeyCtx<'_> {
     /// A class-V view block (the peer-retract receipt): not a notice, so it
     /// keeps its `feedback_blocks` row until the next key.
     fn view_block(&mut self, id: &str, message: &str) {
-        self.state.feedback_blocks.insert(
-            id.to_owned(),
-            FeedbackBlock {
-                id: id.to_owned(),
-                level: FeedbackLevel::Info,
-                message: message.to_owned(),
-                actions: Vec::new(),
-            },
+        crate::adapters::tui::views::show_view(
+            &mut self.state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::PeerRetract,
+            id,
+            FeedbackLevel::Info,
+            message,
         );
         self.state.needs_redraw = true;
     }
@@ -386,6 +383,8 @@ pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
         active_messages: 0,
         turn_running: false,
         retry_supported: false,
+        decisions_supported: false,
+        context_warning: false,
         titles: Vec::new(),
     }
 }
@@ -943,6 +942,11 @@ async fn chord(ctx: &mut KeyCtx<'_>, c: char, origin: FocusState) -> KeyFlow {
         AttachedRoute::ClearToasts => {
             let _ = ctx.state.notifications.clear_toasts();
             ctx.state.needs_redraw = true;
+        }
+        AttachedRoute::Decisions => {
+            // The attached client has no decision producers: every permission,
+            // plan and question card stays inline (21-6 migrates them).
+            ctx.info("No decisions waiting in this client");
         }
         AttachedRoute::Detach => return KeyFlow::Detach,
     }
@@ -1630,6 +1634,15 @@ mod tests {
         assert_eq!(rig.state.notifications.visible().count(), 0);
         assert_eq!(rig.state.notifications.records().len(), 1);
         exercised.insert("X".to_owned());
+
+        // `q`: the attached client owns no decision pane, so the chord answers
+        // honestly instead of painting `(n/a)` or doing nothing.
+        let mut rig = Rig::new(false);
+        rig.ctrl('x').await;
+        assert_eq!(rig.ch('q').await, KeyFlow::Continue);
+        assert_eq!(rig.state.notifications.visible().count(), 1);
+        assert!(rig.frames().is_empty(), "a local answer, nothing sent");
+        exercised.insert("Q".to_owned());
 
         // The painted menu inventory equals the exercised routes, so hiding an
         // attached chord (or painting one without a caller) fails here.
@@ -2430,6 +2443,21 @@ mod tests {
         assert!(rig.frames().is_empty(), "never sent to the daemon");
     }
 
+    /// S2 AC10 — the attached client has no decision producers: `Ctrl+X q` is a
+    /// painted, routed chord that answers honestly (an Info notice) and sends
+    /// nothing to the daemon; the status row never claims a waiting decision.
+    #[tokio::test]
+    async fn story21_1_attached_ctrl_x_q_answers_that_no_decision_waits_in_this_client() {
+        let mut rig = Rig::new(false);
+        assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
+        assert_eq!(rig.ch('q').await, KeyFlow::Continue);
+        let notice = rig.state.notifications.visible().next().expect("a toast");
+        assert_eq!(notice.message, "No decisions waiting in this client");
+        assert_eq!(notice.severity, NoticeSeverity::Info);
+        assert!(rig.state.decisions.is_empty());
+        assert!(rig.frames().is_empty(), "never sent to the daemon");
+    }
+
     /// K6 (attached families) — a refused send and a dead socket reach the user
     /// as store notices through the real key ingress, never as a status
     /// flash or a transcript row: the read-only send refusal is an Info toast,
@@ -2451,7 +2479,7 @@ mod tests {
         assert_eq!(refusal.severity, NoticeSeverity::Info);
         assert_eq!(refusal.source, NoticeSource::Attached);
         assert!(viewer.frames().is_empty(), "nothing reached the daemon");
-        assert!(!matches!(viewer.state.status, StatusState::Flash { .. }));
+        assert_eq!(viewer.state.status, StatusState::Idle, "no sticky status");
         assert!(viewer.conversation.messages.is_empty());
 
         let mut rig = Rig::new(false);
@@ -2464,7 +2492,7 @@ mod tests {
         let dead = rig.state.notifications.visible().next().expect("a toast");
         assert_eq!(dead.message, "attach socket closed — stop request not sent");
         assert_eq!(dead.severity, NoticeSeverity::Error);
-        assert!(!matches!(rig.state.status, StatusState::Flash { .. }));
+        assert_eq!(rig.state.status, StatusState::Idle, "no sticky status");
         assert!(rig.conversation.messages.is_empty());
     }
 }

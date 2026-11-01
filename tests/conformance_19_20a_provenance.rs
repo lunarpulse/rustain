@@ -241,7 +241,6 @@ fn paint(
                     cache,
                     &HashMap::new(),
                     &BTreeMap::new(),
-                    None,
                     withheld,
                 )
             } else {
@@ -263,7 +262,6 @@ fn paint(
                     None,
                     &[],
                     bookmarks,
-                    None,
                     None,
                     None,
                     None,
@@ -1091,7 +1089,6 @@ async fn migrated_sessions_preserve_decorations_search_and_selected_tool_copy() 
                             matches.first(),
                             &matches,
                             &[0],
-                            None,
                             None,
                             None,
                             None,

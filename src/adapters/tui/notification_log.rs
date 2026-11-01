@@ -52,6 +52,11 @@ pub struct LogFacts {
     pub retry_supported: bool,
     /// `(conversation id, title)` of every owned tab, for attribution.
     pub titles: Vec<(String, String)>,
+    /// The host owns the interim decision pane (the attached client does not).
+    pub decisions_supported: bool,
+    /// The active conversation's context warning is still in force
+    /// (`context_warn_level != None`).
+    pub context_warning: bool,
 }
 
 impl LogFacts {
@@ -86,7 +91,31 @@ pub fn retry_eligible(record: &NoticeRecord, facts: &LogFacts) -> bool {
             active && !facts.turn_running && messages == facts.active_messages
         }
         NoticeAction::RetryCompaction => active,
+        // The context-warning record only raises decisions (`K`/`n`), never retries.
+        NoticeAction::ContextDecision => false,
     }
+}
+
+/// True when `K` may raise the Compact decision (A7, AC11): a context-warning
+/// record of the ACTIVE conversation while its warning is still in force.
+#[must_use]
+pub fn compact_eligible(record: &NoticeRecord, facts: &LogFacts) -> bool {
+    facts.decisions_supported
+        && facts.context_warning
+        && record.action == Some(NoticeAction::ContextDecision)
+        && facts.active_conversation_id.is_some()
+        && record.conversation_id == facts.active_conversation_id
+}
+
+/// True when `n` may raise the Start-fresh (carryover) decision: the same
+/// context-warning record, or a compaction failure of the active conversation.
+#[must_use]
+pub fn fresh_eligible(record: &NoticeRecord, facts: &LogFacts) -> bool {
+    compact_eligible(record, facts)
+        || (facts.decisions_supported
+            && record.action == Some(NoticeAction::RetryCompaction)
+            && facts.active_conversation_id.is_some()
+            && record.conversation_id == facts.active_conversation_id)
 }
 
 /// Open S-LOG (idempotent). Presents every record: the unseen badge clears
@@ -236,6 +265,34 @@ pub fn handle_key(state: &mut TuiState, key: LogKey, facts: &LogFacts) -> LogOut
                 },
                 _ => LogOutcome::Consumed,
             }
+        }
+        LogKey::Char('K') => {
+            let Some(record) = current.filter(|r| compact_eligible(r, facts)) else {
+                return LogOutcome::Consumed;
+            };
+            let message = record.message.clone();
+            let conversation_id = record.conversation_id.clone().unwrap_or_default();
+            close(state);
+            // Raises the decision; nothing is compacted until the pane's own `K`.
+            crate::adapters::tui::decision_pane::raise(
+                state,
+                crate::adapters::tui::decision_pane::DecisionDraft::new(
+                    crate::adapters::tui::decision_pane::DecisionKind::ContextWarning,
+                    message,
+                )
+                .conversation(conversation_id),
+                crate::adapters::tui::decision_pane::Arrival::Requested,
+            );
+            LogOutcome::Closed
+        }
+        LogKey::Char('n') => {
+            let Some(record) = current.filter(|r| fresh_eligible(r, facts)) else {
+                return LogOutcome::Consumed;
+            };
+            let conversation_id = record.conversation_id.clone().unwrap_or_default();
+            close(state);
+            crate::adapters::tui::decision_pane::request_carryover(state, Some(conversation_id));
+            LogOutcome::Closed
         }
         LogKey::Char(_) | LogKey::Other => LogOutcome::Consumed,
     }
@@ -409,6 +466,14 @@ pub fn render(
         rail.push(Span::styled("[r]", accent));
         rail.push(Span::styled(" Retry  ", normal));
     }
+    if current.is_some_and(|record| compact_eligible(record, facts)) {
+        rail.push(Span::styled("[K]", accent));
+        rail.push(Span::styled(" Compact…  ", normal));
+    }
+    if current.is_some_and(|record| fresh_eligible(record, facts)) {
+        rail.push(Span::styled("[n]", accent));
+        rail.push(Span::styled(" Start fresh…  ", normal));
+    }
     rail.push(Span::styled("[x]", accent));
     rail.push(Span::styled(" Dismiss  ", normal));
     rail.push(Span::styled("[Esc]", accent));
@@ -456,7 +521,7 @@ fn row_meta(record: &NoticeRecord, facts: &LogFacts) -> String {
 
 /// Greedy wrap of the rail spans onto rows no wider than `width` cells (a span
 /// pair — key plus label — is never split).
-fn footer_lines(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
+pub(crate) fn footer_lines(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut current: Vec<Span<'static>> = Vec::new();
     let mut used = 0usize;

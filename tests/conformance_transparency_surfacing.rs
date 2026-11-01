@@ -332,12 +332,10 @@ fn a_room_event_produces_exactly_one_persistent_transcript_line() {
     // Persistent: a FeedbackBlock scrolls with the conversation and never
     // auto-dismisses. An `Info` SystemNotice would have been a transient
     // status-bar flash instead — invisible three seconds later.
-    assert!(
-        !matches!(
-            state.status,
-            rustain::domain::models::StatusState::Flash { .. }
-        ),
-        "the notice must be a transcript block, not a status flash"
+    assert_eq!(
+        state.status,
+        rustain::domain::models::StatusState::Idle,
+        "the notice must be a transcript block, not a status fact"
     );
 }
 
