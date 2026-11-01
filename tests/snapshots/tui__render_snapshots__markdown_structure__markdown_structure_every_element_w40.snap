@@ -10,9 +10,9 @@ expression: every_element(40)
 │ Details
 │
 │ A paragraph with bold, italic, gone,
-│ inline  code, a link
-│ (https://example.test/docs) and [image:
-│ diagram]. Soft breaks join; a hard break
+│ inline  code, a link (example.test) and
+│ [image: diagram]. Soft breaks join; a
+│ hard break
 │ splits. Literal text stays: SELECT *
 │ FROM t, 2 * 3, Vec<String>.
 │

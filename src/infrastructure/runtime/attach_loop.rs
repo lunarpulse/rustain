@@ -3327,6 +3327,8 @@ pub async fn run_attached(
                     u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2),
                 );
             }
+            tab_render_state.osc8_links =
+                crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
             visible_feedback_ids = chat_pane::render_attached(
                 f,
                 transcript_area,

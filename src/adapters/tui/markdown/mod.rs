@@ -24,12 +24,15 @@
 
 pub mod highlight;
 pub mod layout;
+pub mod link;
 pub mod parse;
 pub mod sanitize;
 pub mod table;
 pub mod transform;
 
 use ratatui::prelude::*;
+
+pub use link::{LinkPresentation, LinkRun};
 
 use crate::adapters::tui::theme::Theme;
 
@@ -42,10 +45,13 @@ pub enum RenderMode {
 }
 
 /// Pipeline configuration. There is deliberately no `Default`: a caller that
-/// forgets to choose a mode would silently get the wrong one.
+/// forgets to choose a mode would silently get the wrong one. Links default to
+/// [`LinkPresentation::Explicit`] (the full URL stays visible); the Stage opts
+/// in to `Labeled` with [`RenderOptions::with_links`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
     pub mode: RenderMode,
+    pub links: LinkPresentation,
 }
 
 impl RenderOptions {
@@ -53,32 +59,44 @@ impl RenderOptions {
     /// paragraph is closed for display only.
     #[must_use]
     pub const fn streaming() -> Self {
-        Self {
-            mode: RenderMode::Streaming,
-        }
+        Self::new(RenderMode::Streaming)
     }
 
     /// A completed message: CommonMark exactly, never a speculative closer.
     #[must_use]
     pub const fn completed() -> Self {
-        Self {
-            mode: RenderMode::Completed,
-        }
+        Self::new(RenderMode::Completed)
     }
 
     /// User-typed text shown as typed.
     #[must_use]
     pub const fn literal() -> Self {
+        Self::new(RenderMode::Literal)
+    }
+
+    const fn new(mode: RenderMode) -> Self {
         Self {
-            mode: RenderMode::Literal,
+            mode,
+            links: LinkPresentation::Explicit,
         }
+    }
+
+    /// The same options with another link presentation.
+    #[must_use]
+    pub const fn with_links(mut self, links: LinkPresentation) -> Self {
+        self.links = links;
+        self
     }
 }
 
-/// The rendered lines of one markdown source.
+/// The rendered lines of one markdown source, and the OSC 8 runs of its links.
 #[derive(Debug, Clone)]
 pub struct Rendered {
     pub lines: Vec<Line<'static>>,
+    /// One run per physical line segment of a safe link label, in line order;
+    /// empty unless the options asked for `Labeled { osc8: true }`. `line`
+    /// indexes `lines`, `start_cell` is the first label cell of that line.
+    pub links: Vec<LinkRun>,
 }
 
 /// Debug-only count of pipeline runs on the current thread, used to prove the
@@ -117,14 +135,17 @@ pub fn render(content: &str, width: usize, theme: &Theme, opts: &RenderOptions) 
     if opts.mode == RenderMode::Literal {
         return Rendered {
             lines: layout::literal(content, width, theme),
+            links: Vec::new(),
         };
     }
     let sanitized = sanitize::sanitize(content, opts.mode);
-    let parsed = parse::parse(&sanitized);
+    let parsed = parse::parse(&sanitized, opts.links);
     let styled = transform::transform(parsed, theme);
     let highlighted = highlight::highlight(styled, theme);
+    let rows = layout::layout(highlighted, width, theme);
     Rendered {
-        lines: layout::layout(highlighted, width, theme),
+        lines: rows.lines,
+        links: rows.links,
     }
 }
 

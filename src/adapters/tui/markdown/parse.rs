@@ -6,7 +6,11 @@
 //! so neither the builder nor the later recursive stages nor `Drop` can be
 //! driven off the stack by adversarial input.
 
+use std::sync::Arc;
+
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+use super::link::{self, LinkPresentation};
 
 /// Container frames (quote, list, item) the builder opens before it stops
 /// nesting and flattens the rest into the deepest open container.
@@ -74,14 +78,20 @@ pub struct Fmt {
     pub link: bool,
     /// The ` (url)` shown after a link label (Explicit presentation).
     pub destination: bool,
+    /// The dim ` (host)` shown after a link label (Labeled presentation).
+    pub host: bool,
 }
 
-/// Inline nodes of a paragraph or heading.
+/// Inline nodes of a paragraph or heading. `LinkStart`/`LinkEnd` bracket the
+/// label of a safe link under `Labeled { osc8: true }`; they carry the
+/// `safe_url` target and no text.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Inline {
     Text { text: String, fmt: Fmt },
     SoftBreak,
     HardBreak,
+    LinkStart(Arc<str>),
+    LinkEnd,
 }
 
 enum Frame {
@@ -106,6 +116,15 @@ struct InlineState {
     link: u32,
 }
 
+/// A link whose label is being collected.
+struct OpenLink {
+    dest: String,
+    /// `safe_url` of `dest` under a `Labeled` presentation; `None` when the
+    /// destination is unsafe or the presentation is `Explicit`.
+    safe: Option<String>,
+    label: String,
+}
+
 struct Builder {
     stack: Vec<Frame>,
     /// Container starts ignored because the stack is at its depth cap.
@@ -115,8 +134,9 @@ struct Builder {
     heading: Option<u8>,
     code: Option<(Option<String>, String)>,
     html: Option<String>,
-    /// Open link: destination and the label text seen so far.
-    link: Option<(String, String)>,
+    links: LinkPresentation,
+    /// Open link: its raw and safe destinations and the label text so far.
+    link: Option<OpenLink>,
     /// Alt text of the open image.
     image: Option<String>,
     /// The open table and the cells of its open row.
@@ -124,9 +144,10 @@ struct Builder {
 }
 
 /// Parse sanitized markdown into a block tree. Tables are on together with the
-/// producer-side cell escaping (`markdown_source`, slice 12-B).
+/// producer-side cell escaping (`markdown_source`, slice 12-B). `links` picks
+/// how a link is presented (D11).
 #[must_use]
-pub fn parse(input: &str) -> Vec<Block> {
+pub fn parse(input: &str, links: LinkPresentation) -> Vec<Block> {
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
     let mut builder = Builder {
@@ -137,6 +158,7 @@ pub fn parse(input: &str) -> Vec<Block> {
         heading: None,
         code: None,
         html: None,
+        links,
         link: None,
         image: None,
         table: None,
@@ -185,6 +207,7 @@ impl Builder {
             code: false,
             link: self.state.link > 0,
             destination: false,
+            host: false,
         }
     }
 
@@ -214,8 +237,8 @@ impl Builder {
             alt.push_str(text);
             return;
         }
-        if let Some((_, label)) = &mut self.link {
-            label.push_str(text);
+        if let Some(link) = &mut self.link {
+            link.label.push_str(text);
         }
         let mut fmt = self.fmt();
         fmt.code = code;
@@ -256,8 +279,8 @@ impl Builder {
             // HTML is literal text everywhere (D2): never stripped.
             Event::Html(text) | Event::InlineHtml(text) => self.text(&text, false),
             Event::SoftBreak => {
-                if let Some((_, label)) = &mut self.link {
-                    label.push(' ');
+                if let Some(link) = &mut self.link {
+                    link.label.push(' ');
                 }
                 if self.image.is_none() {
                     self.inlines.push(Inline::SoftBreak);
@@ -353,7 +376,22 @@ impl Builder {
             Tag::Strikethrough => self.state.strike += 1,
             Tag::Link { dest_url, .. } => {
                 self.state.link += 1;
-                self.link = Some((dest_url.to_string(), String::new()));
+                let dest = dest_url.to_string();
+                let safe = match self.links {
+                    LinkPresentation::Labeled { .. } => link::safe_target(&dest),
+                    LinkPresentation::Explicit => None,
+                };
+                if let (LinkPresentation::Labeled { osc8: true }, Some(safe), None) =
+                    (self.links, &safe, &self.image)
+                {
+                    self.inlines
+                        .push(Inline::LinkStart(Arc::from(safe.as_str())));
+                }
+                self.link = Some(OpenLink {
+                    dest,
+                    safe,
+                    label: String::new(),
+                });
             }
             Tag::Image { .. } => self.image = Some(String::new()),
             Tag::Table(aligns) => {
@@ -429,8 +467,8 @@ impl Builder {
             TagEnd::Strikethrough => self.state.strike = self.state.strike.saturating_sub(1),
             TagEnd::Link => {
                 self.state.link = self.state.link.saturating_sub(1);
-                if let Some((url, label)) = self.link.take() {
-                    self.link_destination(&url, &label);
+                if let Some(open) = self.link.take() {
+                    self.end_link(&open);
                 }
             }
             TagEnd::Image => {
@@ -468,6 +506,28 @@ impl Builder {
         }
     }
 
+    /// Present the link that just closed: `Labeled` with a safe target ends
+    /// the OSC 8 run and adds the host suffix when the label does not name the
+    /// host (AC13); everything else shows the destination (D11).
+    fn end_link(&mut self, open: &OpenLink) {
+        if self.image.is_some() {
+            return;
+        }
+        let Some(safe) = &open.safe else {
+            self.link_destination(&open.dest, &open.label);
+            return;
+        };
+        if matches!(self.links, LinkPresentation::Labeled { osc8: true }) {
+            self.inlines.push(Inline::LinkEnd);
+        }
+        if let Some(suffix) = link::host_suffix(safe, &open.dest, &open.label) {
+            let mut fmt = self.fmt();
+            fmt.host = true;
+            fmt.link = false;
+            self.push_inline(&suffix, fmt);
+        }
+    }
+
     /// Explicit link presentation: `label (url)`, the URL once when the label
     /// already is the URL (autolinks).
     fn link_destination(&mut self, url: &str, label: &str) {
@@ -497,6 +557,19 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Most tests read the Explicit presentation (the full URL visible).
+    fn parse(input: &str) -> Vec<Block> {
+        super::parse(input, LinkPresentation::Explicit)
+    }
+
+    fn labeled(input: &str, osc8: bool) -> Vec<Inline> {
+        let mut blocks = super::parse(input, LinkPresentation::Labeled { osc8 });
+        let Some(Block::Paragraph(inlines)) = blocks.pop() else {
+            panic!("one paragraph expected: {blocks:?}");
+        };
+        inlines
+    }
 
     fn text(s: &str) -> Inline {
         Inline::Text {
@@ -733,6 +806,63 @@ mod tests {
             texts,
             "lbl (https://e.test/p) [image: alt] https://auto.test/"
         );
+    }
+
+    #[test]
+    fn test_labeled_link_brackets_the_label_and_adds_the_host_suffix() {
+        let inlines = labeled("[claude.ai](https://evil.test/x)", true);
+        let [
+            Inline::LinkStart(url),
+            Inline::Text { text: label, fmt },
+            Inline::LinkEnd,
+            Inline::Text {
+                text: suffix,
+                fmt: suffix_fmt,
+            },
+        ] = inlines.as_slice()
+        else {
+            panic!("{inlines:?}");
+        };
+        assert_eq!(&**url, "https://evil.test/x");
+        assert_eq!(label, "claude.ai");
+        assert!(fmt.link && !fmt.host);
+        assert_eq!(suffix, " (evil.test)");
+        assert!(suffix_fmt.host && !suffix_fmt.link && !suffix_fmt.destination);
+    }
+
+    fn texts(inlines: Vec<Inline>) -> Vec<String> {
+        inlines
+            .into_iter()
+            .filter_map(|i| match i {
+                Inline::Text { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_labeled_without_osc8_has_no_markers_and_the_same_text() {
+        let on = texts(labeled("a [l](https://e.test/p) b", true));
+        let off = labeled("a [l](https://e.test/p) b", false);
+        assert!(
+            off.iter().all(|i| matches!(i, Inline::Text { .. })),
+            "{off:?}"
+        );
+        let off = texts(off);
+        assert_eq!(on, off);
+        assert_eq!(off.concat(), "a l (e.test) b");
+    }
+
+    #[test]
+    fn test_labeled_keeps_the_full_url_for_unsafe_destinations_and_adds_no_marker() {
+        for dest in ["javascript:alert(1)", "docs/a.md", "mailto:a@b.test"] {
+            let inlines = labeled(&format!("[l]({dest})"), true);
+            assert!(
+                inlines.iter().all(|i| matches!(i, Inline::Text { .. })),
+                "{dest}: {inlines:?}"
+            );
+            assert_eq!(texts(inlines).concat(), format!("l ({dest})"));
+        }
     }
 
     #[test]

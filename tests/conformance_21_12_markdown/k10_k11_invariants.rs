@@ -11,7 +11,7 @@ use super::support::*;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use rustain::adapters::tui::markdown::{self, RenderOptions, metrics};
+use rustain::adapters::tui::markdown::{self, LinkPresentation, RenderOptions, metrics};
 use rustain::adapters::tui::theme::Theme;
 use rustain::infrastructure::terminal_info::ColorCapability;
 use unicode_segmentation::UnicodeSegmentation;
@@ -65,6 +65,12 @@ const FRAGMENTS: &[&str] = &[
     "| `a | b` | **x |\n|---|---|\n| y | `z |",
     "| a |\n|---|\n| 1 | 2 | 3 | 4 |",
     "| 名前 | n |\n|---|---|\n| 界界界界界界界界 | 1 |",
+    "[界界界](https://例え.test/p) and [a\u{7}b\u{9c}](https://e.test/\u{1b}x)",
+    "[a label with several words that must wrap](https://www.example.com/x) tail",
+    "> - [nested](http://127.0.0.1:1/) <https://auto.test/q>",
+    "| [t](https://e.test/) | b |\n|---|---|\n| [界](https://e.test/) | x |",
+    "# [head](https://e.test/h)\n\n**[bold](https://e.test/b)** `c` [e\u{301}](https://e.test/e)",
+    "[](https://www./) and [www](https://www./)",
 ];
 const SEPARATORS: &[&str] = &["\n", "\n\n", " ", "", "  \n", "\r\n"];
 
@@ -76,6 +82,13 @@ fn source_strategy() -> impl Strategy<Value = String> {
             .collect()
     })
 }
+
+/// Link presentations under test: the Task detail/MW-7 one and both Stage ones.
+const PRESENTATIONS: [LinkPresentation; 3] = [
+    LinkPresentation::Explicit,
+    LinkPresentation::Labeled { osc8: false },
+    LinkPresentation::Labeled { osc8: true },
+];
 
 fn opts(index: usize) -> RenderOptions {
     match index {
@@ -94,8 +107,21 @@ fn theme(mono: bool) -> Theme {
 }
 
 fn check(source: &str, width: usize, mode: usize, mono: bool) -> Result<(), TestCaseError> {
+    for links in PRESENTATIONS {
+        check_links(source, width, mode, mono, links)?;
+    }
+    Ok(())
+}
+
+fn check_links(
+    source: &str,
+    width: usize,
+    mode: usize,
+    mono: bool,
+    links: LinkPresentation,
+) -> Result<(), TestCaseError> {
     let theme = theme(mono);
-    let opts = opts(mode);
+    let opts = opts(mode).with_links(links);
     let rendered = markdown::render(source, width, &theme, &opts);
     prop_assert_eq!(
         rendered.lines.len(),
@@ -126,6 +152,48 @@ fn check(source: &str, width: usize, mode: usize, mono: bool) -> Result<(), Test
             width,
             source,
             mode
+        );
+    }
+    // Link runs lie inside their line and the width (AC9); only a caller that
+    // asked for OSC 8 gets any.
+    if links == (LinkPresentation::Labeled { osc8: true }) {
+        // The flag adds runs only: the lines (text and style) are identical.
+        let off = opts.with_links(LinkPresentation::Labeled { osc8: false });
+        let plain = markdown::render(source, width, &theme, &off);
+        prop_assert_eq!(&rendered.lines, &plain.lines, "flag changed {:?}", source);
+    } else {
+        prop_assert!(
+            rendered.links.is_empty(),
+            "runs without OSC 8: {:?}",
+            source
+        );
+    }
+    let mut previous = (0usize, 0usize);
+    for run in &rendered.links {
+        prop_assert!(run.line < rendered.lines.len(), "run line {:?}", run);
+        let line = &rendered.lines[run.line];
+        let cells: usize = line.spans.iter().map(|s| s.content.as_ref().width()).sum();
+        prop_assert!(
+            run.width > 0 && run.start_cell + run.width <= cells,
+            "run {:?} outside a {}-cell line {:?} (source {:?}, width {})",
+            run,
+            cells,
+            line,
+            source,
+            width
+        );
+        prop_assert!(
+            (run.line, run.start_cell) >= previous,
+            "runs out of order: {:?}",
+            rendered.links
+        );
+        previous = (run.line, run.start_cell + run.width);
+        prop_assert!(
+            run.url
+                .chars()
+                .all(|c| !c.is_control() && !c.is_whitespace()),
+            "hostile target {:?}",
+            run.url
         );
     }
     Ok(())
@@ -282,6 +350,10 @@ const MARKDOWN_SOURCES: &[(&str, &str)] = &[
         "highlight.rs",
         include_str!("../../src/adapters/tui/markdown/highlight.rs"),
     ),
+    (
+        "link.rs",
+        include_str!("../../src/adapters/tui/markdown/link.rs"),
+    ),
 ];
 
 /// The source before its trailing unit-test module.
@@ -388,7 +460,7 @@ fn private_parser_users(sources: &[(String, String)], allowed: &[&str]) -> Vec<S
 fn k10_gate_baseline_defects_stay_out_of_the_markdown_sources() {
     let violations = gate_violations(MARKDOWN_SOURCES);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
-    assert_eq!(MARKDOWN_SOURCES.len(), 7, "the gate must stay scoped");
+    assert_eq!(MARKDOWN_SOURCES.len(), 8, "the gate must stay scoped");
     // 12-B allowlists exactly one domain module: the producer-side helper.
     let users = private_parser_users(&src_sources(), &["domain/services/markdown_source.rs"]);
     assert!(

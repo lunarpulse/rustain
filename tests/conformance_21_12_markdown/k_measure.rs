@@ -14,9 +14,12 @@
 use std::time::{Duration, Instant};
 
 use rustain::adapters::tui::markdown::{
-    self, RenderOptions, highlight, layout, parse, sanitize, transform,
+    self, LinkPresentation, RenderOptions, highlight, layout, parse, sanitize, transform,
 };
 use rustain::adapters::tui::theme::Theme;
+
+/// The Stage's draw path: host suffix and OSC 8 runs (the widest presentation).
+const STAGE: LinkPresentation = LinkPresentation::Labeled { osc8: true };
 
 const WIDTH: usize = 78;
 const SIZES_KIB: [usize; 4] = [2, 8, 32, 128];
@@ -91,7 +94,12 @@ pub fn run() {
     for kib in SIZES_KIB {
         let text = fixture(kib);
         let full = measure(|| {
-            let _ = markdown::render(&text, WIDTH, &theme, &RenderOptions::streaming());
+            let _ = markdown::render(
+                &text,
+                WIDTH,
+                &theme,
+                &RenderOptions::streaming().with_links(STAGE),
+            );
         });
         // Per-stage split of the same pass.
         let sanitize_ms = measure(|| {
@@ -99,9 +107,9 @@ pub fn run() {
         });
         let sanitized = sanitize::sanitize(&text, markdown::RenderMode::Streaming).into_owned();
         let parse_ms = measure(|| {
-            let _ = parse::parse(&sanitized);
+            let _ = parse::parse(&sanitized, STAGE);
         });
-        let blocks = || parse::parse(&sanitized);
+        let blocks = || parse::parse(&sanitized, STAGE);
         let transform_ms = measure(|| {
             let _ = transform::transform(blocks(), &theme);
         });
@@ -124,7 +132,12 @@ pub fn run() {
     for kib in SIZES_KIB {
         let text = fixture(kib);
         let stats = measure(|| {
-            let _ = markdown::render(&text, WIDTH, &theme, &RenderOptions::completed());
+            let _ = markdown::render(
+                &text,
+                WIDTH,
+                &theme,
+                &RenderOptions::completed().with_links(STAGE),
+            );
         });
         println!(
             "  {kib:>3} KiB: median {:>8.2} p95 {:>8.2}",
@@ -136,7 +149,12 @@ pub fn run() {
     let turns: Vec<String> = (0..50).map(|_| fixture(2)).collect();
     let stats = measure(|| {
         for turn in &turns {
-            let _ = markdown::compute_height(turn, WIDTH, &theme, &RenderOptions::completed());
+            let _ = markdown::compute_height(
+                turn,
+                WIDTH,
+                &theme,
+                &RenderOptions::completed().with_links(STAGE),
+            );
         }
     });
     println!(

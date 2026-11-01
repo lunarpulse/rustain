@@ -30,10 +30,75 @@ use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
 
 use super::empty_state;
+use super::hyperlink;
 use super::plan_card;
 use crate::adapters::tui::markdown;
+use crate::adapters::tui::markdown::{LinkPresentation, LinkRun, RenderOptions, Rendered};
 use crate::adapters::tui::text_geometry as geom;
 use word_wrap::wrap_text;
+
+/// Stage presentation of `mode` (D11, owner ruling OR-21-12-1): a link shows
+/// its label plus a dim host suffix, and with `osc8` the label cells are also
+/// returned as runs. Height passes ask with `osc8: false`; the flag changes
+/// no geometry.
+fn stage_options(mode: RenderOptions, osc8: bool) -> RenderOptions {
+    mode.with_links(LinkPresentation::Labeled { osc8 })
+}
+
+/// OSC 8 runs of Stage markdown, gathered while a producer builds its lines
+/// (D15). Runs are in the coordinates of the lines that producer returns; the
+/// draw maps them to viewport rows and encodes them after the paint. A sink
+/// that is off asks the pipeline for no runs.
+struct LinkSink {
+    osc8: bool,
+    runs: Vec<LinkRun>,
+}
+
+impl LinkSink {
+    fn new(osc8: bool) -> Self {
+        Self {
+            osc8,
+            runs: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn off() -> Self {
+        Self::new(false)
+    }
+
+    fn options(&self, mode: RenderOptions) -> RenderOptions {
+        stage_options(mode, self.osc8)
+    }
+
+    /// Keep the runs of `rendered`, whose first line is line `first_line` of
+    /// the producer's lines, and return its lines.
+    fn take(&mut self, rendered: Rendered, first_line: usize) -> Vec<Line<'static>> {
+        self.runs.extend(rendered.links.into_iter().map(|mut run| {
+            run.line += first_line;
+            run
+        }));
+        rendered.lines
+    }
+}
+
+/// Map producer runs to viewport rows: `first_abs` is the absolute line of the
+/// producer's line 0. Rows outside `visible_start..visible_end` are dropped.
+fn place_runs(
+    out: &mut Vec<LinkRun>,
+    runs: Vec<LinkRun>,
+    first_abs: usize,
+    visible_start: usize,
+    visible_end: usize,
+) {
+    for mut run in runs {
+        let abs = first_abs + run.line;
+        if abs >= visible_start && abs < visible_end {
+            run.line = abs - visible_start;
+            out.push(run);
+        }
+    }
+}
 
 fn feedback_lines(
     block: &FeedbackBlock,
@@ -56,6 +121,7 @@ fn legacy_streaming_lines(
     streaming: &StreamingState,
     width: usize,
     theme: &Theme,
+    sink: &mut LinkSink,
 ) -> ([Option<Line<'static>>; 2], Vec<Line<'static>>) {
     let has_error = streaming.current_blocks.contains(&ContentBlockType::Error);
     let mut prefix = [None, None];
@@ -79,13 +145,14 @@ fn legacy_streaming_lines(
         )));
         Vec::new()
     } else {
-        let mut prose = markdown::render(
+        let rendered = markdown::render(
             &streaming.current_text_buffer,
             width,
             theme,
-            &markdown::RenderOptions::streaming(),
-        )
-        .lines;
+            &sink.options(RenderOptions::streaming()),
+        );
+        // Line 0 is the `Assistant:` label.
+        let mut prose = sink.take(rendered, 1);
         if has_error {
             for line in &mut prose {
                 for span in &mut line.spans {
@@ -327,7 +394,7 @@ fn compute_message_height(
             &content,
             content_width,
             theme,
-            &markdown::RenderOptions::completed(),
+            &stage_options(RenderOptions::completed(), false),
         )
     };
     // Cancelled messages append " [interrupted]" as a separate line.
@@ -517,6 +584,7 @@ fn render_message<'a>(
     search_query: Option<&str>,
     focused_match_ordinal_in_message: Option<usize>,
     show_terminal_origin_prefix: bool,
+    sink: &mut LinkSink,
 ) -> Vec<Line<'a>> {
     let mut lines = Vec::new();
     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
@@ -593,24 +661,24 @@ fn render_message<'a>(
             "┄".repeat(content_width),
             Style::default().fg(theme.colors.fg_muted),
         )));
-        let parsed_lines = markdown::render(
+        let rendered = markdown::render(
             &content,
             content_width,
             theme,
-            &markdown::RenderOptions::completed(),
-        )
-        .lines;
+            &sink.options(RenderOptions::completed()),
+        );
+        let parsed_lines = sink.take(rendered, lines.len());
         lines.extend(parsed_lines);
     } else if msg.role == MessageRole::User {
         lines.extend(user_message_lines(&content, content_width, theme));
     } else {
-        let parsed_lines = markdown::render(
+        let rendered = markdown::render(
             &content,
             content_width,
             theme,
-            &markdown::RenderOptions::completed(),
-        )
-        .lines;
+            &sink.options(RenderOptions::completed()),
+        );
+        let parsed_lines = sink.take(rendered, lines.len());
         lines.extend(parsed_lines);
     }
     let content_end = lines.len();
@@ -1037,7 +1105,7 @@ fn expanded_turn_height_attached(
                     text,
                     content_width,
                     theme,
-                    &crate::adapters::tui::markdown::RenderOptions::completed(),
+                    &stage_options(RenderOptions::completed(), false),
                 );
             }
             TurnPart::Reasoning { text, .. } => {
@@ -1046,7 +1114,7 @@ fn expanded_turn_height_attached(
                     text,
                     content_width,
                     theme,
-                    &crate::adapters::tui::markdown::RenderOptions::completed(),
+                    &stage_options(RenderOptions::completed(), false),
                 );
             }
             TurnPart::ToolInvocation { id, status, .. } => {
@@ -1284,6 +1352,9 @@ fn inter_part_blank_lines(prev: Option<&TurnPart>, next: &TurnPart) -> usize {
     }
 }
 
+/// Cells of the gutter prefix (`│ `) that `gutter_lines` adds to every line.
+const GUTTER_CELLS: usize = 2;
+
 /// Wrap every line in a content vec with the gutter prefix (`│ `) styled accent.
 fn gutter_lines<'a>(content_lines: Vec<Line<'a>>, theme: &Theme) -> Vec<Line<'a>> {
     let gutter_style = Style::default().fg(theme.colors.accent);
@@ -1354,6 +1425,7 @@ fn render_expanded_turn<'a>(
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
     search: Option<(&str, Option<usize>)>,
+    sink: &mut LinkSink,
 ) -> Vec<Line<'a>> {
     let content_width = width.saturating_sub(2); // gutter + space
     if content_width == 0 {
@@ -1369,6 +1441,7 @@ fn render_expanded_turn<'a>(
         }
     }
 
+    let first_run = sink.runs.len();
     let mut lines: Vec<Line<'a>> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
     let mut match_cursor = 0;
@@ -1387,24 +1460,24 @@ fn render_expanded_turn<'a>(
 
         match part {
             TurnPart::Prose { text, .. } => {
-                let prose_lines = crate::adapters::tui::markdown::render(
+                let rendered = crate::adapters::tui::markdown::render(
                     text,
                     content_width,
                     theme,
-                    &crate::adapters::tui::markdown::RenderOptions::completed(),
-                )
-                .lines;
+                    &sink.options(RenderOptions::completed()),
+                );
+                let prose_lines = sink.take(rendered, lines.len());
                 lines.extend(prose_lines);
             }
             TurnPart::Reasoning { text, .. } => {
                 // P2-2: italic fg_secondary — merge with existing span styles
-                let reasoning_lines = crate::adapters::tui::markdown::render(
+                let rendered = crate::adapters::tui::markdown::render(
                     text,
                     content_width,
                     theme,
-                    &crate::adapters::tui::markdown::RenderOptions::completed(),
-                )
-                .lines;
+                    &sink.options(RenderOptions::completed()),
+                );
+                let reasoning_lines = sink.take(rendered, lines.len());
                 for line in reasoning_lines {
                     let styled_spans: Vec<Span<'a>> = line
                         .spans
@@ -1500,6 +1573,9 @@ fn render_expanded_turn<'a>(
     }
 
     // Wrap in gutter and add trailing half-line gap
+    for run in &mut sink.runs[first_run..] {
+        run.start_cell += GUTTER_CELLS;
+    }
     let mut result = gutter_lines(lines, theme);
     result.push(Line::from(Span::styled(
         "│",
@@ -1856,6 +1932,10 @@ fn render_with_search_impl(
     let viewport_height = area.height as usize;
     let spacing = theme.spacing.normal as usize;
     let msg_count = conversation.messages.len();
+    // Story 21.12 (D15): the output supports OSC 8. Link runs gathered by the
+    // producers below are encoded onto the painted cells after the paint.
+    let osc8 = tab_render_state.osc8_links;
+    let mut placed_runs: Vec<LinkRun> = Vec::new();
 
     // Invalidate cache if terminal width changed (O(1) divergence check — AC5)
     if tab_render_state.cached_width != Some(area.width) {
@@ -2160,22 +2240,24 @@ fn render_with_search_impl(
     // Open prose: text buffered during streaming, not yet committed to
     // turn.parts. It is rendered ONCE per draw: this height pass keeps the
     // lines and the paint pass below reuses them (B13, AC8).
+    let mut open_prose_sink = LinkSink::new(osc8);
     let mut open_prose_lines = open_prose.filter(|text| !text.is_empty()).map(|text| {
-        markdown::render(
+        let rendered = markdown::render(
             text,
             width.saturating_sub(2),
             theme,
-            &markdown::RenderOptions::streaming(),
-        )
-        .lines
+            &open_prose_sink.options(RenderOptions::streaming()),
+        );
+        open_prose_sink.take(rendered, 0)
     });
     if let Some(prose_lines) = &open_prose_lines {
         cumulative_offset += prose_lines.len();
     }
 
     // Attached streaming belongs to the same height model and clipped range as feedback.
+    let mut legacy_sink = LinkSink::new(osc8);
     let (legacy_prefix, legacy_body) = if open_turn.is_none() && streaming.is_streaming {
-        legacy_streaming_lines(streaming, width, theme)
+        legacy_streaming_lines(streaming, width, theme, &mut legacy_sink)
     } else {
         ([None, None], Vec::new())
     };
@@ -2284,7 +2366,11 @@ fn render_with_search_impl(
                                 ))
                             });
                         let marker_line = auto_sent_marker_line(msg, theme);
+                        let lead = metadata_line.iter().count()
+                            + authorship_line.iter().count()
+                            + marker_line.iter().count();
                         let search = search_query.map(|query| (query, focused_local_ordinal));
+                        let mut sink = LinkSink::new(osc8);
                         let turn_lines = if collapsed {
                             render_collapsed_turn(turn, view_state, theme, width, clock, search)
                         } else {
@@ -2297,6 +2383,7 @@ fn render_with_search_impl(
                                 liveness,
                                 withheld_tool_inputs,
                                 search,
+                                &mut sink,
                             )
                         };
                         let interrupted_line = (msg.stop_reason == Some(StopReason::Cancelled))
@@ -2310,6 +2397,19 @@ fn render_with_search_impl(
                             .focused_turn
                             .as_ref()
                             .is_some_and(|ft| *ft == turn.id);
+                        // The focus arrow shifts row 0 right by its two cells.
+                        if is_focused && lead == 0 {
+                            for run in sink.runs.iter_mut().filter(|run| run.line == 0) {
+                                run.start_cell += 2;
+                            }
+                        }
+                        place_runs(
+                            &mut placed_runs,
+                            std::mem::take(&mut sink.runs),
+                            line_offset + lead,
+                            visible_start,
+                            visible_end,
+                        );
                         for (j, mut line) in metadata_line
                             .into_iter()
                             .chain(authorship_line)
@@ -2342,6 +2442,7 @@ fn render_with_search_impl(
                         }
                     } else {
                         // Legacy fallback for Assistant messages without a Turn
+                        let mut sink = LinkSink::new(osc8);
                         let msg_lines = render_message(
                             msg,
                             width,
@@ -2351,6 +2452,14 @@ fn render_with_search_impl(
                             search_query,
                             focused_local_ordinal,
                             show_terminal_origin_prefix,
+                            &mut sink,
+                        );
+                        place_runs(
+                            &mut placed_runs,
+                            sink.runs,
+                            line_offset,
+                            visible_start,
+                            visible_end,
                         );
                         let text_height = compute_message_height(
                             &msg.content,
@@ -2396,6 +2505,7 @@ fn render_with_search_impl(
                     }
                 }
                 MessageRole::User | MessageRole::System => {
+                    let mut sink = LinkSink::new(osc8);
                     let msg_lines = render_message(
                         msg,
                         width,
@@ -2405,6 +2515,14 @@ fn render_with_search_impl(
                         search_query,
                         focused_local_ordinal,
                         show_terminal_origin_prefix,
+                        &mut sink,
+                    );
+                    place_runs(
+                        &mut placed_runs,
+                        sink.runs,
+                        line_offset,
+                        visible_start,
+                        visible_end,
                     );
                     let text_height = compute_message_height(
                         &msg.content,
@@ -2527,6 +2645,7 @@ fn render_with_search_impl(
                 }
                 line_offset += spacing;
             }
+            let mut sink = LinkSink::new(osc8);
             let turn_lines = render_expanded_turn(
                 ot,
                 theme,
@@ -2536,6 +2655,14 @@ fn render_with_search_impl(
                 liveness,
                 withheld_tool_inputs,
                 None,
+                &mut sink,
+            );
+            place_runs(
+                &mut placed_runs,
+                sink.runs,
+                line_offset,
+                visible_start,
+                visible_end,
             );
             let tl_len = turn_lines.len();
             for (j, line) in turn_lines.into_iter().enumerate() {
@@ -2550,6 +2677,16 @@ fn render_with_search_impl(
             if let Some(prose_lines) = open_prose_lines.take() {
                 let gutter_prose = gutter_lines(prose_lines, theme);
                 let gp_len = gutter_prose.len();
+                for run in &mut open_prose_sink.runs {
+                    run.start_cell += GUTTER_CELLS;
+                }
+                place_runs(
+                    &mut placed_runs,
+                    std::mem::take(&mut open_prose_sink.runs),
+                    line_offset,
+                    visible_start,
+                    visible_end,
+                );
                 for (j, line) in gutter_prose.into_iter().enumerate() {
                     let abs_line = line_offset + j;
                     if abs_line >= visible_start && abs_line < visible_end {
@@ -2580,6 +2717,13 @@ fn render_with_search_impl(
             }
             line_offset += spacing;
         }
+        place_runs(
+            &mut placed_runs,
+            std::mem::take(&mut legacy_sink.runs),
+            line_offset,
+            visible_start,
+            visible_end,
+        );
         let start = visible_start.saturating_sub(line_offset).min(legacy_height);
         let end = visible_end.saturating_sub(line_offset).min(legacy_height);
         lines.extend(
@@ -2655,10 +2799,23 @@ fn render_with_search_impl(
         ));
         let last = lines.len() - 1;
         lines[last] = indicator_line;
+        // The indicator replaced that row: any run on it is gone.
+        placed_runs.retain(|run| run.line != last);
     }
 
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
+    for run in &placed_runs {
+        let to_u16 = |cells: usize| u16::try_from(cells).unwrap_or(u16::MAX);
+        let target = Rect::new(
+            area.x.saturating_add(to_u16(run.start_cell)),
+            area.y.saturating_add(to_u16(run.line)),
+            to_u16(run.width),
+            1,
+        )
+        .intersection(area);
+        hyperlink::encode(frame.buffer_mut(), target, &run.url);
+    }
 
     // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
     // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
@@ -2798,6 +2955,51 @@ mod parts_aware_tests {
     use crate::domain::clock::{BRAILLE_FRAMES, current_braille_frame};
     use crate::domain::models::ChatMessage;
 
+    /// `render_expanded_turn` with no search and no link collection.
+    fn render_turn<'a>(
+        turn: &Turn,
+        theme: &'a Theme,
+        width: usize,
+        clock: &dyn Clock,
+        tbs: &HashMap<String, ToolBlockState>,
+    ) -> Vec<Line<'a>> {
+        render_expanded_turn(
+            turn,
+            theme,
+            width,
+            clock,
+            tbs,
+            None,
+            None,
+            None,
+            &mut LinkSink::off(),
+        )
+    }
+
+    /// `render_message` with no link collection.
+    #[allow(clippy::too_many_arguments)]
+    fn render_msg<'a>(
+        msg: &ChatMessage,
+        width: usize,
+        theme: &Theme,
+        is_fork_point: bool,
+        is_bookmarked: bool,
+        search_query: Option<&str>,
+        focused_match: Option<usize>,
+        show_origin: bool,
+    ) -> Vec<Line<'a>> {
+        render_message(
+            msg,
+            width,
+            theme,
+            is_fork_point,
+            is_bookmarked,
+            search_query,
+            focused_match,
+            show_origin,
+            &mut LinkSink::off(),
+        )
+    }
     fn make_prose(text: &str) -> TurnPart {
         TurnPart::Prose {
             id: PartId(0),
@@ -3278,7 +3480,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -3304,7 +3506,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
         let rail_text: String = lines
             .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains("⠋")))
@@ -3331,7 +3533,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
         // Verify both prose and tool are present, and tool comes after prose
         let all_text: String = lines
             .iter()
@@ -3386,7 +3588,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
         // Every non-empty line should start with the gutter
         for line in &lines {
             if line.spans.is_empty() {
@@ -3459,7 +3661,7 @@ mod parts_aware_tests {
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_expanded_turn(&turn, &theme, 0, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 0, &clock, &tbs);
         assert!(lines.is_empty());
     }
 
@@ -3653,8 +3855,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: empty turn");
         // Empty turn: only trailing rail = 1
         assert_eq!(cached.height, 1);
@@ -3667,8 +3868,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: single prose");
     }
 
@@ -3685,8 +3885,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: prose + inter-part blank");
     }
 
@@ -3703,8 +3902,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: running tool with rail");
         // Should include per-Running rail addend
         assert!(cached.height > 0);
@@ -3731,8 +3929,7 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: completed tool expanded");
     }
 
@@ -3750,8 +3947,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: mixed prose-tool-prose");
     }
 
@@ -3762,8 +3958,7 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(
             cached.height, rendered,
             "parity: trailing rail after running"
@@ -3793,8 +3988,7 @@ mod parts_aware_tests {
             },
         );
         let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered =
-            render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None).len();
+        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
         assert_eq!(cached.height, rendered, "parity: tool peek state");
         assert!(cached.height > 0);
     }
@@ -3820,11 +4014,9 @@ mod parts_aware_tests {
         let tbs: HashMap<String, ToolBlockState> = HashMap::new();
 
         let cached_9s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_9s =
-            render_expanded_turn(&turn, &theme, 80, &clock_9s, &tbs, None, None, None).len();
+        let rendered_9s = render_turn(&turn, &theme, 80, &clock_9s, &tbs).len();
         let cached_10s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_10s =
-            render_expanded_turn(&turn, &theme, 80, &clock_10s, &tbs, None, None, None).len();
+        let rendered_10s = render_turn(&turn, &theme, 80, &clock_10s, &tbs).len();
 
         assert_eq!(cached_9s.height, rendered_9s, "parity: 9.9s elapsed");
         assert_eq!(cached_10s.height, rendered_10s, "parity: 10.0s elapsed");
@@ -4013,8 +4205,7 @@ mod parts_aware_tests {
 
         for width in [79, 80, 81] {
             let cached = expanded_turn_height(&turn, &theme, width, &tbs);
-            let rendered =
-                render_expanded_turn(&turn, &theme, width, &clock, &tbs, None, None, None).len();
+            let rendered = render_turn(&turn, &theme, width, &clock, &tbs).len();
             assert_eq!(cached.height, rendered, "parity fail: width={}", width);
         }
     }
@@ -4047,7 +4238,7 @@ mod parts_aware_tests {
 
         // Render and verify cumulative offsets
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
-        let lines = render_expanded_turn(&turn, &theme, 80, &clock, &tbs, None, None, None);
+        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
 
         // The first block offset should be 0 (start of turn)
         assert_eq!(layout.block_offsets[0], 0, "first block should start at 0");
@@ -4217,7 +4408,7 @@ mod parts_aware_tests {
             ..Default::default()
         };
         let theme = Theme::dark();
-        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let rendered = render_msg(&message, 80, &theme, false, false, None, None, false);
         let computed = compute_message_height(
             &message.content,
             MessageRole::Assistant,
@@ -4234,7 +4425,7 @@ mod parts_aware_tests {
             computed,
             "the virtual-scroll invariant: every rendered line is counted"
         );
-        let plain = render_message(
+        let plain = render_msg(
             &crate::domain::models::ChatMessage {
                 role: MessageRole::Assistant,
                 content: "generated response".to_owned(),
@@ -4281,7 +4472,7 @@ mod parts_aware_tests {
         );
 
         let theme = Theme::dark();
-        let rendered = render_message(&surfaced, 80, &theme, false, false, None, None, false);
+        let rendered = render_msg(&surfaced, 80, &theme, false, false, None, None, false);
         let computed = compute_message_height(
             &surfaced.content,
             surfaced.role,
@@ -4320,7 +4511,7 @@ mod parts_aware_tests {
             ..Default::default()
         };
         let theme = Theme::dark();
-        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let rendered = render_msg(&message, 80, &theme, false, false, None, None, false);
         let rows: Vec<String> = rendered.iter().map(ToString::to_string).collect();
         assert!(rows.iter().any(|row| row.contains("[file] ab")), "{rows:?}");
         assert!(
@@ -4343,7 +4534,7 @@ mod parts_aware_tests {
             ..Default::default()
         };
         let theme = Theme::dark();
-        let rendered = render_message(&message, 80, &theme, false, false, None, None, false);
+        let rendered = render_msg(&message, 80, &theme, false, false, None, None, false);
         let content = rendered
             .iter()
             .skip(1)
@@ -4384,7 +4575,7 @@ mod parts_aware_tests {
             computed,
             "peer gutter width must preserve the virtual-scroll invariant"
         );
-        let highlighted = render_message(
+        let highlighted = render_msg(
             &message,
             80,
             &theme,
@@ -4413,7 +4604,7 @@ mod parts_aware_tests {
             ..Default::default()
         };
         let theme = Theme::dark();
-        let rendered = render_message(&message, 80, &theme, false, false, None, None, false)
+        let rendered = render_msg(&message, 80, &theme, false, false, None, None, false)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
@@ -4423,7 +4614,7 @@ mod parts_aware_tests {
         assert!(rendered.contains("generated response"));
 
         message.retracted_at_ms = Some(1_700_000_123_000);
-        let retracted = render_message(&message, 80, &theme, false, false, None, None, false)
+        let retracted = render_msg(&message, 80, &theme, false, false, None, None, false)
             .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()

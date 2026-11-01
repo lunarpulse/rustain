@@ -103,12 +103,39 @@ pub fn paint_local(
     width: u16,
     height: u16,
 ) -> Pane {
+    paint_local_osc8(
+        conversation,
+        open_turn,
+        streaming,
+        open_prose,
+        theme,
+        width,
+        height,
+        false,
+    )
+}
+
+/// [`paint_local`] with the per-tab OSC 8 capability set to `osc8`.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_local_osc8(
+    conversation: &Conversation,
+    open_turn: Option<&Turn>,
+    streaming: &StreamingState,
+    open_prose: Option<&str>,
+    theme: &Theme,
+    width: u16,
+    height: u16,
+    osc8: bool,
+) -> Pane {
     let clock = clock();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     let mut total_height = 0usize;
     terminal
         .draw(|frame| {
-            let mut tab = TabRenderState::default();
+            let mut tab = TabRenderState {
+                osc8_links: osc8,
+                ..TabRenderState::default()
+            };
             let result = chat_pane::render_with_search(
                 frame,
                 Rect::new(0, 0, width, height),
@@ -148,11 +175,26 @@ pub fn paint_attached(
     width: u16,
     height: u16,
 ) -> Pane {
+    paint_attached_osc8(conversation, streaming, theme, width, height, false)
+}
+
+/// [`paint_attached`] with the per-tab OSC 8 capability set to `osc8`.
+pub fn paint_attached_osc8(
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    theme: &Theme,
+    width: u16,
+    height: u16,
+    osc8: bool,
+) -> Pane {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     let mut total_height = 0usize;
     terminal
         .draw(|frame| {
-            let mut tab = TabRenderState::default();
+            let mut tab = TabRenderState {
+                osc8_links: osc8,
+                ..TabRenderState::default()
+            };
             let result = chat_pane::render_attached(
                 frame,
                 Rect::new(0, 0, width, height),

@@ -3,6 +3,8 @@
 //! Nothing here removes source characters: HTML, unmatched delimiters and
 //! escapes are shown exactly as CommonMark resolved them (D2, AD-2113).
 
+use std::sync::Arc;
+
 use ratatui::prelude::*;
 
 use super::parse::{Align, Block, Fmt, Inline, List, Table};
@@ -50,11 +52,14 @@ pub struct StyledTable {
 
 /// A styled inline node. Soft breaks carry the style of the surrounding block
 /// so the space they become continues its underline or strike-through.
+/// `LinkStart`/`LinkEnd` bracket the label of a safe link and carry no text.
 #[derive(Debug, Clone)]
 pub enum StyledInline {
     Text(StyledSpan),
     SoftBreak(Style),
     HardBreak,
+    LinkStart(Arc<str>),
+    LinkEnd,
 }
 
 /// A text run with its style. `atomic` marks an inline code span: the wrapper
@@ -72,6 +77,7 @@ struct Palette {
     code: Style,
     link: Style,
     destination: Style,
+    host: Style,
     heading: [Style; 3],
     quote: bool,
 }
@@ -98,6 +104,7 @@ impl Palette {
                 .fg(colors.accent)
                 .add_modifier(Modifier::UNDERLINED),
             destination: Style::default().fg(colors.fg_muted),
+            host: theme.typography.meta.fg(colors.fg_muted),
             heading: [heading.fg(colors.accent), h2, heading],
             quote: false,
         }
@@ -118,6 +125,9 @@ impl Palette {
         }
         if fmt.destination {
             style = style.patch(self.destination);
+        }
+        if fmt.host {
+            style = style.patch(self.host);
         }
         if fmt.bold {
             style = style.add_modifier(Modifier::BOLD);
@@ -220,6 +230,8 @@ fn inlines_to_styled(inlines: Vec<Inline>, base: Style, palette: &Palette) -> Ve
             }),
             Inline::SoftBreak => StyledInline::SoftBreak(base),
             Inline::HardBreak => StyledInline::HardBreak,
+            Inline::LinkStart(url) => StyledInline::LinkStart(url),
+            Inline::LinkEnd => StyledInline::LinkEnd,
         })
         .collect()
 }
@@ -227,10 +239,11 @@ fn inlines_to_styled(inlines: Vec<Inline>, base: Style, palette: &Palette) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::tui::markdown::LinkPresentation;
     use crate::adapters::tui::markdown::parse::parse;
 
     fn styled(markdown: &str, theme: &Theme) -> Vec<StyledBlock> {
-        transform(parse(markdown), theme)
+        transform(parse(markdown, LinkPresentation::Explicit), theme)
     }
 
     fn first_span(blocks: &[StyledBlock], needle: &str) -> StyledSpan {
@@ -347,5 +360,24 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::CROSSED_OUT)
         );
+    }
+
+    #[test]
+    fn test_host_suffix_is_dim_muted_and_not_underlined() {
+        let theme = Theme::dark();
+        let blocks = transform(
+            parse(
+                "[lbl](https://e.test/p)",
+                LinkPresentation::Labeled { osc8: false },
+            ),
+            &theme,
+        );
+        let link = first_span(&blocks, "lbl").style;
+        assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(link.fg, Some(theme.colors.accent));
+        let host = first_span(&blocks, "(e.test)").style;
+        assert_eq!(host.fg, Some(theme.colors.fg_muted));
+        assert!(host.add_modifier.contains(Modifier::DIM));
+        assert!(!host.add_modifier.contains(Modifier::UNDERLINED));
     }
 }

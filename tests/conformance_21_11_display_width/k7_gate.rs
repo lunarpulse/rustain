@@ -49,6 +49,7 @@ const SITES: &[Site] = &[
             "render_html",
             "wrap_inlines",
             "hard_wrap",
+            "push_text",
             "unit",
             "render_list",
             "literal"
@@ -58,6 +59,7 @@ const SITES: &[Site] = &[
         "markdown/table.rs",
         ["new", "render", "row_line", "fit", "shrink", "rule"]
     ),
+    site!("widgets/hyperlink.rs", ["encode"]),
     site!(
         "widgets/chat_pane/mod.rs",
         [

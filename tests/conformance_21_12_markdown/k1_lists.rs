@@ -232,10 +232,7 @@ fn k1_strikethrough_and_images_and_links() {
         20,
     );
     let rows = content_rows(&pane);
-    assert_eq!(
-        rows[0], "gone [image: alt text] lbl (https://e.test/p)",
-        "{rows:?}"
-    );
+    assert_eq!(rows[0], "gone [image: alt text] lbl (e.test)", "{rows:?}");
     let style = style_of(&pane.buffer, "gone").unwrap();
     assert!(
         style

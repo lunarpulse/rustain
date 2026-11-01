@@ -1,0 +1,24 @@
+---
+source: tests/render_snapshots.rs
+expression: links(40)
+---
+│ Links
+│
+│ See claude.ai (evil.test) and the docs
+│ (example.com) or example.com.
+│
+│ • notevil.test (evil.test) and
+│   https://example.com/a
+│ • 例え (xn--r8jz45g.test) then local
+│   (127.0.0.1)
+│
+│ │ quoted a label that wraps across the
+│ │ pane width easily (docs.example.org)
+│
+│ 日本語のテキスト表示確認とても長いリンク
+│ ラベル (example.com)
+│
+│ unsafe (javascript:alert(1)) and
+│ relative (docs/readme.md).
+│
+│

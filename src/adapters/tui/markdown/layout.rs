@@ -7,9 +7,12 @@
 //! spans whole when they fit on a fresh line and hard-wraps anything wider than
 //! a line at grapheme boundaries — no character is clipped away (D5).
 
+use std::sync::Arc;
+
 use ratatui::prelude::*;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::link::LinkRun;
 use super::table;
 use super::transform::{StyledBlock, StyledInline, StyledList};
 use crate::adapters::tui::text_geometry as geom;
@@ -69,16 +72,68 @@ fn blank() -> Line<'static> {
     Line::from("")
 }
 
+/// Laid-out lines and the OSC 8 runs of the links they paint. A run's `line`
+/// indexes `lines`; containers shift runs by the prefix they add.
+#[derive(Debug, Default)]
+pub struct Rows {
+    pub lines: Vec<Line<'static>>,
+    pub links: Vec<LinkRun>,
+}
+
+impl Rows {
+    fn push(&mut self, line: Line<'static>) {
+        self.lines.push(line);
+    }
+
+    /// Append `inner` unchanged.
+    fn extend(&mut self, inner: Rows) {
+        let base = self.lines.len();
+        self.links.extend(inner.links.into_iter().map(|mut run| {
+            run.line += base;
+            run
+        }));
+        self.lines.extend(inner.lines);
+    }
+
+    /// Append `inner` with `first` before its first row and `rest` before
+    /// every other row; both are `cells` wide, so runs move right by `cells`.
+    fn extend_prefixed(
+        &mut self,
+        inner: Rows,
+        first: &Span<'static>,
+        rest: &Span<'static>,
+        cells: usize,
+    ) {
+        let base = self.lines.len();
+        self.links.extend(inner.links.into_iter().map(|mut run| {
+            run.line += base;
+            run.start_cell += cells;
+            run
+        }));
+        for (row, mut line) in inner.lines.into_iter().enumerate() {
+            line.spans.insert(
+                0,
+                if row == 0 {
+                    first.clone()
+                } else {
+                    rest.clone()
+                },
+            );
+            self.lines.push(line);
+        }
+    }
+}
+
 /// Lay the styled blocks out at `width` cells.
 #[must_use]
-pub fn layout(blocks: Vec<StyledBlock>, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub fn layout(blocks: Vec<StyledBlock>, width: usize, theme: &Theme) -> Rows {
     if width == 0 {
-        return Vec::new();
+        return Rows::default();
     }
     let styles = Styles::new(theme);
-    let mut lines = Vec::new();
-    render_blocks(&blocks, width, 0, Separator::AfterEach, &styles, &mut lines);
-    lines
+    let mut rows = Rows::default();
+    render_blocks(&blocks, width, 0, Separator::AfterEach, &styles, &mut rows);
+    rows
 }
 
 /// Lay user-typed text out as typed: every source line break and whitespace
@@ -92,7 +147,7 @@ pub fn literal(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         return Vec::new();
     }
     let style = Style::default().fg(theme.colors.fg_primary);
-    let mut wrapper = Wrapper::new(width, true);
+    let mut wrapper = Wrapper::new(width, true, false);
     for (index, source) in body.split('\n').enumerate() {
         if index > 0 {
             wrapper.hard_break();
@@ -100,16 +155,17 @@ pub fn literal(text: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
         let source = geom::expand_tabs(source, 0);
         for (is_space, run) in runs(&source) {
             if is_space {
-                wrapper.space(run, style);
+                wrapper.space(run, style, None);
             } else {
                 wrapper.unit(&[Piece {
                     text: run.to_owned(),
                     style,
+                    link: None,
                 }]);
             }
         }
     }
-    let mut lines = wrapper.finish();
+    let mut lines = wrapper.finish().lines;
     lines.push(blank());
     lines
 }
@@ -120,7 +176,7 @@ fn render_blocks(
     depth: usize,
     separator: Separator,
     styles: &Styles,
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
 ) {
     for (index, block) in blocks.iter().enumerate() {
         if index > 0 && separator == Separator::Between {
@@ -133,13 +189,7 @@ fn render_blocks(
     }
 }
 
-fn render_block(
-    block: &StyledBlock,
-    width: usize,
-    depth: usize,
-    styles: &Styles,
-    out: &mut Vec<Line<'static>>,
-) {
+fn render_block(block: &StyledBlock, width: usize, depth: usize, styles: &Styles, out: &mut Rows) {
     match block {
         StyledBlock::Paragraph(inlines) => out.extend(wrap_inlines(inlines, width)),
         StyledBlock::Heading { level, inlines } => {
@@ -151,11 +201,11 @@ fn render_block(
         StyledBlock::List(list) => render_list(list, width, depth, styles, out),
         StyledBlock::Quote(children) => render_quote(children, width, depth, styles, out),
         StyledBlock::Code { language, content } => {
-            render_code_block(language.as_deref(), content, width, styles, out);
+            render_code_block(language.as_deref(), content, width, styles, &mut out.lines);
         }
-        StyledBlock::Html(source) => render_html(source, width, styles, out),
+        StyledBlock::Html(source) => render_html(source, width, styles, &mut out.lines),
         StyledBlock::Table(table) => {
-            out.extend(table::render(
+            out.lines.extend(table::render(
                 table,
                 width,
                 styles.code_border,
@@ -171,13 +221,13 @@ fn render_quote(
     width: usize,
     depth: usize,
     styles: &Styles,
-    out: &mut Vec<Line<'static>>,
+    out: &mut Rows,
 ) {
     if depth >= MAX_PREFIX_DEPTH || width < RAIL_CELLS + MIN_CONTENT_CELLS {
         render_blocks(children, width, depth + 1, Separator::Between, styles, out);
         return;
     }
-    let mut inner = Vec::new();
+    let mut inner = Rows::default();
     render_blocks(
         children,
         width - RAIL_CELLS,
@@ -186,10 +236,8 @@ fn render_quote(
         styles,
         &mut inner,
     );
-    for mut line in inner {
-        line.spans.insert(0, Span::styled(RAIL, styles.rail));
-        out.push(line);
-    }
+    let rail = Span::styled(RAIL, styles.rail);
+    out.extend_prefixed(inner, &rail, &rail, RAIL_CELLS);
 }
 
 /// `• `, `3. `, with `[ ] `/`[x] ` appended for task items.
@@ -206,13 +254,7 @@ fn item_marker(list: &StyledList, index: usize) -> String {
     marker
 }
 
-fn render_list(
-    list: &StyledList,
-    width: usize,
-    depth: usize,
-    styles: &Styles,
-    out: &mut Vec<Line<'static>>,
-) {
+fn render_list(list: &StyledList, width: usize, depth: usize, styles: &Styles, out: &mut Rows) {
     let separator = if list.tight {
         Separator::Nothing
     } else {
@@ -228,7 +270,7 @@ fn render_list(
             render_blocks(&item.blocks, width, depth + 1, separator, styles, out);
             continue;
         }
-        let mut inner = Vec::new();
+        let mut inner = Rows::default();
         render_blocks(
             &item.blocks,
             width - marker_cells,
@@ -237,20 +279,12 @@ fn render_list(
             styles,
             &mut inner,
         );
-        if inner.is_empty() {
+        if inner.lines.is_empty() {
             out.push(Line::from(Span::raw(marker)));
             continue;
         }
-        let hanging = geom::spaces(marker_cells);
-        for (row, mut line) in inner.into_iter().enumerate() {
-            let lead = if row == 0 {
-                marker.clone()
-            } else {
-                hanging.clone()
-            };
-            line.spans.insert(0, Span::raw(lead));
-            out.push(line);
-        }
+        let hanging = Span::raw(geom::spaces(marker_cells));
+        out.extend_prefixed(inner, &Span::raw(marker), &hanging, marker_cells);
     }
 }
 
@@ -334,10 +368,12 @@ fn render_html(source: &str, width: usize, styles: &Styles, out: &mut Vec<Line<'
 
 // ── Wrapping ─────────────────────────────────────────────────────────────────
 
-/// A run of non-whitespace text in one style.
+/// A run of non-whitespace text in one style; `link` is the safe target of the
+/// link label it belongs to.
 struct Piece {
     text: String,
     style: Style,
+    link: Option<Arc<str>>,
 }
 
 /// Split `text` into maximal runs of spaces and non-spaces: `(is_space, run)`.
@@ -393,12 +429,18 @@ struct Wrapper {
     current: Vec<Span<'static>>,
     col: usize,
     line_start: bool,
-    pending: Vec<(String, Style)>,
+    pending: Vec<(String, Style, Option<Arc<str>>)>,
     pending_cells: usize,
+    /// Follow the cells pushed onto the current row so label text can be
+    /// returned as OSC 8 runs. Off unless the paragraph holds a link marker.
+    track: bool,
+    row_cells: usize,
+    row_runs: Vec<(usize, usize, Arc<str>)>,
+    links: Vec<LinkRun>,
 }
 
 impl Wrapper {
-    fn new(width: usize, keep_leading: bool) -> Self {
+    fn new(width: usize, keep_leading: bool, track: bool) -> Self {
         Self {
             width: width.max(1),
             keep_leading,
@@ -408,12 +450,32 @@ impl Wrapper {
             line_start: true,
             pending: Vec::new(),
             pending_cells: 0,
+            track,
+            row_cells: 0,
+            row_runs: Vec::new(),
+            links: Vec::new(),
         }
     }
 
-    fn push_text(&mut self, text: &str, style: Style) {
+    fn push_text(&mut self, text: &str, style: Style, link: Option<&Arc<str>>) {
         if text.is_empty() {
             return;
+        }
+        if self.track {
+            let cells = geom::cells(text);
+            if let Some(url) = link
+                && cells > 0
+            {
+                match self.row_runs.last_mut() {
+                    Some((start, width, target))
+                        if *start + *width == self.row_cells && **target == **url =>
+                    {
+                        *width += cells;
+                    }
+                    _ => self.row_runs.push((self.row_cells, cells, url.clone())),
+                }
+            }
+            self.row_cells += cells;
         }
         if let Some(last) = self.current.last_mut()
             && last.style == style
@@ -426,6 +488,18 @@ impl Wrapper {
 
     fn flush_line(&mut self) {
         let spans = std::mem::take(&mut self.current);
+        let line = self.lines.len();
+        self.links.extend(
+            self.row_runs
+                .drain(..)
+                .map(|(start_cell, width, url)| LinkRun {
+                    line,
+                    start_cell,
+                    width,
+                    url,
+                }),
+        );
+        self.row_cells = 0;
         self.lines.push(Line::from(spans));
         self.col = 0;
         self.line_start = false;
@@ -433,9 +507,9 @@ impl Wrapper {
         self.pending_cells = 0;
     }
 
-    fn space(&mut self, text: &str, style: Style) {
+    fn space(&mut self, text: &str, style: Style, link: Option<Arc<str>>) {
         self.pending_cells += geom::cells(text);
-        self.pending.push((text.to_owned(), style));
+        self.pending.push((text.to_owned(), style, link));
     }
 
     fn hard_break(&mut self) {
@@ -452,12 +526,12 @@ impl Wrapper {
         };
         if self.col + lead + unit_cells <= self.width {
             if lead > 0 {
-                for (text, style) in std::mem::take(&mut self.pending) {
-                    self.push_text(&text, style);
+                for (text, style, link) in std::mem::take(&mut self.pending) {
+                    self.push_text(&text, style, link.as_ref());
                 }
             }
             for piece in pieces {
-                self.push_text(&piece.text, piece.style);
+                self.push_text(&piece.text, piece.style, piece.link.as_ref());
             }
             self.col += lead + unit_cells;
         } else {
@@ -466,7 +540,7 @@ impl Wrapper {
             }
             if unit_cells <= self.width {
                 for piece in pieces {
-                    self.push_text(&piece.text, piece.style);
+                    self.push_text(&piece.text, piece.style, piece.link.as_ref());
                 }
                 self.col = unit_cells;
             } else {
@@ -495,7 +569,7 @@ impl Wrapper {
                         row = 0;
                     }
                     let take = (self.width - row).min(rest.len());
-                    self.push_text(&rest[..take], piece.style);
+                    self.push_text(&rest[..take], piece.style, piece.link.as_ref());
                     row += take;
                     rest = &rest[take..];
                 }
@@ -510,38 +584,46 @@ impl Wrapper {
                     cells = self.width;
                 }
                 if row > 0 && row + cells > self.width {
-                    self.push_text(&text[pending_from..at], piece.style);
+                    self.push_text(&text[pending_from..at], piece.style, piece.link.as_ref());
                     self.flush_line();
                     row = 0;
                     pending_from = at;
                 }
                 if oversized {
-                    self.push_text(&text[pending_from..at], piece.style);
-                    self.push_text(&" ".repeat(self.width), piece.style);
+                    self.push_text(&text[pending_from..at], piece.style, piece.link.as_ref());
+                    self.push_text(&" ".repeat(self.width), piece.style, None);
                     pending_from = at + grapheme.len();
                 }
                 row += cells;
             }
-            self.push_text(&text[pending_from..], piece.style);
+            self.push_text(&text[pending_from..], piece.style, piece.link.as_ref());
         }
         self.col = row;
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> Rows {
         if !self.current.is_empty() {
             self.flush_line();
         }
         if self.lines.is_empty() {
             self.lines.push(blank());
         }
-        self.lines
+        Rows {
+            lines: self.lines,
+            links: self.links,
+        }
     }
 }
 
-/// Wrap styled inline nodes to `width` cells, one `Line` per physical row.
-fn wrap_inlines(inlines: &[StyledInline], width: usize) -> Vec<Line<'static>> {
-    let mut wrapper = Wrapper::new(width, false);
+/// Wrap styled inline nodes to `width` cells, one `Line` per physical row, and
+/// return the OSC 8 runs of the link labels they hold.
+fn wrap_inlines(inlines: &[StyledInline], width: usize) -> Rows {
+    let track = inlines
+        .iter()
+        .any(|inline| matches!(inline, StyledInline::LinkStart(_)));
+    let mut wrapper = Wrapper::new(width, false, track);
     let mut unit: Vec<Piece> = Vec::new();
+    let mut link: Option<Arc<str>> = None;
     fn flush(wrapper: &mut Wrapper, unit: &mut Vec<Piece>) {
         if !unit.is_empty() {
             wrapper.unit(unit);
@@ -557,6 +639,7 @@ fn wrap_inlines(inlines: &[StyledInline], width: usize) -> Vec<Line<'static>> {
                         unit.push(Piece {
                             text: text.into_owned(),
                             style: span.style,
+                            link: link.clone(),
                         });
                     }
                     continue;
@@ -564,23 +647,26 @@ fn wrap_inlines(inlines: &[StyledInline], width: usize) -> Vec<Line<'static>> {
                 for (is_space, run) in runs(&text) {
                     if is_space {
                         flush(&mut wrapper, &mut unit);
-                        wrapper.space(run, span.style);
+                        wrapper.space(run, span.style, link.clone());
                     } else {
                         unit.push(Piece {
                             text: run.to_owned(),
                             style: span.style,
+                            link: link.clone(),
                         });
                     }
                 }
             }
             StyledInline::SoftBreak(style) => {
                 flush(&mut wrapper, &mut unit);
-                wrapper.space(" ", *style);
+                wrapper.space(" ", *style, link.clone());
             }
             StyledInline::HardBreak => {
                 flush(&mut wrapper, &mut unit);
                 wrapper.hard_break();
             }
+            StyledInline::LinkStart(url) => link = Some(url.clone()),
+            StyledInline::LinkEnd => link = None,
         }
     }
     flush(&mut wrapper, &mut unit);
@@ -617,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_empty_input_returns_empty() {
-        assert!(layout(vec![], 80, &theme()).is_empty());
+        assert!(layout(vec![], 80, &theme()).lines.is_empty());
     }
 
     #[test]
@@ -907,5 +993,137 @@ mod tests {
         }
         assert_eq!(symbol(7).as_deref(), Some("→"));
         assert_eq!(symbol(8).as_deref(), Some("│"));
+    }
+
+    // ── OSC 8 runs (slice 12-C) ──────────────────────────────────────────────
+
+    use crate::adapters::tui::markdown::{LinkPresentation, Rendered};
+
+    fn linked(markdown: &str, width: usize, osc8: bool) -> Rendered {
+        render(
+            markdown,
+            width,
+            &theme(),
+            &RenderOptions::completed().with_links(LinkPresentation::Labeled { osc8 }),
+        )
+    }
+
+    fn run_summary(rendered: &Rendered) -> Vec<(usize, usize, usize, String)> {
+        rendered
+            .links
+            .iter()
+            .map(|r| (r.line, r.start_cell, r.width, r.url.to_string()))
+            .collect()
+    }
+
+    fn texts(rendered: &Rendered) -> Vec<String> {
+        rendered.lines.iter().map(line_text).collect()
+    }
+
+    #[test]
+    fn test_run_covers_the_label_only_never_the_host_suffix() {
+        let rendered = linked("see [claude.ai](https://evil.test/x) now", 80, true);
+        assert_eq!(texts(&rendered)[0], "see claude.ai (evil.test) now");
+        assert_eq!(
+            run_summary(&rendered),
+            [(0, 4, 9, "https://evil.test/x".to_owned())]
+        );
+    }
+
+    #[test]
+    fn test_no_runs_without_osc8_and_identical_lines() {
+        let on = linked("[a b](https://e.test/x) tail", 20, true);
+        let off = linked("[a b](https://e.test/x) tail", 20, false);
+        assert!(off.links.is_empty());
+        assert!(!on.links.is_empty());
+        assert_eq!(texts(&on), texts(&off));
+    }
+
+    #[test]
+    fn test_wrapped_label_gets_one_run_per_row_without_the_break_space() {
+        let rendered = linked("[alpha beta gamma](https://example.com/z)", 14, true);
+        assert_eq!(
+            texts(&rendered)[..3],
+            ["alpha beta", "gamma", "(example.com)"]
+        );
+        let url = "https://example.com/z".to_owned();
+        assert_eq!(
+            run_summary(&rendered),
+            [(0, 0, 10, url.clone()), (1, 0, 5, url)],
+            "the interior space is linked; the wrap-break space is not painted"
+        );
+    }
+
+    #[test]
+    fn test_wide_label_widths_are_cells_not_chars() {
+        let rendered = linked("[日本語](https://example.com/p)", 80, true);
+        assert_eq!(
+            run_summary(&rendered),
+            [(0, 0, 6, "https://example.com/p".to_owned())]
+        );
+    }
+
+    #[test]
+    fn test_containers_shift_runs_by_their_prefix() {
+        let quote = linked("> [a](https://e.test/x)", 40, true);
+        assert_eq!(texts(&quote)[0], "│ a (e.test)");
+        assert_eq!(run_summary(&quote)[0].1, 2);
+
+        let list = linked("1. x\n2. y [a](https://e.test/x)", 40, true);
+        assert_eq!(texts(&list)[1], "2. y a (e.test)");
+        assert_eq!(
+            run_summary(&list),
+            [(1, 5, 1, "https://e.test/x".to_owned())]
+        );
+
+        let nested = linked("- > [a](https://e.test/x)", 40, true);
+        assert_eq!(texts(&nested)[0], "• │ a (e.test)");
+        assert_eq!(run_summary(&nested)[0].1, 4);
+    }
+
+    #[test]
+    fn test_runs_use_the_line_index_after_earlier_blocks() {
+        let rendered = linked("# Title\n\nfirst\n\n[a](https://e.test/x)", 40, true);
+        let at = texts(&rendered)
+            .iter()
+            .position(|r| r == "a (e.test)")
+            .unwrap();
+        assert_eq!(run_summary(&rendered)[0].0, at);
+    }
+
+    #[test]
+    fn test_runs_in_headings_and_table_cells() {
+        let heading = linked("## [a](https://e.test/x)", 40, true);
+        assert_eq!(
+            run_summary(&heading),
+            [(0, 0, 1, "https://e.test/x".to_owned())]
+        );
+        let table = linked("| h |\n|---|\n| [a](https://e.test/x) |\n", 40, true);
+        assert!(table.links.is_empty(), "table cells carry no run");
+        assert!(
+            texts(&table).iter().any(|r| r.contains("a (e.test)")),
+            "label and suffix still show in the cell"
+        );
+    }
+
+    #[test]
+    fn test_unsafe_destinations_never_produce_a_run() {
+        for dest in ["javascript:alert(1)", "docs/a.md", "mailto:a@b.test"] {
+            let rendered = linked(&format!("[a]({dest})"), 40, true);
+            assert!(rendered.links.is_empty(), "{dest}");
+            assert_eq!(texts(&rendered)[0], format!("a ({dest})"));
+        }
+    }
+
+    #[test]
+    fn test_hostile_label_text_is_not_measured_and_leaves_no_control_in_a_span() {
+        let rendered = linked("[a\u{7}b\u{9c}c](https://e.test/x)", 40, true);
+        let spans = rendered.lines.iter().flat_map(|line| line.spans.iter());
+        assert!(
+            spans
+                .flat_map(|s| s.content.chars())
+                .all(|c| !c.is_control())
+        );
+        assert_eq!(run_summary(&rendered)[0].2, 3);
     }
 }

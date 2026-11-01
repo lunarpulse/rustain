@@ -29,10 +29,13 @@ impl<'a> Cell<'a> {
     fn new(inlines: &'a [StyledInline]) -> Self {
         let runs: Vec<(Cow<'a, str>, Style)> = inlines
             .iter()
-            .map(|inline| match inline {
-                StyledInline::Text(span) => (clean_prose(&span.content), span.style),
-                StyledInline::SoftBreak(style) => (Cow::Borrowed(" "), *style),
-                StyledInline::HardBreak => (Cow::Borrowed(" "), Style::default()),
+            .filter_map(|inline| match inline {
+                StyledInline::Text(span) => Some((clean_prose(&span.content), span.style)),
+                StyledInline::SoftBreak(style) => Some((Cow::Borrowed(" "), *style)),
+                StyledInline::HardBreak => Some((Cow::Borrowed(" "), Style::default())),
+                // Table cells show the label and the host suffix; they carry
+                // no OSC 8 run (the cell may be cut by the column budget).
+                StyledInline::LinkStart(_) | StyledInline::LinkEnd => None,
             })
             .collect();
         let cells = runs.iter().map(|(text, _)| geom::cells(text)).sum();

@@ -8415,6 +8415,8 @@ fn render(
                         liveness_snapshot.as_ref();
                     let tab_id = state.active_tab_id;
                     let render_state = state.tab_render_states.entry(tab_id).or_default();
+                    render_state.osc8_links =
+                        crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
                     let open_prose_ref: Option<&str> = tab_manager_for_bar
                         .map(|tm| tm.active_tab().reducer.open_prose.as_deref())
                         .unwrap_or(None);

@@ -1,5 +1,5 @@
 //! Story 21.12 conformance: markdown structure, sanitizer and invariants
-//! (slice 12-A pipeline core, slice 12-B tables and producers).
+//! (slice 12-A pipeline core, slice 12-B tables and producers, slice 12-C links).
 //!
 //! One CI-wired module in the `tui` area binary (`tests/tui/main.rs`). Each
 //! keystone drives the real chat-pane front doors (`render_with_search` for the
@@ -16,7 +16,7 @@
 //!   (`k10_k11_invariants.rs`);
 //! * the DF-075 measurement (`k_measure.rs`, `#[ignore]`d).
 //!
-//! Links (K9, K13) belong to slice 12-C.
+//! * K9 links and OSC 8, K13 host suffix (`k9_k13_links.rs`).
 
 #[path = "conformance_21_12_markdown/support.rs"]
 mod support;
@@ -44,6 +44,9 @@ mod k12_export;
 
 #[path = "conformance_21_12_markdown/k10_k11_invariants.rs"]
 mod k10_k11_invariants;
+
+#[path = "conformance_21_12_markdown/k9_k13_links.rs"]
+mod k9_k13_links;
 
 #[path = "conformance_21_12_markdown/k_measure.rs"]
 mod k_measure;

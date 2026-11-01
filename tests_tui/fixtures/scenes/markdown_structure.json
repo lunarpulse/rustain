@@ -1,0 +1,41 @@
+{
+  "scene": "markdown-structure",
+  "personas": {
+    "scene-ci-markdown": {
+      "turns": [
+        {
+          "expect": "show structure one",
+          "content": [
+            {"type": "text", "text": "# Report\n\n- level one\n  - level two\n    - level three\n      - level four\n\nVec<String> and SELECT * FROM t and 2 \\* 3"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 11, "output_tokens": 40}
+        },
+        {
+          "expect": "show structure two",
+          "content": [
+            {"type": "text", "text": "| name | qty |\n|:-----|----:|\n| apple | 3 |\n\n> outer\n> > inner"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 25, "output_tokens": 30}
+        },
+        {
+          "expect": "show links",
+          "content": [
+            {"type": "text", "text": "[claude.ai](https://evil.test/x)\n\n<https://example.com/a>\n\n[unsafe](javascript:alert(1))"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 36, "output_tokens": 24}
+        },
+        {
+          "expect": "literal **x** <T>",
+          "content": [
+            {"type": "text", "text": "noted"}
+          ],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 47, "output_tokens": 2}
+        }
+      ]
+    }
+  }
+}

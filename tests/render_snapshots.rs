@@ -804,7 +804,7 @@ mod mixed_width {
 }
 
 // ---------------------------------------------------------------------------
-// Story 21.12 (slices 12-A, 12-B) — markdown structure at inner widths
+// Story 21.12 (slices 12-A, 12-B, 12-C) — markdown structure at inner widths
 // 40/80/120, the table fixture and the literal user message. Blank rows are
 // kept (the shared helper drops them) because vertical rhythm is part of what
 // is under review.
@@ -928,6 +928,42 @@ fn main() {
         let turn = make_turn("md", vec![prose(EVERY_ELEMENT)], Some(StopReason::EndTurn));
         let conv = make_conversation(vec![make_msg("md", MessageRole::Assistant)], vec![turn]);
         painted(&conv, inner + 2)
+    }
+
+    /// Stage links (slice 12-C, OR-21-12-1): label plus dim host suffix, the
+    /// suffix rules, an autolink, a wide label that wraps and unsafe targets.
+    const LINKS: &str = "## Links
+
+See [claude.ai](https://claude.ai@evil.test/) and [the docs](https://www.example.com/guide) or [example.com](https://www.example.com/x).
+
+- [notevil.test](https://evil.test) and <https://example.com/a>
+- [例え](https://例え.test/) then [local](http://127.0.0.1:8080/p)
+
+> quoted [a label that wraps across the pane width easily](https://docs.example.org/very/long/path)
+
+[日本語のテキスト表示確認とても長いリンクラベル](https://example.com/p)
+
+[unsafe](javascript:alert(1)) and [relative](docs/readme.md).";
+
+    fn links(inner: u16) -> String {
+        let turn = make_turn("lk", vec![prose(LINKS)], Some(StopReason::EndTurn));
+        let conv = make_conversation(vec![make_msg("lk", MessageRole::Assistant)], vec![turn]);
+        painted(&conv, inner + 2)
+    }
+
+    #[test]
+    fn markdown_structure_links_w40() {
+        insta::assert_snapshot!("markdown_structure_links_w40", links(40));
+    }
+
+    #[test]
+    fn markdown_structure_links_w80() {
+        insta::assert_snapshot!("markdown_structure_links_w80", links(80));
+    }
+
+    #[test]
+    fn markdown_structure_links_w120() {
+        insta::assert_snapshot!("markdown_structure_links_w120", links(120));
     }
 
     /// Natural, aligned, wide-glyph, shrinking and collapsing tables (D10).

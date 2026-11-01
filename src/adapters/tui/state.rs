@@ -550,6 +550,12 @@ pub struct TabRenderState {
     pub cached_width: Option<u16>,
     pub tool_block_states_version: u64,
     pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
+    /// Story 21.12 (D15): the output supports OSC 8, so Stage markdown links
+    /// are encoded after the paint. Changes no geometry (the host suffix is
+    /// painted either way), so no height-cache key depends on it. Production
+    /// callers set it from `hyperlink::terminal_supports_osc8()` before the
+    /// chat-pane draw; it defaults to `false`.
+    pub osc8_links: bool,
 }
 
 /// Session-scoped input history buffer for Up/Down navigation and Ctrl+R search.
