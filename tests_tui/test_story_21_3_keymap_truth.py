@@ -90,6 +90,7 @@ from test_story_20_9a_ephemeral_rows import CARD, _event, _finish, _plan_stream,
 from test_story_21_2_shortcut_truth import _NativeTUI, _capture, _composer, _menu, _menu_painted, _wait
 from test_story_19_20c_exact_approval import Evidence as _Evidence
 from test_story_19_20c_exact_approval import _command, _finished, _world
+from test_story_20_1c_locked_providers import _legacy_status_row
 
 KEY = "sk-ant-21-3-loopback-key-canary"
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "keymap_portable_rows.json"
@@ -209,9 +210,10 @@ def _remedy_toast(screen):
 
 def _box(screen, needle, footer=None, rail=None):
     """Interior rows of the overlay whose title row holds `needle` (which starts with `┌`),
-    else None until it is COMPLETE: a continuous `│…│` body down to the closing `└…┘` border
-    at the same columns, the footer on that border and the rail inside the box."""
+    else None until the border and rail are complete. A8's opaque status row
+    may cut the legacy body, but only with settled status/composer chrome."""
     lines = screen.split("\n")
+    status = _legacy_status_row(lines)
     for top, line in enumerate(lines):
         left = line.find(needle)
         right = line.rfind("┐")
@@ -228,6 +230,8 @@ def _box(screen, needle, footer=None, rail=None):
                 if rail is not None and rail not in " ".join(" ".join(body).split()):
                     return None
                 return body
+            if bottom == status:
+                continue
             if row[left] != "│" or row[right] != "│":
                 return None
         return None

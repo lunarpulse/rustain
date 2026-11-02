@@ -2262,6 +2262,9 @@ fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
 
 /// The accepted bracketed-paste front door; composition never changes focus here.
 fn handle_attached_paste(state: &mut TuiState, input: &mut String, text: &str, card_pending: bool) {
+    if crate::adapters::tui::presentation::route::blocks_paste(state) {
+        return;
+    }
     if !card_pending
         && state.recipient_surface.is_none()
         && !attach_keys::paste_blocked(state)
@@ -3487,8 +3490,10 @@ pub async fn run_attached(
                 false,
                 DensityMode::Focus,
             ) else {
+                crate::adapters::tui::presentation::paint_too_small(f, area);
                 return;
             };
+            let mut shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
             state.notifications.set_capacity(
                 crate::adapters::tui::widgets::toast_layer::capacity_for(layout.chat_pane.height),
             );
@@ -3538,45 +3543,12 @@ pub async fn run_attached(
                 &tool_inputs.reasons,
             )
             .visible_feedback_ids;
-            status_bar::render(
-                f,
-                layout.status_bar,
-                "(daemon)",
-                None,
-                &state.status,
-                &state.theme,
-                scroll_offset,
-                &[],
-                0,
-                layout.chat_pane.height,
-                permission_mode,
-                conversation.usage.as_ref(),
-                0,
-                false,
-                None,
-                false,
-                true,
-                0,
-                attach_keys::status_hint(&state).as_deref(),
-                0,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                DensityMode::Focus,
-                false,
-                Some(&attach_info),
-                state.log_awareness.display,
-                attached_notice_badges(&state, &approvals),
-            );
             let display_input = attached_display_input(&state, &input);
             render_attached_composer(
                 f,
                 layout.input_area,
                 display_input,
-                state.focus.clone(),
+                if state.modal_stack.is_empty() { state.focus.clone() } else { FocusState::Chat },
                 &state.theme,
                 state.multiline_mode,
                 if read_only {
@@ -3668,14 +3640,47 @@ pub async fn run_attached(
             {
                 visible_approval = approvals.paint(f, layout.chat_pane, &state.theme);
             }
-            attach_keys::paint_overlays(
+            let paint_status = |f: &mut ratatui::Frame<'_>| {
+            status_bar::render(
                 f,
-                area,
-                layout.chat_pane,
-                layout.input_area,
                 layout.status_bar,
-                &state,
+                "(daemon)",
+                None,
+                &state.status,
+                &state.theme,
+                scroll_offset,
+                &[],
+                0,
+                layout.chat_pane.height,
+                permission_mode,
+                conversation.usage.as_ref(),
+                0,
+                false,
+                None,
+                false,
+                true,
+                0,
+                attach_keys::status_hint(&state).as_deref(),
+                0,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                DensityMode::Focus,
+                false,
+                Some(&attach_info),
+                state.log_awareness.display,
+                attached_notice_badges(&state, &approvals),
+            );
+            };
+            shell.chat_pane = layout.chat_pane;
+            crate::adapters::tui::presentation::compose(
+                f, &state, &shell, crate::adapters::tui::keymap::Host::Attached,
                 &attach_keys::log_facts(&conversation.id),
+                |f| attach_keys::paint_overlays(f, area, layout.input_area, layout.status_bar, &state),
+                paint_status,
             );
         });
         after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
@@ -3719,6 +3724,9 @@ pub async fn run_attached(
                         let pending = attached_card_pending(&approvals, &pending_consent_approvals,
                             &pending_consolidation_token, &retract_confirm);
                         handle_attached_paste(&mut state, &mut input, &text, pending);
+                    }
+                    Some(Ok(event @ Event::Mouse(_))) => {
+                        let _ = attach_keys::route_event(&mut state, &event);
                     }
                     Some(Ok(Event::Resize(w, h))) => {
                         state.terminal_width = w;
@@ -9798,14 +9806,32 @@ mod tests {
             let state = &*state;
             terminal
                 .draw(|f| {
-                    attach_keys::paint_overlays(
-                        f,
+                    let layout = crate::adapters::tui::layout::compute_layout(
                         f.area(),
-                        chat_pane,
-                        Rect::new(0, height - 5, width, 4),
-                        Rect::new(0, height - 1, width, 1),
+                        &state.theme,
+                        "",
+                        1,
+                        false,
+                        DensityMode::Focus,
+                    )
+                    .unwrap();
+                    let shell = crate::adapters::tui::presentation::Shell::new(f.area(), &layout);
+                    crate::adapters::tui::presentation::compose(
+                        f,
                         state,
+                        &shell,
+                        crate::adapters::tui::keymap::Host::Attached,
                         &LogFacts::default(),
+                        |f| {
+                            attach_keys::paint_overlays(
+                                f,
+                                shell.area,
+                                shell.input_area,
+                                shell.status_bar,
+                                state,
+                            )
+                        },
+                        |_| {},
                     );
                 })
                 .unwrap();

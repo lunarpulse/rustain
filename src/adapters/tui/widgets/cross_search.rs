@@ -23,7 +23,14 @@ const EXCERPT_INDENT: &str = "    ";
 
 /// Render the cross-search overlay into `area` (expected to be the sidebar
 /// column). No-op when `state.active == false`.
-pub fn render(frame: &mut Frame, area: Rect, state: &CrossSearchState, theme: &Theme) {
+/// `show_cursor` controls only hardware cursor placement, not painted cells.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &CrossSearchState,
+    theme: &Theme,
+    show_cursor: bool,
+) {
     if !state.active || area.height < 4 {
         return;
     }
@@ -162,10 +169,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &CrossSearchState, theme: &T
     frame.render_widget(widget, area);
 
     // Cursor at end of the (possibly scrolled) query on row 0.
-    let query_cells = geom::cells(QUERY_PREFIX) + geom::cells(shown_query);
-    let cursor_col = area.x + 1 + query_cells as u16; // +1 for left border
-    let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(2));
-    frame.set_cursor_position((cursor_col, area.y + 1));
+    if show_cursor {
+        let query_cells = geom::cells(QUERY_PREFIX) + geom::cells(shown_query);
+        let cursor_col = area.x + 1 + query_cells as u16; // +1 for left border
+        let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(2));
+        frame.set_cursor_position((cursor_col, area.y + 1));
+    }
 }
 
 /// Split an excerpt into spans so case-insensitive matches against `query`

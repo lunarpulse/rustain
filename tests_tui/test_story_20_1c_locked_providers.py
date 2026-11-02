@@ -91,9 +91,18 @@ def _plain(screen):
     return " ".join(screen.replace("│", " ").replace("┆", " ").split())
 
 
+def _legacy_status_row(rows):
+    """A8's opaque status cutout is valid only with settled composer chrome."""
+    top = harness.composer_top(rows)
+    if (not top or not rows[top].startswith("┌") or not rows[top].endswith("┐")
+            or not rows[-1].startswith("└") or not rows[-1].endswith("┘")
+            or not re.search(r"│ (?:Ready|Streaming\.\.\.)(?:[ │]|$)", rows[top - 1])):
+        return None
+    return top - 1
+
+
 def _modal_complete(screen):
-    """True only once the selector's whole border is painted: a capture taken
-    mid-redraw (a missing right edge or bottom corner) is never accepted."""
+    """The legacy rectangle is complete, with A8's settled status cutout."""
     rows = screen.split("\n")
     top = next((y for y, row in enumerate(rows) if "┌ Select Model" in row), None)
     if top is None:
@@ -102,12 +111,16 @@ def _modal_complete(screen):
     right = rows[top].rfind("┐")
     if right <= left:
         return False
+    status = _legacy_status_row(rows)
     bottom = next((y for y in range(top + 1, len(rows))
-                   if len(rows[y]) > right and rows[y][left] == "└"), None)
-    if bottom is None or rows[bottom][right] != "┘" or set(rows[bottom][left + 1:right]) != {"─"}:
+                   if len(rows[y]) > right and rows[y][left] == "└"),
+                  status if status == len(rows) - top - 1 else None)
+    if bottom is None:
+        return False
+    if bottom != status and (rows[bottom][right] != "┘" or set(rows[bottom][left + 1:right]) != {"─"}):
         return False
     return all(len(rows[y]) > right and rows[y][left] == "│" and rows[y][right] == "│"
-               for y in range(top + 1, bottom))
+               for y in range(top + 1, bottom) if y != status)
 
 
 def status_ready(text):

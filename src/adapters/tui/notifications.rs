@@ -597,7 +597,10 @@ pub fn notify_draft(state: &mut TuiState, draft: NoticeDraft) {
     // A silent arrival still repaints when the `Log !N` badge moved.
     if effect == NotifyEffect::Repaint
         || state.notifications.unseen() != unseen
-        || state.notification_log.is_some()
+        || crate::adapters::tui::presentation::is_open(
+            state,
+            crate::adapters::tui::presentation::Surface::NotificationLog,
+        )
     {
         state.needs_redraw = true;
     }

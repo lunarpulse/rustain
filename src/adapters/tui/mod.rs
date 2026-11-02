@@ -18,6 +18,7 @@ pub mod markdown;
 pub mod notification_log;
 pub mod notifications;
 pub mod palette_gate;
+pub mod presentation;
 pub mod quit_confirm;
 pub mod refresh_tracker;
 pub mod state;

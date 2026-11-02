@@ -2737,14 +2737,14 @@ pub struct TuiState {
     /// Which-key hint bar state (Ctrl+X).
     // Covers: UX-DR19, UX-DR60
     pub which_key: WhichKeyState,
-    /// S-QUIT decision frame (Story 21.2 AC7): one bounded presentation state
-    /// with a saved caller focus; 21-4 migrates it onto the modal stack.
+    /// Shared Log/Quit frame inventory; only the presentation reducer mutates it.
+    pub modal_stack: crate::adapters::tui::presentation::ModalStack,
+    /// S-QUIT payload, present exactly while its stack frame is open.
     pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
     /// Session notification store (Story 21.1): every transient notice of the
     /// host lives here; producers call `notifications::notify`.
     pub notifications: crate::adapters::tui::notifications::NotificationStore,
-    /// S-LOG (Story 21.1 AC5): the Notification Log, a bounded presentation
-    /// state with a saved caller focus; 21-4 migrates it onto the modal stack.
+    /// S-LOG payload, present exactly while its stack frame is open.
     pub notification_log: Option<crate::adapters::tui::notification_log::NotificationLogState>,
     /// Help overlay state (? key or Ctrl+X, ?).
     // Covers: FR108, UX-DR94
@@ -3235,6 +3235,7 @@ impl TuiState {
             image_indicator: None,
             command_palette: CommandPaletteState::new(),
             which_key: WhichKeyState::new(),
+            modal_stack: crate::adapters::tui::presentation::ModalStack::default(),
             quit_confirm: None,
             notifications: {
                 let mut store = crate::adapters::tui::notifications::NotificationStore::default();

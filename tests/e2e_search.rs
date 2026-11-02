@@ -370,7 +370,7 @@ fn test_e2e_search_bar_renders_counter_when_matches_exist() {
     state.focused_match_index = 0;
     terminal
         .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme);
+            search_bar::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -390,7 +390,7 @@ fn test_e2e_search_bar_shows_no_matches_found_when_query_has_zero_matches() {
     // matches intentionally empty
     terminal
         .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme);
+            search_bar::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -407,7 +407,7 @@ fn test_e2e_search_bar_shows_zero_zero_when_query_empty() {
     // query empty, matches empty
     terminal
         .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme);
+            search_bar::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);

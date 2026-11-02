@@ -178,6 +178,7 @@ fn wave_overlay_rows_select_open_close_and_act_on_the_selected_spoke() {
         w(&[Key::Char('r')], "WaveRerunSpoke(1) | Overlay(WaveOverlay) sel=1 div=false"),
         w(&[Key::Char('d')], "OpenDivergeView | Overlay(WaveOverlay) sel=1 div=false"),
         w(&[Key::Char('s')], "CloseDivergeView | Overlay(WaveOverlay) sel=1 div=false"),
+        w(&[Key::Ctrl('q')], "Quit | Overlay(WaveOverlay) sel=1 div=false"),
     ];
     run(&local(Context::WaveOverlay, overlay_state, wave_salient, ROWS));
 }

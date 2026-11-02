@@ -25,6 +25,7 @@ use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
 use crate::adapters::tui::notification_log::{LogFacts, footer_lines};
 use crate::adapters::tui::notifications::{self, NoticeSource};
+use crate::adapters::tui::presentation::{self, Surface};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::modal::wrapped;
@@ -335,8 +336,7 @@ fn clean(detail: &str) -> String {
 
 /// A surface that owns the keyboard: an automatic arrival never competes with it.
 fn protected(state: &TuiState) -> bool {
-    state.quit_confirm.is_some()
-        || state.notification_log.is_some()
+    !state.modal_stack.is_empty()
         || state.help_overlay.active
         || state.model_selector.active
         || state.login.active
@@ -392,7 +392,7 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
     }
     state.needs_redraw = true;
     let take_focus = match arrival {
-        Arrival::Requested => state.quit_confirm.is_none(),
+        Arrival::Requested => !presentation::is_open(state, Surface::QuitConfirm),
         Arrival::Automatic => {
             was_empty
                 && !protected(state)
@@ -560,8 +560,7 @@ pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
 /// Key-owning surfaces may keep Input focus; card arrivals must wait for dismissal.
 pub fn card_focus_blocked(state: &TuiState) -> bool {
     matches!(state.focus, FocusState::Overlay(_))
-        || state.quit_confirm.is_some()
-        || state.notification_log.is_some()
+        || !state.modal_stack.is_empty()
         || state.which_key.active
         || state.command_palette.active
         || state.help_overlay.active

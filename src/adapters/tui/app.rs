@@ -36,6 +36,8 @@ pub enum InputAction {
     /// The S-QUIT decision frame was explicitly confirmed with `y`: the host
     /// performs its existing exit exactly once (Story 21.2 AC7).
     QuitConfirmed,
+    /// A notification-log effect, applied by the host with its live conversation facts.
+    NotificationLog(crate::adapters::tui::notification_log::LogOutcome),
     /// Ctrl+C: cancel streaming if active, otherwise quit.
     CancelOrQuit,
     /// Permission prompt: user pressed y.
@@ -581,7 +583,8 @@ pub fn handle_operator_input(
 
 /// A generic permission may become visible only after every higher owner lets go.
 pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
-    state.pending_plan_card.is_some()
+    !state.modal_stack.is_empty()
+        || state.pending_plan_card.is_some()
         || state.pending_delegation_card.is_some()
         || state.pending_consolidation_card.is_some()
         || state.pending_forget_card.is_some()
@@ -640,7 +643,36 @@ pub fn with_card_focus_reconcile<T>(
     dispatch: impl FnOnce(&mut TuiState) -> T,
 ) -> T {
     let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
+    let permission_owned = permission_modal_owns_focus(state);
+    let stack_was_empty = state.modal_stack.is_empty();
     let action = dispatch(state);
+    finish_input_boundary(state, surface_was_open, permission_owned, stack_was_empty);
+    action
+}
+
+/// Runtime-only interceptors may decline the event. A declined route must not
+/// settle borrowed focus before the real key dispatcher sees the user's choice.
+pub fn try_with_card_focus_reconcile<T>(
+    state: &mut TuiState,
+    dispatch: impl FnOnce(&mut TuiState) -> Option<T>,
+) -> Option<T> {
+    let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
+    let permission_owned = permission_modal_owns_focus(state);
+    let stack_was_empty = state.modal_stack.is_empty();
+    let action = dispatch(state)?;
+    finish_input_boundary(state, surface_was_open, permission_owned, stack_was_empty);
+    Some(action)
+}
+
+fn finish_input_boundary(
+    state: &mut TuiState,
+    surface_was_open: bool,
+    permission_owned: bool,
+    stack_was_empty: bool,
+) {
+    if permission_owned && !permission_modal_owns_focus(state) {
+        advance_deferred_permission(state);
+    }
     if surface_was_open
         && !crate::adapters::tui::decision_pane::card_focus_blocked(state)
         && matches!(inline_card(state), Some(card) if !matches!(card, InlineCard::Plan | InlineCard::SkipCascade))
@@ -648,7 +680,15 @@ pub fn with_card_focus_reconcile<T>(
         crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
     }
     settle_local_card_focus(state);
-    action
+    if stack_was_empty != state.modal_stack.is_empty() {
+        state.current_hint = crate::adapters::tui::hints::contextual_hint(
+            &state.focus,
+            state.session_count,
+            state.theme.timing.status_hint_fade_sessions,
+            state.is_vscode,
+            &state.modal_stack,
+        );
+    }
 }
 
 /// The local key/event boundaries share the renderer/dispatcher's card selector.
@@ -660,19 +700,13 @@ pub fn settle_local_card_focus(state: &mut TuiState) {
 }
 
 fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
-    // S-QUIT owns every user key while its frame is open — before the login
-    // overlay, plan/permission/peer cards or any focus handler, so a `y` can
-    // never leak to a card underneath (Story 21.2 AC7). Resize/focus events
-    // are not user keys and fall through.
-    if state.quit_confirm.is_some()
-        && let Some(outcome) = crate::adapters::tui::quit_confirm::handle_domain_event(state, event)
-    {
-        return match outcome {
-            crate::adapters::tui::quit_confirm::QuitKeyOutcome::Confirmed => {
-                InputAction::QuitConfirmed
-            }
-            _ => InputAction::Consumed,
-        };
+    if let Some(effect) = crate::adapters::tui::presentation::route(
+        state,
+        event,
+        Host::Local,
+        &crate::adapters::tui::notification_log::LogFacts::default(),
+    ) {
+        return effect.into_action();
     }
     // The login overlay owns every key while it has focus (Ctrl+Q still quits).
     if state.focus == FocusState::Overlay(OverlayType::Login)
@@ -687,7 +721,6 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
     }
     // Alt+C/L/U belong to the login overlay only (handled above); anywhere else
     // they are consumed no-ops, never the plain letter (Story 21.3 AC12, PC-13).
-    let modal_owned_focus = permission_modal_owns_focus(state);
     let action = dispatch_input(state, event);
     if state.focus == FocusState::Input
         && matches!(
@@ -703,9 +736,6 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
         // saved one (Esc closing a popup-owned slash edit, Story 21.2).
         ensure_cursor_visible(state);
     }
-    if modal_owned_focus && !permission_modal_owns_focus(state) {
-        advance_deferred_permission(state);
-    }
     action
 }
 
@@ -714,7 +744,8 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
 /// consume every key (palette, selectors, help, search, bookmarks,
 /// confirmations, login) and an open spawn gate leave it without effect.
 pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
-    state.pending_spawn_gate.is_none()
+    state.modal_stack.is_empty()
+        && state.pending_spawn_gate.is_none()
         && !matches!(
             state.focus,
             FocusState::Overlay(
@@ -746,6 +777,9 @@ pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap:
 /// sequence prefix, else `^X menu`, hidden while `Ctrl+X` is unavailable.
 pub fn status_tail(state: &TuiState) -> crate::adapters::tui::keymap::render::StatusTail {
     use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
+    if !state.modal_stack.is_empty() {
+        return StatusTail::Hidden;
+    }
     if state.which_key.active {
         StatusTail::Pending(PendingPrefix::Leader)
     } else if state.pending_z {
@@ -1047,13 +1081,34 @@ fn overlay_focus_context(state: &TuiState) -> Option<Context> {
         OverlayType::CrossSearch => Context::CrossSearch,
         OverlayType::BookmarkList => Context::BookmarkList,
         OverlayType::WaveOverlay => Context::WaveOverlay,
+        OverlayType::Login => Context::Login,
         _ => return None,
     })
 }
 
 /// The context of the key target once no card owns it, top surface first.
-fn focus_context(state: &TuiState) -> Option<Context> {
+pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
     use crate::domain::models::visual::PanelType;
+    if let Some(frame) = state.modal_stack.top() {
+        return Some(match frame.surface {
+            crate::adapters::tui::presentation::Surface::NotificationLog => {
+                Context::NotificationLog
+            }
+            crate::adapters::tui::presentation::Surface::QuitConfirm => Context::QuitConfirm,
+        });
+    }
+    if state.which_key.active {
+        return Some(Context::Leader);
+    }
+    if state.command_palette.active {
+        return Some(Context::CommandPalette);
+    }
+    if state.autocomplete.active {
+        return Some(Context::Autocomplete);
+    }
+    if state.reverse_search.active {
+        return Some(Context::ReverseSearch);
+    }
     let tasks = &state.task_panel_state;
     Some(match &state.focus {
         FocusState::Input => Context::Input,
@@ -2287,12 +2342,7 @@ fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         OverlayCmd::HelpBottom => state.help_overlay.scroll_offset = usize::MAX / 2,
         OverlayCmd::HelpTop => state.help_overlay.scroll_offset = 0,
         OverlayCmd::HelpClose => state.focus = state.help_overlay.close(),
-        // Ctrl+Q passes through to quit: the overlay itself lists `Ctrl+Q - Quit`.
-        OverlayCmd::QuitRequest => {
-            state.focus = state.help_overlay.close();
-            state.needs_redraw = true;
-            return InputAction::Quit;
-        }
+        OverlayCmd::QuitRequest => return InputAction::Quit,
         _ => {}
     }
     state.needs_redraw = true;
@@ -3327,12 +3377,7 @@ fn exec_autocomplete(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
                 InputAction::Consumed
             }
         }
-        // Ctrl+Q closes the popup, then asks to quit (guarded by S-QUIT).
-        OverlayCmd::QuitRequest => {
-            state.autocomplete.dismiss();
-            state.needs_redraw = true;
-            InputAction::Quit
-        }
+        OverlayCmd::QuitRequest => InputAction::Quit,
         _ => InputAction::Consumed,
     }
 }
@@ -3478,12 +3523,7 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
             InputAction::Consumed
         }
         OverlayCmd::PaletteBackspace => palette_edit(state, DomainKey::Backspace),
-        // Ctrl+Q closes the palette, then asks to quit (guarded by S-QUIT).
-        OverlayCmd::QuitRequest => {
-            state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Quit
-        }
+        OverlayCmd::QuitRequest => InputAction::Quit,
         _ => InputAction::Consumed,
     }
 }
@@ -4526,8 +4566,7 @@ mod tests {
                     s.which_key.open(FocusState::Input);
                     s.focus = FocusState::Overlay(OverlayType::WhichKey);
                 }),
-                // The leader's own Ctrl+Q row (21-3 AC20a): the menu closes, then the
-                // guarded quit request follows, as in the attached host.
+                // A18: the leader stays intact beneath the guarded quit frame.
                 expect: CtrlQRowExpectation::Quit,
             },
             // Help was a documented Skip until the code review (D2): the overlay
@@ -4542,9 +4581,7 @@ mod tests {
             Row {
                 label: "Overlay(ModelSelector)",
                 setup: overlay(OverlayType::ModelSelector),
-                expect: CtrlQRowExpectation::Skip(
-                    "ModelSelector: consumes all special keys; Esc closes first",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(Login) (owns every key but Ctrl+Q; quitting cancels the login)",
@@ -4554,9 +4591,7 @@ mod tests {
             Row {
                 label: "Overlay(ProfileSwitcher)",
                 setup: overlay(OverlayType::ProfileSwitcher),
-                expect: CtrlQRowExpectation::Skip(
-                    "ProfileSwitcher: consumes all special keys; Esc closes first",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(ReverseSearch) with reverse search active",
@@ -4564,44 +4599,32 @@ mod tests {
                     s.reverse_search.active = true;
                     s.focus = FocusState::Overlay(OverlayType::ReverseSearch);
                 }),
-                expect: CtrlQRowExpectation::Skip(
-                    "ReverseSearch: consumes all but Ctrl+P/Ctrl+X; Esc closes, Ctrl+C cancels",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(Search)",
                 setup: overlay(OverlayType::Search),
-                expect: CtrlQRowExpectation::Skip(
-                    "Search: Tier-1 overlay consumes ALL special keys by design (Story 4-4)",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(CrossSearch)",
                 setup: overlay(OverlayType::CrossSearch),
-                expect: CtrlQRowExpectation::Skip(
-                    "CrossSearch: consumes all special keys; Esc closes first",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(BookmarkList)",
                 setup: overlay(OverlayType::BookmarkList),
-                expect: CtrlQRowExpectation::Skip(
-                    "BookmarkList: consumes all special keys; Esc closes first",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(WaveOverlay)",
                 setup: overlay(OverlayType::WaveOverlay),
-                expect: CtrlQRowExpectation::Skip(
-                    "WaveOverlay: consumes all special keys; Esc closes first (entry needs a wave run)",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(UsagePanel)",
                 setup: overlay(OverlayType::UsagePanel),
-                expect: CtrlQRowExpectation::Skip(
-                    "UsagePanel: consumes all special keys; Esc/Ctrl+C close it",
-                ),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(Confirmation(Permission))",

@@ -1,20 +1,20 @@
 //! S-QUIT: the guarded quit decision (Story 21.2 AC7, A3).
 //!
-//! One bounded presentation state with a saved caller focus, a shared widget
-//! and a shared request/key transition used by BOTH hosts (the local TUI and the
-//! attached client). It is deliberately *not* a modal stack: 21-4 migrates and
-//! deletes it. Requesting or cancelling quit never interrupts work, drains
-//! queues, resolves cards or touches the draft, focus or scroll; only the
-//! explicit `y` makes the host perform its existing exit — exactly once.
+//! One bounded payload with a saved caller focus, a shared widget and a shared
+//! request/key transition used by BOTH hosts. The presentation reducer owns
+//! its frame and payload lifetime. Requesting or cancelling quit never
+//! interrupts work, drains queues, resolves cards or touches the draft or
+//! scroll; only explicit `y` makes the host perform its existing exit once.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
+use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::theme::Theme;
-use crate::adapters::tui::widgets::{ModalPart, fit_modal, modal_area};
+use crate::adapters::tui::widgets::{ModalPart, fit_modal};
 use crate::domain::models::FocusState;
 
 /// Which client raised the decision: it decides the consequences painted.
@@ -170,21 +170,9 @@ pub enum QuitRequest {
     Confirming,
 }
 
-/// Request quit. Never stacks a second frame; never touches work, draft,
-/// queues, cards, focus or scroll.
+/// Request quit once, preserving all frames and legacy surfaces underneath.
 pub fn request(state: &mut TuiState, facts: QuitFacts) -> QuitRequest {
-    if state.quit_confirm.is_some() {
-        return QuitRequest::Confirming;
-    }
-    if facts.is_idle() {
-        return QuitRequest::ExitNow;
-    }
-    state.quit_confirm = Some(QuitConfirmState {
-        facts,
-        caller_focus: state.focus.clone(),
-    });
-    state.needs_redraw = true;
-    QuitRequest::Confirming
+    reducer::request_quit(state, facts)
 }
 
 /// Host-neutral key classes the decision frame understands.
@@ -222,15 +210,15 @@ impl QuitKey {
 }
 
 /// Apply one key to the open frame. Without an open frame it returns
-/// `Consumed` and changes nothing (callers gate on `quit_confirm.is_some()`).
+/// `Consumed` and changes nothing (ownership comes from the modal stack).
 pub fn handle_key(state: &mut TuiState, key: QuitKey) -> QuitKeyOutcome {
     execute(state, Host::Local, key.key())
 }
 
 /// Resolve the key in `QuitConfirm` and run its command: `y` quits, every other
 /// bound key stays, an unbound key is swallowed.
-fn execute(state: &mut TuiState, host: Host, key: Key) -> QuitKeyOutcome {
-    if state.quit_confirm.is_none() {
+pub(crate) fn execute(state: &mut TuiState, host: Host, key: Key) -> QuitKeyOutcome {
+    if !presentation::is_open(state, Surface::QuitConfirm) {
         return QuitKeyOutcome::Consumed;
     }
     state.needs_redraw = true;
@@ -240,13 +228,11 @@ fn execute(state: &mut TuiState, host: Host, key: Key) -> QuitKeyOutcome {
     };
     match command {
         Some(CommandId::Overlay(OverlayCmd::QuitYes)) => {
-            state.quit_confirm = None;
+            reducer::close(state, Surface::QuitConfirm);
             QuitKeyOutcome::Confirmed
         }
         Some(CommandId::Overlay(OverlayCmd::QuitNo)) => {
-            if let Some(frame) = state.quit_confirm.take() {
-                state.focus = frame.caller_focus;
-            }
+            reducer::back(state);
             QuitKeyOutcome::Cancelled
         }
         _ => QuitKeyOutcome::Consumed,
@@ -276,14 +262,13 @@ pub fn handle_raw_key(state: &mut TuiState, key: crossterm::event::KeyEvent) -> 
     execute(state, Host::Attached, Key::from_crossterm(&key))
 }
 
-/// Paint the decision frame on top of every other overlay: a System/Quit title,
-/// the actual consequences and the safe rail (Stay is the default).
+/// Paint the decision into the caller's exact frame rectangle, retaining the
+/// actual consequences and the safe rail (Stay is the default).
 pub fn render(frame: &mut Frame, area: Rect, state: &QuitConfirmState, theme: &Theme) {
     if area.width < 12 || area.height < 5 {
         return;
     }
-    let width = area.width.min(64);
-    let inner_width = usize::from(width.saturating_sub(4));
+    let inner_width = usize::from(area.width.saturating_sub(2));
     let muted = Style::default().fg(theme.colors.fg_muted);
     let normal = Style::default().fg(theme.colors.fg_primary);
     let warn = Style::default()
@@ -333,16 +318,14 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QuitConfirmState, theme: &T
     ])];
 
     // Chrome: borders + title; the body shrinks, the rail never does.
-    let wanted = u16::try_from(header.len() + body.len() + footer.len() + 2).unwrap_or(u16::MAX);
-    let modal = modal_area(area, width, wanted);
-    frame.render_widget(Clear, modal);
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.warning))
         .title(" System · Quit ")
         .style(Style::default().bg(theme.colors.bg_surface));
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let parts = vec![
         ModalPart::Header(header),
         ModalPart::Notice(body),

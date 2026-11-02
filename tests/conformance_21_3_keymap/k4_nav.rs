@@ -15,6 +15,7 @@
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
+use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::domain::models::FocusState;
@@ -339,11 +340,21 @@ fn every_search_row_resolves_to_its_command_by_value() {
         };
         assert!(own.len() >= expected, "{context:?} rows, got {}", own.len());
         for row in own {
-            let CommandId::Search(cmd) = row.command else {
-                panic!("Search row {row:?} carries a non-Search command");
-            };
             assert_resolves(context, row);
-            search_witness(context, cmd, row.keys);
+            match row.command {
+                CommandId::Search(cmd) => search_witness(context, cmd, row.keys),
+                CommandId::Overlay(OverlayCmd::QuitRequest) => {
+                    let mut state = search_state(context == Context::SearchNavigating);
+                    let before = search_salient(&state);
+                    assert_eq!(press(&mut state, row.keys[0]), InputAction::Quit);
+                    assert_eq!(
+                        search_salient(&state),
+                        before,
+                        "S-QUIT keeps the exact search"
+                    );
+                }
+                _ => panic!("unexpected Search row {row:?}"),
+            }
         }
     }
 }
@@ -488,11 +499,21 @@ fn every_bookmark_row_resolves_to_its_command_by_value() {
     let own = rows(Context::BookmarkList);
     assert!(own.len() >= 10, "BookmarkList rows, got {}", own.len());
     for row in own {
-        let CommandId::Bookmark(cmd) = row.command else {
-            panic!("BookmarkList row {row:?} carries a non-Bookmark command");
-        };
         assert_resolves(Context::BookmarkList, row);
-        bookmark_witness(cmd, row.keys);
+        match row.command {
+            CommandId::Bookmark(cmd) => bookmark_witness(cmd, row.keys),
+            CommandId::Overlay(OverlayCmd::QuitRequest) => {
+                let mut state = bookmark_state();
+                let before = bookmark_salient(&state);
+                assert_eq!(press(&mut state, row.keys[0]), InputAction::Quit);
+                assert_eq!(
+                    bookmark_salient(&state),
+                    before,
+                    "S-QUIT keeps the exact bookmark list"
+                );
+            }
+            _ => panic!("unexpected BookmarkList row {row:?}"),
+        }
     }
 }
 

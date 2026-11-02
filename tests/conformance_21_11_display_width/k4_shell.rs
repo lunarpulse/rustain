@@ -396,7 +396,7 @@ fn search(width: u16, query: &str) -> Painted {
     state.substate = SearchSubstate::Typing;
     let theme = Theme::dark();
     paint(width, 1, |frame| {
-        search_bar::render(frame, frame.area(), &state, &theme);
+        search_bar::render(frame, frame.area(), &state, &theme, true);
     })
 }
 
@@ -453,7 +453,7 @@ fn reverse(width: u16, query: &str, entry: &str) -> Painted {
     };
     let theme = Theme::dark();
     paint(width, 4, |frame| {
-        reverse_search::render(frame, frame.area(), &state, &theme);
+        reverse_search::render(frame, frame.area(), &state, &theme, true);
     })
 }
 
@@ -534,7 +534,7 @@ fn cross(width: u16, query: &str, title: &str, excerpt: &str) -> Painted {
     }];
     let theme = Theme::dark();
     paint(width, 12, |frame| {
-        cross_search::render(frame, frame.area(), &state, &theme);
+        cross_search::render(frame, frame.area(), &state, &theme, true);
     })
 }
 

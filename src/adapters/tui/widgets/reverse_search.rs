@@ -9,8 +9,15 @@ use crate::adapters::tui::theme::Theme;
 const MAX_VISIBLE_MATCHES: usize = 5;
 
 /// Render the reverse search overlay above the input box.
+/// `show_cursor` controls only hardware cursor placement, not painted cells.
 // Covers: UX-DR74 (reverse search overlay)
-pub fn render(frame: &mut Frame, area: Rect, state: &ReverseSearchState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ReverseSearchState,
+    theme: &Theme,
+    show_cursor: bool,
+) {
     if !state.active {
         return;
     }
@@ -107,11 +114,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ReverseSearchState, theme: 
     // Covers: UX-DR74 (AC4 filter input cursor)
     // The query scrolls so its tail stays visible; the caret follows the
     // display cells actually painted (whole graphemes, never a scalar count).
-    let cursor_col = (query_prefix_cells + geom::cells(shown_query)) as u16 + 1; // +1 for left border
-    let cursor_x =
-        (overlay_area.x + cursor_col).min(overlay_area.x + overlay_area.width.saturating_sub(2));
-    let cursor_y = overlay_area.y + 1; // +1 for top border
-    frame.set_cursor_position((cursor_x, cursor_y));
+    if show_cursor {
+        let cursor_col = (query_prefix_cells + geom::cells(shown_query)) as u16 + 1; // +1 for left border
+        let cursor_x = (overlay_area.x + cursor_col)
+            .min(overlay_area.x + overlay_area.width.saturating_sub(2));
+        let cursor_y = overlay_area.y + 1; // +1 for top border
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +159,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, rows)).unwrap();
         let theme = Theme::dark();
         terminal
-            .draw(|frame| render(frame, frame.area(), state, &theme))
+            .draw(|frame| render(frame, frame.area(), state, &theme, true))
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         let buffer = terminal.backend().buffer().clone();

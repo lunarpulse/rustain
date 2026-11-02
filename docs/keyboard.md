@@ -39,7 +39,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, Enter` | Send the composer from any terminal (multi-line safe send) | local, attached | portable |  |
 | `Ctrl+X, Esc` | Close the menu without doing anything | local, attached | portable |  |
 | `Ctrl+X, Ctrl+C` | Close the menu without doing anything | local, attached | portable |  |
-| `Ctrl+X, Ctrl+Q` | Close the menu, then ask to quit (guarded by the quit confirmation), like Ctrl+Q anywhere | local, attached | portable |  |
+| `Ctrl+X, Ctrl+Q` | Ask to quit without closing the menu, like Ctrl+Q in any window | local, attached | portable |  |
 
 ## Input
 
@@ -178,6 +178,7 @@ Also inherits: Append-only text field.
 | `Esc` | Close search, preserve scroll | local | portable |  |
 | `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
 | `Backspace` | Delete the last query character and search again | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
 
 ## Search (navigating)
 
@@ -191,6 +192,7 @@ Also inherits: Append-only text field.
 | `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
 | `Backspace` | Return to typing and delete the last query character | local | portable |  |
 | `Ctrl+U` | Clear the query and return to typing | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
 
 ## Bookmarks
 
@@ -207,6 +209,7 @@ Also inherits: Append-only text field.
 | `Enter` | Jump to the selected bookmark | local | portable |  |
 | `Esc` | Close the bookmark list | local | portable |  |
 | `Ctrl+C` | Close the bookmark list (back one frame) | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing bookmarks | local | portable |  |
 
 ## Permission
 
@@ -374,6 +377,7 @@ Also inherits: Sidebar.
 | `r` | Re-run the selected spoke | local | portable |  |
 | `d` | Open the divergence view | local | portable |  |
 | `s` | Close the divergence view | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing waves | local | portable |  |
 
 ## Help
 
@@ -388,7 +392,7 @@ Also inherits: Sidebar.
 | `?` | Close the help | local, attached | portable |  |
 | `Esc` | Close the help | local, attached | portable |  |
 | `Ctrl+C` | Close the help (back one frame); it never stops a turn or quits | local, attached | portable |  |
-| `Ctrl+Q` | Close the help, then ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing help | local, attached | portable |  |
 
 ## Command palette
 
@@ -402,7 +406,7 @@ Also inherits: Append-only text field.
 | `Esc` | Close the palette | local, attached | portable |  |
 | `Ctrl+C` | Close the palette (back one frame) | local, attached | portable |  |
 | `Backspace` | Delete the last filter character | local, attached | portable |  |
-| `Ctrl+Q` | Close the palette, then ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the palette | local, attached | portable |  |
 
 ## Model selector
 
@@ -410,6 +414,7 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+Q` | Ask to quit without closing the model selector | local | portable |  |
 | `Left` | Select the previous provider column | local | portable |  |
 | `h` | Select the previous provider column | local | portable |  |
 | `Right` | Select the next provider column | local | portable |  |
@@ -430,6 +435,7 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+Q` | Ask to quit without closing the profile switcher | local | portable |  |
 | `Up` | Select the previous profile | local | portable |  |
 | `Down` | Select the next profile | local | portable |  |
 | `Enter` | Preview the selected profile; in the preview, switch to it | local | portable |  |
@@ -442,6 +448,7 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+Q` | Ask to quit without closing usage | local | portable |  |
 | `Esc` | Close the usage panel | local | portable |  |
 | `Ctrl+C` | Close the usage panel (back one frame) | local | portable |  |
 | `Up` | Select the previous section | local | portable |  |
@@ -453,6 +460,7 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+Q` | Ask to quit without closing cross-conversation search | local | portable |  |
 | `Esc` | Close the cross-conversation search | local | portable |  |
 | `Ctrl+C` | Close the cross-conversation search (back one frame) | local | portable |  |
 | `Enter` | Open the selected result | local | portable |  |
@@ -468,6 +476,7 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+Q` | Ask to quit without closing history search | local | portable |  |
 | `Enter` | Put the selected history entry in the composer | local | portable |  |
 | `Esc` | Close the history search | local | portable |  |
 | `Ctrl+C` | Close the history search (back one frame) | local | portable |  |
@@ -490,7 +499,7 @@ Also inherits: Append-only text field.
 | `Ctrl+C` | Close the popup and restore the composer (back one frame) | local, attached | portable |  |
 | `Backspace` | Delete the last filter character; at the trigger, close the popup | local, attached | portable |  |
 | `Ctrl+H` | Delete the last filter character, like Backspace | local | portable |  |
-| `Ctrl+Q` | Close the popup, then ask to quit (guarded by the quit confirmation) | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the popup | local, attached | portable |  |
 
 ## Notification log
 

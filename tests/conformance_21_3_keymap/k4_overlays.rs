@@ -57,7 +57,7 @@ const HELP: &[W] = &[
     w(&[Key::Char('?')], "Consumed | scroll=3 active=false focus=Chat"),
     w(&[Key::Esc], "Consumed | scroll=3 active=false focus=Chat"),
     w(&[Key::Ctrl('c')], "Consumed | scroll=3 active=false focus=Chat"),
-    w(&[Key::Ctrl('q')], "Quit | scroll=3 active=false focus=Chat"),
+    w(&[Key::Ctrl('q')], "Quit | scroll=3 active=true focus=Overlay(Help)"),
 ];
 
 /// Catches a Help row that scrolls the wrong way, closes into the wrong focus, or leaks a key.
@@ -90,7 +90,7 @@ const PALETTE: &[W] = &[
     w(&[Key::Esc], "Consumed | active=false filter= sel=0 focus=Input"),
     w(&[Key::Ctrl('c')], "Consumed | active=false filter= sel=0 focus=Input"),
     w(&[Key::Backspace], "Consumed | active=true filter=a sel=0 focus=Overlay(CommandPalette)"),
-    w(&[Key::Ctrl('q')], "Quit | active=false filter= sel=0 focus=Input"),
+    w(&[Key::Ctrl('q')], "Quit | active=true filter=ab sel=0 focus=Overlay(CommandPalette)"),
 ];
 
 /// Catches a palette row that runs the wrong entry, keeps the palette open, or moves the wrong way.
@@ -179,6 +179,7 @@ const SELECTOR: &[W] = &[
     w(&[Key::Char('L')], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
     w(&[Key::Char('K')], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
     w(&[Key::Char('J')], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
+    w(&[Key::Ctrl('q')], "Quit | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
 ];
 
 /// Off-state (R3): while searching every letter types (`y n j k H` are not commands), and with no
@@ -265,6 +266,7 @@ const PROFILES: &[W] = &[
     wp(&[Key::Esc], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)", into_preview),
     wp(&[Key::Char('y')], "ConfirmProfileSwitch(\"p2\") | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)", into_preview),
     wp(&[Key::Char('n')], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)", into_preview),
+    w(&[Key::Ctrl('q')], "Quit | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)"),
 ];
 
 /// Off-state (R3): with no preview `y` / `n` do nothing; inside it Up / Down do nothing and `Y` confirms.
@@ -323,6 +325,7 @@ const USAGE: &[W] = &[
     w(&[Key::Ctrl('c')], "Consumed | section=0 active=false focus=Chat"),
     w(&[Key::Up], "Consumed | section=3 active=true focus=Overlay(UsagePanel)"),
     w(&[Key::Down], "Consumed | section=1 active=true focus=Overlay(UsagePanel)"),
+    w(&[Key::Ctrl('q')], "Quit | section=0 active=true focus=Overlay(UsagePanel)"),
 ];
 
 /// Catches an Up that fails to wrap to the last section or a close that loses the previous focus.
@@ -352,6 +355,7 @@ const CROSS: &[W] = &[
     w(&[Key::Char('k')], "Consumed | q=ab sel=0 focus=Overlay(CrossSearch)"),
     w(&[Key::Down], "Consumed | q=ab sel=2 focus=Overlay(CrossSearch)"),
     w(&[Key::Char('j')], "Consumed | q=ab sel=2 focus=Overlay(CrossSearch)"),
+    w(&[Key::Ctrl('q')], "Quit | q=ab sel=1 focus=Overlay(CrossSearch)"),
 ];
 
 /// Catches j/k typed into the query, a swapped selection direction, or a close that is not requested.
@@ -395,6 +399,7 @@ const REVERSE: &[W] = &[
     w(&[Key::Backspace], "Consumed | rev=true q=a sel=0 m=4 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
     w(&[Key::Ctrl('p')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=true leader=false focus=Overlay(CommandPalette)"),
     w(&[Key::Ctrl('x')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=true focus=Overlay(WhichKey)"),
+    w(&[Key::Ctrl('q')], "Quit | rev=true q=al sel=0 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
 ];
 
 /// Catches an older/newer swap, an accept that picks the wrong entry, and Ctrl+P/Ctrl+X that stay in the search.
@@ -460,7 +465,7 @@ const AUTOCOMPLETE: &[W] = &[
     w(&[Key::Ctrl('c')], "Consumed | buf= cur=0 sel=0 active=false filter="),
     w(&[Key::Backspace], "Consumed | buf=/ cur=1 sel=1 active=true filter="),
     w(&[Key::Ctrl('h')], "Consumed | buf=/ cur=1 sel=1 active=true filter="),
-    w(&[Key::Ctrl('q')], "Quit | buf=/h cur=2 sel=0 active=false filter="),
+    w(&[Key::Ctrl('q')], "Quit | buf=/h cur=2 sel=1 active=true filter=h"),
 ];
 
 /// Catches an Autocomplete row that accepts the wrong suggestion, fails to restore the composer on Esc, or has no witness.
@@ -682,7 +687,7 @@ fn select_warn(s: &mut TuiState) {
 const LOG: &[W] = &[
     w(&[Key::Esc], "Closed | sel=None detail=None vis=3 dec=[] focus=Chat"),
     w(&[Key::Ctrl('c')], "Closed | sel=None detail=None vis=3 dec=[] focus=Chat"),
-    w(&[Key::Ctrl('q')], "Quit | sel=None detail=None vis=3 dec=[] focus=Chat"),
+    w(&[Key::Ctrl('q')], "Quit | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     w(&[Key::Char('j')], "Consumed | sel=Some((1, Some(2))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     w(&[Key::Down], "Consumed | sel=Some((1, Some(2))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     wp(&[Key::Char('k')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat", select_warn),

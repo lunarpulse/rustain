@@ -177,7 +177,7 @@ fn test_e2e_cross_search_widget_renders_query_prompt_when_short_query() {
     state.query = "a".to_string();
     terminal
         .draw(|frame| {
-            cross_search::render(frame, frame.area(), &state, &theme);
+            cross_search::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -201,7 +201,7 @@ fn test_e2e_cross_search_widget_renders_results_vertical_stack() {
     ];
     terminal
         .draw(|frame| {
-            cross_search::render(frame, frame.area(), &state, &theme);
+            cross_search::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -219,7 +219,7 @@ fn test_e2e_cross_search_widget_shows_no_matches_when_empty_results() {
     state.query = "xyz".to_string();
     terminal
         .draw(|frame| {
-            cross_search::render(frame, frame.area(), &state, &theme);
+            cross_search::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -407,7 +407,7 @@ fn test_e2e_cross_search_widget_shows_truncation_by_count_hint() {
     state.results = vec![stub_result("a", "first", "hit", 0)];
     terminal
         .draw(|frame| {
-            cross_search::render(frame, frame.area(), &state, &theme);
+            cross_search::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);
@@ -429,7 +429,7 @@ fn test_e2e_cross_search_widget_shows_truncation_by_time_hint() {
     state.results = vec![stub_result("a", "first", "hit", 0)];
     terminal
         .draw(|frame| {
-            cross_search::render(frame, frame.area(), &state, &theme);
+            cross_search::render(frame, frame.area(), &state, &theme, true);
         })
         .unwrap();
     let text = common::buffer_text(&terminal);

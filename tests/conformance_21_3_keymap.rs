@@ -6,7 +6,7 @@
 //! next to their crate-private seams (`cargo test --lib story21_3_`).
 
 #[path = "conformance_21_3_keymap/support.rs"]
-mod support;
+pub(super) mod support;
 
 #[path = "conformance_21_3_keymap/k1_governance.rs"]
 mod k1_governance;

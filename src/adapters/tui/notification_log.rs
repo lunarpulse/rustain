@@ -1,8 +1,8 @@
 //! S-LOG: the Notification Log (Story 21.1 AC5, LR-8, A7/A8).
 //!
-//! One bounded presentation state with a saved caller focus, a shared widget
-//! and a shared key transition used by BOTH hosts, following the S-QUIT
-//! precedent (`quit_confirm.rs`); 21-4 migrates it onto the modal stack. It
+//! One bounded payload with a saved caller focus, a shared widget and a shared
+//! key transition used by BOTH hosts. The presentation reducer owns its frame
+//! and payload lifetime; this module only edits selection/detail. It
 //! never owns a source fact: `x` only hides the selected toast presentation,
 //! `c` copies through the existing clipboard boundary (its result is itself a
 //! notice) and `r` is offered only on records that carry an eligible action.
@@ -16,10 +16,11 @@ use crate::adapters::tui::notifications::{
     NoticeAction, NoticeRecord, NoticeSeverity, NotificationStore, Presentation, format_hms,
     headline,
 };
+use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
-use crate::adapters::tui::widgets::{ModalPart, fit_modal, modal_area};
+use crate::adapters::tui::widgets::{ModalPart, fit_modal};
 use crate::domain::models::FocusState;
 
 /// The one open S-LOG.
@@ -123,28 +124,12 @@ pub fn fresh_eligible(record: &NoticeRecord, facts: &LogFacts) -> bool {
 /// Open S-LOG (idempotent). Presents every record: the unseen badge clears
 /// here and nowhere else. Saves the caller focus; never changes the draft.
 pub fn open(state: &mut TuiState) {
-    if state.notification_log.is_some() {
-        return;
-    }
-    let newest = state.notifications.records().next_back().map(|r| r.id);
-    state.notification_log = Some(NotificationLogState {
-        selected_id: newest,
-        selected: 0,
-        detail: false,
-        detail_scroll: 0,
-        caller_focus: state.focus.clone(),
-    });
-    state.notifications.log_presented();
-    state.needs_redraw = true;
+    reducer::open(state, Surface::NotificationLog);
 }
 
 /// Close S-LOG and restore the caller focus.
 pub fn close(state: &mut TuiState) {
-    if let Some(log) = state.notification_log.take() {
-        state.focus = log.caller_focus;
-    }
-    state.notifications.log_closed();
-    state.needs_redraw = true;
+    reducer::close(state, Surface::NotificationLog);
 }
 
 /// What the host must do after a key.
@@ -156,7 +141,7 @@ pub enum LogOutcome {
     Closed,
     /// Copy this text through the host clipboard helper.
     Copy(String),
-    /// `Ctrl+Q`: the log closed; the host runs its guarded quit request.
+    /// `Ctrl+Q`: keep the log open; the host runs its guarded quit request above it.
     Quit,
     /// Run the record's retry exactly once.
     Retry {
@@ -186,6 +171,9 @@ fn select(log: &mut NotificationLogState, rows: &[&NoticeRecord], index: usize) 
 /// Apply one key to the open log: resolve it in `NotificationLog` and run the
 /// command. An unbound key is swallowed. Without an open log it changes nothing.
 pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) -> LogOutcome {
+    if !presentation::is_open(state, Surface::NotificationLog) {
+        return LogOutcome::Consumed;
+    }
     let Some(log) = state.notification_log.as_ref() else {
         return LogOutcome::Consumed;
     };
@@ -207,13 +195,10 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
     };
     match command {
         OverlayCmd::NotifClose => {
-            close(state);
+            reducer::back(state);
             LogOutcome::Closed
         }
-        OverlayCmd::QuitRequest => {
-            close(state);
-            LogOutcome::Quit
-        }
+        OverlayCmd::QuitRequest => LogOutcome::Quit,
         OverlayCmd::NotifNext => {
             if let Some(log) = state.notification_log.as_mut() {
                 if detail {
@@ -359,8 +344,8 @@ fn severity_color(theme: &Theme, severity: NoticeSeverity) -> Color {
     }
 }
 
-/// Paint S-LOG over the stage. `area` excludes the status row; the frame is
-/// fitted with the shared modal geometry (`fit_modal`) so the rail survives.
+/// Paint S-LOG into the caller's exact frame rectangle. Shared body fitting
+/// preserves the header, at least one record row and the action rail.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -372,8 +357,7 @@ pub fn render(
     if area.width < 12 || area.height < 5 {
         return;
     }
-    let width = area.width.min(100);
-    let inner_width = usize::from(width.saturating_sub(2));
+    let inner_width = usize::from(area.width.saturating_sub(2));
     let normal = Style::default().fg(theme.colors.fg_primary);
     let muted = Style::default().fg(theme.colors.fg_muted);
     let accent = Style::default().fg(theme.colors.accent);
@@ -453,42 +437,45 @@ pub fn render(
             ),
             accent,
         ),
-        Span::styled(" Move  ", normal),
+        Span::styled(" Move ", normal),
         Span::styled(key(OverlayCmd::NotifDetail), accent),
-        Span::styled(if log.detail { " List  " } else { " Detail  " }, normal),
+        Span::styled(if log.detail { " List " } else { " Detail " }, normal),
         Span::styled(key(OverlayCmd::NotifCopy), accent),
-        Span::styled(" Copy  ", normal),
+        Span::styled(" Copy ", normal),
     ];
     if current.is_some_and(|record| retry_eligible(record, facts)) {
         rail.push(Span::styled(key(OverlayCmd::NotifRetry), accent));
-        rail.push(Span::styled(" Retry  ", normal));
+        rail.push(Span::styled(" Retry ", normal));
     }
     if current.is_some_and(|record| compact_eligible(record, facts)) {
         rail.push(Span::styled(key(OverlayCmd::NotifCompact), accent));
-        rail.push(Span::styled(" Compact…  ", normal));
+        rail.push(Span::styled(" Compact… ", normal));
     }
     if current.is_some_and(|record| fresh_eligible(record, facts)) {
         rail.push(Span::styled(key(OverlayCmd::NotifFresh), accent));
-        rail.push(Span::styled(" Start fresh…  ", normal));
+        rail.push(Span::styled(" Start fresh… ", normal));
     }
     rail.push(Span::styled(key(OverlayCmd::NotifDismiss), accent));
-    rail.push(Span::styled(" Dismiss  ", normal));
+    rail.push(Span::styled(" Dismiss ", normal));
     rail.push(Span::styled(key(OverlayCmd::NotifClose), accent));
     rail.push(Span::styled(" Close", normal));
-    parts.push(ModalPart::Footer(footer_lines(rail, inner_width)));
+    let mut footer = footer_lines(rail, inner_width);
+    // In the five-row sheet keep one body row, even when eligible actions
+    // wrap the rail. Its final row always retains the Close action.
+    let hidden = footer
+        .len()
+        .saturating_sub(usize::from(area.height.saturating_sub(4)));
+    footer.drain(..hidden);
+    parts.push(ModalPart::Footer(footer));
 
-    let wanted = area
-        .height
-        .min(u16::try_from(rows.len().min(14) + 6).unwrap_or(u16::MAX));
-    let modal = modal_area(area, width, wanted.max(8).min(area.height));
-    frame.render_widget(Clear, modal);
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(accent)
         .title(" System · Notifications ")
         .style(Style::default().bg(theme.colors.bg_surface));
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let lines = fit_modal(parts, usize::from(inner.height), usize::from(inner.width));
     frame.render_widget(
         Paragraph::new(lines).style(

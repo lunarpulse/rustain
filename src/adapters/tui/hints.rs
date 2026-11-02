@@ -2,11 +2,11 @@ use crate::adapters::tui::keymap::{Context, Host, render_tips};
 use crate::domain::models::FocusState;
 use crate::domain::models::visual::OverlayType;
 
-/// Returns a contextual status-bar hint for the given focus state, or `None` when
-/// hints have faded (session_count > fade_threshold) or the focus has no hint.
+/// Returns a registry-derived hint for the base focus, or `None` while a stack
+/// frame owns input, hints have faded, or that focus has no hint.
 ///
-/// Control flow: first checks `session_count > fade_threshold` (fast exit), then
-/// dispatches on `focus`. For `FocusState::Input`, `is_vscode` selects whether the
+/// The base focus is retained under Log/Quit for exact restoration; its bindings
+/// must not be advertised until the stack empties. For Input, `is_vscode` selects
 /// VS Code keybinding hint or the generic help tip is shown (UX-DR93, AC#4).
 /// The `is_vscode` value is read from `TuiState.is_vscode` by the caller (AC9, 3-6a-D2).
 // Covers: UX-DR93, UX-DR96, Sprint Change Proposal 2026-04-08
@@ -15,8 +15,9 @@ pub fn contextual_hint(
     session_count: u32,
     fade_threshold: u32,
     is_vscode: bool,
+    stack: &crate::adapters::tui::presentation::ModalStack,
 ) -> Option<String> {
-    if session_count > fade_threshold {
+    if stack.top().is_some() || session_count > fade_threshold {
         return None;
     }
 
@@ -93,39 +94,45 @@ mod tests {
 
     #[test]
     fn test_hint_input_focus() {
-        let hint = contextual_hint(&FocusState::Input, 1, 5, false);
+        let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default());
         assert!(hint.is_some());
         assert!(hint.unwrap().contains('?'));
     }
 
     #[test]
     fn test_hint_chat_focus() {
-        let hint = contextual_hint(&FocusState::Chat, 1, 5, false);
+        let hint = contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default());
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("j/k"));
     }
 
     #[test]
     fn test_hint_fades_when_session_exceeds_threshold() {
-        let hint = contextual_hint(&FocusState::Input, 6, 5, false);
+        let hint = contextual_hint(&FocusState::Input, 6, 5, false, &Default::default());
         assert!(hint.is_none());
     }
 
     #[test]
     fn test_hint_at_exact_threshold_shows() {
-        let hint = contextual_hint(&FocusState::Input, 5, 5, false);
+        let hint = contextual_hint(&FocusState::Input, 5, 5, false, &Default::default());
         assert!(hint.is_some());
     }
 
     #[test]
     fn test_hint_above_threshold_hidden() {
-        let hint = contextual_hint(&FocusState::Input, 6, 5, false);
+        let hint = contextual_hint(&FocusState::Input, 6, 5, false, &Default::default());
         assert!(hint.is_none());
     }
 
     #[test]
     fn test_hint_whichkey_focus() {
-        let hint = contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
+        let hint = contextual_hint(
+            &FocusState::Overlay(OverlayType::WhichKey),
+            1,
+            5,
+            false,
+            &Default::default(),
+        );
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("Esc"));
     }
@@ -137,6 +144,7 @@ mod tests {
             1,
             5,
             false,
+            &Default::default(),
         );
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("filter"));
@@ -146,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_hint_vscode_input_focus_shows_alt_bindings() {
-        let hint = contextual_hint(&FocusState::Input, 1, 5, true);
+        let hint = contextual_hint(&FocusState::Input, 1, 5, true, &Default::default());
         assert!(hint.is_some());
         let text = hint.unwrap();
         assert!(
@@ -159,20 +167,20 @@ mod tests {
     #[test]
     fn test_hint_vscode_fades_after_threshold() {
         // AC#5: hint disappears after 5 sessions
-        let hint = contextual_hint(&FocusState::Input, 6, 5, true);
+        let hint = contextual_hint(&FocusState::Input, 6, 5, true, &Default::default());
         assert!(hint.is_none());
     }
 
     #[test]
     fn test_hint_vscode_shows_at_exact_threshold() {
-        let hint = contextual_hint(&FocusState::Input, 5, 5, true);
+        let hint = contextual_hint(&FocusState::Input, 5, 5, true, &Default::default());
         assert!(hint.is_some());
     }
 
     #[test]
     fn test_hint_vscode_chat_focus_shows_generic_hint() {
         // VS Code flag only affects Input focus; Chat focus shows generic hint
-        let hint = contextual_hint(&FocusState::Chat, 1, 5, true);
+        let hint = contextual_hint(&FocusState::Chat, 1, 5, true, &Default::default());
         assert!(hint.is_some());
         assert!(hint.unwrap().contains("j/k"));
     }
@@ -204,18 +212,24 @@ mod tests {
     #[test]
     fn story21_3_contextual_hint_text_is_projected_from_the_registry() {
         assert_eq!(
-            contextual_hint(&FocusState::Input, 1, 5, false),
+            contextual_hint(&FocusState::Input, 1, 5, false, &Default::default()),
             render_tips::tip(Context::Input, Host::Local, false)
         );
         assert_eq!(
-            contextual_hint(&FocusState::Input, 1, 5, true),
+            contextual_hint(&FocusState::Input, 1, 5, true, &Default::default()),
             render_tips::tip(Context::Input, Host::Local, true)
         );
         assert_eq!(
-            contextual_hint(&FocusState::Chat, 1, 5, false),
+            contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default()),
             render_tips::tip(Context::Chat, Host::Local, false)
         );
-        let which_key = contextual_hint(&FocusState::Overlay(OverlayType::WhichKey), 1, 5, false);
+        let which_key = contextual_hint(
+            &FocusState::Overlay(OverlayType::WhichKey),
+            1,
+            5,
+            false,
+            &Default::default(),
+        );
         let which_key = which_key.unwrap();
         assert!(which_key.contains("Press a key") && which_key.contains("Esc"));
         let palette = contextual_hint(
@@ -223,10 +237,11 @@ mod tests {
             1,
             5,
             false,
+            &Default::default(),
         );
         let palette = palette.unwrap();
         assert!(palette.contains("Tip:") && palette.contains("filter"));
-        let chat = contextual_hint(&FocusState::Chat, 1, 5, false).unwrap();
+        let chat = contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default()).unwrap();
         for key in ["j/k", "J/K", "Tab", "i ", "?"] {
             assert!(chat.contains(key), "{key}: {chat}");
         }

@@ -19,19 +19,38 @@ fn messages(state: &TuiState) -> Vec<String> {
 /// DF-21-3-LEADER-CTRLQ-HOST-ASYMMETRY: the local host swallowed Ctrl+Q as an
 /// unknown follow-up (a toast, no quit) while the attached host quit.
 #[test]
-fn ctrl_q_with_the_leader_open_closes_it_and_requests_the_guarded_quit() {
+fn ctrl_q_with_the_leader_open_preserves_it_under_the_guarded_quit() {
     let mut state = fresh();
     state.input_buffer = "draft".into();
     state.cursor_position = 5;
     press(&mut state, Key::Ctrl('x'));
     assert!(state.which_key.active);
     assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
-    assert!(!state.which_key.active, "the leader is closed");
-    assert_eq!(state.focus, FocusState::Input, "the origin is restored");
+    assert!(
+        state.which_key.active,
+        "the leader stays intact below S-QUIT"
+    );
+    assert_eq!(
+        state.focus,
+        FocusState::Overlay(rustain::domain::models::visual::OverlayType::WhichKey)
+    );
     assert!(messages(&state).is_empty(), "never a no-binding toast");
     assert_eq!(state.input_buffer, "draft");
-    // Positive control: an ordinary follow-up still runs its row.
-    press(&mut state, Key::Ctrl('x'));
+    rustain::adapters::tui::quit_confirm::request(
+        &mut state,
+        rustain::adapters::tui::quit_confirm::QuitFacts {
+            composer_draft: true,
+            ..rustain::adapters::tui::quit_confirm::QuitFacts::idle(
+                rustain::adapters::tui::quit_confirm::QuitHost::Local,
+            )
+        },
+    );
+    press(&mut state, Key::Char('n'));
+    assert!(
+        state.which_key.active,
+        "cancel restores the same pending menu"
+    );
+    // Positive control: its ordinary follow-up still runs the row.
     assert_eq!(press(&mut state, Key::Char('?')), InputAction::Consumed);
     assert!(state.help_overlay.active);
 }

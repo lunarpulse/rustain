@@ -97,6 +97,16 @@ const fn g(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
 
 #[rustfmt::skip]
 pub const ROWS: &[Binding] = &[
+    // Legacy windows stay intact beneath S-QUIT until their stack cutover.
+    bind(Context::ModelSelector, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the model selector"),
+    bind(Context::ProfileSwitcher, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the profile switcher"),
+    bind(Context::UsagePanel, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing usage"),
+    bind(Context::CrossSearch, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing cross-conversation search"),
+    bind(Context::ReverseSearch, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing history search"),
+    bind(Context::SearchTyping, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing search"),
+    bind(Context::SearchNavigating, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing search"),
+    bind(Context::BookmarkList, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing bookmarks"),
+    bind(Context::WaveOverlay, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing waves"),
     // ── Help ──
     h(&[Key::Char('j')], OverlayCmd::HelpDown).does("Scroll the help down one line"),
     h(&[Key::Down], OverlayCmd::HelpDown).does("Scroll the help down one line"),
@@ -107,7 +117,7 @@ pub const ROWS: &[Binding] = &[
     h(&[Key::Char('?')], OverlayCmd::HelpClose).does("Close the help"),
     h(&[Key::Esc], OverlayCmd::HelpClose).does("Close the help"),
     h(&[Key::Ctrl('c')], OverlayCmd::HelpClose).does("Close the help (back one frame); it never stops a turn or quits"),
-    h(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Close the help, then ask to quit (guarded by the quit confirmation)"),
+    h(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit without closing help"),
     // ── Command palette (the filter is an append-only field: FieldEdit rows apply) ──
     p(&[Key::Up], OverlayCmd::PaletteUp).does("Select the previous entry"),
     p(&[Key::Down], OverlayCmd::PaletteDown).does("Select the next entry"),
@@ -115,7 +125,7 @@ pub const ROWS: &[Binding] = &[
     p(&[Key::Esc], OverlayCmd::PaletteClose).does("Close the palette"),
     p(&[Key::Ctrl('c')], OverlayCmd::PaletteClose).does("Close the palette (back one frame)"),
     p(&[Key::Backspace], OverlayCmd::PaletteBackspace).does("Delete the last filter character"),
-    p(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Close the palette, then ask to quit (guarded by the quit confirmation)"),
+    p(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit without closing the palette"),
     // ── Model selector ──
     m(&[Key::Left], OverlayCmd::ModelProviderPrev).does("Select the previous provider column"),
     m(&[Key::Char('h')], OverlayCmd::ModelProviderPrev).does("Select the previous provider column"),
@@ -173,7 +183,7 @@ pub const ROWS: &[Binding] = &[
     a(&[Key::Ctrl('c')], OverlayCmd::AutoCancel).does("Close the popup and restore the composer (back one frame)"),
     a(&[Key::Backspace], OverlayCmd::AutoBackspace).does("Delete the last filter character; at the trigger, close the popup"),
     a(&[Key::Ctrl('h')], OverlayCmd::AutoBackspace).local().does("Delete the last filter character, like Backspace"),
-    a(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).local().does("Close the popup, then ask to quit (guarded by the quit confirmation)"),
+    a(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit without closing the popup"),
     // ── Notification log ──
     n(&[Key::Esc], OverlayCmd::NotifClose).does("Close the notification log"),
     n(&[Key::Ctrl('c')], OverlayCmd::NotifClose).does("Close the notification log (back one frame)"),

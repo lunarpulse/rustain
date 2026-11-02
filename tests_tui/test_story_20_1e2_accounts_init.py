@@ -28,13 +28,14 @@ import pytest
 
 from test_story_20_1c_locked_providers import (
     PROVIDER_ENV, _NativeTUI, _capture, _plain, _sensitive_env, _sha256, _wait,
+    _legacy_status_row,
 )
 
 KEY = "sk-native-openai-20-1e2-SECRET"
 
 
 def _modal(screen, title):
-    """True once a whole bordered modal titled `title` is painted."""
+    """The whole legacy rectangle, with A8's settled opaque status cutout."""
     rows = screen.split("\n")
     top = next((y for y, row in enumerate(rows) if f"┌ {title}" in row), None)
     if top is None:
@@ -43,12 +44,14 @@ def _modal(screen, title):
     right = rows[top].rfind("┐")
     if right <= left:
         return False
+    status = _legacy_status_row(rows)
     bottom = next((y for y in range(top + 1, len(rows))
-                   if len(rows[y]) > right and rows[y][left] == "└"), None)
-    if bottom is None or rows[bottom][right] != "┘":
+                   if len(rows[y]) > right and rows[y][left] == "└"),
+                  status if status == len(rows) - top - 1 else None)
+    if bottom is None or (bottom != status and rows[bottom][right] != "┘"):
         return False
     return all(len(rows[y]) > right and rows[y][left] == "│" and rows[y][right] == "│"
-               for y in range(top + 1, bottom))
+               for y in range(top + 1, bottom) if y != status)
 
 
 class _Init:

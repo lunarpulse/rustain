@@ -570,10 +570,15 @@ fn k10_the_cue_survives_beside_the_log_badge_at_sixty_and_eighty_columns() {
             }
             if !long && width == 80 {
                 assert!(badge_at.is_some(), "short row: both fit at 80: {case}");
+                assert!(
+                    row.contains("model"),
+                    "the uncongested model still fits: {case}"
+                );
             }
             if long {
-                // The long left side clips; the cue is the thing that must survive.
-                assert!(row.contains("model") || row.contains("claude"), "{case}");
+                // A8: model/context/budget yield before the state and counters.
+                assert!(row.contains("Ready"), "{case}");
+                assert!(row.contains("↑123.5k ↓98.8k"), "{case}");
             }
         }
     }

@@ -43,6 +43,7 @@ use crate::adapters::tui::notification_log;
 use crate::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
 };
+use crate::adapters::tui::presentation::{self, RouteEffect};
 use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
@@ -455,6 +456,7 @@ pub async fn run(
         state.session_count,
         state.theme.timing.status_hint_fade_sessions,
         state.is_vscode,
+        &state.modal_stack,
     );
 
     // Set project context indicator based on persona
@@ -1011,26 +1013,22 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
-                            // Story 21.2 AC7: the S-QUIT frame owns every user key — it is
-                            // consulted before the recovery/carryover/override interceptors so
-                            // no lower card can see (or answer) a `y`.
-                            if state.quit_confirm.is_some()
-                                && let Some(outcome) = crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| crate::adapters::tui::quit_confirm::handle_domain_event(state, &domain_event))
-                            {
-                                if outcome == crate::adapters::tui::quit_confirm::QuitKeyOutcome::Confirmed {
-                                    turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
-                                    state.should_quit = true;
+                            let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog) {
+                                notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
+                            } else { notification_log::LogFacts::default() };
+                            if let Some(effect) = crate::adapters::tui::app::try_with_card_focus_reconcile(
+                                &mut state, |state| presentation::route(state, &domain_event, crate::adapters::tui::keymap::Host::Local, &facts),
+                            ) {
+                                match effect {
+                                    RouteEffect::Consumed => {}
+                                    RouteEffect::QuitRequest => { quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue); }
+                                    RouteEffect::QuitConfirmed => {
+                                        turn_lifecycle.interrupt_all(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
+                                        state.should_quit = true;
+                                    }
+                                    RouteEffect::Log(outcome) => notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router),
                                 }
                                 continue;
-                            }
-                            // Story 21.1 AC5: S-LOG owns every user key while open (after
-                            // S-QUIT, before every lower interceptor); resize/focus events flow on.
-                            if state.notification_log.is_some() {
-                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
-                                if let Some(outcome) = crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| notification_log::handle_domain_event(state, &domain_event, &facts)) {
-                                    if outcome == notification_log::LogOutcome::Quit { quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue); } else { notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router); }
-                                    continue;
-                                }
                             }
                             // Story 21.1 S2 AC9: the interim decision pane owns every user key
                             // while it is focused (after S-QUIT and S-LOG). A waiting or deferred
@@ -1144,6 +1142,7 @@ pub async fn run(
                                     state.session_count,
                                     state.theme.timing.status_hint_fade_sessions,
                                     state.is_vscode,
+                                    &state.modal_stack,
                                 );
                             }
 
@@ -1177,6 +1176,9 @@ pub async fn run(
                                 .await;
 
                             match action {
+                                InputAction::NotificationLog(outcome) => {
+                                    notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router);
+                                }
                                 InputAction::RecipientThreadPage { earlier } => {
                                     if let Err(error) = super::recipient_surface::navigate_received_surface(&workspace_path, None, &mut state, earlier).await {
                                         tracing::warn!(%error, "received-thread page unavailable");
@@ -7778,6 +7780,9 @@ fn render(
 
     // Split borrows: tool_block_states needs &, feedback_blocks needs &
     // height_cache is now in tab_render_states (side-table) and borrowed inside the closure.
+
+    let mut decision_painted = false;
+    terminal.draw(|frame| {
     let TuiState {
         ref tool_block_states,
         ref feedback_blocks,
@@ -7804,7 +7809,6 @@ fn render(
         ref autocomplete,
         ref command_palette,
         ref which_key,
-        ref quit_confirm,
         ref help_overlay,
         ref model_selector,
         ref login,
@@ -7823,9 +7827,6 @@ fn render(
     } = *state;
 
     let display_model = selected_model.as_deref().unwrap_or(config_model);
-
-    let mut decision_painted = false;
-    terminal.draw(|frame| {
         let area = frame.area();
 
         match layout::compute_layout(
@@ -7837,6 +7838,7 @@ fn render(
             density_mode,
         ) {
             Some(mut app_layout) => {
+                let mut shell = presentation::Shell::new(area, &app_layout);
                 let _is_compact = area.width < 80 || area.height < 24;
 
                 // Story 4-4 AC1: reserve the top row for the search bar when active.
@@ -8523,6 +8525,7 @@ fn render(
                         search_bar_area,
                         search_state,
                         theme,
+                        state.modal_stack.is_empty(),
                     );
                 }
 
@@ -8534,6 +8537,7 @@ fn render(
                             sidebar_area,
                             &state.cross_search,
                             theme,
+                            state.modal_stack.is_empty(),
                         );
                     }
                 }
@@ -8784,6 +8788,8 @@ fn render(
                     .task_panel_state
                     .drill_down_task
                     .map(|n| format!("Tasks > Task {}", n));
+                state.notifications.set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
+                let paint_status = |frame: &mut ratatui::Frame<'_>| {
                 status_bar::render(
                     frame,
                     app_layout.status_bar,
@@ -8826,30 +8832,30 @@ fn render(
                         tail: leader_tail,
                     },
 );
+                };
                 input_box::render(
                     frame,
                     app_layout.input_area,
                     input_buffer,
                     cursor_position,
-                    focus.clone(),
+                    if state.modal_stack.is_empty() { focus.clone() } else { FocusState::Chat },
                     theme,
                     multiline_mode,
                     input_scroll_offset,
                     image_indicator.as_deref(),
                 );
 
-                // Story 21.1 A5: toasts paint inside the chat pane, after the status row and
-                // composer, below every overlay AND below the composer's own popups (reverse
-                // search, slash autocomplete) so a toast never covers what the user is
-                // choosing from (same order as the attached host); they never move layout.
-                state
-                    .notifications
-                    .set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
-                toast_layer::render(frame, app_layout.chat_pane, &state.notifications, theme, &log_facts);
+                shell.chat_pane = app_layout.chat_pane;
+                presentation::compose(
+                    frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
+                    |frame| {
 
                 // Render reverse search overlay above input box
                 if reverse_search.active {
-                    reverse_search::render(frame, app_layout.input_area, reverse_search, theme);
+                    reverse_search::render(
+                        frame, app_layout.input_area, reverse_search, theme,
+                        state.modal_stack.is_empty(),
+                    );
                 }
 
                 // Render autocomplete popup above input box
@@ -8919,30 +8925,13 @@ fn render(
                 // pane, below S-LOG and S-QUIT, reserving no layout rows. Only the focused
                 // item paints; waiting items are carried by the status-row cue.
                 decision_painted = crate::adapters::tui::decision_pane::render(frame, app_layout.chat_pane, &state.decisions, &log_facts, theme);
+                    }, paint_status,
+                );
 
-                // S-LOG (Story 21.1 AC5): above the status row, below only S-QUIT.
-                if let Some(log) = state.notification_log.as_ref() {
-                    let above_status = Rect::new(
-                        area.x,
-                        area.y,
-                        area.width,
-                        app_layout.status_bar.y.saturating_sub(area.y),
-                    );
-                    notification_log::render(frame, above_status, log, &state.notifications, theme, &log_facts);
-                }
-
-                // S-QUIT decision frame: painted last, over every other overlay (AC7).
-                if let Some(quit_frame) = quit_confirm.as_ref() {
-                    crate::adapters::tui::quit_confirm::render(frame, area, quit_frame, theme);
-                }
             }
             None => {
                 state.team_proposal_visible = None;
-                // Terminal too small
-                let msg = ratatui::widgets::Paragraph::new("Terminal too small (min 60x16)")
-                    .style(ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Red))
-                    .alignment(ratatui::prelude::Alignment::Center);
-                frame.render_widget(msg, area);
+                presentation::paint_too_small(frame, area);
             }
         }
     })?;

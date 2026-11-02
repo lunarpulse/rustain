@@ -35,7 +35,7 @@ pub enum LeaderCmd {
     ClearToasts,
     Decisions,
     Send,
-    /// `Ctrl+Q` while the menu is open: close it, then ask to quit (guarded).
+    /// `Ctrl+Q` while the menu is open: ask to quit without closing it.
     QuitRequest,
     Cancel,
 }
@@ -129,7 +129,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Enter], LeaderCmd::Send, "Send").help(C, "Ctrl+X, Enter", "Send the composer from any terminal (multi-line safe send)"),
     l(&[Key::Esc], LeaderCmd::Cancel, "Cancel").does("Close the menu without doing anything"),
     l(&[Key::Ctrl('c')], LeaderCmd::Cancel, "").does("Close the menu without doing anything"),
-    l(&[Key::Ctrl('q')], LeaderCmd::QuitRequest, "").does("Close the menu, then ask to quit (guarded by the quit confirmation), like Ctrl+Q anywhere"),
+    l(&[Key::Ctrl('q')], LeaderCmd::QuitRequest, "").does("Ask to quit without closing the menu, like Ctrl+Q in any window"),
 ];
 
 /// What an 80x24 local screen shows after a sidebar-panel chord (the remedy toast).

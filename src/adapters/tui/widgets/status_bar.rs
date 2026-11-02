@@ -93,6 +93,7 @@ pub fn render(
         ));
     }
 
+    let model_span_index = left_spans.len();
     left_spans.push(Span::styled(model_label, Style::default().fg(fg)));
 
     // Story 8.4b AC-5: Density mode indicator chip [F]/[M]/[D]
@@ -206,6 +207,7 @@ pub fn render(
         ));
     }
 
+    let optional_start = left_spans.len();
     // Story 11.4 AC3: injected context token cost (shown when > 0).
     if injected_tokens > 0 {
         left_spans.push(Span::styled(
@@ -268,6 +270,7 @@ pub fn render(
         ));
     }
 
+    let optional_end = left_spans.len();
     // Status (fourth segment — rightmost, most dynamic)
     left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
     left_spans.push(Span::styled(
@@ -352,15 +355,35 @@ pub fn render(
         ));
     }
 
-    let left_width = left_spans
-        .iter()
-        .map(|s| geom::cells(&s.content))
-        .sum::<usize>();
+    let (mut left_width, mut model_width) = (0, 0);
+    for (index, span) in left_spans.iter().enumerate() {
+        let width = geom::cells(&span.content);
+        left_width += width;
+        if index == model_span_index {
+            model_width = width;
+        }
+    }
     let reminder = log_reminder_text(log_awareness);
     let cue = decision_pane::status_cue(badges.decisions);
-    let required_width = left_width
-        + reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
+    let reserved_width = reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
         + cue.as_deref().map_or(0, |text| geom::cells(text) + 1);
+    // If context/budget details alone would crowd state/counters, let them
+    // clip at the far end instead. Keep their full width for hint admission:
+    // a hint must never reappear merely because a fact was clipped.
+    if optional_start != optional_end
+        && left_width - model_width + reserved_width > usize::from(area.width)
+    {
+        left_spans[optional_start..].rotate_left(optional_end - optional_start);
+    }
+    let model_budget =
+        usize::from(area.width).saturating_sub(left_width - model_width + reserved_width);
+    if model_width > model_budget {
+        let label = left_spans[model_span_index].content.to_mut();
+        let end = geom::clip(label, model_budget).len();
+        label.truncate(end);
+        left_width -= model_width - geom::cells(label);
+    }
+    let required_width = left_width + reserved_width;
     // Key hints yield whole before state, tokens, mode/host, log or decision
     // facts. Once admitted, the generated tail remains the rightmost segment.
     let area = match badges.tail.text() {
@@ -1489,6 +1512,18 @@ mod tests {
         })
         .unwrap();
         row_text(t.backend().buffer())
+    }
+
+    #[test]
+    fn story21_4_model_budget_keeps_whole_graphemes_and_state() {
+        let model = G.repeat(20);
+        let buffer = draw_minimal(60, &model, None, None, LogAwareness::Unseen(7));
+        let row = glyph_row(&buffer);
+        assert_eq!(geom::cells(&row), 60, "{row}");
+        assert_eq!(row.matches(G).count(), 15, "{row}");
+        assert!(row.contains(" [F] │ Normal │ Ready"), "{row}");
+        assert!(row.trim_end().ends_with("log: 7"), "{row}");
+        assert!(!row.contains("^X menu"), "{row}");
     }
 
     #[test]

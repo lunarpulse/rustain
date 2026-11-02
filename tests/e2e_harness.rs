@@ -16,7 +16,9 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Style;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::layout;
+use rustain::adapters::tui::presentation::{self, Shell};
 use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
@@ -243,6 +245,7 @@ impl TestHarness {
         let conv = &self.conversation;
         let streaming = &self.streaming;
         let theme = &self.theme;
+        let state = &self.state;
         let tab_render_state = &mut self.tab_render_state;
         let tool_states = &self.tool_block_states;
         let feedback = &self.feedback_blocks;
@@ -257,13 +260,16 @@ impl TestHarness {
         };
         let input_buffer = &self.state.input_buffer;
         let cursor_position = self.state.cursor_position;
-        let focus = self.state.focus.clone();
+        let focus = if state.modal_stack.is_empty() {
+            state.focus.clone()
+        } else {
+            FocusState::Chat
+        };
         let has_project_context = self.state.has_project_context;
         let total_content_height = self.state.total_content_height;
         let multiline_mode = self.state.multiline_mode;
         let input_scroll_offset = self.state.input_scroll_offset;
-        let msg_boundaries: Vec<usize> = vec![];
-        let viewport_height: u16 = 20; // approximate for status bar
+        let msg_boundaries = [];
 
         self.terminal
             .draw(|frame| {
@@ -271,6 +277,7 @@ impl TestHarness {
                 if let Some(app_layout) =
                     layout::compute_layout(area, theme, input_buffer, 1, false, DensityMode::Focus)
                 {
+                    let shell = Shell::new(area, &app_layout);
                     chat_pane::render(
                         frame,
                         app_layout.chat_pane,
@@ -282,44 +289,6 @@ impl TestHarness {
                         tab_render_state,
                         tool_states,
                         feedback,
-                    );
-
-                    status_bar::render(
-                        frame,
-                        app_layout.status_bar,
-                        "mock-model",
-                        None,
-                        status,
-                        theme,
-                        scroll_offset,
-                        &msg_boundaries,
-                        total_content_height,
-                        viewport_height,
-                        PermissionMode::Normal,
-                        None, // token_usage
-                        0,    // context_window
-                        has_project_context,
-                        None, // session_title
-                        multiline_mode,
-                        true,
-                        0,    // injected_tokens
-                        None, // current_hint
-                        0,
-                        None,
-                        None,
-                        None,
-                        false,
-                        None, // daily_budget (Story 7.5)
-                        None,
-                        DensityMode::Focus,
-                        false,
-                        None,
-                        rustain::adapters::tui::state::LogAwareness::Hidden,
-                        rustain::adapters::tui::widgets::status_bar::NoticeBadges {
-                            unseen: unseen_notices,
-                            decisions: decisions.len(),
-                            ..Default::default()
-                        },
                     );
 
                     input_box::render(
@@ -334,14 +303,64 @@ impl TestHarness {
                         None,
                     );
 
-                    // Story 21.1 S2: the interim decision pane paints over the chat pane.
-                    rustain::adapters::tui::decision_pane::render(
+                    presentation::compose(
                         frame,
-                        app_layout.chat_pane,
-                        decisions,
+                        state,
+                        &shell,
+                        Host::Local,
                         &pane_facts,
-                        theme,
+                        |frame| {
+                            // Keep the existing legacy pane painter beneath Log/Quit.
+                            rustain::adapters::tui::decision_pane::render(
+                                frame,
+                                app_layout.chat_pane,
+                                decisions,
+                                &pane_facts,
+                                theme,
+                            );
+                        },
+                        |frame| {
+                            status_bar::render(
+                                frame,
+                                app_layout.status_bar,
+                                "mock-model",
+                                None,
+                                status,
+                                theme,
+                                scroll_offset,
+                                &msg_boundaries,
+                                total_content_height,
+                                app_layout.chat_pane.height,
+                                PermissionMode::Normal,
+                                None, // token_usage
+                                0,    // context_window
+                                has_project_context,
+                                None, // session_title
+                                multiline_mode,
+                                true,
+                                0,    // injected_tokens
+                                None, // current_hint
+                                0,
+                                None,
+                                None,
+                                None,
+                                false,
+                                None, // daily_budget (Story 7.5)
+                                None,
+                                DensityMode::Focus,
+                                false,
+                                None,
+                                rustain::adapters::tui::state::LogAwareness::Hidden,
+                                rustain::adapters::tui::widgets::status_bar::NoticeBadges {
+                                    unseen: unseen_notices,
+                                    decisions: decisions.len(),
+                                    ..Default::default()
+                                },
+                            );
+                        },
                     );
+                } else {
+                    presentation::paint_too_small(frame, area);
                 }
             })
             .unwrap();
@@ -653,40 +672,41 @@ pub fn buffer_contains_styled_text(
 impl TestHarness {
     /// Assert that the status bar row contains `text`.
     ///
-    /// The status bar is positioned at `height - MIN_INPUT_HEIGHT - 1` (one row above the
-    /// input area). This formula is valid when the input buffer is empty, which is the
-    /// standard harness initial state. Tests that fill the input buffer before checking
-    /// the status bar must account for any extra input rows.
-    ///
-    /// A runtime check validates the computed row contains non-whitespace content; if it
-    /// does not, the layout may have changed and this offset needs revisiting.
+    /// Uses the same content-aware layout as `render`, including a full-height
+    /// composer. The status row must still be visible after composition.
     pub fn assert_status_bar_contains(&self, text: &str) {
         assert!(
             !text.is_empty(),
             "assert_status_bar_contains called with empty text — this always passes"
         );
-        let buf = self.terminal.backend().buffer().clone();
-        let height = buf.area.height;
-        let width = buf.area.width as usize;
-        // Status bar sits at height - MIN_INPUT_HEIGHT - 1 (= height - 4 for empty input).
-        let status_row = height.saturating_sub(layout::MIN_INPUT_HEIGHT + 1);
-
-        let row_start = status_row as usize * width;
+        let buf = self.terminal.backend().buffer();
+        let app_layout = layout::compute_layout(
+            buf.area,
+            &self.theme,
+            &self.state.input_buffer,
+            1,
+            false,
+            DensityMode::Focus,
+        )
+        .expect("assert_status_bar_contains requires a terminal of at least 60x16");
+        let status_row = app_layout.status_bar.y;
+        let width = usize::from(buf.area.width);
+        let row_start = usize::from(status_row - buf.area.y) * width;
         let row_end = (row_start + width).min(buf.content().len());
         let row_text: String = buf.content()[row_start..row_end]
             .iter()
             .map(|cell| cell.symbol().chars().next().unwrap_or(' '))
             .collect();
 
-        // Validate: the status bar row must contain non-whitespace content.
-        // If this assertion fires, the layout changed and the row offset needs updating.
+        // Composition must leave the layout's status row visible.
         assert!(
             !row_text.trim().is_empty(),
-            "assert_status_bar_contains: status row {} is blank — layout may have changed \
-             (terminal {}x{}). Recheck MIN_INPUT_HEIGHT offset.",
+            "assert_status_bar_contains: layout status row {} is blank after composition \
+             (terminal {}x{}, input area height {}).",
             status_row,
             buf.area.width,
-            height,
+            buf.area.height,
+            app_layout.input_area.height,
         );
 
         assert!(
@@ -860,6 +880,15 @@ fn test_buffer_contains_styled_text_never_spans_rows() {
 #[test]
 fn test_assert_status_bar_contains_finds_model() {
     let mut h = TestHarness::new();
+    h.render();
+    h.assert_status_bar_contains("mock-model");
+    h.assert_status_bar_contains("Normal");
+}
+
+#[test]
+fn test_assert_status_bar_contains_with_full_composer() {
+    let mut h = TestHarness::with_size(60, 16);
+    h.state.input_buffer = "1\n2\n3\n4\n5\n6\n7\n8".into();
     h.render();
     h.assert_status_bar_contains("mock-model");
     h.assert_status_bar_contains("Normal");

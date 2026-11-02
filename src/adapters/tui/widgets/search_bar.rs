@@ -23,7 +23,14 @@ const LABEL: &str = "Search: ";
 ///
 /// The layout caller must reserve the row via `compute_layout` (Task 2.3).
 /// This function is a no-op when `state.active == false`.
-pub fn render(frame: &mut Frame, area: Rect, state: &SearchState, theme: &Theme) {
+/// `show_cursor` controls only hardware cursor placement, not painted cells.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &SearchState,
+    theme: &Theme,
+    show_cursor: bool,
+) {
     if !state.active {
         return;
     }
@@ -73,7 +80,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &SearchState, theme: &Theme)
     // Place the text cursor at end of query ONLY in Typing sub-state.
     // In Navigating, the cursor is hidden to signal the mode change — `n`/`N`
     // are now live for navigation and typed characters return to Typing.
-    if state.substate == SearchSubstate::Typing {
+    if show_cursor && state.substate == SearchSubstate::Typing {
         let cursor_col = area.x + (label_cells + shown_cells) as u16;
         let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(1));
         frame.set_cursor_position((cursor_col, area.y));
@@ -235,7 +242,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         let theme = Theme::dark();
         terminal
-            .draw(|frame| render(frame, frame.area(), state, &theme))
+            .draw(|frame| render(frame, frame.area(), state, &theme, true))
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         let buffer = terminal.backend().buffer().clone();

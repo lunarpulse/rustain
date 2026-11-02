@@ -1,10 +1,10 @@
 //! Attached host key front door (Story 21.2 Task 5: AC6 / AC8 / AC12 / AC13).
 //!
 //! [`handle_attached_key`] is the one place `run_attached` sends EVERY key
-//! event. It keeps the pre-existing owner order (S-QUIT first, then S-LOG, then
-//! the new overlays, then the team-retract card, approvals, proposals, recipient
-//! surface, the peer card Tab and the inline decision cards) and adds what the
-//! attached client was missing:
+//! event. The shared presentation boundary owns S-QUIT, S-LOG and the minimum
+//! terminal size before the legacy overlays, team-retract card, approvals,
+//! proposals, recipient surface, peer card Tab and inline decision cards.
+//! The attached client also supports:
 //!
 //! * the untimed `Ctrl+X` leader with the complete A5 follow-up table,
 //! * `Esc` / `Ctrl+D` / `Ctrl+C` / `q` with their local meanings (none of them
@@ -56,11 +56,12 @@ use crate::adapters::tui::keymap::{
 use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
-use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitKeyOutcome, QuitRequest};
+use crate::adapters::tui::presentation::{self, RouteEffect};
+use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
 use crate::adapters::tui::state::{PendingConsolidationCard, TabRenderState, TuiState};
 use crate::adapters::tui::widgets::{
     autocomplete_popup, command_palette as command_palette_widget, help_overlay, input_box,
-    toast_layer, which_key_bar,
+    which_key_bar,
 };
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
@@ -351,32 +352,9 @@ fn is_ctrl(key: &KeyEvent, c: char) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(c)
 }
 
-/// Close every transient surface and restore its origin focus (quit and the
-/// `Ctrl+Q` path never leave a half-open overlay behind the decision frame).
-fn close_surfaces(state: &mut TuiState) {
-    if state.which_key.active {
-        state.focus = state.which_key.dismiss().unwrap_or(FocusState::Input);
-    }
-    if state.command_palette.active {
-        state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
-    }
-    if state.help_overlay.active {
-        state.focus = state.help_overlay.close();
-    }
-    if state.notification_log.is_some() {
-        notification_log::close(state);
-    }
-    state.needs_redraw = true;
-}
-
-/// True while a paste must not edit the draft: the decision frame or an overlay
-/// owns the keyboard.
+/// Legacy overlays still own paste outside the shared presentation boundary.
 pub(super) fn paste_blocked(state: &TuiState) -> bool {
-    state.quit_confirm.is_some()
-        || state.notification_log.is_some()
-        || state.command_palette.active
-        || state.which_key.active
-        || state.help_overlay.active
+    state.command_palette.active || state.which_key.active || state.help_overlay.active
 }
 
 /// The status-row hint for the attached client, generated from the registry
@@ -384,7 +362,7 @@ pub(super) fn paste_blocked(state: &TuiState) -> bool {
 /// and `[^X Enter] Send` while multi-line. The `^X menu` tail is painted by the
 /// status row itself, so it is not repeated here.
 pub(super) fn status_hint(state: &TuiState) -> Option<String> {
-    if state.recipient_surface.is_some() {
+    if !state.modal_stack.is_empty() || state.recipient_surface.is_some() {
         return None;
     }
     crate::adapters::tui::keymap::render_tips::attached_status_tip(
@@ -407,19 +385,15 @@ pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
     }
 }
 
-/// Paint the attached overlays above the base frame. Draw order: the toast
-/// layer (below every overlay), slash popup, the untimed which-key menu (above
-/// the status row), the palette, the help overlay, S-LOG, and S-QUIT last.
+/// Paint only the attached legacy surfaces; shared compose owns toasts, frames
+/// and status order until the remaining shared surfaces cut over in 4-A2.
 pub(super) fn paint_overlays(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    chat_pane: Rect,
     input_area: Rect,
     status_bar: Rect,
     state: &TuiState,
-    facts: &LogFacts,
 ) {
-    toast_layer::render(frame, chat_pane, &state.notifications, &state.theme, facts);
     let above_status = Rect::new(
         area.x,
         area.y,
@@ -450,18 +424,13 @@ pub(super) fn paint_overlays(
             state.multiplexer_detected,
         );
     }
-    if let Some(log) = &state.notification_log {
-        notification_log::render(
-            frame,
-            above_status,
-            log,
-            &state.notifications,
-            &state.theme,
-            facts,
-        );
-    }
-    if let Some(quit) = &state.quit_confirm {
-        quit_confirm::render(frame, area, quit, &state.theme);
+}
+
+/// Key and wheel ingress share the same owner boundary; paste stays borrowed.
+pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEffect> {
+    match convert_crossterm_event(event, &MouseConfig::default()) {
+        Some(event) => presentation::route(state, &event, Host::Attached, &LogFacts::default()),
+        None => presentation::route::blocks_paste(state).then_some(RouteEffect::Consumed),
     }
 }
 
@@ -469,7 +438,20 @@ pub(super) fn paint_overlays(
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
     let overlay_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state);
-    let flow = handle_attached_key_inner(ctx, key).await;
+    let routed = route_event(ctx.state, &Event::Key(key));
+    let flow = match routed {
+        Some(RouteEffect::Consumed) => KeyFlow::Continue,
+        Some(RouteEffect::QuitRequest) => request_quit(ctx),
+        Some(RouteEffect::QuitConfirmed) => KeyFlow::Quit,
+        Some(RouteEffect::Log(outcome)) => apply_log_outcome(ctx, outcome),
+        // Guarded quit is universal, including cards that consume every key.
+        None if command_in(Context::Global, overlay_key(&key))
+            == Some(CommandId::Global(GlobalCmd::QuitRequest)) =>
+        {
+            request_quit(ctx)
+        }
+        None => handle_attached_key_inner(ctx, key).await,
+    };
     if overlay_was_open
         && ctx.state.focus == FocusState::Input
         && !crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state)
@@ -501,26 +483,6 @@ fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
 async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crossterm::event::KeyEventKind;
 
-    // S-QUIT owns every key while its frame is open — before approvals,
-    // proposals, the retract cards or any surface (a stray `y` can never
-    // answer a card underneath).
-    if ctx.state.quit_confirm.is_some() {
-        return match quit_confirm::handle_raw_key(ctx.state, key) {
-            QuitKeyOutcome::Confirmed => KeyFlow::Quit,
-            QuitKeyOutcome::Cancelled | QuitKeyOutcome::Consumed => KeyFlow::Continue,
-        };
-    }
-    // Ctrl+Q is a quit request from any focus; with the leader open the shared
-    // leader step answers it (its own `QuitRequest` row), the same row the local
-    // host runs.
-    if is_ctrl(&key, 'q') && !ctx.state.which_key.active {
-        close_surfaces(ctx.state);
-        return request_quit(ctx);
-    }
-    // S-LOG owns every key while it is open (S-QUIT and Ctrl+Q above it).
-    if ctx.state.notification_log.is_some() {
-        return log_key(ctx, key);
-    }
     // A transient surface that is open owns the key until it closes.
     if ctx.state.which_key.active {
         return leader_key(ctx, key).await;
@@ -822,7 +784,6 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             ctx.state.needs_redraw = true;
         }
         CommandId::Global(GlobalCmd::QuitRequest) | CommandId::Overlay(OverlayCmd::QuitRequest) => {
-            close_surfaces(ctx.state);
             return request_quit(ctx);
         }
         CommandId::Input(InputCmd::OpenPalette) | CommandId::Chat(ChatCmd::OpenPalette) => {
@@ -1049,7 +1010,7 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
                 ctx.approvals.pending.len()
             },
     };
-    match quit_confirm::request(ctx.state, facts) {
+    match presentation::reducer::request_quit(ctx.state, facts) {
         QuitRequest::ExitNow => KeyFlow::Quit,
         QuitRequest::Confirming => KeyFlow::Continue,
     }
@@ -1131,8 +1092,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             }
         }
         LeaderCmd::Detach => return KeyFlow::Detach,
-        // The leader's own Ctrl+Q row (AC20a): the menu is closed above, the guarded
-        // quit request follows, exactly like the local host.
+        // The shared boundary intercepts Ctrl+Q before dismissing a legacy menu.
         LeaderCmd::QuitRequest => return request_quit(ctx),
         // Portable multiline send: the same path as Enter, exactly once.
         LeaderCmd::Send if origin == FocusState::Input => {
@@ -1168,6 +1128,9 @@ pub(super) fn attached_avail_ctx(state: &TuiState, read_only: bool) -> AvailCtx 
 
 /// The attached status row's rightmost tail (A10).
 pub(super) fn status_tail(state: &TuiState) -> StatusTail {
+    if !state.modal_stack.is_empty() {
+        return StatusTail::Hidden;
+    }
     if state.which_key.active {
         StatusTail::Pending(PendingPrefix::Leader)
     } else {
@@ -1175,12 +1138,10 @@ pub(super) fn status_tail(state: &TuiState) -> StatusTail {
     }
 }
 
-/// One key while S-LOG is open: the shared handler decides; a copy goes through
-/// the clipboard helper (its result is itself a notice). The attached client has
-/// no retry path, so `Retry` is never offered and never acted on.
-fn log_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    let facts = log_facts(&ctx.conversation.id);
-    match notification_log::handle_raw_key(ctx.state, key, &facts) {
+/// Apply the shared S-LOG boundary's host effects. The attached client has no
+/// retry path, so `Retry` is never offered or acted on.
+fn apply_log_outcome(ctx: &mut KeyCtx<'_>, outcome: LogOutcome) -> KeyFlow {
+    match outcome {
         LogOutcome::Copy(text) => {
             crate::adapters::tui::handlers::clipboard::notify_copy(
                 ctx.state,
@@ -2485,12 +2446,20 @@ mod tests {
         rig.esc().await;
         rig.ctrl('x').await;
         rig.ch('n').await;
-        assert!(paste_blocked(&rig.state), "S-LOG");
+        assert!(presentation::route::blocks_paste(&rig.state), "S-LOG");
+        assert!(
+            !paste_blocked(&rig.state),
+            "S-LOG is not a legacy paste owner"
+        );
         rig.esc().await;
         rig.ctrl('q').await; // idle: exits directly, no frame
         rig.type_text("draft").await;
         rig.ctrl('q').await;
-        assert!(paste_blocked(&rig.state), "S-QUIT");
+        assert!(presentation::route::blocks_paste(&rig.state), "S-QUIT");
+        assert!(
+            !paste_blocked(&rig.state),
+            "S-QUIT is not a legacy paste owner"
+        );
         rig.esc().await;
         assert!(!paste_blocked(&rig.state));
     }
@@ -3160,17 +3129,24 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                let chat_pane = Rect::new(0, 0, width, height - 5);
-                let input_area = Rect::new(0, height - 5, width, 4);
-                let status_bar = Rect::new(0, height - 1, width, 1);
-                paint_overlays(
-                    f,
+                let layout = crate::adapters::tui::layout::compute_layout(
                     area,
-                    chat_pane,
-                    input_area,
-                    status_bar,
+                    &state.theme,
+                    &state.input_buffer,
+                    1,
+                    false,
+                    crate::domain::models::visual::DensityMode::Focus,
+                )
+                .unwrap();
+                let shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
+                crate::adapters::tui::presentation::compose(
+                    f,
                     state,
+                    &shell,
+                    Host::Attached,
                     &log_facts("conversation-1"),
+                    |f| paint_overlays(f, area, layout.input_area, layout.status_bar, state),
+                    |_| {},
                 );
             })
             .unwrap();
@@ -3275,9 +3251,11 @@ mod tests {
         assert!(rig.input.is_empty());
         assert!(rig.frames().is_empty());
         assert!(rig.state.notification_log.is_some());
-        // Ctrl+Q closes the log first, then asks to quit (idle: exits directly).
+        // AC2/A18: even an idle exit leaves the interrupted Log untouched.
+        let log = rig.state.notification_log.clone();
         assert_eq!(rig.ctrl('q').await, KeyFlow::Quit);
-        assert!(rig.state.notification_log.is_none());
+        assert!(rig.state.notification_log.is_some());
+        assert_eq!(rig.state.notification_log, log);
     }
 
     #[tokio::test]
@@ -3588,7 +3566,11 @@ mod tests {
             assert!(rig.state.which_key.active, "{label}: leader open");
             let flow = rig.key(key).await;
             let posted = rig.state.notifications.records().len() - seeded;
-            assert!(!rig.state.which_key.active, "{label}: leader closed");
+            assert_eq!(
+                rig.state.which_key.active,
+                cmd == LeaderCmd::QuitRequest,
+                "{label}: AC2/A18 retains only the Quit caller's pending leader"
+            );
             let expected_flow = if cmd == LeaderCmd::Detach {
                 KeyFlow::Detach
             } else {
@@ -3670,6 +3652,8 @@ mod tests {
                 LeaderCmd::QuitRequest => {
                     assert!(rig.state.quit_confirm.is_some(), "{label}: asks first");
                     assert!(rig.frames().is_empty(), "{label}: nothing is interrupted");
+                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::WhichKey));
+                    assert_eq!(rig.state.which_key.previous_focus, Some(FocusState::Input));
                 }
             }
             ran += 1;
@@ -3975,18 +3959,32 @@ mod tests {
         assert_eq!(warnings(&rig), first, "no repeat in the same generation");
     }
 
-    /// AC20a (attached leg): Ctrl+Q with the leader open closes it and asks the
-    /// guarded quit question, exactly like the local host: never a no-binding toast.
+    /// AC20a, amended by 21-4 AC2/A18: Ctrl+Q asks without closing the leader;
+    /// Cancel returns to the same pending sequence, never a no-binding toast.
     #[tokio::test]
     async fn story21_3_attached_ctrl_q_with_the_leader_open_asks_to_quit() {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('x').await;
+        let focus = rig.state.focus.clone();
+        let previous_focus = rig.state.which_key.previous_focus.clone();
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
-        assert!(!rig.state.which_key.active, "the leader is closed");
+        assert!(
+            rig.state.which_key.active,
+            "the leader stays underneath Quit"
+        );
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
         assert_eq!(rig.state.notifications.records().len(), 0, "no toast");
         assert_eq!(rig.input, "draft");
         assert!(rig.frames().is_empty());
+        rig.esc().await;
+        assert!(rig.state.which_key.active, "Cancel restores the leader");
+        assert_eq!(rig.state.focus, focus);
+        assert_eq!(rig.state.which_key.previous_focus, previous_focus);
+        rig.ch('?').await;
+        assert!(
+            rig.state.help_overlay.active,
+            "the pending sequence still runs"
+        );
         // Idle and clean: the same keys leave the client.
         let mut rig = Rig::at(FocusState::Input, "");
         rig.ctrl('x').await;
@@ -4197,7 +4195,8 @@ mod tests {
             (Key::Char('j'), at("6")), (Key::Down, at("6")), (Key::Char('k'), at("4")), (Key::Up, at("4")),
             (Key::Char('G'), at("bottom")), (Key::Char('g'), at("0")),
             (Key::Char('?'), closed(false)), (Key::Esc, closed(false)), (Key::Ctrl('c'), closed(false)),
-            (Key::Ctrl('q'), closed(true)),
+            // AC2/A18: the exact Help caller survives underneath Quit.
+            (Key::Ctrl('q'), "Continue | help=true scroll=5 quit=true focus=Overlay(Help) input=draft".to_owned()),
         ];
         let open = |k| std::future::ready(help_rig(k));
         witness_rows(Context::Help, open, help_digest, &cases).await;
@@ -4232,7 +4231,9 @@ mod tests {
             (Key::Up, open(0, "", false)), (Key::Down, open(2, "", false)),
             (Key::Enter, closed(true, false)), // "ml" is the first entry: toggles multiline, draft untouched
             (Key::Esc, closed(false, false)), (Key::Ctrl('c'), closed(false, false)),
-            (Key::Backspace, open(0, "m", false)), (Key::Ctrl('q'), closed(false, true)),
+            (Key::Backspace, open(0, "m", false)),
+            // AC2/A18: selection and filter survive underneath Quit.
+            (Key::Ctrl('q'), "Continue | palette=true sel=1 filter= ml=false quit=true focus=Overlay(CommandPalette) input=draft".to_owned()),
         ];
         witness_rows(Context::CommandPalette, palette_rig, palette_digest, &cases).await;
         // Plain printable keys type into the filter (allowed); Tab and every modified key are inert.
@@ -4281,6 +4282,7 @@ mod tests {
             (Key::Tab, shut("/clear")), (Key::Enter, shut("/clear")), // sends nothing: the popup consumed it
             (Key::Esc, shut("")), (Key::Ctrl('c'), shut("")),
             (Key::Backspace, shut("")), // at the trigger the `/` goes with the popup
+            (Key::Ctrl('q'), "Continue | popup=true sel=0 filter= quit=true focus=Input input=/".into()),
         ];
         witness_rows(Context::Autocomplete, slash_rig, slash_digest, &cases).await;
         // Inside the filter Backspace only deletes the last filter character.
@@ -4348,7 +4350,9 @@ mod tests {
         let on = |sel: &str, detail: bool, archived: u8, records: u8, clip: bool| format!("Continue | log=true sel={sel} detail={detail} scroll=0 archived={archived} records={records} clip={clip} quit=false focus=Input input=draft");
         let off = |quit: bool| format!("Continue | log=false sel=- detail=false scroll=0 archived=0 records=2 clip=false quit={quit} focus=Input input=draft");
         let cases = [
-            (Key::Esc, off(false)), (Key::Ctrl('c'), off(false)), (Key::Ctrl('q'), off(true)),
+            (Key::Esc, off(false)), (Key::Ctrl('c'), off(false)),
+            // AC2/A18: Quit is pushed without resetting the selected Log record.
+            (Key::Ctrl('q'), "Continue | log=true sel=second detail=false scroll=0 archived=0 records=2 clip=false quit=true focus=Input input=draft".to_owned()),
             (Key::Char('j'), on("first", false, 0, 2, false)), (Key::Down, on("first", false, 0, 2, false)),
             (Key::Char('k'), on("second", false, 0, 2, false)), (Key::Up, on("second", false, 0, 2, false)),
             (Key::Enter, on("second", true, 0, 2, false)),
@@ -4563,32 +4567,548 @@ mod tests {
         }
     }
 
-    /// K9 (attached twin): Ctrl+Q in the open palette and in S-LOG closes it and asks the
-    /// guarded quit question (the rows are `Both`; the log handler itself answers `Quit`).
+    /// K9, amended by 21-4 AC2/A18: Ctrl+Q retains the palette and S-LOG
+    /// underneath Quit; their state is restored exactly when Quit is cancelled.
     #[tokio::test]
     async fn story21_3_attached_k9_ctrl_q_in_palette_and_log_asks_to_quit() {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('p').await;
         assert!(rig.state.command_palette.active);
+        let palette = palette_digest(&rig);
+        let previous_focus = rig.state.command_palette.previous_focus.clone();
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
-        assert!(!rig.state.command_palette.active);
+        assert!(rig.state.command_palette.active);
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+        rig.esc().await;
+        assert_eq!(palette_digest(&rig), palette);
+        assert_eq!(rig.state.command_palette.previous_focus, previous_focus);
         let mut idle = Rig::at(FocusState::Input, "");
         idle.ctrl('p').await;
         assert_eq!(idle.ctrl('q').await, KeyFlow::Quit);
 
         let mut rig = log_rig(Key::Ctrl('q')).await;
+        let log = rig.state.notification_log.clone();
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
-        assert!(rig.state.notification_log.is_none());
+        assert!(rig.state.notification_log.is_some());
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
+        rig.ch('n').await;
+        assert_eq!(rig.state.notification_log, log);
 
         let mut rig = log_rig(Key::Ctrl('q')).await;
         let ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         let outcome = notification_log::handle_raw_key(&mut rig.state, ctrl_q, &log_facts("c"));
         assert_eq!(outcome, LogOutcome::Quit);
         assert!(
-            rig.state.notification_log.is_none(),
-            "the handler closes the log"
+            rig.state.notification_log.is_some(),
+            "AC2/A18: requesting Quit does not close the log"
         );
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_ctrl_q_over_team_retract_preserves_card() {
+        let mut rig = Rig::at(FocusState::Input, "retained draft");
+        crate::adapters::tui::handlers::team_command::open_team_retract_card(
+            &mut rig.state,
+            "daemon-attachment",
+            crate::domain::events::TeamRetractPreview::Card(
+                crate::domain::events::TeamRetractCard {
+                    peer: "peer-a".into(),
+                    item_id: "item-a".into(),
+                    task: Some("task-a".into()),
+                    body: "Retraction still needs its own answer".into(),
+                    armed: true,
+                },
+            ),
+        );
+        rig.team_requests.open_retract = Some("retract-a".into());
+        let before = (
+            format!("{:?}", rig.state.pending_team_retract),
+            rig.state.focus.clone(),
+            rig.input.clone(),
+        );
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+        assert!(presentation::is_open(
+            &rig.state,
+            presentation::Surface::QuitConfirm
+        ));
+        assert_eq!(rig.state.modal_stack.len(), 1);
+        assert_eq!(
+            (
+                format!("{:?}", rig.state.pending_team_retract),
+                rig.state.focus.clone(),
+                rig.input.clone()
+            ),
+            before
+        );
+        rig.ch('n').await;
+        assert!(rig.state.modal_stack.is_empty());
+        assert_eq!(
+            (
+                format!("{:?}", rig.state.pending_team_retract),
+                rig.state.focus.clone(),
+                rig.input.clone()
+            ),
+            before
+        );
+        assert_eq!(rig.team_requests.open_retract.as_deref(), Some("retract-a"));
+        assert!(
+            rig.frames().is_empty(),
+            "Quit never decides or interrupts the card"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_only_the_top_frame_receives_keys() {
+        for quit in [false, true] {
+            for key in Key::universe() {
+                let mut rig = Rig::at(FocusState::Input, "unchanged draft");
+                rig.ctrl('x').await;
+                rig.ch('n').await;
+                if quit {
+                    rig.ctrl('q').await;
+                }
+                let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
+                let flow = rig.key(key).await;
+                assert_eq!(
+                    (rig.input.clone(), rig.scroll_offset, rig.auto_scroll),
+                    before,
+                    "quit={quit} key={key:?}: {flow:?}"
+                );
+                assert!(
+                    rig.frames().is_empty(),
+                    "quit={quit} key={key:?}: no card/interrupt frame"
+                );
+                assert!(!matches!(flow, KeyFlow::Detach));
+            }
+        }
+        let mut base = Rig::at(FocusState::Input, "");
+        base.ch('y').await;
+        assert_eq!(
+            base.input, "y",
+            "positive control: base keys still reach Input"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_quit_cancel_restores_log_and_legacy_help() {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        let log = rig.state.notification_log.clone();
+        rig.ctrl('q').await;
+        rig.ch('n').await;
+        assert_eq!(
+            rig.state.notification_log, log,
+            "Quit must not close/reset Log"
+        );
+        rig.esc().await;
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        rig.state.help_overlay.scroll_offset = 7;
+        let focus = rig.state.focus.clone();
+        rig.ctrl('q').await;
+        rig.ch('n').await;
+        assert!(rig.state.help_overlay.active);
+        assert_eq!(rig.state.help_overlay.scroll_offset, 7);
+        assert_eq!(rig.state.focus, focus);
+        assert_eq!(rig.input, "draft");
+        assert!(rig.frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_tiny_keys_and_paste_never_answer_or_edit() {
+        let mut rig = Rig::at(FocusState::Input, "");
+        rig.approval_arrives("tiny-terminal");
+        rig.paint_approvals();
+        rig.state.terminal_width = 59;
+        for key in [Key::Char('y'), Key::Ctrl('c'), Key::Ctrl('q')] {
+            assert_eq!(rig.key(key).await, KeyFlow::Continue);
+            assert!(
+                rig.frames().is_empty(),
+                "{key:?}: no response or interrupt below minimum"
+            );
+        }
+        super::super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
+        assert!(rig.input.is_empty());
+        assert_eq!(rig.approvals.pending.len(), 1);
+        rig.state.terminal_width = 80;
+        rig.ch('y').await;
+        assert!(
+            matches!(
+                rig.frames().as_slice(),
+                [ClientFrame::ApprovalResponse { .. }]
+            ),
+            "positive control: the visible permission answers at 80x24"
+        );
+    }
+
+    /// AC2/A18: quit cancellation preserves the complete legacy slash popup,
+    /// including its rollback, so the next Esc still restores the original draft.
+    #[tokio::test]
+    async fn story21_4_attached_quit_cancel_restores_legacy_popup_payload() {
+        for cancel in [Key::Esc, Key::Ctrl('c'), Key::Enter, Key::Char('n')] {
+            let mut rig = Rig::at(FocusState::Input, "");
+            rig.type_text("/te").await;
+            let snapshot = |rig: &Rig| {
+                let popup = &rig.state.autocomplete;
+                (
+                    popup.active,
+                    popup.kind,
+                    popup.trigger_position,
+                    popup.filter_text.clone(),
+                    popup.suggestions.clone(),
+                    popup.selected_index,
+                    popup.scroll_offset,
+                    popup.slash_rollback.clone(),
+                )
+            };
+            let before = snapshot(&rig);
+            assert!(before.0);
+            assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+            assert!(rig.state.quit_confirm.is_some());
+            assert_eq!(snapshot(&rig), before, "Quit must not dismiss the popup");
+            assert_eq!(rig.key(cancel).await, KeyFlow::Continue);
+            assert!(rig.state.quit_confirm.is_none());
+            assert_eq!(
+                snapshot(&rig),
+                before,
+                "{cancel:?}: exact popup restoration"
+            );
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert_eq!(rig.input, "/te");
+            assert!(rig.frames().is_empty());
+            rig.esc().await;
+            assert!(!rig.state.autocomplete.active);
+            assert!(
+                rig.input.is_empty(),
+                "the original slash rollback still works"
+            );
+        }
+    }
+
+    /// A17 covers either undersized dimension and every key, with or without a
+    /// migrated frame. Blocked paste leaves the existing borrowed draft in place.
+    #[tokio::test]
+    async fn story21_4_attached_both_tiny_dimensions_block_all_key_and_paste_ingress() {
+        for (width, height) in [(59, 24), (80, 15)] {
+            for surface in [None, Some('n'), Some('q')] {
+                let mut rig = Rig::at(FocusState::Input, "draft");
+                match surface {
+                    Some('n') => {
+                        rig.ctrl('x').await;
+                        rig.ch('n').await;
+                    }
+                    Some('q') => {
+                        rig.ctrl('q').await;
+                    }
+                    _ => {}
+                }
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                let before = salient(&rig);
+                let log = rig.state.notification_log.clone();
+                for key in Key::universe() {
+                    assert_eq!(
+                        rig.key(key).await,
+                        KeyFlow::Continue,
+                        "{width}x{height}: {key:?}"
+                    );
+                    assert_eq!(salient(&rig), before, "{width}x{height}: {key:?}");
+                    assert_eq!(rig.state.notification_log, log);
+                    assert!(rig.frames().is_empty());
+                }
+                let allocation = (rig.input.as_ptr(), rig.input.capacity());
+                super::super::handle_attached_paste(
+                    &mut rig.state,
+                    &mut rig.input,
+                    "hidden paste",
+                    false,
+                );
+                assert_eq!(salient(&rig), before);
+                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
+            }
+        }
+        let mut visible = Rig::at(FocusState::Input, "");
+        super::super::handle_attached_paste(
+            &mut visible.state,
+            &mut visible.input,
+            "visible paste",
+            false,
+        );
+        assert_eq!(
+            visible.input, "visible paste",
+            "normal-size base paste still edits"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_hints_and_wheel_follow_the_frame_owner() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        let wheel = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: 1,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let mut rig = Rig::at(FocusState::Chat, "draft");
+        let hint = status_hint(&rig.state);
+        assert!(hint.is_some());
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+        ] {
+            assert_eq!(route_event(&mut rig.state, &wheel(kind)), None);
+        }
+        rig.ctrl('x').await;
+        rig.ch('n').await;
+        assert_eq!(status_hint(&rig.state), None);
+        assert_eq!(status_tail(&rig.state), StatusTail::Hidden);
+        for kind in [
+            MouseEventKind::ScrollUp,
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollLeft,
+        ] {
+            assert_eq!(
+                route_event(&mut rig.state, &wheel(kind)),
+                Some(RouteEffect::Consumed)
+            );
+        }
+        rig.ctrl('q').await;
+        assert_eq!(status_hint(&rig.state), None);
+        assert_eq!(status_tail(&rig.state), StatusTail::Hidden);
+        rig.ch('n').await;
+        rig.esc().await;
+        assert_eq!(status_hint(&rig.state), hint);
+        assert_eq!(status_tail(&rig.state), StatusTail::Menu);
+        for (width, height) in [(59, 24), (80, 15)] {
+            rig.state.terminal_width = width;
+            rig.state.terminal_height = height;
+            assert_eq!(
+                route_event(&mut rig.state, &wheel(MouseEventKind::ScrollUp)),
+                Some(RouteEffect::Consumed)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_real_compose_preserves_shell_cursor_and_fitted_rows() {
+        use crate::adapters::tui::{
+            layout::compute_layout,
+            presentation::{Shell, geometry},
+        };
+        use crate::domain::models::visual::DensityMode;
+        use ratatui::widgets::Paragraph;
+        use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Modifier};
+        let row = |buffer: &Buffer, rect: Rect, y| -> String {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        };
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            for full in [false, true] {
+                for route in ["log", "quit", "log-quit", "legacy-help-quit"] {
+                    let draft = if full {
+                        ["draft"; 8].join("\n")
+                    } else {
+                        String::new()
+                    };
+                    let mut rig = Rig::at(FocusState::Input, &draft);
+                    rig.state.terminal_width = width;
+                    rig.state.terminal_height = height;
+                    rig.streaming.is_streaming = true;
+                    notifications::notify(
+                        &mut rig.state,
+                        NoticeSource::System,
+                        NoticeSeverity::Info,
+                        "body-witness",
+                    );
+                    let draw = |rig: &Rig, title: Option<&str>| {
+                        let state = &rig.state;
+                        let display = attached_display_input(state, &rig.input);
+                        let area = Rect::new(0, 0, width, height);
+                        let layout = compute_layout(
+                            area,
+                            &state.theme,
+                            display,
+                            1,
+                            false,
+                            DensityMode::Focus,
+                        )
+                        .unwrap();
+                        assert_eq!(layout.input_area.height, if full { 10 } else { 3 });
+                        assert!(layout.sidebar.is_none());
+                        let shell = Shell::new(area, &layout);
+                        assert_eq!(shell.region.bottom(), layout.chat_pane.bottom());
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal
+                            .draw(|frame| {
+                                super::super::render_attached_composer(
+                                    frame,
+                                    layout.input_area,
+                                    display,
+                                    if state.modal_stack.is_empty() {
+                                        state.focus.clone()
+                                    } else {
+                                        FocusState::Chat
+                                    },
+                                    &state.theme,
+                                    state.multiline_mode,
+                                    None,
+                                );
+                                frame.render_widget(
+                                    Paragraph::new("status-row-sentinel"),
+                                    layout.status_bar,
+                                );
+                                presentation::compose(
+                                    frame,
+                                    state,
+                                    &shell,
+                                    Host::Attached,
+                                    &log_facts(&rig.conversation.id),
+                                    |frame| {
+                                        paint_overlays(
+                                            frame,
+                                            area,
+                                            layout.input_area,
+                                            layout.status_bar,
+                                            state,
+                                        )
+                                    },
+                                    |frame| {
+                                        let buffer = frame.buffer_mut();
+                                        if !state.help_overlay.active {
+                                            assert!(
+                                                row(buffer, layout.status_bar, layout.status_bar.y)
+                                                    .starts_with("status-row-sentinel")
+                                            );
+                                        }
+                                        if let Some(title) = title {
+                                            let rect = geometry::frame_rect(shell.region);
+                                            assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
+                                            assert_eq!(
+                                                buffer[(rect.right() - 1, rect.bottom() - 1)]
+                                                    .symbol(),
+                                                "┘"
+                                            );
+                                            assert!(row(buffer, rect, rect.y).contains(title));
+                                            let quit = route != "log";
+                                            let header = if quit {
+                                                "Leave this attached client?"
+                                            } else {
+                                                "Notifications (1)"
+                                            };
+                                            let body =
+                                                if quit { "Daemon work" } else { "body-witness" };
+                                            let footer = if quit { "Stay" } else { "Close" };
+                                            assert!(row(buffer, rect, rect.y + 1).contains(header));
+                                            assert!(row(buffer, rect, rect.y + 2).contains(body));
+                                            let footer_y = (rect.y + 2..rect.bottom() - 1)
+                                                .find(|&y| row(buffer, rect, y).contains(footer))
+                                                .expect("fitted footer");
+                                            if width == 60 && height == 16 && full {
+                                                assert_eq!(rect, Rect::new(0, 0, 60, 5));
+                                                assert_eq!(footer_y, rect.y + 3);
+                                            } else {
+                                                assert!(
+                                                    footer_y < rect.bottom() - 2,
+                                                    "footer must not bottom-anchor"
+                                                );
+                                            }
+                                        }
+                                        frame.render_widget(
+                                            ratatui::widgets::Clear,
+                                            layout.status_bar,
+                                        );
+                                        frame.render_widget(
+                                            Paragraph::new("Ready/status-sentinel"),
+                                            layout.status_bar,
+                                        );
+                                    },
+                                );
+                            })
+                            .unwrap();
+                        assert_eq!(terminal.backend().cursor_visible(), title.is_none());
+                        (terminal, layout)
+                    };
+                    let (bare, before) = draw(&rig, None);
+                    if route == "legacy-help-quit" {
+                        rig.ctrl('x').await;
+                        rig.ch('?').await;
+                        rig.state.help_overlay.scroll_offset = 7;
+                    } else if route != "quit" {
+                        rig.ctrl('x').await;
+                        rig.ch('n').await;
+                    }
+                    let legacy = (
+                        rig.state.focus.clone(),
+                        rig.state.help_overlay.active,
+                        rig.state.help_overlay.scroll_offset,
+                    );
+                    let log = rig.state.notification_log.clone();
+                    if route != "log" {
+                        assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
+                    }
+                    let title = match route {
+                        "log" => "System · Notifications",
+                        "log-quit" => "System · Notifications › System · Quit",
+                        _ => "System · Quit",
+                    };
+                    assert!(presentation::consistent(&rig.state));
+                    assert_eq!(
+                        (
+                            rig.state.focus.clone(),
+                            rig.state.help_overlay.active,
+                            rig.state.help_overlay.scroll_offset
+                        ),
+                        legacy
+                    );
+                    assert_eq!(rig.input, draft);
+                    let (painted, after) = draw(&rig, Some(title));
+                    assert_eq!(
+                        (before.chat_pane, before.input_area, before.status_bar),
+                        (after.chat_pane, after.input_area, after.status_bar)
+                    );
+                    let buffer = painted.backend().buffer();
+                    for x in after.status_bar.x..after.status_bar.right() {
+                        assert_eq!(
+                            buffer[(x, after.status_bar.y)],
+                            bare.backend().buffer()[(x, before.status_bar.y)]
+                        );
+                    }
+                    assert!(
+                        row(buffer, after.status_bar, after.status_bar.y)
+                            .starts_with("Ready/status-sentinel")
+                    );
+                    for y in after.input_area.y..after.input_area.bottom() {
+                        for x in after.input_area.x..after.input_area.right() {
+                            assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+                        }
+                    }
+                    if route != "log" {
+                        rig.ch('n').await;
+                    }
+                    assert_eq!(rig.state.notification_log, log);
+                    assert_eq!(
+                        (
+                            rig.state.focus.clone(),
+                            rig.state.help_overlay.active,
+                            rig.state.help_overlay.scroll_offset
+                        ),
+                        legacy
+                    );
+                    assert!(
+                        !rig.state.command_palette.active
+                            && !rig.state.which_key.active
+                            && !rig.state.autocomplete.active
+                    );
+                    assert_eq!(rig.input, draft);
+                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                    assert!(presentation::consistent(&rig.state));
+                }
+            }
+        }
     }
 }

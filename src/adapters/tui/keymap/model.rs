@@ -528,8 +528,8 @@ impl Context {
     /// Declared parents, nearest first.
     pub const fn parents(self) -> &'static [Context] {
         match self {
-            // The Search and Bookmark overlays consume every special key, `Ctrl+X`
-            // and `Ctrl+Q` included (`app::ctrl_x_opens_leader`): no Global parent.
+            // Search and Bookmark consume Ctrl+X: no Global parent. Their own
+            // Ctrl+Q rows ask to quit without discarding their legacy state.
             Context::Global
             | Context::Leader
             | Context::Permission
