@@ -2,6 +2,7 @@
 use super::keymap_support::press;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::keymap::Key;
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::{notification_log, quit_confirm};
@@ -40,10 +41,23 @@ fn request_permission(state: &mut TuiState) -> RequestId {
 
 #[test]
 fn only_the_top_frame_receives_keys() {
-    for quit in [false, true] {
+    for surface in [
+        Surface::NotificationLog,
+        Surface::Help,
+        Surface::CommandPalette,
+        Surface::QuitConfirm,
+    ] {
         for key in Key::universe() {
             let mut state = log();
-            if quit {
+            if matches!(surface, Surface::Help | Surface::CommandPalette) {
+                press(&mut state, Key::Ctrl('x'));
+                press(&mut state, Key::Char('?'));
+                state.help_overlay.scroll_offset = 7;
+            }
+            if surface == Surface::CommandPalette {
+                press(&mut state, Key::Ctrl('p'));
+            }
+            if surface == Surface::QuitConfirm {
                 quit_confirm::request(
                     &mut state,
                     QuitFacts {
@@ -56,7 +70,7 @@ fn only_the_top_frame_receives_keys() {
                 state.input_buffer.clone(),
                 state.cursor_position,
                 state.scroll_offset(),
-                state.help_overlay.scroll_offset,
+                (surface != Surface::Help).then_some(state.help_overlay.scroll_offset),
             );
             let action = press(&mut state, key);
             assert!(
@@ -67,17 +81,17 @@ fn only_the_top_frame_receives_keys() {
                         | InputAction::PermissionDeny
                         | InputAction::MouseScroll(_)
                 ),
-                "quit={quit} key={key:?}: {action:?}"
+                "surface={surface:?} key={key:?}: {action:?}"
             );
             assert_eq!(
                 (
                     state.input_buffer.clone(),
                     state.cursor_position,
                     state.scroll_offset(),
-                    state.help_overlay.scroll_offset
+                    (surface != Surface::Help).then_some(state.help_overlay.scroll_offset)
                 ),
                 before,
-                "quit={quit} key={key:?}: {action:?}"
+                "surface={surface:?} key={key:?}: {action:?}"
             );
         }
         for event in [
@@ -86,7 +100,14 @@ fn only_the_top_frame_receives_keys() {
             DomainInputEvent::MouseScroll(ScrollDelta::WheelUp(2)),
         ] {
             let mut state = log();
-            if quit {
+            if matches!(surface, Surface::Help | Surface::CommandPalette) {
+                press(&mut state, Key::Ctrl('x'));
+                press(&mut state, Key::Char('?'));
+            }
+            if surface == Surface::CommandPalette {
+                press(&mut state, Key::Ctrl('p'));
+            }
+            if surface == Surface::QuitConfirm {
                 quit_confirm::request(
                     &mut state,
                     QuitFacts {
@@ -134,7 +155,7 @@ fn tiny_terminal_consumes_every_user_ingress_but_resize_recovers() {
 }
 
 #[test]
-fn quit_cancel_returns_to_the_same_log_and_legacy_help() {
+fn quit_cancel_returns_to_the_same_log_and_help() {
     let mut state = log();
     let saved = state.notification_log.clone();
     assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
@@ -161,7 +182,7 @@ fn quit_cancel_returns_to_the_same_log_and_legacy_help() {
         },
     );
     press(&mut state, Key::Char('n'));
-    assert!(state.help_overlay.active);
+    assert!(presentation::is_open(&state, Surface::Help));
     assert_eq!(state.help_overlay.scroll_offset, 7);
     assert_eq!(state.focus, focus);
 }
@@ -229,6 +250,7 @@ fn frame_owned_hints_hide_and_restore_the_underlying_context() {
             state.theme.timing.status_hint_fade_sessions,
             state.is_vscode,
             &state.modal_stack,
+            state.pending_leader,
         )
     }
     for origin in ["log", "base", "leader", "palette"] {
@@ -242,7 +264,7 @@ fn frame_owned_hints_hide_and_restore_the_underlying_context() {
         let before_hint = hint(&state);
         state.current_hint = before_hint.clone(); // The runtime's normal refresh before this key.
         let before_tail = rustain::adapters::tui::app::status_tail(&state);
-        assert!(before_hint.is_some());
+        assert_eq!(before_hint.is_some(), origin != "palette");
         if origin == "log" {
             press(&mut state, Key::Ctrl('x'));
             press(&mut state, Key::Char('n'));
@@ -262,7 +284,11 @@ fn frame_owned_hints_hide_and_restore_the_underlying_context() {
         );
         assert_eq!(
             rustain::adapters::tui::app::status_tail(&state),
-            rustain::adapters::tui::keymap::render::StatusTail::Hidden
+            if origin == "log" {
+                rustain::adapters::tui::keymap::render::StatusTail::Menu
+            } else {
+                rustain::adapters::tui::keymap::render::StatusTail::Hidden
+            }
         );
         if origin == "log" {
             assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
@@ -305,6 +331,227 @@ fn frame_owned_hints_hide_and_restore_the_underlying_context() {
         assert_eq!(
             rustain::adapters::tui::app::status_tail(&state),
             before_tail
+        );
+    }
+}
+
+#[test]
+fn story21_4_a2a_help_palette_leader_preserve_the_frame_caller() {
+    let mut state = TuiState::new(130, 30);
+    state.input_buffer = "retained".into();
+    state.cursor_position = 3;
+    press(&mut state, Key::Ctrl('p'));
+    state.command_palette.filter_text = "mo".into();
+    press(&mut state, Key::Ctrl('x'));
+    press(&mut state, Key::Char('?'));
+    press(&mut state, Key::Char('j'));
+    press(&mut state, Key::Ctrl('x'));
+    press(&mut state, Key::Char('n'));
+    assert_eq!(state.modal_stack.len(), 3, "palette / Help / Log");
+    let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+    super::k3_compose::open_quit(&mut state);
+    assert_eq!(state.modal_stack.len(), 4, "Quit is the fourth live frame");
+    press(&mut state, Key::Char('n'));
+    assert_eq!(
+        state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+        frames
+    );
+    assert!(frames.windows(2).all(|w| w[0].id < w[1].id));
+    press(&mut state, Key::Esc);
+    assert_eq!(state.modal_stack.len(), 2);
+    assert_eq!(state.help_overlay.scroll_offset, 1);
+    press(&mut state, Key::Esc);
+    assert_eq!(state.modal_stack.len(), 1);
+    assert_eq!(state.command_palette.filter_text, "mo");
+    press(&mut state, Key::Esc);
+    assert!(state.modal_stack.is_empty());
+    assert_eq!(state.input_buffer, "retained");
+    assert_eq!(state.cursor_position, 3);
+    assert_eq!(state.focus, rustain::domain::models::FocusState::Input);
+}
+
+#[test]
+fn reopening_help_truncates_without_resetting_its_payload() {
+    let mut state = TuiState::new(130, 30);
+    for key in [
+        Key::Ctrl('p'),
+        Key::Ctrl('x'),
+        Key::Char('?'),
+        Key::Char('j'),
+    ] {
+        press(&mut state, key);
+    }
+    let help = state.modal_stack.top().cloned();
+    for key in [
+        Key::Ctrl('x'),
+        Key::Char('n'),
+        Key::Ctrl('x'),
+        Key::Char('?'),
+    ] {
+        press(&mut state, key);
+    }
+    assert_eq!(state.modal_stack.len(), 2);
+    assert_eq!(state.modal_stack.top(), help.as_ref());
+    assert_eq!(state.help_overlay.scroll_offset, 1);
+    assert!(rustain::adapters::tui::presentation::consistent(&state));
+}
+
+#[test]
+fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchanged() {
+    use rustain::adapters::tui::{
+        keymap::table::CLOSE_WINDOW_FIRST,
+        presentation::{self, Surface},
+    };
+    use rustain::domain::models::{
+        palette::{PaletteAction, PaletteEntry, PaletteScope},
+        visual::PanelType,
+    };
+    let mut targets = vec![
+        (
+            PaletteAction::OpenPanel(PanelType::History),
+            InputAction::OpenPanel(PanelType::History),
+        ),
+        (
+            PaletteAction::SwitchModel {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            InputAction::SwitchModelProvider {
+                provider_id: Some("provider".into()),
+                model_id: "model".into(),
+            },
+        ),
+        (
+            PaletteAction::SwitchProfile("profile".into()),
+            InputAction::ProfileSwitchRequested("profile".into()),
+        ),
+        (
+            PaletteAction::DeleteAllConversations,
+            InputAction::DeleteAllConversations,
+        ),
+        (
+            PaletteAction::PasteImageFromClipboard,
+            InputAction::RequestClipboardPaste,
+        ),
+    ];
+    for panel in [
+        PanelType::Tasks,
+        PanelType::Agents,
+        PanelType::Adapters,
+        PanelType::TransparencyLog,
+        PanelType::Room,
+        PanelType::Artifacts,
+    ] {
+        targets.push((
+            PaletteAction::OpenPanel(panel),
+            InputAction::OpenPanel(panel),
+        ));
+    }
+    for name in ["login", "logout", "accounts", "models", "room", "artifacts"] {
+        targets.push((
+            PaletteAction::ExecuteCommand(name.into(), None),
+            InputAction::ExecuteCommand {
+                name: name.into(),
+                args: None,
+            },
+        ));
+    }
+    for (name, args) in [
+        ("retract-auto", "peer-response-id"),
+        ("team", "view peer"),
+        ("team", "retract peer"),
+        ("artifact", "apply id"),
+        ("artifact", "resolve id"),
+        ("peer", "add peer"),
+        ("peer", "reach refresh peer"),
+        ("fanout", "task"),
+        ("memory", "forget id"),
+        ("extension-without-policy", "anything"),
+        ("mode", "unclassified-argument"),
+    ] {
+        targets.push((
+            PaletteAction::ExecuteCommand(name.into(), Some(args.into())),
+            InputAction::ExecuteCommand {
+                name: name.into(),
+                args: Some(args.into()),
+            },
+        ));
+    }
+    targets.extend([
+        (
+            PaletteAction::ExecuteCommand("cancel-plan".into(), None),
+            InputAction::TaskCancelPlan,
+        ),
+        (
+            PaletteAction::ExecuteCommand("reorder-task".into(), None),
+            InputAction::TaskReorderEnter(1),
+        ),
+    ]);
+    for (action, expected) in targets {
+        for nested in [false, true] {
+            let mut state = TuiState::new(130, 30);
+            if nested {
+                press(&mut state, Key::Ctrl('x'));
+                press(&mut state, Key::Char('?'));
+            }
+            press(&mut state, Key::Ctrl('p'));
+            state.command_palette.filtered_entries.push(PaletteEntry {
+                name: "selected fixture".into(),
+                description: String::new(),
+                shortcut: None,
+                scope: PaletteScope::All,
+                action: action.clone(),
+            });
+            let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+            let count = state.notifications.records().len();
+            let result = press(&mut state, Key::Enter);
+            if nested {
+                assert_eq!(result, InputAction::Consumed, "{action:?}");
+                assert_eq!(
+                    state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    frames
+                );
+                assert_eq!(state.command_palette.filtered_entries.len(), 1);
+                assert_eq!(state.notifications.records().len(), count + 1);
+                assert_eq!(
+                    state.notifications.records().next_back().unwrap().message,
+                    CLOSE_WINDOW_FIRST
+                );
+            } else {
+                assert_eq!(result, expected, "{action:?}");
+                assert!(!presentation::is_open(&state, Surface::CommandPalette));
+            }
+        }
+    }
+    for action in [
+        PaletteAction::ShowVersion,
+        PaletteAction::ExecuteCommand("notifications".into(), None),
+        PaletteAction::ExecuteCommand("mode".into(), Some("plan".into())),
+        PaletteAction::ExecuteCommand("room".into(), Some("list".into())),
+        PaletteAction::ExecuteCommand("artifact".into(), Some("list".into())),
+        PaletteAction::ExecuteCommand("team".into(), Some("status".into())),
+        PaletteAction::ExecuteCommand("peer".into(), Some("list".into())),
+        PaletteAction::ExecuteCommand("resume-all-tasks".into(), None),
+    ] {
+        let mut state = TuiState::new(130, 30);
+        press(&mut state, Key::Ctrl('x'));
+        press(&mut state, Key::Char('?'));
+        press(&mut state, Key::Ctrl('p'));
+        state.command_palette.filtered_entries.push(PaletteEntry {
+            name: "allowed fixture".into(),
+            description: String::new(),
+            shortcut: None,
+            scope: PaletteScope::All,
+            action,
+        });
+        press(&mut state, Key::Enter);
+        assert!(!presentation::is_open(&state, Surface::CommandPalette));
+        assert!(presentation::is_open(&state, Surface::Help));
+        assert!(
+            state
+                .notifications
+                .records()
+                .all(|record| record.message != CLOSE_WINDOW_FIRST)
         );
     }
 }

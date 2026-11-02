@@ -337,13 +337,11 @@ fn clean(detail: &str) -> String {
 /// A surface that owns the keyboard: an automatic arrival never competes with it.
 fn protected(state: &TuiState) -> bool {
     !state.modal_stack.is_empty()
-        || state.help_overlay.active
         || state.model_selector.active
         || state.login.active
         || state.profile_switcher.active
         || state.usage_panel.active
-        || state.command_palette.active
-        || state.which_key.active
+        || state.pending_leader.is_some()
         || state.reverse_search.active
         || state.search_state.active
         || state.ask_user_question.is_some()
@@ -561,9 +559,7 @@ pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
 pub fn card_focus_blocked(state: &TuiState) -> bool {
     matches!(state.focus, FocusState::Overlay(_))
         || !state.modal_stack.is_empty()
-        || state.which_key.active
-        || state.command_palette.active
-        || state.help_overlay.active
+        || state.pending_leader.is_some()
         || state.autocomplete.active
         || state.reverse_search.active
 }
@@ -1494,7 +1490,7 @@ mod tests {
     #[test]
     fn story21_3_card_arrival_takes_chat_focus_only_from_an_empty_input() {
         use crate::domain::models::visual::OverlayType;
-        let overlay = FocusState::Overlay(OverlayType::CommandPalette);
+        let overlay = FocusState::Overlay(OverlayType::ModelSelector);
         // (focus, can answer, user mid-sentence) -> (focus after, moved)
         let cases = [
             (FocusState::Input, true, false, FocusState::Chat, true),

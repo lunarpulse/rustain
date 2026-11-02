@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::ProviderColumn;
 use rustain::adapters::tui::widgets::model_selector;
 use rustain::domain::events::DomainKey;
@@ -100,11 +101,11 @@ fn test_ctrl_x_m_returns_open_model_selector() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlX);
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 
     let action = h.type_char('m');
     assert!(matches!(action, InputAction::OpenModelSelector));
-    assert!(!h.state.which_key.active);
+    assert!(h.state.pending_leader.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -487,11 +488,21 @@ fn test_model_selector_blocked_when_command_palette_open() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlP);
-    assert!(h.state.command_palette.active);
-
-    let _action = h.press_key(DomainKey::CtrlX);
-    assert!(h.state.command_palette.active);
-    assert!(!h.state.which_key.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    let caller = h.state.modal_stack.top().unwrap().clone();
+    h.press_key(DomainKey::CtrlX);
+    assert!(h.state.pending_leader.is_some());
+    assert_eq!(h.type_char('m'), InputAction::Consumed);
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    assert_eq!(h.state.pending_leader, Some(caller.surface.context()));
+    assert_eq!(h.state.modal_stack.top(), Some(&caller));
+    assert!(!h.state.model_selector.active);
+    assert!(
+        h.state
+            .notifications
+            .records()
+            .any(|r| r.message.contains("close the window first"))
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

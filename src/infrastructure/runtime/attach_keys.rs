@@ -26,6 +26,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 
+use crate::adapters::tui::app::refuse_leader;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -42,7 +43,9 @@ use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::command_registry::{CommandRegistry, CommandSource};
 use crate::adapters::daemon::protocol::{ClientFrame, ProposalToken};
 use crate::adapters::palette_registry::PaletteRegistry;
-use crate::adapters::tui::app::{cancel_autocomplete_popup, convert_crossterm_event, handle_input};
+use crate::adapters::tui::app::{
+    cancel_autocomplete_popup, convert_crossterm_event, handle_input, open_leader,
+};
 use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
 use crate::adapters::tui::keymap::resolve::no_binding_text;
 use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, GlobalCmd, LeaderCmd};
@@ -56,16 +59,12 @@ use crate::adapters::tui::keymap::{
 use crate::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
-use crate::adapters::tui::presentation::{self, RouteEffect};
+use crate::adapters::tui::presentation::{self, RouteEffect, Surface};
 use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
 use crate::adapters::tui::state::{PendingConsolidationCard, TabRenderState, TuiState};
-use crate::adapters::tui::widgets::{
-    autocomplete_popup, command_palette as command_palette_widget, help_overlay, input_box,
-    which_key_bar,
-};
+use crate::adapters::tui::widgets::{autocomplete_popup, input_box};
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-use crate::domain::models::visual::OverlayType;
 use crate::domain::models::{
     Conversation, FeedbackLevel, FocusState, MouseConfig, SessionManager, StreamingState,
 };
@@ -352,17 +351,15 @@ fn is_ctrl(key: &KeyEvent, c: char) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(c)
 }
 
-/// Legacy overlays still own paste outside the shared presentation boundary.
-pub(super) fn paste_blocked(state: &TuiState) -> bool {
-    state.command_palette.active || state.which_key.active || state.help_overlay.active
-}
-
 /// The status-row hint for the attached client, generated from the registry
 /// (Story 21.3 A10): the Detach leader row, `i` to type while Chat has focus
 /// and `[^X Enter] Send` while multi-line. The `^X menu` tail is painted by the
 /// status row itself, so it is not repeated here.
 pub(super) fn status_hint(state: &TuiState) -> Option<String> {
-    if !state.modal_stack.is_empty() || state.recipient_surface.is_some() {
+    if !state.modal_stack.is_empty()
+        || state.pending_leader.is_some()
+        || state.recipient_surface.is_some()
+    {
         return None;
     }
     crate::adapters::tui::keymap::render_tips::attached_status_tip(
@@ -385,44 +382,17 @@ pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
     }
 }
 
-/// Paint only the attached legacy surfaces; shared compose owns toasts, frames
-/// and status order until the remaining shared surfaces cut over in 4-A2.
+/// Paint only the attached legacy autocomplete popup; compose owns all frames,
+/// toasts, the pending leader and status order.
 pub(super) fn paint_overlays(
     frame: &mut ratatui::Frame<'_>,
-    area: Rect,
+    _area: Rect,
     input_area: Rect,
-    status_bar: Rect,
+    _status_bar: Rect,
     state: &TuiState,
 ) {
-    let above_status = Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        status_bar.y.saturating_sub(area.y),
-    );
     if state.autocomplete.active {
         autocomplete_popup::render(frame, input_area, &state.autocomplete, &state.theme);
-    }
-    if state.which_key.active {
-        which_key_bar::render(
-            frame,
-            above_status,
-            &state.which_key,
-            &state.theme,
-            &AvailCtx::attached(area.width, false),
-        );
-    }
-    if state.command_palette.active {
-        command_palette_widget::render(frame, area, &state.command_palette, &state.theme);
-    }
-    if state.help_overlay.active {
-        help_overlay::render(
-            frame,
-            area,
-            &state.help_overlay,
-            &state.theme,
-            state.multiplexer_detected,
-        );
     }
 }
 
@@ -438,12 +408,26 @@ pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEf
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
     let overlay_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state);
+    let owner_before = (
+        ctx.state.modal_stack.top().map(|frame| frame.id),
+        ctx.state.pending_leader,
+        crate::adapters::tui::app::focus_context(ctx.state),
+    );
     let routed = route_event(ctx.state, &Event::Key(key));
     let flow = match routed {
         Some(RouteEffect::Consumed) => KeyFlow::Continue,
         Some(RouteEffect::QuitRequest) => request_quit(ctx),
         Some(RouteEffect::QuitConfirmed) => KeyFlow::Quit,
         Some(RouteEffect::Log(outcome)) => apply_log_outcome(ctx, outcome),
+        Some(RouteEffect::OpenPalette) => {
+            open_palette(ctx).await;
+            KeyFlow::Continue
+        }
+        Some(RouteEffect::Frame(Context::Help)) => help_key(ctx, key).await,
+        Some(RouteEffect::Frame(Context::CommandPalette)) => palette_key(ctx, key).await,
+        Some(RouteEffect::Leader) => leader_key(ctx, key).await,
+        Some(RouteEffect::Frame(context)) => unreachable!("attached frame context: {context:?}"),
+        Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
         // Guarded quit is universal, including cards that consume every key.
         None if command_in(Context::Global, overlay_key(&key))
             == Some(CommandId::Global(GlobalCmd::QuitRequest)) =>
@@ -466,6 +450,21 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         ctx.consolidation_token,
         ctx.retract_confirm,
     );
+    let owner_after = (
+        ctx.state.modal_stack.top().map(|frame| frame.id),
+        ctx.state.pending_leader,
+        crate::adapters::tui::app::focus_context(ctx.state),
+    );
+    if owner_before != owner_after {
+        ctx.state.current_hint = crate::adapters::tui::hints::contextual_hint(
+            &ctx.state.focus,
+            ctx.state.session_count,
+            ctx.state.theme.timing.status_hint_fade_sessions,
+            ctx.state.is_vscode,
+            &ctx.state.modal_stack,
+            ctx.state.pending_leader,
+        );
+    }
     flow
 }
 
@@ -483,16 +482,6 @@ fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
 async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crossterm::event::KeyEventKind;
 
-    // A transient surface that is open owns the key until it closes.
-    if ctx.state.which_key.active {
-        return leader_key(ctx, key).await;
-    }
-    if ctx.state.command_palette.active {
-        return palette_key(ctx, key).await;
-    }
-    if ctx.state.help_overlay.active {
-        return help_key(ctx, key).await;
-    }
     if ctx.state.autocomplete.active
         && ctx.state.focus == FocusState::Input
         && let Some(flow) = popup_key(ctx, key).await
@@ -778,10 +767,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             if ctx.state.focus != FocusState::Chat => {}
         // Ctrl+X opens the untimed leader (RU-3); it is never a retract.
         CommandId::Global(GlobalCmd::OpenLeader) => {
-            let origin = ctx.state.focus.clone();
-            ctx.state.which_key.open(origin);
-            ctx.state.focus = FocusState::Overlay(OverlayType::WhichKey);
-            ctx.state.needs_redraw = true;
+            let _ = open_leader(ctx.state);
         }
         CommandId::Global(GlobalCmd::QuitRequest) | CommandId::Overlay(OverlayCmd::QuitRequest) => {
             return request_quit(ctx);
@@ -798,10 +784,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             ctx.state.needs_redraw = true;
         }
         CommandId::Chat(ChatCmd::OpenHelp) => {
-            let prior = ctx.state.focus.clone();
-            ctx.state.help_overlay.open(prior);
-            ctx.state.focus = FocusState::Overlay(OverlayType::Help);
-            ctx.state.needs_redraw = true;
+            presentation::reducer::open(ctx.state, Surface::Help);
         }
         // Esc never detaches, quits or submits: with no popup/overlay open it
         // moves focus between Input and Chat and preserves the unsent text.
@@ -898,16 +881,10 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             ctx.state.needs_redraw = true;
         }
         CommandId::Overlay(OverlayCmd::HelpClose) => {
-            ctx.state.focus = ctx.state.help_overlay.close();
-            ctx.state.needs_redraw = true;
+            presentation::reducer::close(ctx.state, Surface::Help);
         }
         CommandId::Overlay(OverlayCmd::PaletteClose) => {
-            ctx.state.focus = ctx
-                .state
-                .command_palette
-                .dismiss()
-                .unwrap_or(FocusState::Input);
-            ctx.state.needs_redraw = true;
+            presentation::reducer::close(ctx.state, Surface::CommandPalette);
         }
         CommandId::Overlay(
             OverlayCmd::PaletteUp
@@ -1020,26 +997,29 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 
 /// A follow-up to the open leader, resolved through the keymap registry (AC2):
 /// `Esc`/`Ctrl+C` cancel silently, a key without a row posts one info notice,
-/// a row this host cannot run answers with its remedy. The origin focus is
-/// always restored.
+/// a row this host cannot run answers with its remedy. The origin context is
+/// retained without changing the underlying base focus.
 async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    let origin = ctx.state.which_key.dismiss().unwrap_or(FocusState::Input);
-    ctx.state.focus = origin.clone();
+    let origin = ctx.state.pending_leader.take().unwrap_or(Context::Input);
+    ctx.state.leader_feedback = None;
     ctx.state.needs_redraw = true;
     let key = Key::from_crossterm(&key);
-    let origin_name = match origin {
-        FocusState::Input => "Input",
-        _ => "Chat",
-    };
-    let avail = attached_avail_ctx(ctx.state, ctx.read_only);
+    let origin_name = origin.name();
+    let mut avail = attached_avail_ctx(ctx.state, ctx.read_only);
+    avail.frame_origin = !ctx.state.modal_stack.is_empty();
     let row = match leader_step(Host::Attached, key, &avail, origin_name) {
         LeaderStep::Cancel => return KeyFlow::Continue,
         LeaderStep::NoBinding(text) => {
-            notifications::info(ctx.state, NoticeSource::Chord, text);
+            refuse_leader(ctx.state, origin, None, NoticeSource::Chord, text.into());
             return KeyFlow::Continue;
         }
-        LeaderStep::Unavailable(_, remedy) => {
-            show_unavailable(ctx, remedy);
+        LeaderStep::Unavailable(row, remedy) => {
+            let source = if remedy == ATTACHED_SIGN_IN {
+                NoticeSource::Login
+            } else {
+                NoticeSource::Chord
+            };
+            refuse_leader(ctx.state, origin, Some(row.command), source, remedy.into());
             return KeyFlow::Continue;
         }
         LeaderStep::Run(row) => row,
@@ -1049,9 +1029,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     };
     match command {
         LeaderCmd::Help => {
-            ctx.state.help_overlay.open(origin);
-            ctx.state.focus = FocusState::Overlay(OverlayType::Help);
-            ctx.state.needs_redraw = true;
+            presentation::reducer::open(ctx.state, Surface::Help);
         }
         LeaderCmd::A2aLog => {
             // The existing attached `/team log` local read.
@@ -1059,7 +1037,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             run_team_log(ctx, &args).await;
         }
         LeaderCmd::Notifications => {
-            // The leader restored the origin focus; S-LOG saves it as its caller.
+            // S-LOG pushes above the exact frame that started this leader.
             notification_log::open(ctx.state);
         }
         LeaderCmd::ClearToasts => {
@@ -1095,7 +1073,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
         // The shared boundary intercepts Ctrl+Q before dismissing a legacy menu.
         LeaderCmd::QuitRequest => return request_quit(ctx),
         // Portable multiline send: the same path as Enter, exactly once.
-        LeaderCmd::Send if origin == FocusState::Input => {
+        LeaderCmd::Send if origin == Context::Input => {
             if !ctx.input.is_empty() {
                 return submit_enter(ctx).await;
             }
@@ -1110,20 +1088,11 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     KeyFlow::Continue
 }
 
-/// The capability-qualified unavailable result of one retained chord.
-fn show_unavailable(ctx: &mut KeyCtx<'_>, remedy: &str) {
-    // `i`/`m` reuse the existing sign-in refusal (same notice as typed `/login`).
-    let source = if remedy == ATTACHED_SIGN_IN {
-        NoticeSource::Login
-    } else {
-        NoticeSource::Chord
-    };
-    notifications::info(ctx.state, source, remedy);
-}
-
 /// Facts the registry's availability rows read in the attached host.
 pub(super) fn attached_avail_ctx(state: &TuiState, read_only: bool) -> AvailCtx {
-    AvailCtx::attached(state.terminal_width, read_only)
+    let mut avail = AvailCtx::attached(state.terminal_width, read_only);
+    avail.frame_origin = !state.modal_stack.is_empty();
+    avail
 }
 
 /// The attached status row's rightmost tail (A10).
@@ -1131,7 +1100,7 @@ pub(super) fn status_tail(state: &TuiState) -> StatusTail {
     if !state.modal_stack.is_empty() {
         return StatusTail::Hidden;
     }
-    if state.which_key.active {
+    if state.pending_leader.is_some() {
         StatusTail::Pending(PendingPrefix::Leader)
     } else {
         StatusTail::Menu
@@ -1217,11 +1186,8 @@ fn popup_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
 // ── command palette ──────────────────────────────────────────────────────────
 
 async fn open_palette(ctx: &mut KeyCtx<'_>) {
-    let prior = ctx.state.focus.clone();
     ctx.chrome.begin_palette(ctx.conversation, ctx.read_only);
-    ctx.state.command_palette.open(prior);
-    ctx.state.focus = FocusState::Overlay(OverlayType::CommandPalette);
-    ctx.state.needs_redraw = true;
+    presentation::reducer::open(ctx.state, Surface::CommandPalette);
     ctx.chrome.sync_palette(ctx.state, ctx.workspace).await;
 }
 
@@ -1681,9 +1647,9 @@ mod tests {
             let mut rig = Rig::new(false);
             rig.type_text("draft").await;
             assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
-            assert!(rig.state.which_key.active, "{key}: leader open");
+            assert!(rig.state.pending_leader.is_some(), "{key}: leader open");
             assert_eq!(rig.ch(key).await, KeyFlow::Continue, "{key}");
-            assert!(!rig.state.which_key.active, "{key}: leader consumed");
+            assert!(rig.state.pending_leader.is_none(), "{key}: leader consumed");
             assert_eq!(rig.state.focus, FocusState::Input, "{key}: origin restored");
             assert_eq!(rig.input, "draft", "{key}: draft untouched");
             assert!(
@@ -1749,10 +1715,10 @@ mod tests {
         rig.type_text("keep me").await;
         rig.ctrl('x').await;
         assert_eq!(rig.ch('?').await, KeyFlow::Continue);
-        assert!(rig.state.help_overlay.active);
-        assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+        assert!(presentation::is_open(&rig.state, Surface::Help));
+        assert_eq!(rig.state.focus, FocusState::Input);
         assert_eq!(rig.esc().await, KeyFlow::Continue);
-        assert!(!rig.state.help_overlay.active);
+        assert!(!presentation::is_open(&rig.state, Surface::Help));
         assert_eq!(rig.state.focus, FocusState::Input);
         assert_eq!(rig.input, "keep me");
         exercised.insert("?".to_owned());
@@ -1780,7 +1746,7 @@ mod tests {
         rig.state.focus = FocusState::Chat;
         rig.ctrl('x').await;
         assert_eq!(rig.esc().await, KeyFlow::Continue);
-        assert!(!rig.state.which_key.active);
+        assert!(rig.state.pending_leader.is_none());
         assert_eq!(rig.state.focus, FocusState::Chat);
         exercised.insert("Esc".to_owned());
 
@@ -1835,11 +1801,11 @@ mod tests {
         // its resize arm only stores the terminal size, so there is no resize logic
         // to exercise here; the leader simply stays open until a follow-up.
         assert!(
-            rig.state.which_key.active,
+            rig.state.pending_leader.is_some(),
             "untimed: stays open until a follow-up"
         );
         assert_eq!(rig.esc().await, KeyFlow::Continue);
-        assert!(!rig.state.which_key.active);
+        assert!(rig.state.pending_leader.is_none());
         assert_eq!(rig.state.focus, FocusState::Input);
         assert_eq!(rig.input, "keep");
 
@@ -1848,7 +1814,7 @@ mod tests {
         rig.state.focus = FocusState::Chat;
         rig.ctrl('x').await;
         assert_eq!(rig.ch('z').await, KeyFlow::Continue);
-        assert!(!rig.state.which_key.active);
+        assert!(rig.state.pending_leader.is_none());
         assert_eq!(rig.state.focus, FocusState::Chat);
         assert!(rig.state.feedback_blocks.is_empty());
         // Story 21.3 AC2: consumed aloud, with exactly one info record.
@@ -1991,13 +1957,13 @@ mod tests {
 
         // An open overlay owns Ctrl+C: it closes, no interrupt is sent.
         rig.ctrl('p').await;
-        assert!(rig.state.command_palette.active);
+        assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
-        assert!(!rig.state.command_palette.active);
+        assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
         assert!(rig.frames().is_empty());
         rig.ctrl('x').await;
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
-        assert!(!rig.state.which_key.active);
+        assert!(rig.state.pending_leader.is_none());
         assert!(rig.frames().is_empty());
 
         // S-QUIT: Ctrl+C cancels the frame only.
@@ -2186,7 +2152,7 @@ mod tests {
     async fn story21_2_attached_palette_lists_only_attached_commands_and_reopens_populated() {
         let mut rig = Rig::new(false);
         rig.ctrl('p').await;
-        assert!(rig.state.command_palette.active);
+        assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
         let names = rig.palette_names();
         for expected in ["/clear", "/team", "/ml", "/quit", "/detach"] {
             assert!(
@@ -2212,7 +2178,7 @@ mod tests {
         );
         // Close and reopen: populated again, not a false empty list.
         rig.esc().await;
-        assert!(!rig.state.command_palette.active);
+        assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
         assert_eq!(rig.state.focus, FocusState::Input);
         rig.ctrl('p').await;
         assert_eq!(rig.palette_names(), names);
@@ -2235,7 +2201,7 @@ mod tests {
         assert_eq!(rig.enter().await, KeyFlow::Continue);
         assert!(rig.state.multiline_mode, "palette /ml toggles");
         assert_eq!(rig.input, "half-written", "the draft is never the command");
-        assert!(!rig.state.command_palette.active);
+        assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
         assert_eq!(rig.state.focus, FocusState::Input);
         assert!(rig.frames().is_empty());
 
@@ -2290,7 +2256,7 @@ mod tests {
         rig.retractable("peer-response-node-b", "second auto reply");
         // Ctrl+X is the leader now — never an immediate retract.
         rig.ctrl('x').await;
-        assert!(rig.state.which_key.active);
+        assert!(rig.state.pending_leader.is_some());
         assert!(rig.retract_confirm.is_none());
         rig.esc().await;
 
@@ -2437,31 +2403,23 @@ mod tests {
     #[tokio::test]
     async fn story21_2_attached_paste_is_blocked_while_an_overlay_owns_the_keyboard() {
         let mut rig = Rig::new(false);
-        assert!(!paste_blocked(&rig.state));
+        assert!(!presentation::route::blocks_paste(&rig.state));
         rig.ctrl('x').await;
-        assert!(paste_blocked(&rig.state), "which-key");
+        assert!(presentation::route::blocks_paste(&rig.state), "which-key");
         rig.esc().await;
         rig.ctrl('p').await;
-        assert!(paste_blocked(&rig.state), "palette");
+        assert!(presentation::route::blocks_paste(&rig.state), "palette");
         rig.esc().await;
         rig.ctrl('x').await;
         rig.ch('n').await;
         assert!(presentation::route::blocks_paste(&rig.state), "S-LOG");
-        assert!(
-            !paste_blocked(&rig.state),
-            "S-LOG is not a legacy paste owner"
-        );
         rig.esc().await;
         rig.ctrl('q').await; // idle: exits directly, no frame
         rig.type_text("draft").await;
         rig.ctrl('q').await;
         assert!(presentation::route::blocks_paste(&rig.state), "S-QUIT");
-        assert!(
-            !paste_blocked(&rig.state),
-            "S-QUIT is not a legacy paste owner"
-        );
         rig.esc().await;
-        assert!(!paste_blocked(&rig.state));
+        assert!(!presentation::route::blocks_paste(&rig.state));
     }
 
     // ── the pre-existing owners keep their keys ──────────────────────────────
@@ -2638,16 +2596,20 @@ mod tests {
     }
 
     async fn retained_attached_arrival(consolidation: bool) {
-        for (focus, draft) in [
-            (FocusState::Input, ""),
-            (FocusState::Input, "draft\n界"),
-            (FocusState::Overlay(OverlayType::Help), ""),
+        for (focus, draft, help) in [
+            (FocusState::Input, "", false),
+            (FocusState::Input, "draft\n界", false),
+            (FocusState::Input, "", true),
         ] {
             let mut rig = Rig::new(false);
             rig.state.focus = focus.clone();
             rig.input = draft.into();
+            if help {
+                rig.ctrl('x').await;
+                rig.ch('?').await;
+            }
             rig.retained_arrives(consolidation);
-            let takes = focus == FocusState::Input && draft.is_empty();
+            let takes = !help && focus == FocusState::Input && draft.is_empty();
             assert_eq!(
                 rig.state.focus,
                 if takes {
@@ -2667,7 +2629,7 @@ mod tests {
                     FocusState::Chat,
                     "burst retakes empty Input"
                 );
-            } else if focus == FocusState::Input {
+            } else if !help && focus == FocusState::Input {
                 rig.esc().await;
                 rig.ch('i').await;
                 assert_eq!(rig.state.focus, FocusState::Input);
@@ -2862,9 +2824,11 @@ mod tests {
             rig.input = draft.into();
             rig.ctrl('x').await;
             rig.ch('?').await;
-            assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+            assert!(presentation::is_open(&rig.state, Surface::Help));
+            assert_eq!(rig.state.focus, FocusState::Input);
             rig.approval_arrives("behind-help");
-            assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+            assert!(presentation::is_open(&rig.state, Surface::Help));
+            assert_eq!(rig.state.focus, FocusState::Input);
             rig.esc().await;
             assert_eq!(
                 rig.state.focus,
@@ -3122,7 +3086,7 @@ mod tests {
 
     // ── draw: the attached overlays at 60 / 80 / 130 columns ─────────────────
 
-    fn paint(state: &TuiState, width: u16) -> Vec<String> {
+    fn paint_buffer(state: &TuiState, width: u16) -> ratatui::buffer::Buffer {
         let height = 24;
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
@@ -3150,7 +3114,11 @@ mod tests {
                 );
             })
             .unwrap();
-        let buffer = terminal.backend().buffer().clone();
+        terminal.backend().buffer().clone()
+    }
+
+    fn paint(state: &TuiState, width: u16) -> Vec<String> {
+        let buffer = paint_buffer(state, width);
         (0..buffer.area.height)
             .map(|y| {
                 (0..buffer.area.width)
@@ -3432,11 +3400,11 @@ mod tests {
             input: rig.input.clone(),
             multiline: state.multiline_mode,
             surfaces: [
-                state.which_key.active,
-                state.help_overlay.active,
-                state.command_palette.active,
-                state.notification_log.is_some(),
-                state.quit_confirm.is_some(),
+                state.pending_leader.is_some(),
+                presentation::is_open(state, Surface::Help),
+                presentation::is_open(state, Surface::CommandPalette),
+                presentation::is_open(state, Surface::NotificationLog),
+                presentation::is_open(state, Surface::QuitConfirm),
                 state.autocomplete.active,
                 state.recipient_surface.is_some(),
             ],
@@ -3484,9 +3452,9 @@ mod tests {
         for (key, label) in unknown {
             let mut rig = Rig::at(FocusState::Input, "draft");
             rig.ctrl('x').await;
-            assert!(rig.state.which_key.active, "{label}: leader open");
+            assert!(rig.state.pending_leader.is_some(), "{label}: leader open");
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{label}");
-            assert!(!rig.state.which_key.active, "{label}: leader closed");
+            assert!(rig.state.pending_leader.is_none(), "{label}: leader closed");
             assert_eq!(rig.state.focus, FocusState::Input, "{label}: origin");
             assert_eq!(rig.input, "draft", "{label}: composer unchanged");
             assert!(rig.frames().is_empty(), "{label}: nothing forwarded");
@@ -3520,7 +3488,7 @@ mod tests {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('x').await;
         assert_eq!(rig.ch('?').await, KeyFlow::Continue);
-        assert!(rig.state.help_overlay.active);
+        assert!(presentation::is_open(&rig.state, Surface::Help));
         assert_eq!(rig.state.notifications.records().len(), 0);
 
         // Esc and Ctrl+C cancel silently and never reach the interrupt path,
@@ -3533,7 +3501,7 @@ mod tests {
             rig.streaming.is_streaming = true;
             rig.ctrl('x').await;
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
-            assert!(!rig.state.which_key.active, "{key:?}: closed");
+            assert!(rig.state.pending_leader.is_none(), "{key:?}: closed");
             assert_eq!(rig.state.focus, FocusState::Chat, "{key:?}: origin");
             assert_eq!(rig.state.notifications.records().len(), 0, "{key:?}");
             assert!(rig.state.quit_confirm.is_none(), "{key:?}");
@@ -3563,11 +3531,11 @@ mod tests {
             }
             let seeded = rig.state.notifications.records().len();
             rig.ctrl('x').await;
-            assert!(rig.state.which_key.active, "{label}: leader open");
+            assert!(rig.state.pending_leader.is_some(), "{label}: leader open");
             let flow = rig.key(key).await;
             let posted = rig.state.notifications.records().len() - seeded;
             assert_eq!(
-                rig.state.which_key.active,
+                rig.state.pending_leader.is_some(),
                 cmd == LeaderCmd::QuitRequest,
                 "{label}: AC2/A18 retains only the Quit caller's pending leader"
             );
@@ -3616,8 +3584,8 @@ mod tests {
                     assert_eq!(upper.ch('D').await, KeyFlow::Detach);
                 }
                 LeaderCmd::Help => {
-                    assert!(rig.state.help_overlay.active, "{label}");
-                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+                    assert!(presentation::is_open(&rig.state, Surface::Help), "{label}");
+                    assert_eq!(rig.state.focus, FocusState::Input);
                     assert_eq!(posted, 0, "{label}");
                 }
                 LeaderCmd::Notifications => {
@@ -3652,8 +3620,8 @@ mod tests {
                 LeaderCmd::QuitRequest => {
                     assert!(rig.state.quit_confirm.is_some(), "{label}: asks first");
                     assert!(rig.frames().is_empty(), "{label}: nothing is interrupted");
-                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::WhichKey));
-                    assert_eq!(rig.state.which_key.previous_focus, Some(FocusState::Input));
+                    assert_eq!(rig.state.focus, FocusState::Input);
+                    assert_eq!(rig.state.pending_leader, Some(Context::Input));
                 }
             }
             ran += 1;
@@ -3682,8 +3650,8 @@ mod tests {
                     GlobalCmd::OpenLeader => {
                         let mut rig = Rig::at(focus.clone(), "draft");
                         assert_eq!(rig.key(key).await, KeyFlow::Continue);
-                        assert!(rig.state.which_key.active, "{focus:?}");
-                        assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::WhichKey));
+                        assert!(rig.state.pending_leader.is_some(), "{focus:?}");
+                        assert_eq!(rig.state.focus, focus);
                         assert_eq!(rig.input, "draft");
                     }
                     GlobalCmd::QuitRequest => {
@@ -3756,7 +3724,7 @@ mod tests {
                     assert_eq!(rig.input, "hi", "unsent text kept");
                 }
                 InputCmd::OpenPalette => {
-                    assert!(rig.state.command_palette.active);
+                    assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
                     assert_eq!(rig.input, "hi");
                 }
                 InputCmd::CancelOrQuit => {
@@ -3813,10 +3781,12 @@ mod tests {
                     assert_eq!(idle.key(key).await, KeyFlow::Quit, "{row:?}: idle");
                 }
                 ChatCmd::OpenHelp => {
-                    assert!(rig.state.help_overlay.active);
-                    assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+                    assert!(presentation::is_open(&rig.state, Surface::Help));
+                    assert_eq!(rig.state.focus, FocusState::Chat);
                 }
-                ChatCmd::OpenPalette => assert!(rig.state.command_palette.active),
+                ChatCmd::OpenPalette => {
+                    assert!(presentation::is_open(&rig.state, Surface::CommandPalette))
+                }
                 ChatCmd::ScrollHalfPageDown => {
                     assert_eq!((rig.scroll_offset, rig.auto_scroll), (9, false), "{row:?}");
                 }
@@ -3966,10 +3936,10 @@ mod tests {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('x').await;
         let focus = rig.state.focus.clone();
-        let previous_focus = rig.state.which_key.previous_focus.clone();
+        let pending_leader = rig.state.pending_leader;
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
         assert!(
-            rig.state.which_key.active,
+            rig.state.pending_leader.is_some(),
             "the leader stays underneath Quit"
         );
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
@@ -3977,12 +3947,15 @@ mod tests {
         assert_eq!(rig.input, "draft");
         assert!(rig.frames().is_empty());
         rig.esc().await;
-        assert!(rig.state.which_key.active, "Cancel restores the leader");
+        assert!(
+            rig.state.pending_leader.is_some(),
+            "Cancel restores the leader"
+        );
         assert_eq!(rig.state.focus, focus);
-        assert_eq!(rig.state.which_key.previous_focus, previous_focus);
+        assert_eq!(rig.state.pending_leader, pending_leader);
         rig.ch('?').await;
         assert!(
-            rig.state.help_overlay.active,
+            presentation::is_open(&rig.state, Surface::Help),
             "the pending sequence still runs"
         );
         // Idle and clean: the same keys leave the client.
@@ -4010,7 +3983,10 @@ mod tests {
         }
         assert!(rig.frames().is_empty(), "Ctrl+Shift+C never interrupts");
         assert!(rig.state.quit_confirm.is_none(), "Ctrl+Shift+Q never quits");
-        assert!(!rig.state.which_key.active, "Ctrl+Shift+X opens no leader");
+        assert!(
+            rig.state.pending_leader.is_none(),
+            "Ctrl+Shift+X opens no leader"
+        );
         assert!(!rig.state.multiline_mode, "Alt+Shift+M toggles nothing");
         assert_eq!(rig.input, "draft");
         // Positive controls: the plain keys still act.
@@ -4047,9 +4023,12 @@ mod tests {
         let mut rig = live_rig().await;
         rig.ctrl('x').await;
         rig.ch('?').await;
-        assert!(rig.state.help_overlay.active);
+        assert!(presentation::is_open(&rig.state, Surface::Help));
         rig.ctrl('c').await;
-        assert!(!rig.state.help_overlay.active, "Help closed");
+        assert!(
+            !presentation::is_open(&rig.state, Surface::Help),
+            "Help closed"
+        );
         assert_eq!(rig.state.focus, FocusState::Input, "caller restored");
         assert!(rig.frames().is_empty(), "Help: no interrupt");
 
@@ -4137,6 +4116,16 @@ mod tests {
             let mut rig = open(*key).await;
             let flow = rig.key(*key).await;
             assert_eq!(&format!("{flow:?} | {}", digest(&rig)), expected, "{context:?} {key:?}");
+            match command_in(context, *key) {
+                Some(CommandId::Global(GlobalCmd::OpenLeader)) => {
+                    assert_eq!(rig.state.pending_leader, Some(context));
+                }
+                Some(CommandId::Input(InputCmd::OpenPalette)) => {
+                    assert_eq!(rig.state.modal_stack.top().unwrap().surface, Surface::CommandPalette);
+                    assert!(!rig.state.command_palette.filtered_entries.is_empty());
+                }
+                _ => {}
+            }
             assert!(rig.frames().is_empty(), "{context:?} {key:?} sent a frame");
         }
     }
@@ -4170,11 +4159,11 @@ mod tests {
         )
     }
 
-    fn help_rig(_: Key) -> Rig {
+    async fn help_rig(_: Key) -> Rig {
         let mut rig = Rig::at(FocusState::Input, "draft");
-        rig.state.help_overlay.open(FocusState::Input);
+        rig.ctrl('x').await;
+        rig.ch('?').await;
         rig.state.help_overlay.scroll_offset = 5;
-        rig.state.focus = FocusState::Overlay(OverlayType::Help);
         rig
     }
 
@@ -4182,25 +4171,25 @@ mod tests {
     fn help_digest(rig: &Rig) -> String {
         let h = &rig.state.help_overlay;
         let scroll = if h.scroll_offset > 1_000_000 { "bottom".to_owned() } else { h.scroll_offset.to_string() };
-        format!("help={} scroll={scroll} {}", h.active, open_surface(rig))
+        format!("help={} scroll={scroll} {}", presentation::is_open(&rig.state, Surface::Help), open_surface(rig))
     }
 
     /// Catches a Help row that scrolls the wrong way, closes into the wrong focus or skips the quit question, or a rowless key that acts.
     #[rustfmt::skip]
     #[tokio::test]
     async fn story21_3_attached_witness_help() {
-        let at = |scroll: &str| format!("Continue | help=true scroll={scroll} quit=false focus=Overlay(Help) input=draft");
+        let at = |scroll: &str| format!("Continue | help=true scroll={scroll} quit=false focus=Input input=draft");
         let closed = |quit: bool| format!("Continue | help=false scroll=5 quit={quit} focus=Input input=draft");
         let cases = [
             (Key::Char('j'), at("6")), (Key::Down, at("6")), (Key::Char('k'), at("4")), (Key::Up, at("4")),
             (Key::Char('G'), at("bottom")), (Key::Char('g'), at("0")),
             (Key::Char('?'), closed(false)), (Key::Esc, closed(false)), (Key::Ctrl('c'), closed(false)),
             // AC2/A18: the exact Help caller survives underneath Quit.
-            (Key::Ctrl('q'), "Continue | help=true scroll=5 quit=true focus=Overlay(Help) input=draft".to_owned()),
+            (Key::Ctrl('q'), "Continue | help=true scroll=5 quit=true focus=Input input=draft".to_owned()),
+            (Key::Ctrl('x'), at("5")), (Key::Ctrl('p'), at("5")),
         ];
-        let open = |k| std::future::ready(help_rig(k));
-        witness_rows(Context::Help, open, help_digest, &cases).await;
-        witness_inert(Context::Help, open, help_digest, |_| false).await;
+        witness_rows(Context::Help, help_rig, help_digest, &cases).await;
+        witness_inert(Context::Help, help_rig, help_digest, |_| false).await;
     }
 
     async fn palette_rig(key: Key) -> Rig {
@@ -4218,14 +4207,14 @@ mod tests {
     #[rustfmt::skip]
     fn palette_digest(rig: &Rig) -> String {
         let p = &rig.state.command_palette;
-        format!("palette={} sel={} filter={} ml={} {}", p.active, p.selected_index, p.filter_text, rig.state.multiline_mode, open_surface(rig))
+        format!("palette={} sel={} filter={} ml={} {}", presentation::is_open(&rig.state, Surface::CommandPalette), p.selected_index, p.filter_text, rig.state.multiline_mode, open_surface(rig))
     }
 
     /// Catches a palette row that runs the wrong entry, keeps the palette open, edits the filter wrongly or swallows Ctrl+Q.
     #[rustfmt::skip]
     #[tokio::test]
     async fn story21_3_attached_witness_command_palette() {
-        let open = |sel: u8, filter: &str, ml: bool| format!("Continue | palette=true sel={sel} filter={filter} ml={ml} quit=false focus=Overlay(CommandPalette) input=draft");
+        let open = |sel: u8, filter: &str, ml: bool| format!("Continue | palette=true sel={sel} filter={filter} ml={ml} quit=false focus=Input input=draft");
         let closed = |ml: bool, quit: bool| format!("Continue | palette=false sel=0 filter= ml={ml} quit={quit} focus=Input input=draft");
         let cases = [
             (Key::Up, open(0, "", false)), (Key::Down, open(2, "", false)),
@@ -4233,7 +4222,8 @@ mod tests {
             (Key::Esc, closed(false, false)), (Key::Ctrl('c'), closed(false, false)),
             (Key::Backspace, open(0, "m", false)),
             // AC2/A18: selection and filter survive underneath Quit.
-            (Key::Ctrl('q'), "Continue | palette=true sel=1 filter= ml=false quit=true focus=Overlay(CommandPalette) input=draft".to_owned()),
+            (Key::Ctrl('q'), "Continue | palette=true sel=1 filter= ml=false quit=true focus=Input input=draft".to_owned()),
+            (Key::Ctrl('x'), open(1, "", false)), (Key::Ctrl('p'), open(1, "", false)),
         ];
         witness_rows(Context::CommandPalette, palette_rig, palette_digest, &cases).await;
         // Plain printable keys type into the filter (allowed); Tab and every modified key are inert.
@@ -4245,13 +4235,13 @@ mod tests {
             rig.type_text("ab cd").await;
             assert_eq!(rig.key(key).await, KeyFlow::Continue);
             assert_eq!(rig.state.command_palette.filter_text, want, "{key:?}");
-            assert!(rig.state.command_palette.active && rig.input == "draft" && rig.frames().is_empty());
+            assert!(presentation::is_open(&rig.state, Surface::CommandPalette) && rig.input == "draft" && rig.frames().is_empty());
         }
         let mut typing = Rig::at(FocusState::Input, "draft");
         typing.ctrl('p').await;
         typing.ch('z').await;
         assert_eq!(typing.state.command_palette.filter_text, "z");
-        assert!(typing.state.command_palette.active);
+        assert!(presentation::is_open(&typing.state, Surface::CommandPalette));
         assert_eq!(typing.input, "draft", "the palette filter never touches the composer");
         assert!(typing.frames().is_empty());
     }
@@ -4358,6 +4348,8 @@ mod tests {
             (Key::Enter, on("second", true, 0, 2, false)),
             (Key::Char('c'), on("second", false, 0, 3, true)), // the copy result is a third (Clipboard) notice
             (Key::Char('x'), on("second", false, 1, 2, false)),
+            (Key::Ctrl('x'), on("second", false, 0, 2, false)),
+            (Key::Ctrl('p'), on("second", false, 0, 2, false)),
         ];
         witness_rows(Context::NotificationLog, log_rig, log_digest, &cases).await;
         // `r`, `K`, `n` are local-only rows: with no retry path and no decisions they are inert here.
@@ -4430,7 +4422,7 @@ mod tests {
         witness_inert(Context::RecipientSurface, open, surface_digest, |k| k == Key::Ctrl('x')).await;
         let mut rig = surface_rig(Key::Esc);
         rig.ctrl('x').await;
-        assert!(rig.state.which_key.active && rig.state.recipient_surface.is_some());
+        assert!(rig.state.pending_leader.is_some() && rig.state.recipient_surface.is_some());
         assert!(rig.frames().is_empty());
     }
 
@@ -4482,8 +4474,8 @@ mod tests {
         assert_eq!(rig.state.focus, FocusState::Input);
         let mut rig = Rig::at(FocusState::Chat, "draft");
         rig.key(Key::Char('?')).await;
-        assert!(rig.state.help_overlay.active);
-        assert_eq!(rig.state.focus, FocusState::Overlay(OverlayType::Help));
+        assert!(presentation::is_open(&rig.state, Surface::Help));
+        assert_eq!(rig.state.focus, FocusState::Chat);
 
         let mut rig = Rig::at(FocusState::Chat, "draft").scrollable();
         let before = salient(&rig);
@@ -4573,15 +4565,18 @@ mod tests {
     async fn story21_3_attached_k9_ctrl_q_in_palette_and_log_asks_to_quit() {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('p').await;
-        assert!(rig.state.command_palette.active);
+        assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
         let palette = palette_digest(&rig);
-        let previous_focus = rig.state.command_palette.previous_focus.clone();
+        let caller = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
-        assert!(rig.state.command_palette.active);
+        assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
         rig.esc().await;
         assert_eq!(palette_digest(&rig), palette);
-        assert_eq!(rig.state.command_palette.previous_focus, previous_focus);
+        assert_eq!(
+            rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            caller
+        );
         let mut idle = Rig::at(FocusState::Input, "");
         idle.ctrl('p').await;
         assert_eq!(idle.ctrl('q').await, KeyFlow::Quit);
@@ -4659,24 +4654,44 @@ mod tests {
 
     #[tokio::test]
     async fn story21_4_attached_only_the_top_frame_receives_keys() {
-        for quit in [false, true] {
-            for key in Key::universe() {
+        for surface in [
+            Surface::Help,
+            Surface::CommandPalette,
+            Surface::NotificationLog,
+            Surface::QuitConfirm,
+        ] {
+            for key in Key::universe()
+                .into_iter()
+                .chain((' '..='~').map(Key::Char))
+            {
                 let mut rig = Rig::at(FocusState::Input, "unchanged draft");
-                rig.ctrl('x').await;
-                rig.ch('n').await;
-                if quit {
-                    rig.ctrl('q').await;
+                match surface {
+                    Surface::Help => {
+                        rig.ctrl('x').await;
+                        rig.ch('?').await;
+                    }
+                    Surface::CommandPalette => {
+                        rig.ctrl('p').await;
+                        rig.type_text("ml").await;
+                    }
+                    Surface::NotificationLog | Surface::QuitConfirm => {
+                        rig.ctrl('x').await;
+                        rig.ch('n').await;
+                        if surface == Surface::QuitConfirm {
+                            rig.ctrl('q').await;
+                        }
+                    }
                 }
                 let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
                 let flow = rig.key(key).await;
                 assert_eq!(
                     (rig.input.clone(), rig.scroll_offset, rig.auto_scroll),
                     before,
-                    "quit={quit} key={key:?}: {flow:?}"
+                    "{surface:?} key={key:?}: {flow:?}"
                 );
                 assert!(
                     rig.frames().is_empty(),
-                    "quit={quit} key={key:?}: no card/interrupt frame"
+                    "{surface:?} key={key:?}: no card/interrupt frame"
                 );
                 assert!(!matches!(flow, KeyFlow::Detach));
             }
@@ -4690,7 +4705,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_attached_quit_cancel_restores_log_and_legacy_help() {
+    async fn story21_4_attached_quit_cancel_restores_log_and_help() {
         let mut rig = Rig::at(FocusState::Input, "draft");
         rig.ctrl('x').await;
         rig.ch('n').await;
@@ -4708,7 +4723,7 @@ mod tests {
         let focus = rig.state.focus.clone();
         rig.ctrl('q').await;
         rig.ch('n').await;
-        assert!(rig.state.help_overlay.active);
+        assert!(presentation::is_open(&rig.state, Surface::Help));
         assert_eq!(rig.state.help_overlay.scroll_offset, 7);
         assert_eq!(rig.state.focus, focus);
         assert_eq!(rig.input, "draft");
@@ -4909,7 +4924,7 @@ mod tests {
         };
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             for full in [false, true] {
-                for route in ["log", "quit", "log-quit", "legacy-help-quit"] {
+                for route in ["log", "quit", "log-quit", "help-quit"] {
                     let draft = if full {
                         ["draft"; 8].join("\n")
                     } else {
@@ -4949,7 +4964,9 @@ mod tests {
                                     frame,
                                     layout.input_area,
                                     display,
-                                    if state.modal_stack.is_empty() {
+                                    if state.modal_stack.is_empty()
+                                        && state.pending_leader.is_none()
+                                    {
                                         state.focus.clone()
                                     } else {
                                         FocusState::Chat
@@ -4979,12 +4996,10 @@ mod tests {
                                     },
                                     |frame| {
                                         let buffer = frame.buffer_mut();
-                                        if !state.help_overlay.active {
-                                            assert!(
-                                                row(buffer, layout.status_bar, layout.status_bar.y)
-                                                    .starts_with("status-row-sentinel")
-                                            );
-                                        }
+                                        assert!(
+                                            row(buffer, layout.status_bar, layout.status_bar.y)
+                                                .starts_with("status-row-sentinel")
+                                        );
                                         if let Some(title) = title {
                                             let rect = geometry::frame_rect(shell.region);
                                             assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
@@ -5034,7 +5049,7 @@ mod tests {
                         (terminal, layout)
                     };
                     let (bare, before) = draw(&rig, None);
-                    if route == "legacy-help-quit" {
+                    if route == "help-quit" {
                         rig.ctrl('x').await;
                         rig.ch('?').await;
                         rig.state.help_overlay.scroll_offset = 7;
@@ -5044,7 +5059,7 @@ mod tests {
                     }
                     let legacy = (
                         rig.state.focus.clone(),
-                        rig.state.help_overlay.active,
+                        presentation::is_open(&rig.state, Surface::Help),
                         rig.state.help_overlay.scroll_offset,
                     );
                     let log = rig.state.notification_log.clone();
@@ -5054,13 +5069,14 @@ mod tests {
                     let title = match route {
                         "log" => "System · Notifications",
                         "log-quit" => "System · Notifications › System · Quit",
+                        "help-quit" => "Help — Rustain Keybindings › System · Quit",
                         _ => "System · Quit",
                     };
                     assert!(presentation::consistent(&rig.state));
                     assert_eq!(
                         (
                             rig.state.focus.clone(),
-                            rig.state.help_overlay.active,
+                            presentation::is_open(&rig.state, Surface::Help),
                             rig.state.help_overlay.scroll_offset
                         ),
                         legacy
@@ -5094,14 +5110,14 @@ mod tests {
                     assert_eq!(
                         (
                             rig.state.focus.clone(),
-                            rig.state.help_overlay.active,
+                            presentation::is_open(&rig.state, Surface::Help),
                             rig.state.help_overlay.scroll_offset
                         ),
                         legacy
                     );
                     assert!(
-                        !rig.state.command_palette.active
-                            && !rig.state.which_key.active
+                        !presentation::is_open(&rig.state, Surface::CommandPalette)
+                            && rig.state.pending_leader.is_none()
                             && !rig.state.autocomplete.active
                     );
                     assert_eq!(rig.input, draft);
@@ -5109,6 +5125,643 @@ mod tests {
                     assert!(presentation::consistent(&rig.state));
                 }
             }
+        }
+    }
+
+    /// K1: all four migrated surfaces are reached through the attached front door.
+    #[tokio::test]
+    async fn story21_4_attached_a2a_stack_back_truncation_and_identity() {
+        for base in [FocusState::Input, FocusState::Chat] {
+            let mut rig = Rig::at(base.clone(), "attached draft 界");
+            rig.ctrl('p').await;
+            rig.type_text("ml").await;
+            let palette = palette_digest(&rig);
+            let palette_id = rig.state.modal_stack.top().unwrap().id;
+            rig.ctrl('x').await;
+            assert_eq!(rig.state.pending_leader, Some(Context::CommandPalette));
+            rig.ch('?').await;
+            rig.state.help_overlay.scroll_offset = 7;
+            let help_id = rig.state.modal_stack.top().unwrap().id;
+            rig.ctrl('x').await;
+            assert_eq!(rig.state.pending_leader, Some(Context::Help));
+            rig.ch('n').await;
+            let log_id = rig.state.modal_stack.top().unwrap().id;
+            assert!(palette_id < help_id && help_id < log_id);
+            assert_eq!(rig.state.modal_stack.len(), 3);
+            let frames = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+            let log = rig.state.notification_log.clone();
+            for cancel in [Key::Char('n'), Key::Esc, Key::Ctrl('c')] {
+                rig.ctrl('q').await;
+                assert_eq!(rig.state.modal_stack.len(), 4);
+                assert_eq!(
+                    rig.state.modal_stack.top().unwrap().surface,
+                    Surface::QuitConfirm
+                );
+                assert!(rig.state.modal_stack.top().unwrap().id > log_id);
+                rig.key(cancel).await;
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    frames
+                );
+                assert_eq!(rig.state.notification_log, log);
+                assert_eq!(rig.state.help_overlay.scroll_offset, 7);
+                assert!(presentation::consistent(&rig.state));
+            }
+            rig.ctrl('x').await;
+            assert_eq!(rig.state.pending_leader, Some(Context::NotificationLog));
+            rig.ch('?').await;
+            assert_eq!(
+                rig.state.modal_stack.len(),
+                2,
+                "reopen truncates, never duplicates"
+            );
+            assert_eq!(rig.state.modal_stack.top().unwrap().id, help_id);
+            assert_eq!(rig.state.help_overlay.scroll_offset, 7);
+            rig.ctrl('x').await;
+            rig.ch('n').await;
+            assert!(rig.state.modal_stack.top().unwrap().id > log_id);
+            for depth in [2, 1, 0] {
+                rig.esc().await;
+                assert_eq!(rig.state.modal_stack.len(), depth);
+                assert_eq!(rig.state.focus, base);
+                assert_eq!(rig.input, "attached draft 界");
+                assert!(presentation::consistent(&rig.state));
+                if depth == 1 {
+                    assert_eq!(
+                        palette_digest(&rig),
+                        palette,
+                        "lent filter and selection restored"
+                    );
+                }
+            }
+            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+        }
+    }
+
+    /// K2: legacy-target refusal is a registry result and never closes the caller.
+    #[tokio::test]
+    async fn story21_4_attached_a2a_frame_leader_gate_and_quit_retention() {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        rig.ctrl('p').await;
+        rig.type_text("ml").await;
+        let palette = palette_digest(&rig);
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        let caller = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+        let records = rig.state.notifications.records().len();
+        rig.ctrl('x').await;
+        let avail = attached_avail_ctx(&rig.state, false);
+        assert!(avail.frame_origin);
+        let LeaderStep::Unavailable(_, remedy) =
+            leader_step(Host::Attached, Key::Char('q'), &avail, Context::Help.name())
+        else {
+            panic!("frame-origin legacy target must be registry-gated");
+        };
+        assert!(remedy.contains("close the window first"));
+        rig.ch('q').await;
+        assert_eq!(rig.notice(NoticeSource::Chord), Some(remedy));
+        assert_eq!(rig.state.notifications.records().len(), records + 1);
+        assert_eq!(
+            rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            caller
+        );
+        assert_eq!(rig.state.pending_leader, Some(Context::Help));
+        let pending = rig.state.pending_leader;
+        rig.ctrl('q').await;
+        assert_eq!(rig.state.pending_leader, pending);
+        assert_eq!(
+            rig.state.modal_stack.top().unwrap().surface,
+            Surface::QuitConfirm
+        );
+        rig.ch('?').await;
+        assert_eq!(
+            rig.state.pending_leader, pending,
+            "Quit owns keys over pending leader"
+        );
+        assert_eq!(rig.state.modal_stack.len(), 3);
+        rig.ch('n').await;
+        assert_eq!(rig.state.pending_leader, pending);
+        assert_eq!(
+            rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            caller
+        );
+        rig.ch('n').await;
+        assert_eq!(
+            rig.state.modal_stack.top().unwrap().surface,
+            Surface::NotificationLog
+        );
+        rig.ctrl('p').await;
+        assert_eq!(rig.state.modal_stack.len(), 1, "palette reopen truncates");
+        assert_eq!(palette_digest(&rig), palette);
+        assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+    }
+
+    /// K2: Help/palette/pending leader block paste and wheel without editing Stage.
+    #[tokio::test]
+    async fn story21_4_attached_a2a_frame_ingress_and_hint_cache() {
+        use crossterm::event::{MouseEvent, MouseEventKind};
+        for surface in [Surface::Help, Surface::CommandPalette] {
+            let mut rig = Rig::at(FocusState::Input, "draft").scrollable();
+            rig.state.current_hint = Some("stale base hint".into());
+            if surface == Surface::Help {
+                rig.ctrl('x').await;
+                rig.ch('?').await;
+            } else {
+                rig.ctrl('p').await;
+            }
+            assert_eq!(rig.state.current_hint, None);
+            let scroll = (rig.scroll_offset, rig.auto_scroll);
+            let allocation = (rig.input.as_ptr(), rig.input.capacity());
+            for pending in [false, true] {
+                if pending {
+                    rig.ctrl('x').await;
+                }
+                let before = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+                super::super::handle_attached_paste(
+                    &mut rig.state,
+                    &mut rig.input,
+                    "hidden",
+                    false,
+                );
+                for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
+                    assert_eq!(
+                        route_event(
+                            &mut rig.state,
+                            &Event::Mouse(MouseEvent {
+                                kind,
+                                column: 1,
+                                row: 2,
+                                modifiers: KeyModifiers::NONE,
+                            })
+                        ),
+                        Some(RouteEffect::Consumed)
+                    );
+                }
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    before
+                );
+                assert_eq!((rig.scroll_offset, rig.auto_scroll), scroll);
+                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
+                assert_eq!(rig.input, "draft");
+                if pending {
+                    rig.esc().await;
+                }
+            }
+            rig.ctrl('c').await;
+            assert!(rig.state.modal_stack.is_empty());
+            assert_eq!(
+                rig.state.current_hint,
+                crate::adapters::tui::hints::contextual_hint(
+                    &rig.state.focus,
+                    rig.state.session_count,
+                    rig.state.theme.timing.status_hint_fade_sessions,
+                    rig.state.is_vscode,
+                    &rig.state.modal_stack,
+                    None,
+                )
+            );
+            assert!(rig.frames().is_empty());
+        }
+    }
+    /// K3: real host composition keeps status last and the hardware caret hidden.
+    #[tokio::test]
+    async fn story21_4_attached_a2a_compose_breadcrumb_leader_and_cursor_matrix() {
+        use crate::adapters::tui::{
+            layout::compute_layout,
+            presentation::{Shell, geometry},
+        };
+        use crate::domain::models::visual::DensityMode;
+        use ratatui::{Terminal, backend::TestBackend, widgets::Paragraph};
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            for full in [false, true] {
+                for (depth, pending) in [
+                    (0, true),
+                    (1, false),
+                    (2, false),
+                    (3, false),
+                    (4, false),
+                    (3, true),
+                    (4, true),
+                ] {
+                    let draft = if full {
+                        ["draft"; 8].join("\n")
+                    } else {
+                        "draft".into()
+                    };
+                    let mut rig = Rig::at(FocusState::Input, &draft);
+                    rig.state.terminal_width = width;
+                    rig.state.terminal_height = height;
+                    if depth > 0 {
+                        rig.ctrl('p').await;
+                    }
+                    if depth > 1 {
+                        rig.ctrl('x').await;
+                        rig.ch('?').await;
+                    }
+                    if depth > 2 {
+                        rig.ctrl('x').await;
+                        rig.ch('n').await;
+                    }
+                    if pending {
+                        rig.ctrl('x').await;
+                    }
+                    if depth > 3 {
+                        rig.ctrl('q').await;
+                    }
+                    assert_eq!(rig.state.modal_stack.len(), depth);
+                    assert_eq!(rig.state.pending_leader.is_some(), pending);
+                    assert_eq!(rig.state.focus, FocusState::Input);
+                    let state = &rig.state;
+                    let area = Rect::new(0, 0, width, height);
+                    let layout =
+                        compute_layout(area, &state.theme, &draft, 1, false, DensityMode::Focus)
+                            .unwrap();
+                    let shell = Shell::new(area, &layout);
+                    let rect = geometry::frame_rect(shell.region);
+                    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            super::super::render_attached_composer(
+                                frame,
+                                layout.input_area,
+                                &draft,
+                                if state.modal_stack.is_empty() && state.pending_leader.is_none() {
+                                    state.focus.clone()
+                                } else {
+                                    FocusState::Chat
+                                },
+                                &state.theme,
+                                false,
+                                None,
+                            );
+                            frame.render_widget(Paragraph::new("status-before"), layout.status_bar);
+                            presentation::compose(
+                                frame,
+                                state,
+                                &shell,
+                                Host::Attached,
+                                &log_facts(&rig.conversation.id),
+                                |frame| {
+                                    paint_overlays(
+                                        frame,
+                                        area,
+                                        layout.input_area,
+                                        layout.status_bar,
+                                        state,
+                                    )
+                                },
+                                |frame| {
+                                    let buffer = frame.buffer_mut();
+                                    let row = |y| {
+                                        (0..width)
+                                            .map(|x| buffer[(x, y)].symbol())
+                                            .collect::<String>()
+                                    };
+                                    assert!(row(layout.status_bar.y).starts_with("status-before"));
+                                    if !pending && depth > 0 {
+                                        let breadcrumb = state
+                                            .modal_stack
+                                            .iter()
+                                            .map(|frame| frame.surface.title())
+                                            .collect::<Vec<_>>()
+                                            .join(" › ");
+                                        let title = row(rect.y);
+                                        if width == 130 {
+                                            assert!(title.contains(&breadcrumb), "{title}");
+                                        } else {
+                                            assert!(
+                                                title.contains(Surface::CommandPalette.title()),
+                                                "{title}"
+                                            );
+                                        }
+                                    }
+                                    if pending && depth < 4 {
+                                        assert!(
+                                            (0..layout.status_bar.y)
+                                                .any(|y| row(y).contains("Ctrl+X")),
+                                            "which-key paints above frames and outside status"
+                                        );
+                                    }
+                                    frame.render_widget(ratatui::widgets::Clear, layout.status_bar);
+                                    frame.render_widget(
+                                        Paragraph::new("Ready/status-after"),
+                                        layout.status_bar,
+                                    );
+                                },
+                            );
+                        })
+                        .unwrap();
+                    assert!(
+                        !terminal.backend().cursor_visible(),
+                        "{width}x{height}: depth={depth} pending={pending}"
+                    );
+                    let buffer = terminal.backend().buffer();
+                    let status = (0..width)
+                        .map(|x| buffer[(x, layout.status_bar.y)].symbol())
+                        .collect::<String>();
+                    assert!(status.starts_with("Ready/status-after"));
+                    assert_eq!(rig.input, draft);
+                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                    assert!(presentation::consistent(&rig.state));
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn story21_4_attached_a2a_nested_palette_retract_preserves_owner() {
+        use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
+        for nested in [false, true] {
+            let mut rig = Rig::at(FocusState::Input, "retained retract draft");
+            rig.retractable("peer-response-auto-a", "alpha auto reply");
+            rig.retractable("peer-response-auto-b", "beta auto reply");
+            if nested {
+                rig.ctrl('x').await;
+                rig.ch('?').await;
+                rig.state.help_overlay.scroll_offset = 7;
+            }
+            rig.ctrl('p').await;
+            rig.type_text("retract").await;
+            let target = rig
+                .state
+                .command_palette
+                .filtered_entries
+                .iter()
+                .position(|entry| {
+                    entry.action
+                        == PaletteAction::ExecuteCommand(
+                            RETRACT_AUTO.into(),
+                            Some("peer-response-auto-b".into()),
+                        )
+                })
+                .expect("real attached retract-auto catalogue row");
+            for _ in 0..target {
+                rig.press(KeyCode::Down, KeyModifiers::NONE).await;
+            }
+            let owner = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+            let palette = palette_digest(&rig);
+            let records = rig.state.notifications.records().len();
+            assert_eq!(rig.enter().await, KeyFlow::Continue);
+            if nested {
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    owner
+                );
+                assert_eq!(palette_digest(&rig), palette);
+                assert_eq!(rig.state.help_overlay.scroll_offset, 7);
+                assert_eq!(rig.state.focus, FocusState::Input);
+                assert!(rig.retract_confirm.is_none());
+                assert_eq!(rig.state.notifications.records().len(), records + 1);
+                assert_eq!(rig.notice(NoticeSource::Palette), Some(CLOSE_WINDOW_FIRST));
+            } else {
+                assert!(rig.state.modal_stack.is_empty());
+                assert_eq!(
+                    rig.retract_confirm.as_ref().map(|(id, _)| id.as_str()),
+                    Some("peer-response-auto-b")
+                );
+                assert_eq!(rig.state.focus, FocusState::Chat);
+                assert_eq!(rig.state.notifications.records().len(), records);
+            }
+            assert_eq!(rig.input, "retained retract draft");
+            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_a2a_frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
+        use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
+        for width in [60, 80, 130] {
+            for key in ['q', 'z'] {
+                let mut rig = Rig::at(FocusState::Input, "leader draft");
+                rig.state.terminal_width = width;
+                rig.ctrl('p').await;
+                rig.type_text("ml").await;
+                rig.ctrl('x').await;
+                rig.ch('?').await;
+                let owner = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+                let palette = palette_digest(&rig);
+                rig.ctrl('x').await;
+                let records = rig.state.notifications.records().len();
+                rig.ch(key).await;
+                let expected = if key == 'q' {
+                    CLOSE_WINDOW_FIRST.to_owned()
+                } else {
+                    crate::adapters::tui::keymap::resolve::no_binding_text(
+                        Key::Char(key),
+                        Context::Help.name(),
+                    )
+                };
+                assert_eq!(rig.state.pending_leader, Some(Context::Help));
+                assert_eq!(rig.notice(NoticeSource::Chord), Some(expected.as_str()));
+                assert_eq!(rig.state.notifications.records().len(), records + 1);
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    owner
+                );
+                let rows = paint(&rig.state, width);
+                let menu_y = rows
+                    .iter()
+                    .position(|row| row.contains("┌ Ctrl+X "))
+                    .expect("WhichKey title");
+                let painted = rows[menu_y..]
+                    .join(" ")
+                    .replace('│', " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(painted.contains(&expected), "{width}: {painted}");
+                for item in leader_menu(&attached_avail_ctx(&rig.state, false)) {
+                    assert!(painted.contains(&item.text()), "{width}: {}", item.text());
+                }
+                if key == 'q' {
+                    let buffer = paint_buffer(&rig.state, width);
+                    let (y, row) = rows
+                        .iter()
+                        .enumerate()
+                        .find(|(_, row)| row.contains("[Q] Decisions (n/a)"))
+                        .unwrap();
+                    let x = row[..row.find("[Q]").unwrap()].chars().count() as u16;
+                    assert!(
+                        buffer[(x, y as u16)].modifier.intersects(
+                            ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED
+                        ),
+                        "pressed unavailable row must stand out"
+                    );
+                }
+                rig.ctrl('q').await;
+                assert_eq!(rig.state.pending_leader, Some(Context::Help));
+                assert!(
+                    !paint(&rig.state, width)
+                        .join("\n")
+                        .contains("[Q] Decisions")
+                );
+                rig.ch('n').await;
+                assert_eq!(rig.state.pending_leader, Some(Context::Help));
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    owner
+                );
+                assert_eq!(
+                    paint(&rig.state, width),
+                    rows,
+                    "Quit returns exact menu and feedback"
+                );
+                rig.esc().await;
+                assert_eq!(rig.state.pending_leader, None);
+                assert_eq!(palette_digest(&rig), palette);
+                assert_eq!(rig.input, "leader draft");
+                assert_eq!(rig.state.focus, FocusState::Input);
+                assert!(rig.frames().is_empty());
+                let mut base = Rig::at(FocusState::Input, "base draft");
+                base.ctrl('x').await;
+                base.ch(key).await;
+                assert_eq!(
+                    base.state.pending_leader, None,
+                    "base-origin behavior unchanged"
+                );
+                assert!(base.state.modal_stack.is_empty() && base.frames().is_empty());
+                assert_eq!(base.state.notifications.records().len(), 1);
+                if key == 'q' {
+                    assert_eq!(
+                        base.notice(NoticeSource::Attached),
+                        Some("No decisions waiting in this client")
+                    );
+                } else {
+                    assert_eq!(
+                        base.notice(NoticeSource::Chord),
+                        Some("No binding for Ctrl+X z in Input")
+                    );
+                }
+                assert_eq!(base.input, "base draft");
+                assert_eq!(base.state.focus, FocusState::Input);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_a2a_nested_palette_refusal_is_visible_without_dispatch() {
+        use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
+        for width in [60, 80, 130] {
+            let mut rig = Rig::at(FocusState::Input, "palette draft");
+            rig.state.terminal_width = width;
+            rig.retractable("peer-response-auto-a", "real auto reply");
+            rig.ctrl('x').await;
+            rig.ch('?').await;
+            rig.ctrl('p').await;
+            rig.type_text("retract").await;
+            let owner = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+            let palette = palette_digest(&rig);
+            let records = rig.state.notifications.records().len();
+            rig.enter().await;
+            assert_eq!(
+                rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                owner
+            );
+            assert_eq!(palette_digest(&rig), palette);
+            assert_eq!(rig.state.notifications.records().len(), records + 1);
+            assert_eq!(rig.notice(NoticeSource::Palette), Some(CLOSE_WINDOW_FIRST));
+            let rows = paint(&rig.state, width);
+            let target_y = rows
+                .iter()
+                .position(|row| row.contains("retract: real auto reply"))
+                .unwrap();
+            let header = rows
+                .iter()
+                .find(|row| row.contains("Command Palette"))
+                .unwrap();
+            let left = header.chars().position(|c| c == '┌').unwrap();
+            let columns = header.chars().skip(left).position(|c| c == '┐').unwrap() + 1;
+            // A7 permits a toast outside the centered sheet; inspect only its footer.
+            let bottom = rows
+                .iter()
+                .position(|row| {
+                    row.chars().nth(left) == Some('└')
+                        && row.chars().nth(left + columns - 1) == Some('┘')
+                })
+                .expect("palette closing rail at its own columns");
+            let footer_text = |rows: &[String]| {
+                rows[target_y + 1..bottom]
+                    .iter()
+                    .map(|row| row.chars().skip(left).take(columns).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let footer = footer_text(&rows);
+            assert!(footer.contains(CLOSE_WINDOW_FIRST), "{width}: {rows:?}");
+            assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
+            rig.press(KeyCode::Left, KeyModifiers::NONE).await;
+            assert_eq!(
+                palette_digest(&rig),
+                palette,
+                "an inert key retains query and selection"
+            );
+            let cleared = footer_text(&paint(&rig.state, width));
+            assert!(
+                !cleared.contains("close the window first"),
+                "{width}: {cleared}"
+            );
+            assert_eq!(
+                rig.state.notifications.records().len(),
+                records + 1,
+                "clearing does not erase history"
+            );
+            assert_eq!(rig.input, "palette draft");
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
+        }
+    }
+
+    /// Controlled selected-entry fixture: unsupported local entries are not an
+    /// attached capability, but the shared nested-palette gate must still own Enter.
+    #[tokio::test]
+    async fn story21_4_attached_a2a_nested_palette_legacy_target_fixture() {
+        for nested in [false, true] {
+            let mut rig = Rig::at(FocusState::Input, "attached draft");
+            if nested {
+                rig.ctrl('x').await;
+                rig.ch('?').await;
+            }
+            rig.ctrl('p').await;
+            assert!(
+                !rig.palette_names().iter().any(|name| name == "/login"),
+                "the actual attached catalogue does not offer this local target"
+            );
+            // The fixture supplies registry action metadata only; dispatch still
+            // traverses the production palette/lent-input/attached command doors.
+            rig.state.command_palette.filtered_entries = vec![PaletteEntry {
+                name: "/login".into(),
+                description: "controlled local-target fixture".into(),
+                shortcut: None,
+                scope: PaletteScope::SlashCommand,
+                action: PaletteAction::ExecuteCommand("login".into(), None),
+            }];
+            rig.state.command_palette.selected_index = 0;
+            let before = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
+            let palette = palette_digest(&rig);
+            let records = rig.state.notifications.records().len();
+            assert_eq!(rig.enter().await, KeyFlow::Continue);
+            if nested {
+                assert_eq!(
+                    rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    before
+                );
+                assert_eq!(palette_digest(&rig), palette);
+                assert_eq!(rig.state.notifications.records().len(), records + 1);
+                assert!(
+                    rig.notice(NoticeSource::Palette)
+                        .unwrap()
+                        .contains("close the window first")
+                );
+            } else {
+                assert!(rig.state.modal_stack.is_empty());
+                assert_eq!(
+                    rig.notice(NoticeSource::Login),
+                    Some(ATTACHED_SIGN_IN),
+                    "base palette retains the existing attached auth refusal"
+                );
+            }
+            assert_eq!(rig.input, "attached draft");
+            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
         }
     }
 }

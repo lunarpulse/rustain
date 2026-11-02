@@ -8,6 +8,7 @@ use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::resolve::rows_of;
 use rustain::adapters::tui::keymap::table_input::InputCmd;
 use rustain::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
 use rustain::domain::models::autocomplete::AutocompleteKind;
@@ -50,8 +51,8 @@ fn salient(state: &TuiState) -> Salient {
         multiline: state.multiline_mode,
         autocomplete: state.autocomplete.active,
         reverse_search: state.reverse_search.active,
-        palette: state.command_palette.active,
-        which_key: state.which_key.active,
+        palette: is_open(state, Surface::CommandPalette),
+        which_key: state.pending_leader.is_some(),
         search: state.search_state.active,
         quit_confirm: state.quit_confirm.is_some(),
         pending_images: state.pending_images.len(),
@@ -124,14 +125,11 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
         InputCmd::OpenPalette => {
             let mut state = fresh();
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert!(state.command_palette.active);
+            assert!(is_open(&state, Surface::CommandPalette));
+            assert_eq!(state.focus, FocusState::Input);
             assert_eq!(
-                state.focus,
-                FocusState::Overlay(OverlayType::CommandPalette)
-            );
-            assert_eq!(
-                state.command_palette.previous_focus,
-                Some(FocusState::Input)
+                state.modal_stack.top().unwrap().surface,
+                Surface::CommandPalette
             );
         }
         InputCmd::ReverseSearch => {

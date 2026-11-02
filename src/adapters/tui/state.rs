@@ -2305,57 +2305,53 @@ impl ArtifactsPanelState {
     }
 }
 
+/// Paint-only feedback; pending_leader remains the menu-presence authority.
+pub struct LeaderFeedback {
+    pub command: Option<crate::adapters::tui::keymap::CommandId>,
+    pub message: std::borrow::Cow<'static, str>,
+}
+
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
-    pub active: bool,
     pub filter_text: String,
     pub filtered_entries: Vec<PaletteEntry>,
     pub selected_index: usize,
     pub scroll_offset: usize,
     pub current_scope: Option<PaletteScope>,
-    /// Previous focus state to restore on dismiss.
-    pub previous_focus: Option<FocusState>,
-    /// Incremented by every `open`; lets the populate gate distinguish an
-    /// inactive→active transition from an unchanged empty query.
+    /// Incremented on a new frame opening; distinguishes an unchanged empty query.
     pub open_epoch: u64,
+    /// Registry refusal shown until the next key handled by this palette.
+    pub refusal: Option<&'static str>,
 }
 
 impl CommandPaletteState {
     pub fn new() -> Self {
         Self {
-            active: false,
             filter_text: String::new(),
             filtered_entries: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
             current_scope: None,
-            previous_focus: None,
             open_epoch: 0,
+            refusal: None,
         }
     }
 
-    /// Open the command palette, saving the current focus for restoration.
-    pub fn open(&mut self, current_focus: FocusState) {
-        self.active = true;
+    /// Initialize a new frame's payload, independently of keyboard ownership.
+    pub fn reset(&mut self) {
         self.open_epoch = self.open_epoch.wrapping_add(1);
-        self.filter_text.clear();
-        self.filtered_entries.clear();
-        self.selected_index = 0;
-        self.scroll_offset = 0;
-        self.current_scope = None;
-        self.previous_focus = Some(current_focus);
+        self.clear();
     }
 
-    /// Dismiss the palette, returning the previous focus to restore.
-    pub fn dismiss(&mut self) -> Option<FocusState> {
-        self.active = false;
+    /// Release a closed frame's transient result/filter payload.
+    pub fn clear(&mut self) {
         self.filter_text.clear();
         self.filtered_entries.clear();
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.current_scope = None;
-        self.previous_focus.take()
+        self.refusal = None;
     }
 
     /// Navigate up or down in the result list (wraps around).
@@ -2414,9 +2410,6 @@ impl Default for CommandPaletteState {
 /// State for the help overlay (? key or Ctrl+X, ?).
 // Covers: FR108, UX-DR94
 pub struct HelpOverlayState {
-    pub active: bool,
-    /// Focus state to restore when the overlay is dismissed.
-    pub prior_focus: FocusState,
     /// Vertical scroll offset within the overlay content.
     pub scroll_offset: usize,
     /// Index of the currently highlighted category (reserved for future navigation).
@@ -2426,68 +2419,19 @@ pub struct HelpOverlayState {
 impl HelpOverlayState {
     pub fn new() -> Self {
         Self {
-            active: false,
-            prior_focus: FocusState::Input,
             scroll_offset: 0,
             selected_category: 0,
         }
     }
 
-    /// Open the help overlay, saving `prior` focus for restoration.
-    pub fn open(&mut self, prior: FocusState) {
-        self.active = true;
-        self.prior_focus = prior;
+    /// Initialize the payload of a newly opened Help frame.
+    pub fn reset(&mut self) {
         self.scroll_offset = 0;
         self.selected_category = 0;
-    }
-
-    /// Dismiss the overlay; returns the saved prior focus state.
-    pub fn close(&mut self) -> FocusState {
-        self.active = false;
-        self.prior_focus.clone()
     }
 }
 
 impl Default for HelpOverlayState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// State for the which-key hint bar overlay (Ctrl+X).
-// Covers: UX-DR19, UX-DR60
-pub struct WhichKeyState {
-    pub active: bool,
-    // Untimed leader (Story 21.2 AC6): no clock, no timeout method, no tick.
-    /// Previous focus state to restore on dismiss.
-    pub previous_focus: Option<FocusState>,
-}
-
-impl WhichKeyState {
-    pub fn new() -> Self {
-        Self {
-            active: false,
-            previous_focus: None,
-        }
-    }
-
-    /// Open the which-key hint bar, saving the current focus.
-    pub fn open(&mut self, current_focus: FocusState) {
-        self.active = true;
-        self.previous_focus = Some(current_focus);
-    }
-
-    /// Dismiss the which-key bar, returning the previous focus.
-    pub fn dismiss(&mut self) -> Option<FocusState> {
-        self.active = false;
-        self.previous_focus.take()
-    }
-
-    // Story 21.2 AC6: the Ctrl+X leader is untimed — it stays active until a
-    // follow-up key or Esc, so there is no timeout field, method or tick.
-}
-
-impl Default for WhichKeyState {
     fn default() -> Self {
         Self::new()
     }
@@ -2734,10 +2678,10 @@ pub struct TuiState {
     /// Command palette state (Ctrl+P).
     // Covers: UX-DR18
     pub command_palette: CommandPaletteState,
-    /// Which-key hint bar state (Ctrl+X).
-    // Covers: UX-DR19, UX-DR60
-    pub which_key: WhichKeyState,
-    /// Shared Log/Quit frame inventory; only the presentation reducer mutates it.
+    /// Untimed pending leader: the context at Ctrl+X, never a second focus owner.
+    pub pending_leader: Option<crate::adapters::tui::keymap::Context>,
+    pub leader_feedback: Option<LeaderFeedback>,
+    /// Shared frame inventory; only the presentation reducer mutates it.
     pub modal_stack: crate::adapters::tui::presentation::ModalStack,
     /// S-QUIT payload, present exactly while its stack frame is open.
     pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
@@ -3234,7 +3178,8 @@ impl TuiState {
             pending_large_image: None,
             image_indicator: None,
             command_palette: CommandPaletteState::new(),
-            which_key: WhichKeyState::new(),
+            pending_leader: None,
+            leader_feedback: None,
             modal_stack: crate::adapters::tui::presentation::ModalStack::default(),
             quit_confirm: None,
             notifications: {

@@ -8,10 +8,10 @@
 //! - Contextual status bar hints (first 5 sessions)
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::widgets::help_overlay;
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::OverlayType;
 use serial_test::serial;
 
 use crate::e2e_harness;
@@ -33,18 +33,11 @@ fn test_e2e_help_overlay_opens_from_chat() {
     // Press ? to open help
     let action = h.type_char('?');
     assert!(matches!(action, InputAction::Consumed));
-    assert!(matches!(
-        h.state.focus,
-        FocusState::Overlay(OverlayType::Help)
-    ));
-    assert!(h.state.help_overlay.active);
+    assert_eq!(h.state.focus, FocusState::Chat);
+    assert!(is_open(&h.state, Surface::Help));
 
-    // Render and verify help overlay appears (render help overlay directly)
-    h.terminal
-        .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
-        })
-        .unwrap();
+    // Render through the shared compositor, not a second Help owner.
+    h.render();
 
     h.assert_screen_contains("Help — Rustain Keybindings", "Help overlay title visible");
     h.assert_screen_contains(
@@ -66,7 +59,7 @@ fn test_e2e_help_overlay_does_not_open_in_input() {
     let action = h.type_char('?');
     assert!(matches!(action, InputAction::Consumed));
     assert!(matches!(h.state.focus, FocusState::Input));
-    assert!(!h.state.help_overlay.active);
+    assert!(!is_open(&h.state, Surface::Help));
     assert_eq!(h.state.input_buffer, "?");
 }
 
@@ -78,12 +71,12 @@ fn test_e2e_help_overlay_toggles_off_with_question() {
     // Open help from Chat
     h.press_key(DomainKey::Esc);
     h.type_char('?');
-    assert!(h.state.help_overlay.active);
+    assert!(is_open(&h.state, Surface::Help));
 
     // Press ? again to close
     let action = h.type_char('?');
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.help_overlay.active);
+    assert!(!is_open(&h.state, Surface::Help));
     assert!(matches!(h.state.focus, FocusState::Chat));
 }
 
@@ -95,12 +88,12 @@ fn test_e2e_help_overlay_closes_with_esc() {
     // Open help
     h.press_key(DomainKey::Esc);
     h.type_char('?');
-    assert!(h.state.help_overlay.active);
+    assert!(is_open(&h.state, Surface::Help));
 
     // Press Esc to close
     let action = h.press_key(DomainKey::Esc);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.help_overlay.active);
+    assert!(!is_open(&h.state, Surface::Help));
     assert!(matches!(h.state.focus, FocusState::Chat));
 }
 
@@ -306,7 +299,7 @@ fn test_e2e_version_command_via_palette() {
 
     // Open command palette
     h.press_key(DomainKey::CtrlP);
-    assert!(h.state.command_palette.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
 
     // Inject version entry and select it
     h.state.command_palette.filtered_entries = vec![PaletteEntry {
@@ -439,17 +432,17 @@ fn test_e2e_contextual_hint_per_focus() {
     use rustain::adapters::tui::hints::contextual_hint;
 
     // Test Input focus hint
-    let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default());
+    let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("? for help"));
 
     // Test Chat focus hint
-    let hint = contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default());
+    let hint = contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default(), None);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("j/k"));
 
     // Test above threshold
-    let hint = contextual_hint(&FocusState::Input, 6, 5, false, &Default::default());
+    let hint = contextual_hint(&FocusState::Input, 6, 5, false, &Default::default(), None);
     assert!(hint.is_none());
 }
 
@@ -464,17 +457,14 @@ fn test_e2e_help_blocked_during_command_palette() {
 
     // Open command palette
     h.press_key(DomainKey::CtrlP);
-    assert!(h.state.command_palette.active);
-    assert!(matches!(
-        h.state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
-    ));
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    assert_eq!(h.state.focus, FocusState::Input);
 
     // ? should be treated as filter text, not open help
     let action = h.type_char('?');
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.command_palette.active);
-    assert!(!h.state.help_overlay.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    assert!(!is_open(&h.state, Surface::Help));
 
     // ? should appear in filter text
     assert!(h.state.command_palette.filter_text.contains('?'));
@@ -490,16 +480,13 @@ fn test_e2e_help_overlay_ctrl_x_chord() {
 
     // Open which-key
     h.press_key(DomainKey::CtrlX);
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 
     // Press ? — should execute chord and open help
     h.type_char('?');
-    assert!(!h.state.which_key.active);
-    assert!(h.state.help_overlay.active);
-    assert!(matches!(
-        h.state.focus,
-        FocusState::Overlay(OverlayType::Help)
-    ));
+    assert!(h.state.pending_leader.is_none());
+    assert!(is_open(&h.state, Surface::Help));
+    assert_eq!(h.state.focus, FocusState::Input);
 }
 
 /// Covers: Help overlay at minimum terminal size
@@ -520,18 +507,22 @@ fn test_e2e_help_overlay_minimum_terminal_size() {
     h.assert_screen_contains("Help", "Help renders at minimum size");
 }
 
-/// Covers: Ctrl+P blocked when help overlay is active
+/// Covers: Ctrl+P pushes above Help and Esc restores its exact payload.
 #[test]
-fn test_e2e_ctrl_p_blocked_in_help_overlay() {
+fn test_e2e_ctrl_p_pushes_above_help_overlay() {
     let mut h = TestHarness::new();
 
     // Open help
     h.press_key(DomainKey::Esc);
     h.type_char('?');
-    assert!(h.state.help_overlay.active);
-
-    // Ctrl+P should be ignored (consumed by help handler or blocked by Tier-1 guard)
-    let _action = h.press_key(DomainKey::CtrlP);
-    assert!(!h.state.command_palette.active);
-    assert!(h.state.help_overlay.active); // Help still active
+    assert!(is_open(&h.state, Surface::Help));
+    h.state.help_overlay.scroll_offset = 7;
+    let caller = h.state.modal_stack.top().unwrap().clone();
+    h.press_key(DomainKey::CtrlP);
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    assert!(is_open(&h.state, Surface::Help));
+    assert_eq!(h.state.focus, FocusState::Chat);
+    h.press_key(DomainKey::Esc);
+    assert_eq!(h.state.modal_stack.top(), Some(&caller));
+    assert_eq!(h.state.help_overlay.scroll_offset, 7);
 }

@@ -1,6 +1,8 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::modal::{ModalPart, fit_modal_indexed};
+use crate::adapters::tui::keymap::{Context, render as keys, table_overlay::OverlayCmd};
 use crate::adapters::tui::state::CommandPaletteState;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -9,30 +11,9 @@ use crate::domain::models::palette::PaletteScope;
 /// Maximum number of visible items in the palette result list.
 const MAX_VISIBLE_ITEMS: usize = 12;
 
-/// Render the command palette as a centered overlay.
+/// Render the palette into the frame rectangle supplied by compose.
 // Covers: UX-DR18 (command palette overlay)
 pub fn render(frame: &mut Frame, area: Rect, state: &CommandPaletteState, theme: &Theme) {
-    if !state.active {
-        return;
-    }
-
-    let palette_area = calculate_centered_area(area);
-
-    // Clear the area behind the overlay
-    frame.render_widget(Clear, palette_area);
-
-    // Split palette into title bar + input + result list
-    let chunks = Layout::default()
-        .direction(ratatui::layout::Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // Input line with borders
-            Constraint::Min(1),    // Result list
-        ])
-        .split(palette_area);
-
-    let input_area = chunks[0];
-    let results_area = chunks[1];
-
     // Build title based on scope; suppress scope header when scope has no entries (AC8, Task 4.7)
     let scope_has_entries = state.current_scope.is_none() || !state.filtered_entries.is_empty();
     let title = if scope_has_entries {
@@ -48,118 +29,121 @@ pub fn render(frame: &mut Frame, area: Rect, state: &CommandPaletteState, theme:
         " Command Palette "
     };
 
-    // Render the input box
-    let input_block = Block::default()
+    let selected = state
+        .selected_index
+        .min(state.filtered_entries.len().saturating_sub(1));
+    let start = state
+        .scroll_offset
+        .min(selected)
+        .max(selected.saturating_sub(MAX_VISIBLE_ITEMS - 1));
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.accent))
         .title(title);
-
-    let input_text = Paragraph::new(Line::from(vec![
+    let inner = block.inner(area);
+    let visible_count = usize::from(inner.height.saturating_sub(2)).min(MAX_VISIBLE_ITEMS);
+    if start + visible_count < state.filtered_entries.len() {
+        block = block.title_bottom(format!(
+            " {}/{} ",
+            selected + 1,
+            state.filtered_entries.len()
+        ));
+    }
+    let mut query = Some(Line::from(vec![
         Span::styled("> ", Style::default().fg(theme.colors.accent)),
         Span::styled(
-            &state.filter_text,
+            state.filter_text.as_str(),
             Style::default().fg(theme.colors.fg_primary),
         ),
         Span::styled("_", Style::default().fg(theme.colors.fg_muted)),
-    ]))
-    .block(input_block)
-    .style(
-        Style::default()
-            .fg(theme.colors.fg_primary)
-            .bg(theme.colors.bg_surface),
-    );
-
-    frame.render_widget(input_text, input_area);
-
-    // Render results
-    if state.filtered_entries.is_empty() {
-        let empty_block = Block::default()
-            .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-            .border_style(Style::default().fg(theme.colors.accent));
-
-        let empty_text = Paragraph::new(Line::from(Span::styled(
+    ]));
+    let rows = if state.filtered_entries.is_empty() {
+        vec![Line::from(Span::styled(
             "  No matches",
             Style::default()
                 .fg(theme.colors.fg_muted)
                 .add_modifier(Modifier::ITALIC),
-        )))
-        .block(empty_block)
-        .style(
-            Style::default()
-                .fg(theme.colors.fg_primary)
-                .bg(theme.colors.bg_surface),
-        );
-
-        frame.render_widget(empty_text, results_area);
-        return;
-    }
-
-    let visible_count = state
-        .filtered_entries
-        .len()
-        .saturating_sub(state.scroll_offset)
-        .min(MAX_VISIBLE_ITEMS);
-    let has_more = state.scroll_offset + visible_count < state.filtered_entries.len();
-
-    let results_block = Block::default()
-        .borders(Borders::LEFT | Borders::RIGHT | Borders::BOTTOM)
-        .border_style(Style::default().fg(theme.colors.accent));
-
-    let results_block = if has_more {
-        results_block.title_bottom(format!(
-            " {}/{} ",
-            state.selected_index + 1,
-            state.filtered_entries.len()
-        ))
+        ))]
     } else {
-        results_block
+        state
+            .filtered_entries
+            .iter()
+            .skip(start)
+            .take(MAX_VISIBLE_ITEMS)
+            .enumerate()
+            .map(|(index, entry)| {
+                let mut line = format_palette_entry(entry, theme);
+                if start + index == selected {
+                    let highlight = Style::default()
+                        .fg(theme.colors.accent)
+                        .add_modifier(Modifier::BOLD);
+                    for span in &mut line.spans {
+                        span.style = span.style.patch(highlight);
+                    }
+                }
+                line
+            })
+            .collect()
     };
-
-    let items: Vec<ListItem> = state
-        .filtered_entries
-        .iter()
-        .skip(state.scroll_offset)
-        .take(visible_count)
-        .map(|entry| format_palette_entry(entry, theme))
-        .collect();
-
-    let mut list_state = ListState::default();
-    list_state.select(Some(
-        state.selected_index.saturating_sub(state.scroll_offset),
-    ));
-
-    let list = List::new(items)
-        .block(results_block)
-        .highlight_style(
-            Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(
+    let footer = state
+        .refusal
+        .map(std::borrow::Cow::Borrowed)
+        .unwrap_or_else(|| {
+            std::borrow::Cow::Owned(format!(
+                "{} move  {} run  {} close",
+                keys::rail_pair(
+                    Context::CommandPalette,
+                    OverlayCmd::PaletteUp,
+                    OverlayCmd::PaletteDown
+                ),
+                keys::rail_key(Context::CommandPalette, OverlayCmd::PaletteRun),
+                keys::rail_key(Context::CommandPalette, OverlayCmd::PaletteClose),
+            ))
+        });
+    let selected_row = selected.saturating_sub(start);
+    let lines = fit_modal_indexed(
+        vec![
+            ModalPart::Header(vec![Line::default()]),
+            ModalPart::Rows {
+                lines: rows,
+                selected: (selected_row, selected_row + 1),
+            },
+            ModalPart::Footer(vec![Line::from(Span::styled(
+                footer,
+                Style::default().fg(theme.colors.fg_muted),
+            ))]),
+        ],
+        usize::from(inner.height),
+        usize::from(inner.width),
+    );
+    // Reserve the query row through the shared fit, then borrow its text.
+    let lines = lines
+        .into_iter()
+        .map(|(part, _, line)| {
+            if part == 0 {
+                query.take().expect("one query row")
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(
             Style::default()
                 .fg(theme.colors.fg_primary)
                 .bg(theme.colors.bg_surface),
-        );
-
-    frame.render_stateful_widget(list, results_area, &mut list_state);
+        ),
+        inner,
+    );
 }
 
-/// Calculate a centered overlay area within the terminal.
-/// Size: 60% width (min 40, max 80), 50% height (min 8, max 20).
-fn calculate_centered_area(area: Rect) -> Rect {
-    let width = (area.width * 60 / 100).clamp(40, 80).min(area.width);
-    let height = (area.height * 50 / 100).clamp(8, 20).min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
-}
-
-/// Format a palette entry as a ListItem.
-/// Shows: name (bold, left-aligned), shortcut (dimmed, right-aligned), description (dimmed).
-fn format_palette_entry<'a>(
+/// Format a result row, preserving the display-cell aligned shortcut column.
+fn format_palette_entry(
     entry: &crate::domain::models::palette::PaletteEntry,
     theme: &Theme,
-) -> ListItem<'a> {
+) -> Line<'static> {
     // Fixed column widths in display cells: name fills up to 30 cells, shortcut
     // right-aligned in 16 cells.
     const NAME_WIDTH: usize = 30;
@@ -199,7 +183,7 @@ fn format_palette_entry<'a>(
         ));
     }
 
-    ListItem::new(Line::from(spans))
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -207,29 +191,106 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_centered_area() {
-        let area = Rect::new(0, 0, 120, 40);
-        let centered = calculate_centered_area(area);
-        assert_eq!(centered.width, 72); // 60% of 120
-        assert_eq!(centered.height, 20); // 50% of 40 = 20 (max)
-        assert_eq!(centered.x, 24); // (120-72)/2
-        assert_eq!(centered.y, 10); // (40-20)/2
+    fn test_shared_geometry_small_palette_keeps_query_selection_and_footer() {
+        assert_palette_fit(Rect::new(0, 0, 60, 5));
     }
 
     #[test]
-    fn test_calculate_centered_area_small_terminal() {
-        let area = Rect::new(0, 0, 60, 16);
-        let centered = calculate_centered_area(area);
-        assert!(centered.width >= 36 && centered.width <= 60);
-        assert!(centered.height >= 8 && centered.height <= 16);
+    fn test_shared_geometry_wide_palette_keeps_query_selection_and_footer() {
+        assert_palette_fit(Rect::new(0, 0, 130, 30));
     }
 
     #[test]
-    fn test_calculate_centered_area_respects_max() {
-        let area = Rect::new(0, 0, 200, 60);
-        let centered = calculate_centered_area(area);
-        assert_eq!(centered.width, 80); // capped at 80
-        assert_eq!(centered.height, 20); // capped at 20
+    fn test_render_respects_caller_rectangle() {
+        let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        let area = Rect::new(7, 3, 80, 20);
+        terminal
+            .draw(|frame| render(frame, area, &CommandPaletteState::new(), &Theme::dark()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "┘");
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn test_depth_one_scoped_titles_and_empty_scope_fallback_are_unchanged() {
+        for (scope, title) in [
+            (None, "Command Palette"),
+            (Some(PaletteScope::All), "Command Palette"),
+            (Some(PaletteScope::SlashCommand), "Commands /"),
+            (Some(PaletteScope::FileMention), "Files @"),
+            (Some(PaletteScope::Model), "Models :"),
+            (Some(PaletteScope::Profile), "Profiles >"),
+            (Some(PaletteScope::Adapter), "Adapters !"),
+        ] {
+            for populated in [false, true] {
+                let mut state = CommandPaletteState::new();
+                state.current_scope = scope;
+                if populated {
+                    state.filtered_entries.push(model_entry("model"));
+                }
+                let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+                terminal
+                    .draw(|frame| render(frame, frame.area(), &state, &Theme::dark()))
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let top = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+                let expected = if populated { title } else { "Command Palette" };
+                assert!(top.contains(&format!(" {expected} ")), "{top}");
+            }
+        }
+    }
+
+    fn assert_palette_fit(region: Rect) {
+        use crate::adapters::tui::presentation::geometry;
+
+        let area = geometry::frame_rect(region);
+        let mut state = CommandPaletteState::new();
+        state.filter_text = "needle".to_owned();
+        state.filtered_entries = (0..20)
+            .map(|index| model_entry(&format!("model-{index}")))
+            .collect();
+        state.selected_index = 15;
+        state.scroll_offset = 4;
+        let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+        terminal
+            .draw(|frame| render(frame, area, &state, &Theme::dark()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert!(row(area.y).contains("Command Palette"));
+        assert!(row(area.y + 1).contains("> needle_"));
+        let text = (area.y + 2..area.bottom() - 1)
+            .map(row)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("model-15"), "{text}");
+        let footer = format!(
+            "{} move  {} run  {} close",
+            keys::rail_pair(
+                Context::CommandPalette,
+                OverlayCmd::PaletteUp,
+                OverlayCmd::PaletteDown
+            ),
+            keys::rail_key(Context::CommandPalette, OverlayCmd::PaletteRun),
+            keys::rail_key(Context::CommandPalette, OverlayCmd::PaletteClose)
+        );
+        assert!(text.contains(&footer), "{text}");
+        assert!(row(area.bottom() - 1).contains("16/20"));
+        if region.width >= 100 {
+            assert!(text.contains("200K ctx"), "{text}");
+        }
+        assert!((area.y + 2..area.bottom() - 1).any(|y| {
+            row(y).contains("model-15")
+                && buffer[(area.x + 1, y)].style().fg == Some(Theme::dark().colors.accent)
+        }));
+        assert_eq!(state.selected_index, 15);
+        assert_eq!(state.scroll_offset, 4);
     }
 
     // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
@@ -259,18 +320,17 @@ mod tests {
         }
     }
 
-    /// Paint the real palette on a 100x30 terminal (overlay x = 20, list
-    /// text from x = 21, first entry on row 10) and return the column where
-    /// the shortcut text starts on the first entry row, plus that row.
+    /// Paint the real palette in an explicit caller rectangle matching the old
+    /// fixture's text origin, isolating cell-width equivalence from geometry.
     fn shortcut_column(entry: PaletteEntry) -> (u16, String) {
         let shortcut = entry.shortcut.clone().unwrap();
         let mut state = CommandPaletteState::new();
-        state.active = true;
+        state.reset();
         state.filtered_entries = vec![entry];
         let theme = Theme::dark();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|frame| render(frame, frame.area(), &state, &theme))
+            .draw(|frame| render(frame, Rect::new(20, 8, 60, 15), &state, &theme))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let mut glyphs: Vec<(u16, String)> = Vec::new();

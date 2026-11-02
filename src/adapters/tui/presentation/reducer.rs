@@ -1,18 +1,31 @@
-//! The sole owner of Log/Quit frame and payload lifetimes and focus restoration.
+//! The sole owner of migrated frame/payload lifetimes and focus restoration.
 
 use super::{Frame, Opened, Surface, is_open};
 use crate::adapters::tui::notification_log::NotificationLogState;
 use crate::adapters::tui::quit_confirm::{QuitConfirmState, QuitFacts, QuitRequest};
 use crate::adapters::tui::state::TuiState;
 
-/// Open once, leaving an existing frame and its payload untouched.
-/// Quit's guarded request installs its facts before calling this function.
+/// Reopen truncates to the existing frame and retains its untouched payload.
 pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
-    if is_open(state, surface) {
+    if let Some(index) = state
+        .modal_stack
+        .iter()
+        .position(|frame| frame.surface == surface)
+    {
+        let truncated = index + 1 < state.modal_stack.len();
+        while index + 1 < state.modal_stack.len() {
+            back(state);
+        }
         debug_assert!(super::consistent(state));
-        return Opened::Unchanged;
+        return if truncated {
+            Opened::Truncated
+        } else {
+            Opened::Unchanged
+        };
     }
     match surface {
+        Surface::CommandPalette => state.command_palette.reset(),
+        Surface::Help => state.help_overlay.reset(),
         Surface::NotificationLog => {
             state.notification_log = Some(NotificationLogState {
                 selected_id: state
@@ -96,6 +109,11 @@ pub fn close(state: &mut TuiState, surface: Surface) {
     let was_top = index + 1 == state.modal_stack.len();
     state.modal_stack.frames.remove(index);
     let caller_focus = match surface {
+        Surface::CommandPalette => {
+            state.command_palette.clear();
+            None
+        }
+        Surface::Help => None,
         Surface::NotificationLog => {
             let caller = state.notification_log.take().map(|log| log.caller_focus);
             state.notifications.log_closed();
@@ -127,8 +145,16 @@ mod tests {
             (Host::Attached, QuitHost::Attached),
         ] {
             let mut state = TuiState::new(80, 24);
-            state.focus = FocusState::Overlay(OverlayType::Help);
-            state.help_overlay.active = true;
+            crate::adapters::tui::app::handle_input(
+                &mut state,
+                &crate::domain::events::DomainInputEvent::SpecialKey(
+                    crate::domain::events::DomainKey::CtrlX,
+                ),
+            );
+            crate::adapters::tui::app::handle_input(
+                &mut state,
+                &crate::domain::events::DomainInputEvent::KeyPress('?'),
+            );
             state.help_overlay.scroll_offset = 7;
             state.input_buffer = "keep draft".into();
             state.cursor_position = 3;
@@ -167,7 +193,7 @@ mod tests {
             state.needs_redraw = false;
             notification_log::open(&mut state);
             assert!(!state.needs_redraw, "duplicate open is a no-op");
-            assert_eq!(state.modal_stack.len(), 1);
+            assert_eq!(state.modal_stack.len(), 2);
             assert_eq!(state.modal_stack.top(), Some(&log_frame));
             assert_eq!(state.notification_log, log);
             assert_eq!(state.focus, base);
@@ -197,7 +223,7 @@ mod tests {
                 QuitRequest::Confirming
             );
             assert!(!state.needs_redraw);
-            assert_eq!(state.modal_stack.len(), 2);
+            assert_eq!(state.modal_stack.len(), 3);
             assert_eq!(state.modal_stack.top(), Some(&quit_frame));
             assert_eq!(state.quit_confirm, quit);
             assert_eq!(state.notification_log, log);
@@ -216,12 +242,11 @@ mod tests {
                 notification_log::handle_key(&mut state, host, Key::Esc, &facts),
                 LogOutcome::Closed
             );
-            assert_eq!(back(&mut state), None);
-            assert!(state.modal_stack.is_empty());
+            assert_eq!(state.modal_stack.len(), 1, "Help is still the caller");
             assert!(state.notification_log.is_none());
             assert!(consistent(&state));
             assert_eq!(state.focus, base);
-            assert!(state.help_overlay.active);
+            assert!(is_open(&state, Surface::Help));
             assert_eq!(state.help_overlay.scroll_offset, 7);
             assert_eq!(state.input_buffer, "keep draft");
             assert_eq!(state.cursor_position, 3);

@@ -10,6 +10,7 @@ use super::table::{GlobalCmd, LeaderCmd};
 /// One painted leader-menu entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuItem {
+    pub command: CommandId,
     /// Key as painted inside the brackets (`P`, `?`, `Enter`, `Esc`).
     pub key: String,
     /// Label painted after the key.
@@ -36,6 +37,7 @@ pub fn leader_menu(avail: &AvailCtx) -> Vec<MenuItem> {
     rows_of(Context::Leader, avail.host)
         .filter(|row| !row.label.is_empty())
         .map(|row| MenuItem {
+            command: row.command,
             key: match row.keys[0] {
                 Key::Char(c) => c.to_ascii_uppercase().to_string(),
                 other => other.label(),

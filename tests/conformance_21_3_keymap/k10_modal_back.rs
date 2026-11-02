@@ -7,6 +7,7 @@
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::notification_log::{self, LogFacts};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
@@ -20,8 +21,8 @@ fn open_surfaces(s: &TuiState) -> String {
     format!(
         "{:?} help={} palette={} model={} profile={} usage={} reverse={} popup={} log={} surface={}",
         s.focus,
-        s.help_overlay.active,
-        s.command_palette.active,
+        is_open(s, Surface::Help),
+        is_open(s, Surface::CommandPalette),
         s.model_selector.active,
         s.profile_switcher.active,
         s.usage_panel.active,
@@ -187,7 +188,7 @@ fn ctrl_c_in_the_leader_menu_cancels_it_silently() {
     let mut state = fresh();
     press(&mut state, Key::Ctrl('x'));
     assert_eq!(press(&mut state, Key::Ctrl('c')), InputAction::Consumed);
-    assert!(!state.which_key.active);
+    assert!(state.pending_leader.is_none());
     assert_eq!(state.focus, FocusState::Input);
     assert_eq!(state.notifications.records().count(), 0);
 }

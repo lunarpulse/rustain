@@ -46,7 +46,7 @@ fn test_ctrl_x_h_reveals_the_history_sidebar() {
         handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
         assert_eq!(action, InputAction::OpenPanel(PanelType::History));
-        assert!(!state.which_key.active);
+        assert!(state.pending_leader.is_none());
     }
 
     // Ctrl+H no longer toggles anything (Story 21.3 AC6).

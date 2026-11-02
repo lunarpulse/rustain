@@ -691,7 +691,7 @@ fn palette_entry(name: &str, shortcut: &str, scope: PaletteScope) -> PaletteEntr
 fn shortcut_column(width: u16, entry: PaletteEntry) -> u16 {
     let shortcut = entry.shortcut.clone().unwrap();
     let mut state = CommandPaletteState::new();
-    state.active = true;
+    state.reset();
     state.filtered_entries = vec![entry];
     let theme = Theme::dark();
     let painted = paint(width, 30, |frame| {
@@ -700,7 +700,7 @@ fn shortcut_column(width: u16, entry: PaletteEntry) -> u16 {
     let mut x = 0u16;
     let mut symbols: Vec<(u16, String)> = Vec::new();
     while x < width {
-        let symbol = painted.buffer.cell((x, 10)).unwrap().symbol().to_string();
+        let symbol = painted.buffer.cell((x, 2)).unwrap().symbol().to_string();
         let step = u16::try_from(cells(&symbol).max(1)).unwrap();
         symbols.push((x, symbol));
         x += step;
@@ -719,9 +719,8 @@ fn shortcut_column(width: u16, entry: PaletteEntry) -> u16 {
 #[test]
 fn k4_palette_shortcut_column_matches_the_ascii_control() {
     // Model entries: `{display} ({provider})` with `Ctrl+X, M`; profile
-    // entries: `> {name}` with `(active)`. The overlay is 48 cells wide at 80
-    // columns and clips the shortcut field of names wider than 29 cells, so
-    // those names are checked at 100 and 130 columns only.
+    // entries: `> {name}` with `(active)`. The widget uses its supplied frame;
+    // keep the original narrow and wide display-cell alignment witnesses.
     let models_fit_80 = [
         "模型 (openai)".to_string(),
         format!("{G} (p)"),

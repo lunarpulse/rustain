@@ -340,7 +340,7 @@ fn test_focus_state_variants() {
         panel: PanelType::History,
         selected: 0,
     };
-    let overlay = FocusState::Overlay(OverlayType::CommandPalette);
+    let overlay = FocusState::Overlay(OverlayType::ModelSelector);
 
     // Chat is a unit variant (scroll state owned by TuiState)
     assert_eq!(chat, FocusState::Chat);
@@ -356,15 +356,13 @@ fn test_focus_state_variants() {
 fn test_overlay_type_variants() {
     use rustain::domain::models::visual::OverlayType;
 
-    // 5 variants (no Confirmation yet)
-    let variants = [
-        OverlayType::CommandPalette,
-        OverlayType::ModelSelector,
-        OverlayType::ProfileSwitcher,
-        OverlayType::WhichKey,
-        OverlayType::Help,
-    ];
-    assert_eq!(variants.len(), 5);
+    // Help, palette and which-key are frame/routed contexts, not legacy overlays.
+    let variants = [OverlayType::ModelSelector, OverlayType::ProfileSwitcher];
+    assert_eq!(variants.len(), 2);
+    use rustain::adapters::tui::keymap::Context;
+    use rustain::adapters::tui::presentation::Surface;
+    assert_ne!(Surface::Help, Surface::CommandPalette);
+    assert_eq!(Context::Leader.name(), "Leader");
 }
 
 // ── Task 5.8: Integration test -- TUI renders with Theme applied ──

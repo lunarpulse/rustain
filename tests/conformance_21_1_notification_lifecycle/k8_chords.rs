@@ -31,7 +31,7 @@ fn k8_ctrl_x_x_clears_every_toast_without_touching_sources_or_focus() {
         FocusState::Chat,
         "the leader restored the origin"
     );
-    assert!(!state.which_key.active);
+    assert!(state.pending_leader.is_none());
     assert!(state.notification_log.is_none(), "x is not the log");
 }
 
@@ -44,7 +44,7 @@ fn k8_ctrl_x_n_opens_the_log_with_the_origin_focus_as_its_caller() {
     handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     let log = state.notification_log.as_ref().expect("S-LOG is open");
     assert_eq!(log.caller_focus, FocusState::Chat);
-    assert!(!state.which_key.active, "the leader is spent");
+    assert!(state.pending_leader.is_none(), "the leader is spent");
     assert_eq!(
         state.notifications.unseen(),
         0,

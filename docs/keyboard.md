@@ -383,6 +383,8 @@ Also inherits: Sidebar.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local, attached | portable |  |
 | `j` | Scroll the help down one line | local, attached | portable |  |
 | `Down` | Scroll the help down one line | local, attached | portable |  |
 | `k` | Scroll the help up one line | local, attached | portable |  |
@@ -400,6 +402,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
+| `Ctrl+P` | Return to this command palette | local, attached | portable |  |
 | `Up` | Select the previous entry | local, attached | portable |  |
 | `Down` | Select the next entry | local, attached | portable |  |
 | `Enter` | Run the selected entry | local, attached | portable |  |
@@ -505,6 +509,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local, attached | portable |  |
 | `Esc` | Close the notification log | local, attached | portable |  |
 | `Ctrl+C` | Close the notification log (back one frame) | local, attached | portable |  |
 | `j` | Select the next record; scroll the details when open | local, attached | portable |  |

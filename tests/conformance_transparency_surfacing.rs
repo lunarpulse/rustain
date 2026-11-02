@@ -26,7 +26,7 @@ use rustain::domain::services::transparency::{
 fn ctrl_x_l_dispatches_the_transparency_log_panel() {
     let mut state = TuiState::new(160, 24);
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('l'));
     assert_eq!(
@@ -34,7 +34,7 @@ fn ctrl_x_l_dispatches_the_transparency_log_panel() {
         InputAction::OpenPanel(PanelType::TransparencyLog),
         "Ctrl+X, L must open the real panel"
     );
-    assert!(!state.which_key.active);
+    assert!(state.pending_leader.is_none());
     // A `Noop` chord records a Chord-source notice instead of dispatching.
     assert!(
         state

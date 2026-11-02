@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use rustain::adapters::tui::notifications::{
     self, NoticeDraft, NoticeSeverity, NoticeSource, NotificationStore,
 };
+use rustain::adapters::tui::presentation::{Surface, reducer};
 use rustain::domain::clock::MockClock;
-use rustain::domain::models::visual::OverlayType;
-use rustain::domain::models::{FocusState, NotificationsConfig};
+use rustain::domain::models::NotificationsConfig;
 
 use super::support::{advance, clocked, clocked_with, draw, notify, screen};
 
@@ -156,7 +156,7 @@ fn k1_configured_one_second_ttl_applies_per_severity() {
 #[test]
 fn k1_expiry_ignores_focus_and_overlays() {
     let (mut state, clock) = clocked(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    reducer::open(&mut state, Surface::Help);
     notify(&mut state, NoticeSeverity::Info, "focus independent");
     advance(&clock, Duration::from_secs(4));
     assert!(!screen(&draw(&mut state, 80, 24, true)).contains("focus independent"));

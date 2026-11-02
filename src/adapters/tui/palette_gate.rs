@@ -77,7 +77,10 @@ impl PaletteGate {
         palette_registry: &mut PaletteRegistry,
         workspace_path: &Path,
     ) -> bool {
-        if !state.command_palette.active {
+        if !crate::adapters::tui::presentation::is_open(
+            state,
+            crate::adapters::tui::presentation::Surface::CommandPalette,
+        ) {
             self.populated_for = None;
             return false;
         }
@@ -271,7 +274,10 @@ mod tests {
         let mut rig = Rig::new();
         rig.ctrl_p().await;
 
-        assert!(rig.state.command_palette.active);
+        assert!(crate::adapters::tui::presentation::is_open(
+            &rig.state,
+            crate::adapters::tui::presentation::Surface::CommandPalette
+        ));
         assert_eq!(rig.gate.refresh_count(), 1);
         // Independent oracle: every command-registry command is listed, in
         // the existing stable registry order.
@@ -295,7 +301,10 @@ mod tests {
         rig.ctrl_p().await;
         let first = rig.names();
         rig.esc().await;
-        assert!(!rig.state.command_palette.active);
+        assert!(!crate::adapters::tui::presentation::is_open(
+            &rig.state,
+            crate::adapters::tui::presentation::Surface::CommandPalette
+        ));
         assert!(rig.state.command_palette.filtered_entries.is_empty());
 
         rig.ctrl_p().await;

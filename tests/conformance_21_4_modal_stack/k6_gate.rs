@@ -1,4 +1,4 @@
-//! K6 / A19: partial 4-A1 ratchet. Behaviour belongs to K2–K4, not this scanner.
+//! K6 / A19: 4-A2a ratchet. Behaviour belongs to K1–K4, not this scanner.
 //! Every retained occurrence has an exact named-site pin and a migration owner.
 //! Removed/changed pins fail stale; new hits never inherit a file exemption.
 use regex::Regex;
@@ -191,28 +191,26 @@ fn scope(code: &str, at: usize) -> String {
     name
 }
 
-// Exact named-site pins from da41ddae, minus A1 cutovers; whitespace is not ownership.
+// Exact named-site pins from da41ddae, minus A1/A2a cutovers; whitespace is not ownership.
 #[rustfmt::skip]
 const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/agent_inspector_keys.rs", "4-C", &[
         r###"focus-write|on_key|state.focus = FocusState::Chat;"###,
     ]),
     ("src/adapters/tui/app.rs", "4-C", &[
-        r###"focus-write|advance_deferred_permission|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));"###, r###"focus-write|advance_deferred_permission|state.focus = if state.recipient_surface.is_some() {"###, r###"focus-write|handle_leader_key|state.focus = origin.clone();"###, r###"focus-write|handle_leader_key|state.focus = FocusState::Overlay(OverlayType::Help);"###, r###"focus-write|dispatch_input|state.focus = FocusState::Chat;"###, r###"focus-write|open_leader|state.focus = FocusState::Overlay(OverlayType::WhichKey);"###,
-        r###"focus-write|open_palette|state.focus = FocusState::Overlay(OverlayType::CommandPalette);"###, r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###,
-        r###"focus-write|exec_chat|state.focus = FocusState::Input;"###, r###"focus-write|exec_chat|state.focus = FocusState::Overlay(OverlayType::Help);"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Chat;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"focus-write|sidebar_move|state.focus = FocusState::Sidebar {"###,
-        r###"focus-write|exec_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|exec_panel|state.focus = FocusState::Chat;"###, r###"focus-write|exec_recipient|state.focus = surface.prior_focus;"###, r###"focus-write|exec_help|OverlayCmd::HelpClose => state.focus = state.help_overlay.close(),"###,
-        r###"focus-write|exec_profile|state.focus = prev;"###, r###"focus-write|exec_model_selector|state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|handle_char|state.focus = FocusState::Input;"###, r###"focus-write|exec_palette|state.focus = focus;"###, r###"focus-write|exec_palette|state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);"###,
+        r###"focus-write|advance_deferred_permission|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));"###, r###"focus-write|advance_deferred_permission|state.focus = if state.recipient_surface.is_some() {"###, r###"focus-write|dispatch_input|state.focus = FocusState::Chat;"###,
+        r###"focus-write|open_leader|state.focus = FocusState::Input;"###, r###"focus-write|open_palette|state.focus = FocusState::Input;"###, r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###,
+        r###"focus-write|exec_chat|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Chat;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"focus-write|sidebar_move|state.focus = FocusState::Sidebar {"###,
+        r###"focus-write|exec_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|exec_panel|state.focus = FocusState::Chat;"###, r###"focus-write|exec_recipient|state.focus = surface.prior_focus;"###,
+        r###"focus-write|exec_profile|state.focus = prev;"###, r###"focus-write|exec_model_selector|state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|handle_char|state.focus = FocusState::Input;"###,
         r###"focus-write|exec_usage|state.focus = state.usage_panel.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###,
-    ]),
-    ("src/adapters/tui/app.rs", "4-A2", &[
-        r###"prior|open_leader|let prior_focus = match &state.focus {"###, r###"prior|open_leader|state.which_key.open(prior_focus);"###, r###"prior|open_palette|let prior_focus = match &state.focus {"###, r###"prior|open_palette|state.command_palette.open(prior_focus);"###, r###"overlay|ctrl_x_opens_leader|OverlayType::CommandPalette"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::WhichKey"###,
-        r###"overlay|ctrl_x_opens_leader|| OverlayType::Help"###, r###"overlay|handle_leader_key|state.focus = FocusState::Overlay(OverlayType::Help);"###, r###"overlay|overlay_focus_context|OverlayType::Help => Context::Help,"###, r###"overlay|open_leader|FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###, r###"overlay|open_leader|FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###, r###"overlay|open_leader|state.focus = FocusState::Overlay(OverlayType::WhichKey);"###,
-        r###"overlay|open_palette|FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###, r###"overlay|open_palette|FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###, r###"overlay|open_palette|state.focus = FocusState::Overlay(OverlayType::CommandPalette);"###, r###"overlay|exec_chat|state.focus = FocusState::Overlay(OverlayType::Help);"###,
     ]),
     ("src/adapters/tui/app.rs", "4-B", &[
         r###"overlay|overlay_focus_context|OverlayType::Login => Context::Login,"###,
-        r###"prior|exec_input|state.search_state.prior_focus = Some(prior);"###, r###"overlay|handle_input_inner|if state.focus == FocusState::Overlay(OverlayType::Login)"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::ModelSelector"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::ProfileSwitcher"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::Search"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::CrossSearch"###,
+        r###"overlay|open_leader|| FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###, r###"overlay|open_leader|| FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {"###,
+        r###"overlay|open_leader|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))) {"###, r###"overlay|open_leader|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))) {"###,
+        r###"overlay|open_palette|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))) {"###, r###"overlay|open_palette|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))) {"###,
+        r###"prior|exec_input|state.search_state.prior_focus = Some(prior);"###, r###"overlay|handle_input_inner|if state.focus == FocusState::Overlay(OverlayType::Login)"###, r###"overlay|ctrl_x_opens_leader|OverlayType::ModelSelector"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::ProfileSwitcher"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::Search"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::CrossSearch"###,
         r###"overlay|ctrl_x_opens_leader|| OverlayType::BookmarkList"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::UsagePanel"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::WaveOverlay"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::Login"###, r###"overlay|overlay_focus_context|OverlayType::ModelSelector => Context::ModelSelector,"###, r###"overlay|overlay_focus_context|OverlayType::UsagePanel => Context::UsagePanel,"###,
         r###"overlay|overlay_focus_context|OverlayType::ProfileSwitcher => Context::ProfileSwitcher,"###, r###"overlay|overlay_focus_context|OverlayType::Search => match state.search_state.substate {"###, r###"overlay|overlay_focus_context|OverlayType::CrossSearch => Context::CrossSearch,"###, r###"overlay|overlay_focus_context|OverlayType::BookmarkList => Context::BookmarkList,"###, r###"overlay|overlay_focus_context|OverlayType::WaveOverlay => Context::WaveOverlay,"###, r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###,
         r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###, r###"overlay|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"overlay|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###,
@@ -277,9 +275,6 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/handlers/usage_panel.rs", "4-B", &[
         r###"overlay|handle_open_usage_panel|crate::domain::models::visual::OverlayType::UsagePanel,"###,
     ]),
-    ("src/adapters/tui/hints.rs", "4-A2", &[
-        r###"overlay|contextual_hint|FocusState::Overlay(OverlayType::WhichKey) => {"###, r###"overlay|contextual_hint|FocusState::Overlay(OverlayType::CommandPalette) => Some(render_tips::palette_tip()),"###,
-    ]),
     ("src/adapters/tui/layout.rs", "4-B", &[
         r###"reservation|AppLayout|pub search_bar: Option<Rect>,"###, r###"reservation|AppLayout|pub bookmark_panel: Option<Rect>,"###, r###"reservation|AppLayout|pub fn reserve_search_bar(&mut self, active: bool) {"###, r###"reservation|impl AppLayout::reserve_search_bar|self.search_bar = Some(bar);"###, r###"reservation|impl AppLayout::reserve_search_bar|pub fn reserve_bookmark_panel(&mut self, requested_height: u16) {"###, r###"reservation|impl AppLayout::reserve_bookmark_panel|self.bookmark_panel = Some(panel);"###,
         r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
@@ -291,10 +286,8 @@ const PINS: &[Pin<'_>] = &[
         r###"prior|SearchState|pub prior_focus: Option<FocusState>,"###, r###"prior|impl SearchState::new|prior_focus: None,"###, r###"active|ReverseSearchState|pub active: bool,"###, r###"active|SearchState|pub active: bool,"###, r###"active|CrossSearchState|pub active: bool,"###, r###"active|ModelSelectorState|pub active: bool,"###,
         r###"active|ProfileSwitcherState|pub active: bool,"###, r###"active|UsagePanelState|pub active: bool,"###,
     ]),
-    ("src/adapters/tui/state.rs", "4-A2", &[
-        r###"previous|CommandPaletteState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl CommandPaletteState::new|previous_focus: None,"###, r###"previous|impl CommandPaletteState::open|self.previous_focus = Some(current_focus);"###, r###"previous|impl CommandPaletteState::dismiss|self.previous_focus.take()"###, r###"previous|WhichKeyState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl WhichKeyState::new|previous_focus: None,"###,
-        r###"previous|impl WhichKeyState::open|self.previous_focus = Some(current_focus);"###, r###"previous|impl WhichKeyState::dismiss|self.previous_focus.take()"###, r###"prior|HelpOverlayState|pub prior_focus: FocusState,"###, r###"prior|impl HelpOverlayState::new|prior_focus: FocusState::Input,"###, r###"prior|impl HelpOverlayState::open|self.prior_focus = prior;"###, r###"prior|impl HelpOverlayState::close|self.prior_focus.clone()"###,
-        r###"active|AutocompleteState|pub active: bool,"###, r###"active|CommandPaletteState|pub active: bool,"###, r###"active|HelpOverlayState|pub active: bool,"###, r###"active|WhichKeyState|pub active: bool,"###,
+    ("src/adapters/tui/state.rs", "4-A2b", &[
+        r###"active|AutocompleteState|pub active: bool,"###,
     ]),
     ("src/adapters/tui/state.rs", "21-6", &[
         r###"prior|PendingArtifactCard|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingPeerAdd|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingTeamRetract|pub prior_focus: crate::domain::models::FocusState,"###,
@@ -309,8 +302,8 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/widgets/mod.rs", "4-B", &[
         r###"reservation|<module>|pub mod search_bar;"###,
     ]),
-    ("src/domain/models/visual.rs", "4-A2", &[
-        r###"variant|OverlayType|CommandPalette,"###, r###"variant|OverlayType|WhichKey,"###, r###"variant|OverlayType|Help,"###, r###"variant|OverlayType|Autocomplete(super::autocomplete::AutocompleteKind),"###,
+    ("src/domain/models/visual.rs", "4-A2b", &[
+        r###"variant|OverlayType|Autocomplete(super::autocomplete::AutocompleteKind),"###,
     ]),
     ("src/domain/models/visual.rs", "4-B", &[
         r###"variant|OverlayType|ModelSelector,"###, r###"variant|OverlayType|ProfileSwitcher,"###, r###"variant|OverlayType|ReverseSearch,"###, r###"variant|OverlayType|Search,"###, r###"variant|OverlayType|CrossSearch,"###, r###"variant|OverlayType|BookmarkList,"###,
@@ -326,13 +319,13 @@ const PINS: &[Pin<'_>] = &[
         r###"prior|open_apply_card|let prior_focus = state.focus.clone();"###, r###"prior|open_apply_card|prior_focus,"###, r###"prior|open_resolve_card|let prior_focus = state.focus.clone();"###, r###"prior|open_resolve_card|prior_focus,"###,
     ]),
     ("src/infrastructure/runtime/attach_keys.rs", "4-C", &[
-        r###"focus-write|execute_attached|ctx.state.focus = FocusState::Overlay(OverlayType::WhichKey);"###, r###"focus-write|execute_attached|ctx.state.focus = FocusState::Input;"###, r###"focus-write|execute_attached|ctx.state.focus = FocusState::Overlay(OverlayType::Help);"###,
-        r###"focus-write|execute_attached|FocusState::Input => ctx.state.focus = FocusState::Chat,"###, r###"focus-write|execute_attached|FocusState::Chat => ctx.state.focus = FocusState::Input,"###, r###"focus-write|execute_attached|ctx.state.focus = ctx.state.help_overlay.close();"###, r###"focus-write|execute_attached|ctx.state.focus = ctx"###, r###"focus-write|leader_key|ctx.state.focus = origin.clone();"###, r###"focus-write|leader_key|ctx.state.focus = FocusState::Overlay(OverlayType::Help);"###,
-        r###"focus-write|open_palette|ctx.state.focus = FocusState::Overlay(OverlayType::CommandPalette);"###, r###"focus-write|begin_retract|ctx.state.focus = FocusState::Chat;"###, r###"focus-borrow|begin_retract|&mut ctx.state.focus,"###, r###"attached|attached_card_context|fn with_lent_input<R>("###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);"###,
+        r###"focus-write|execute_attached|ctx.state.focus = FocusState::Input;"###,
+        r###"focus-write|execute_attached|FocusState::Input => ctx.state.focus = FocusState::Chat,"###, r###"focus-write|execute_attached|FocusState::Chat => ctx.state.focus = FocusState::Input,"###,
+        r###"focus-write|begin_retract|ctx.state.focus = FocusState::Chat;"###, r###"focus-borrow|begin_retract|&mut ctx.state.focus,"###, r###"attached|attached_card_context|fn with_lent_input<R>("###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);"###,
         r###"attached|popup_delegate|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|palette_delegate|let action = with_lent_input(ctx.state, ctx.input, |state| handle_input(state, &event));"###,
     ]),
-    ("src/infrastructure/runtime/attach_keys.rs", "4-A2", &[
-        r###"overlay|execute_attached|ctx.state.focus = FocusState::Overlay(OverlayType::WhichKey);"###, r###"overlay|execute_attached|ctx.state.focus = FocusState::Overlay(OverlayType::Help);"###, r###"overlay|leader_key|ctx.state.focus = FocusState::Overlay(OverlayType::Help);"###, r###"overlay|open_palette|ctx.state.focus = FocusState::Overlay(OverlayType::CommandPalette);"###, r###"attached|log_facts|pub(super) fn paint_overlays("###, r###"render|paint_overlays|help_overlay::render("###,
+    ("src/infrastructure/runtime/attach_keys.rs", "4-A2b", &[
+        r###"attached|log_facts|pub(super) fn paint_overlays("###,
     ]),
     ("src/infrastructure/runtime/attach_loop.rs", "4-C", &[
         r###"focus-write|open_response_surface|state.focus = FocusState::Chat;"###, r###"focus-write|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"focus-write|recipient_surface_key|state.focus = FocusState::Input;"###, r###"focus-write|attached_proposal_key|state.focus = surface.prior_focus;"###, r###"focus-write|run_attached|state.focus = FocusState::Chat;"###, r###"focus-borrow|open_response_surface|None => (std::mem::replace(&mut state.focus, FocusState::Chat), None),"###,
@@ -342,7 +335,7 @@ const PINS: &[Pin<'_>] = &[
     ("src/infrastructure/runtime/attach_loop.rs", "21-8", &[
         r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"prior|attached_proposal_key|state.focus = surface.prior_focus;"###,
     ]),
-    ("src/infrastructure/runtime/attach_loop.rs", "4-A2", &[
+    ("src/infrastructure/runtime/attach_loop.rs", "4-A2b", &[
         r###"attached|run_attached|attach_keys::paint_overlays(f, area, layout.input_area, layout.status_bar, &state)"###,
     ]),
     ("src/infrastructure/runtime/event_loop.rs", "4-C", &[
@@ -364,8 +357,8 @@ const PINS: &[Pin<'_>] = &[
         r###"render|render|crate::adapters::tui::widgets::login_dialog::render("###, r###"render|render|usage_panel::render(frame, area, usage_panel, theme);"###, r###"render|render|profile_switcher::render(frame, area, profile_switcher, theme);"###,
         r###"render|render|reverse_search::render(frame, app_layout.input_area, reverse_search, theme, state.modal_stack.is_empty());"###,
     ]),
-    ("src/infrastructure/runtime/event_loop.rs", "4-A2", &[
-        r###"render|render|help_overlay::render("###, r###"render|render|decision_painted = crate::adapters::tui::decision_pane::render(frame, app_layout.chat_pane, &state.decisions, &log_facts, theme);"###,
+    ("src/infrastructure/runtime/event_loop.rs", "4-A2b", &[
+        r###"render|render|decision_painted = crate::adapters::tui::decision_pane::render(frame, app_layout.chat_pane, &state.decisions, &log_facts, theme);"###,
     ]),
     ("src/infrastructure/runtime/panel_bridge.rs", "4-C", &[
         r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###,
@@ -421,7 +414,7 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "render",
-        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|decision_pane|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|search_bar|cross_search|bookmark_list|reverse_search)\s*::\s*render\w*\s*\("###,
+        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|search_bar|cross_search|bookmark_list|reverse_search)\s*::\s*render\w*\s*\("###,
     ),
     // Payload presence cannot become a second open authority, regardless of read syntax.
     ("option", r"\.\s*(?:notification_log|quit_confirm)\b"),
@@ -430,6 +423,14 @@ const RULES: &[(&str, &str)] = &[
         r"\b(?:notification_log|quit_confirm)\s*::\s*(?:handle_\w+|execute)\s*\(",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
+    (
+        "migrated-owner",
+        r"\b(?:WhichKeyState|which_key)\b|OverlayType\s*::\s*(?:Help|CommandPalette|WhichKey)\b|\.\s*(?:help_overlay|command_palette)\s*\.\s*(?:active|previous_focus|prior_focus|open|close|dismiss|is_open)\b|\b(?:HelpOverlayState|CommandPaletteState)\s*\{[^{}]*\b(?:active|previous_focus|prior_focus)\b|\b(?:help_overlay|command_palette)\s*:\s*(?:bool|Option\s*<)",
+    ),
+    (
+        "migrated-payload-owner",
+        r"\b(?:active|previous_focus|prior_focus)\b|\bfn\s+(?:open|close|dismiss|is_open)\s*\(",
+    ),
 ];
 
 // Canonical bytes retain an offset back into the masked source. Rustfmt may wrap
@@ -469,6 +470,13 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             r"NotificationLog|QuitConfirm|CommandPalette|HelpOverlay|WhichKey|Autocomplete|ReverseSearch|SearchState|CrossSearch|ModelSelector|ProfileSwitcher|UsagePanel|LoginOverlay",
         )
     });
+    static MIGRATED: LazyLock<Regex> =
+        LazyLock::new(|| re(r"\b(?:Help|CommandPalette|WhichKey)\b"));
+    static PAYLOAD: LazyLock<Regex> =
+        LazyLock::new(|| re(r"\b(?:HelpOverlayState|CommandPaletteState|WhichKeyState)\b"));
+    static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
+        re(r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar)\b")
+    });
     let mut errors = Vec::new();
     let mut unused: Vec<_> = pins
         .iter()
@@ -483,7 +491,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
         })
         .collect();
     for (_, owner, _, _, _, _) in &unused {
-        assert!(["4-A2", "4-B", "4-C", "21-6", "21-8"].contains(owner));
+        assert!(["4-A2b", "4-B", "4-C", "21-6", "21-8"].contains(owner));
     }
     for (path, source) in files {
         let code = production_part(source);
@@ -517,6 +525,9 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 if *rule == "focus-write" && code.as_bytes().get(m.end()) == Some(&b'=') {
                     continue;
                 }
+                if *rule == "migrated-payload-owner" && !PAYLOAD.is_match(&scope(&code, m.end())) {
+                    continue;
+                }
                 if *rule == "active" && !ACTIVE_TYPES.is_match(&scope(&code, m.start())) {
                     continue;
                 }
@@ -526,11 +537,18 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     .map_or(code.len(), |n| m.end() + n);
                 let name = scope(&code, m.start());
                 let site = format!("{rule}|{name}|{}", compact(&code[start..end]));
-                // A1 ownership bans are not eligible for a future-slice pin.
-                let hard = ["option", "interceptor", "close-surfaces"].contains(rule)
-                    || (*rule == "render"
-                        && (m.as_str().starts_with("notification_log")
-                            || m.as_str().starts_with("quit_confirm")));
+                // Migrated ownership cannot be restored under a future-slice pin.
+                let hard = [
+                    "option",
+                    "interceptor",
+                    "close-surfaces",
+                    "migrated-owner",
+                    "migrated-payload-owner",
+                ]
+                .contains(rule)
+                    || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
+                    || (["active", "prior", "previous"].contains(rule) && PAYLOAD.is_match(&name))
+                    || (*rule == "render" && PAINTER.is_match(m.as_str()));
                 let hit = offsets.partition_point(|&offset| offset < m.start());
                 if let Some(n) = unused.iter().position(|(p, _, _, r, n, text)| {
                     !hard
@@ -912,7 +930,7 @@ fn k6_a1_bans_cannot_be_pinned_and_payload_exemptions_are_exact() {
         let site = format!("{rule}|real|{text}");
         let sites = [site.as_str()];
         // These pins are fixture-local, not additions to the production allowlist.
-        let pins = [("src/x.rs", "4-A2", sites.as_slice())];
+        let pins = [("src/x.rs", "4-A2b", sites.as_slice())];
         let errors = scan(
             &[("src/x.rs".into(), format!("fn real() {{ {text} }}"))],
             &pins,
@@ -942,4 +960,68 @@ fn k6_a1_bans_cannot_be_pinned_and_payload_exemptions_are_exact() {
         assert!(!scan(&[(path.into(), payload.clone())], &[]).is_empty());
     }
     assert!(scan(&[("src/adapters/tui/presentation/route.rs".into(),"fn real() { quit_confirm::execute(s, h, k); notification_log::render(f); s.focus = base; }".into())],&[]).is_empty());
+}
+
+#[test]
+fn k6_a2a_ownership_reads_patterns_and_painters_are_unpinnable() {
+    for text in [
+        "s.help_overlay.active;",
+        "matches!(s.help_overlay.active, true);",
+        "match &s.command_palette.previous_focus { Some(_) => (), None => () }",
+        "let HelpOverlayState { active, .. } = payload;",
+        "struct CommandPaletteState { previous_focus: FocusState }",
+        "impl HelpOverlayState { fn open(&mut self) {} }",
+        "s.command_palette.is_open();",
+        "s.help_overlay.close();",
+        "s.which_key;",
+        "struct WhichKeyState {}",
+        "let o = OverlayType::CommandPalette;",
+        "let o = OverlayType::WhichKey;",
+        "struct TuiState { help_overlay: Option<HelpOverlayState> }",
+        "help_overlay::render(f);",
+        "command_palette::render(f);",
+        "which_key_bar::render(f);",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(!first.is_empty(), "{text}");
+        // Attempt all matching pins together: generic legacy rules may be
+        // pinnable, but they can never exempt the migrated ownership violation.
+        let sites: Vec<_> = first
+            .iter()
+            .map(|error| error.split_once(": ").unwrap().1)
+            .collect();
+        let pins = [("src/x.rs", "4-C", sites.as_slice())];
+        let errors = scan(&files, &pins);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|s| !s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+    }
+    for path in ["src/x.rs", "src/adapters/tui/presentation/route.rs"] {
+        let payload = "fn real() { s.help_overlay.scroll_offset += 1; s.command_palette.filter_text.clear(); s.command_palette.reset(); s.command_palette.clear(); s.pending_leader = Some(Context::Help); }";
+        assert!(scan(&[(path.into(), payload.into())], &[]).is_empty());
+        let old = "fn real() { matches!(&s.help_overlay.active, true); }";
+        assert!(!scan(&[(path.into(), old.into())], &[]).is_empty());
+    }
+    let payload = "struct HelpOverlayState { scroll_offset: usize } impl HelpOverlayState { fn reset(&mut self) { self.scroll_offset = 0; } }";
+    assert!(scan(&[("src/x.rs".into(), payload.into())], &[]).is_empty());
+    for variant in ["Help", "CommandPalette", "WhichKey"] {
+        let path = "src/domain/models/visual.rs";
+        let source = format!("enum OverlayType {{\n {variant},\n}}");
+        let site = format!("variant|OverlayType|{variant},");
+        let sites = [site.as_str()];
+        let pins = [(path, "4-B", sites.as_slice())];
+        let errors = scan(&[(path.into(), source)], &pins);
+        assert!(
+            errors
+                .iter()
+                .any(|s| s.contains("variant|") && !s.starts_with("stale pin"))
+        );
+        assert!(errors.iter().any(|s| s.starts_with("stale pin")));
+    }
 }

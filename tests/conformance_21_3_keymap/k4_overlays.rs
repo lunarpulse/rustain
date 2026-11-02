@@ -19,6 +19,7 @@ use rustain::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use rustain::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource, NotificationStore,
 };
+use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, is_open};
 use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
 use rustain::adapters::tui::state::{
     ContextWarning, LoginOrigin, LoginSection, OverlayMode, ProviderColumn, RecipientSurface,
@@ -48,24 +49,27 @@ fn focused(overlay: OverlayType) -> TuiState {
 
 #[rustfmt::skip]
 const HELP: &[W] = &[
-    w(&[Key::Char('j')], "Consumed | scroll=4 active=true focus=Overlay(Help)"),
-    w(&[Key::Down], "Consumed | scroll=4 active=true focus=Overlay(Help)"),
-    w(&[Key::Char('k')], "Consumed | scroll=2 active=true focus=Overlay(Help)"),
-    w(&[Key::Up], "Consumed | scroll=2 active=true focus=Overlay(Help)"),
-    w(&[Key::Char('G')], "Consumed | scroll=99 active=true focus=Overlay(Help)"),
-    w(&[Key::Char('g')], "Consumed | scroll=0 active=true focus=Overlay(Help)"),
+    w(&[Key::Char('j')], "Consumed | scroll=4 active=true focus=Chat"),
+    w(&[Key::Down], "Consumed | scroll=4 active=true focus=Chat"),
+    w(&[Key::Char('k')], "Consumed | scroll=2 active=true focus=Chat"),
+    w(&[Key::Up], "Consumed | scroll=2 active=true focus=Chat"),
+    w(&[Key::Char('G')], "Consumed | scroll=99 active=true focus=Chat"),
+    w(&[Key::Char('g')], "Consumed | scroll=0 active=true focus=Chat"),
     w(&[Key::Char('?')], "Consumed | scroll=3 active=false focus=Chat"),
     w(&[Key::Esc], "Consumed | scroll=3 active=false focus=Chat"),
     w(&[Key::Ctrl('c')], "Consumed | scroll=3 active=false focus=Chat"),
-    w(&[Key::Ctrl('q')], "Quit | scroll=3 active=true focus=Overlay(Help)"),
+    w(&[Key::Ctrl('q')], "Quit | scroll=3 active=true focus=Chat"),
+    w(&[Key::Ctrl('x')], "Consumed | scroll=3 active=true focus=Chat"),
+    w(&[Key::Ctrl('p')], "Consumed | scroll=3 active=true focus=Chat"),
 ];
 
 /// Catches a Help row that scrolls the wrong way, closes into the wrong focus, or leaks a key.
 #[test]
 fn help_rows_by_value_and_every_other_key_is_inert() {
     let setup = || {
-        let mut s = focused(OverlayType::Help);
-        s.help_overlay.open(FocusState::Chat);
+        let mut s = fresh();
+        s.focus = FocusState::Chat;
+        press(&mut s, Key::Char('?'));
         s.help_overlay.scroll_offset = 3;
         s
     };
@@ -75,7 +79,7 @@ fn help_rows_by_value_and_every_other_key_is_inert() {
         format!(
             "scroll={} active={} focus={:?}",
             h.scroll_offset.min(99),
-            h.active,
+            is_open(s, Surface::Help),
             s.focus
         )
     };
@@ -84,13 +88,15 @@ fn help_rows_by_value_and_every_other_key_is_inert() {
 
 #[rustfmt::skip]
 const PALETTE: &[W] = &[
-    w(&[Key::Up], "Consumed | active=true filter=ab sel=2 focus=Overlay(CommandPalette)"),
-    w(&[Key::Down], "Consumed | active=true filter=ab sel=1 focus=Overlay(CommandPalette)"),
+    w(&[Key::Up], "Consumed | active=true filter=ab sel=2 focus=Input"),
+    w(&[Key::Down], "Consumed | active=true filter=ab sel=1 focus=Input"),
     w(&[Key::Enter], "NewTab | active=false filter= sel=0 focus=Input"),
     w(&[Key::Esc], "Consumed | active=false filter= sel=0 focus=Input"),
     w(&[Key::Ctrl('c')], "Consumed | active=false filter= sel=0 focus=Input"),
-    w(&[Key::Backspace], "Consumed | active=true filter=a sel=0 focus=Overlay(CommandPalette)"),
-    w(&[Key::Ctrl('q')], "Quit | active=true filter=ab sel=0 focus=Overlay(CommandPalette)"),
+    w(&[Key::Backspace], "Consumed | active=true filter=a sel=0 focus=Input"),
+    w(&[Key::Ctrl('q')], "Quit | active=true filter=ab sel=0 focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | active=true filter=ab sel=0 focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | active=true filter=ab sel=0 focus=Input"),
 ];
 
 /// Catches a palette row that runs the wrong entry, keeps the palette open, or moves the wrong way.
@@ -104,8 +110,8 @@ fn command_palette_rows_by_value_and_every_other_non_text_key_is_inert() {
             scope: PaletteScope::All,
             action,
         };
-        let mut s = focused(OverlayType::CommandPalette);
-        s.command_palette.open(FocusState::Input);
+        let mut s = fresh();
+        press(&mut s, Key::Ctrl('p'));
         s.command_palette.filter_text = "ab".into();
         s.command_palette.filtered_entries = [
             PaletteAction::NewTab,
@@ -120,7 +126,10 @@ fn command_palette_rows_by_value_and_every_other_non_text_key_is_inert() {
         let p = &s.command_palette;
         format!(
             "active={} filter={} sel={} focus={:?}",
-            p.active, p.filter_text, p.selected_index, s.focus
+            is_open(s, Surface::CommandPalette),
+            p.filter_text,
+            p.selected_index,
+            s.focus
         )
     };
     run(&Case {
@@ -397,8 +406,8 @@ const REVERSE: &[W] = &[
     w(&[Key::Ctrl('r')], "Consumed | rev=true q=al sel=1 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
     w(&[Key::Down], "Consumed | rev=true q=al sel=2 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
     w(&[Key::Backspace], "Consumed | rev=true q=a sel=0 m=4 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
-    w(&[Key::Ctrl('p')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=true leader=false focus=Overlay(CommandPalette)"),
-    w(&[Key::Ctrl('x')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=true focus=Overlay(WhichKey)"),
+    w(&[Key::Ctrl('p')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=true leader=false focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=true focus=Input"),
     w(&[Key::Ctrl('q')], "Quit | rev=true q=al sel=0 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
 ];
 
@@ -426,8 +435,8 @@ fn reverse_search_rows_by_value_and_every_other_non_text_key_is_inert() {
             r.selected_match,
             r.matches.len(),
             s.input_buffer,
-            s.command_palette.active,
-            s.which_key.active,
+            is_open(s, Surface::CommandPalette),
+            s.pending_leader.is_some(),
             s.focus
         )
     };
@@ -669,9 +678,23 @@ fn shown<T: Debug>(out: &Option<T>) -> String {
         .map_or_else(|| "None".to_owned(), |o| format!("{o:?}"))
 }
 
-/// S-LOG's host-neutral handler, which the event loop calls before `handle_input`.
+/// The production presentation boundary precedes S-LOG's fact-aware handler.
 fn log_door(state: &mut TuiState, key: Key) -> (String, bool) {
-    let out = decode(key).and_then(|e| notification_log::handle_domain_event(state, &e, &facts()));
+    let effect = decode(key).and_then(|e| presentation::route(state, &e, Host::Local, &facts()));
+    let out = match effect {
+        Some(RouteEffect::Consumed) if !is_open(state, Surface::NotificationLog) => {
+            Some(LogOutcome::Closed)
+        }
+        Some(RouteEffect::Consumed) => Some(LogOutcome::Consumed),
+        Some(RouteEffect::QuitRequest) => Some(LogOutcome::Quit),
+        Some(RouteEffect::Log(out)) => Some(out),
+        Some(RouteEffect::Action(action)) => {
+            assert!(is_open(state, Surface::CommandPalette));
+            return (format!("{action:?}"), true);
+        }
+        None => None,
+        other => panic!("unexpected local Log effect: {other:?}"),
+    };
     (
         shown(&out),
         matches!(out, None | Some(LogOutcome::Consumed)),
@@ -698,6 +721,8 @@ const LOG: &[W] = &[
     w(&[Key::Char('r')], "Retry { action: RetryTurn { messages: 1 }, conversation_id: \"conv-a\" } | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     wp(&[Key::Char('K')], "Closed | sel=None detail=None vis=3 dec=[ContextWarning] focus=Chat", select_warn),
     wp(&[Key::Char('n')], "Closed | sel=None detail=None vis=3 dec=[Carryover] focus=Chat", select_warn),
+    w(&[Key::Ctrl('x')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
+    w(&[Key::Ctrl('p')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
 ];
 
 /// Catches a log row that mis-selects, copies/retries the wrong record, or raises a decision from an ineligible one.

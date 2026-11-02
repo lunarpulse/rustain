@@ -3,6 +3,7 @@
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
 
@@ -24,16 +25,13 @@ fn ctrl_q_with_the_leader_open_preserves_it_under_the_guarded_quit() {
     state.input_buffer = "draft".into();
     state.cursor_position = 5;
     press(&mut state, Key::Ctrl('x'));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
     assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
     assert!(
-        state.which_key.active,
+        state.pending_leader.is_some(),
         "the leader stays intact below S-QUIT"
     );
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(rustain::domain::models::visual::OverlayType::WhichKey)
-    );
+    assert_eq!(state.focus, FocusState::Input);
     assert!(messages(&state).is_empty(), "never a no-binding toast");
     assert_eq!(state.input_buffer, "draft");
     rustain::adapters::tui::quit_confirm::request(
@@ -47,12 +45,12 @@ fn ctrl_q_with_the_leader_open_preserves_it_under_the_guarded_quit() {
     );
     press(&mut state, Key::Char('n'));
     assert!(
-        state.which_key.active,
+        state.pending_leader.is_some(),
         "cancel restores the same pending menu"
     );
     // Positive control: its ordinary follow-up still runs the row.
     assert_eq!(press(&mut state, Key::Char('?')), InputAction::Consumed);
-    assert!(state.help_overlay.active);
+    assert!(is_open(&state, Surface::Help));
 }
 
 /// DF-21-3-UNBOUND-KEY-ALIASING: a decoded key with an extra modifier resolved to
@@ -65,7 +63,10 @@ fn extra_modifier_keys_never_act_as_the_plain_key() {
     assert!(is_inert(&press(&mut state, Key::Combo('c', ctrl_shift))));
     assert!(is_inert(&press(&mut state, Key::Combo('q', ctrl_shift))));
     assert!(is_inert(&press(&mut state, Key::Combo('x', ctrl_shift))));
-    assert!(!state.which_key.active, "Ctrl+Shift+X opens no leader");
+    assert!(
+        state.pending_leader.is_none(),
+        "Ctrl+Shift+X opens no leader"
+    );
     assert!(is_inert(&press(&mut state, Key::Combo('m', alt_shift))));
     assert!(!state.multiline_mode, "Alt+Shift+M toggles nothing");
     // Positive controls: the plain keys still act.
@@ -74,7 +75,7 @@ fn extra_modifier_keys_never_act_as_the_plain_key() {
     press(&mut state, Key::Alt('m'));
     assert!(state.multiline_mode, "Alt+M toggles multi-line");
     press(&mut state, Key::Ctrl('x'));
-    assert!(state.which_key.active, "Ctrl+X opens the leader");
+    assert!(state.pending_leader.is_some(), "Ctrl+X opens the leader");
     // In the open leader the combined key is a named unknown follow-up, not Ctrl+C
     // (which would cancel silently).
     assert_eq!(

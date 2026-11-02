@@ -641,6 +641,8 @@ pub struct AvailCtx {
     pub read_only: bool,
     /// False while a confirmation owns the keyboard: `Ctrl+X` is unavailable.
     pub leader_available: bool,
+    /// A frame lies beneath this route; still-legacy targets cannot take ownership.
+    pub frame_origin: bool,
 }
 
 impl AvailCtx {
@@ -651,6 +653,7 @@ impl AvailCtx {
             density,
             read_only: false,
             leader_available: true,
+            frame_origin: false,
         }
     }
 
@@ -661,6 +664,7 @@ impl AvailCtx {
             density: DensityMode::Focus,
             read_only,
             leader_available: true,
+            frame_origin: false,
         }
     }
 }

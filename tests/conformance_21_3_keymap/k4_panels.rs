@@ -82,6 +82,56 @@ fn panel_salient(state: &TuiState) -> String {
     format!("{:?} sel={}", state.focus, state.sidebar_selected)
 }
 
+#[test]
+fn inherited_ctrl_p_opens_palette_and_restores_task_contexts() {
+    use rustain::adapters::tui::presentation::{self, Surface};
+    for (setup, key, action) in [
+        (
+            drill_state as fn() -> TuiState,
+            Key::Char('c'),
+            InputAction::CopyTaskResult {
+                plan_id: None,
+                task_number: 3,
+            },
+        ),
+        (
+            reorder_tasks_state as fn() -> TuiState,
+            Key::Enter,
+            InputAction::TaskReorderCommit,
+        ),
+    ] {
+        let mut state = setup();
+        let before = tasks_salient(&state);
+        let retained = (
+            state.sidebar_selected,
+            state.task_panel_state.task_count,
+            state.task_panel_state.reorder_original_order.clone(),
+        );
+        assert_eq!(press(&mut state, Key::Ctrl('p')), InputAction::Consumed);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
+        assert!(!presentation::is_open(&state, Surface::CommandPalette));
+        assert!(state.modal_stack.is_empty());
+        assert_eq!(tasks_salient(&state), before);
+        assert_eq!(
+            (
+                state.sidebar_selected,
+                state.task_panel_state.task_count,
+                state.task_panel_state.reorder_original_order.clone()
+            ),
+            retained
+        );
+        assert_eq!(
+            press(&mut state, key),
+            action,
+            "restored task context owns its verb"
+        );
+    }
+}
+
 // ── ChatDrill ─────────────────────────────────────────────────────────────
 
 /// Regression caught: a drill-down verb (`r s e p c`, scroll, `Enter`, `Esc`) acts on the wrong task or state.
@@ -105,7 +155,7 @@ fn chat_drill_rows_act_on_the_drilled_task() {
     ];
     // The non-character Chat rows the exclusive drill-down inherits (R4).
     const INHERITED: &[W] = &[
-        w(&[Key::Ctrl('p')], "Consumed | Overlay(CommandPalette) idx=0 drill=Some(3) exp=false scroll=5 reorder=None"),
+        w(&[Key::Ctrl('p')], "Consumed | Chat idx=0 drill=Some(3) exp=false scroll=5 reorder=None"),
         w(&[Key::Ctrl('c')], "CancelOrQuit | Chat idx=0 drill=Some(3) exp=false scroll=5 reorder=None"),
         w(&[Key::Ctrl('d')], "ScrollHalfPageDown | Chat idx=0 drill=Some(3) exp=false scroll=5 reorder=None"),
         w(&[Key::Ctrl('u')], "ScrollHalfPageUp | Chat idx=0 drill=Some(3) exp=false scroll=5 reorder=None"),
@@ -231,7 +281,7 @@ fn tasks_reorder_rows_move_and_commit_the_task() {
         w(&[Key::Tab], "Consumed | Input idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
         w(&[Key::ShiftTab], "SwitchToPrevTab | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
         w(&[Key::Ctrl('t')], "NewTab | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
-        w(&[Key::Ctrl('p')], "Consumed | Overlay(CommandPalette) idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
+        w(&[Key::Ctrl('p')], "Consumed | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
         w(&[Key::Ctrl('c')], "CancelOrQuit | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
         w(&[Key::Alt('v')], "RequestClipboardPaste | Sidebar { panel: Tasks, selected: 1 } idx=1 drill=None exp=false scroll=0 reorder=Some(2)"),
     ];

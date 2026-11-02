@@ -8,6 +8,7 @@ use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
+use crate::adapters::tui::presentation::{self, Surface};
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
@@ -584,6 +585,7 @@ pub fn handle_operator_input(
 /// A generic permission may become visible only after every higher owner lets go.
 pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
     !state.modal_stack.is_empty()
+        || state.pending_leader.is_some()
         || state.pending_plan_card.is_some()
         || state.pending_delegation_card.is_some()
         || state.pending_consolidation_card.is_some()
@@ -644,9 +646,12 @@ pub fn with_card_focus_reconcile<T>(
 ) -> T {
     let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
     let permission_owned = permission_modal_owns_focus(state);
-    let stack_was_empty = state.modal_stack.is_empty();
+    let owner_before = (
+        state.modal_stack.top().map(|frame| frame.id),
+        state.pending_leader,
+    );
     let action = dispatch(state);
-    finish_input_boundary(state, surface_was_open, permission_owned, stack_was_empty);
+    finish_input_boundary(state, surface_was_open, permission_owned, owner_before);
     action
 }
 
@@ -658,9 +663,12 @@ pub fn try_with_card_focus_reconcile<T>(
 ) -> Option<T> {
     let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
     let permission_owned = permission_modal_owns_focus(state);
-    let stack_was_empty = state.modal_stack.is_empty();
+    let owner_before = (
+        state.modal_stack.top().map(|frame| frame.id),
+        state.pending_leader,
+    );
     let action = dispatch(state)?;
-    finish_input_boundary(state, surface_was_open, permission_owned, stack_was_empty);
+    finish_input_boundary(state, surface_was_open, permission_owned, owner_before);
     Some(action)
 }
 
@@ -668,7 +676,7 @@ fn finish_input_boundary(
     state: &mut TuiState,
     surface_was_open: bool,
     permission_owned: bool,
-    stack_was_empty: bool,
+    owner_before: (Option<u64>, Option<Context>),
 ) {
     if permission_owned && !permission_modal_owns_focus(state) {
         advance_deferred_permission(state);
@@ -680,13 +688,19 @@ fn finish_input_boundary(
         crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
     }
     settle_local_card_focus(state);
-    if stack_was_empty != state.modal_stack.is_empty() {
+    if owner_before
+        != (
+            state.modal_stack.top().map(|frame| frame.id),
+            state.pending_leader,
+        )
+    {
         state.current_hint = crate::adapters::tui::hints::contextual_hint(
             &state.focus,
             state.session_count,
             state.theme.timing.status_hint_fade_sessions,
             state.is_vscode,
             &state.modal_stack,
+            state.pending_leader,
         );
     }
 }
@@ -739,30 +753,29 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
     action
 }
 
-/// Whether `Ctrl+X` opens the leader menu right now (AC4, KG-2): the one
-/// predicate shared by the `Ctrl+X` arm and the `^X menu` cue. Overlays that
-/// consume every key (palette, selectors, help, search, bookmarks,
-/// confirmations, login) and an open spawn gate leave it without effect.
+/// The same ownership predicate qualifies dispatch and the generated menu hint.
 pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
-    state.modal_stack.is_empty()
-        && state.pending_spawn_gate.is_none()
-        && !matches!(
-            state.focus,
-            FocusState::Overlay(
-                OverlayType::CommandPalette
-                    | OverlayType::WhichKey
-                    | OverlayType::ModelSelector
-                    | OverlayType::Help
-                    | OverlayType::ProfileSwitcher
-                    | OverlayType::Search
-                    | OverlayType::CrossSearch
-                    | OverlayType::BookmarkList
-                    | OverlayType::Confirmation(_)
-                    | OverlayType::UsagePanel
-                    | OverlayType::WaveOverlay
-                    | OverlayType::Login
-            )
-        )
+    state.pending_leader.is_none()
+        && match state.modal_stack.top() {
+            Some(frame) => frame.surface != Surface::QuitConfirm,
+            None => {
+                state.pending_spawn_gate.is_none()
+                    && !matches!(
+                        state.focus,
+                        FocusState::Overlay(
+                            OverlayType::ModelSelector
+                                | OverlayType::ProfileSwitcher
+                                | OverlayType::Search
+                                | OverlayType::CrossSearch
+                                | OverlayType::BookmarkList
+                                | OverlayType::Confirmation(_)
+                                | OverlayType::UsagePanel
+                                | OverlayType::WaveOverlay
+                                | OverlayType::Login
+                        )
+                    )
+            }
+        }
 }
 
 /// Facts the registry's availability rows read in the local host (A5, A10).
@@ -770,6 +783,7 @@ pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap:
     let mut ctx =
         crate::adapters::tui::keymap::AvailCtx::local(state.terminal_width, state.density_mode);
     ctx.leader_available = ctrl_x_opens_leader(state);
+    ctx.frame_origin = !state.modal_stack.is_empty();
     ctx
 }
 
@@ -777,10 +791,14 @@ pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap:
 /// sequence prefix, else `^X menu`, hidden while `Ctrl+X` is unavailable.
 pub fn status_tail(state: &TuiState) -> crate::adapters::tui::keymap::render::StatusTail {
     use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
-    if !state.modal_stack.is_empty() {
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::QuitConfirm)
+    {
         return StatusTail::Hidden;
     }
-    if state.which_key.active {
+    if state.pending_leader.is_some() {
         StatusTail::Pending(PendingPrefix::Leader)
     } else if state.pending_z {
         StatusTail::Pending(PendingPrefix::Z)
@@ -796,11 +814,25 @@ pub fn status_tail(state: &TuiState) -> crate::adapters::tui::keymap::render::St
 }
 
 /// Name of the context the leader was opened from, for the no-binding notice.
-fn leader_origin_name(origin: &FocusState) -> &'static str {
-    match origin {
-        FocusState::Input => "Input",
-        FocusState::Sidebar { .. } => "Sidebar",
-        _ => "Chat",
+fn leader_origin_name(origin: Context) -> &'static str {
+    origin.name()
+}
+
+/// Retain feedback only for a frame-origin menu; base-origin dismissal is unchanged.
+pub(crate) fn refuse_leader(
+    state: &mut TuiState,
+    origin: Context,
+    command: Option<crate::adapters::tui::keymap::CommandId>,
+    source: crate::adapters::tui::notifications::NoticeSource,
+    message: std::borrow::Cow<'static, str>,
+) {
+    if state.modal_stack.is_empty() {
+        crate::adapters::tui::notifications::info(state, source, message.into_owned());
+    } else {
+        crate::adapters::tui::notifications::info(state, source, message.as_ref());
+        state.pending_leader = Some(origin);
+        state.leader_feedback =
+            Some(crate::adapters::tui::state::LeaderFeedback { command, message });
     }
 }
 
@@ -808,23 +840,32 @@ fn leader_origin_name(origin: &FocusState) -> &'static str {
 /// Esc/Ctrl+C cancel silently; a key without a row posts one info notice; a
 /// row that cannot run now answers with its remedy; the origin focus is
 /// always restored.
-fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Key) -> InputAction {
+pub(crate) fn handle_leader_key(
+    state: &mut TuiState,
+    key: crate::adapters::tui::keymap::Key,
+) -> InputAction {
     use crate::adapters::tui::keymap::table::LeaderCmd;
     use crate::adapters::tui::keymap::{CommandId, Host, LeaderStep, leader_step};
     use crate::adapters::tui::notifications::{self, NoticeSource};
-    let origin = state.which_key.dismiss().unwrap_or(FocusState::Input);
-    state.focus = origin.clone();
+    let origin = state.pending_leader.take().unwrap_or(Context::Input);
+    state.leader_feedback = None;
     state.needs_redraw = true;
     let avail = local_avail_ctx(state);
-    let step = leader_step(Host::Local, key, &avail, leader_origin_name(&origin));
+    let step = leader_step(Host::Local, key, &avail, leader_origin_name(origin));
     let row = match step {
         LeaderStep::Cancel => return InputAction::Consumed,
         LeaderStep::NoBinding(text) => {
-            notifications::info(state, NoticeSource::Chord, text);
+            refuse_leader(state, origin, None, NoticeSource::Chord, text.into());
             return InputAction::Consumed;
         }
-        LeaderStep::Unavailable(_, remedy) => {
-            notifications::info(state, NoticeSource::Chord, remedy);
+        LeaderStep::Unavailable(row, remedy) => {
+            refuse_leader(
+                state,
+                origin,
+                Some(row.command),
+                NoticeSource::Chord,
+                remedy.into(),
+            );
             return InputAction::Consumed;
         }
         LeaderStep::Run(row) => row,
@@ -857,8 +898,7 @@ fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Ke
             })
         }
         LeaderCmd::Help => {
-            state.help_overlay.open(origin);
-            state.focus = FocusState::Overlay(OverlayType::Help);
+            presentation::reducer::open(state, Surface::Help);
             InputAction::Consumed
         }
         LeaderCmd::Notifications => {
@@ -871,7 +911,7 @@ fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Ke
         }
         LeaderCmd::Decisions => InputAction::FocusDecisions,
         // Portable multi-line send: only from the originating Input (AC12 of 21-2).
-        LeaderCmd::Send if origin == FocusState::Input => {
+        LeaderCmd::Send if origin == Context::Input => {
             if state.input_buffer.is_empty() {
                 InputAction::Consumed
             } else {
@@ -881,13 +921,12 @@ fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Ke
         LeaderCmd::Send => {
             let text = crate::adapters::tui::keymap::resolve::no_binding_text(
                 key,
-                leader_origin_name(&origin),
+                leader_origin_name(origin),
             );
             notifications::info(state, NoticeSource::Chord, text);
             InputAction::Consumed
         }
-        // Ctrl+Q with the menu open: the menu is already closed; the guarded quit
-        // request follows, exactly like the attached host (AC20a).
+        // The shared boundary preserves a pending menu before returning a quit effect.
         LeaderCmd::QuitRequest => InputAction::Quit,
         // Attached-only: the local registry has no such row.
         LeaderCmd::Detach | LeaderCmd::Cancel => InputAction::Consumed,
@@ -895,12 +934,6 @@ fn handle_leader_key(state: &mut TuiState, key: crate::adapters::tui::keymap::Ke
 }
 
 fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
-    // The open leader owns every key (before any surface or card).
-    if state.which_key.active
-        && let Some(key) = crate::adapters::tui::keymap::Key::from_domain(event)
-    {
-        return handle_leader_key(state, key);
-    }
     if state.recipient_surface.is_some()
         && state.focus == FocusState::Chat
         && !recipient_higher_confirmation_active(state)
@@ -1048,7 +1081,7 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
 /// The overlays that own the character keys before any card: the palette, the focus
 /// overlays (help, model selector, usage, profile switcher) and reverse search.
 fn char_overlay_context(state: &TuiState) -> Option<Context> {
-    if state.command_palette.active {
+    if presentation::is_open(state, Surface::CommandPalette) {
         return Some(Context::CommandPalette);
     }
     match overlay_focus_context(state) {
@@ -1064,13 +1097,12 @@ fn char_overlay_context(state: &TuiState) -> Option<Context> {
 }
 
 /// The overlay context the focus names, if any.
-fn overlay_focus_context(state: &TuiState) -> Option<Context> {
+pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
     use crate::adapters::tui::state::SearchSubstate;
     let FocusState::Overlay(overlay) = &state.focus else {
         return None;
     };
     Some(match overlay {
-        OverlayType::Help => Context::Help,
         OverlayType::ModelSelector => Context::ModelSelector,
         OverlayType::UsagePanel => Context::UsagePanel,
         OverlayType::ProfileSwitcher => Context::ProfileSwitcher,
@@ -1089,19 +1121,11 @@ fn overlay_focus_context(state: &TuiState) -> Option<Context> {
 /// The context of the key target once no card owns it, top surface first.
 pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
     use crate::domain::models::visual::PanelType;
-    if let Some(frame) = state.modal_stack.top() {
-        return Some(match frame.surface {
-            crate::adapters::tui::presentation::Surface::NotificationLog => {
-                Context::NotificationLog
-            }
-            crate::adapters::tui::presentation::Surface::QuitConfirm => Context::QuitConfirm,
-        });
-    }
-    if state.which_key.active {
+    if state.pending_leader.is_some() {
         return Some(Context::Leader);
     }
-    if state.command_palette.active {
-        return Some(Context::CommandPalette);
+    if let Some(frame) = state.modal_stack.top() {
+        return Some(frame.surface.context());
     }
     if state.autocomplete.active {
         return Some(Context::Autocomplete);
@@ -1345,40 +1369,58 @@ fn exec_global(state: &mut TuiState, cmd: GlobalCmd) -> InputAction {
     }
 }
 
-/// `Ctrl+X`: open the which-key menu, closing the popup or reverse search first.
-fn open_leader(state: &mut TuiState) -> InputAction {
+/// Start an untimed leader without borrowing or replacing base/frame focus.
+pub(crate) fn open_leader(state: &mut TuiState) -> InputAction {
+    let origin = state
+        .modal_stack
+        .top()
+        .map(|frame| frame.surface.context())
+        .unwrap_or(match state.focus {
+            FocusState::Input
+            | FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
+                Context::Input
+            }
+            FocusState::Sidebar { .. } => Context::Sidebar,
+            _ => Context::Chat,
+        });
     if state.autocomplete.active {
         state.autocomplete.dismiss();
     }
     state.reverse_search.active = false;
-    let prior_focus = match &state.focus {
-        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
-            FocusState::Input
-        }
-        other => other.clone(),
-    };
-    state.which_key.open(prior_focus);
-    state.focus = FocusState::Overlay(OverlayType::WhichKey);
+    if matches!(
+        state.focus,
+        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))
+    ) {
+        state.focus = FocusState::Input;
+    }
+    state.pending_leader = Some(origin);
+    state.leader_feedback = None;
     state.needs_redraw = true;
     InputAction::Consumed
 }
 
-/// `Ctrl+P`: open the command palette, closing the popup or reverse search first.
-fn open_palette(state: &mut TuiState) -> InputAction {
+/// Open the palette, retaining any frame caller and closing only routed popups.
+pub(crate) fn open_palette(state: &mut TuiState) -> InputAction {
     if state.autocomplete.active {
         state.autocomplete.dismiss();
     }
     state.reverse_search.active = false;
-    let prior_focus = match &state.focus {
-        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
-            FocusState::Input
-        }
-        other => other.clone(),
-    };
-    state.command_palette.open(prior_focus);
-    state.focus = FocusState::Overlay(OverlayType::CommandPalette);
-    state.needs_redraw = true;
+    if matches!(
+        state.focus,
+        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))
+    ) {
+        state.focus = FocusState::Input;
+    }
+    presentation::reducer::open(state, Surface::CommandPalette);
     InputAction::Consumed
+}
+
+/// Shared frame commands; callers have already established top ownership.
+pub(crate) fn dispatch_frame_key(state: &mut TuiState, context: Context, key: Key) -> InputAction {
+    if matches!(key, Key::Char(c) if !c.is_control()) {
+        state.last_printable_at = Some(state.notifications.now());
+    }
+    dispatch(state, context, key)
 }
 
 /// One priority for inline cue, dispatch and paint: the last covering card wins.
@@ -1820,9 +1862,7 @@ fn exec_chat(state: &mut TuiState, cmd: ChatCmd, keys: &[Key]) -> InputAction {
         }
         ChatCmd::Quit => InputAction::Quit,
         ChatCmd::OpenHelp => {
-            let prior = state.focus.clone();
-            state.help_overlay.open(prior);
-            state.focus = FocusState::Overlay(OverlayType::Help);
+            presentation::reducer::open(state, Surface::Help);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2341,7 +2381,7 @@ fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         // A large sentinel: the render fn clamps to the maximum.
         OverlayCmd::HelpBottom => state.help_overlay.scroll_offset = usize::MAX / 2,
         OverlayCmd::HelpTop => state.help_overlay.scroll_offset = 0,
-        OverlayCmd::HelpClose => state.focus = state.help_overlay.close(),
+        OverlayCmd::HelpClose => presentation::reducer::close(state, Surface::Help),
         OverlayCmd::QuitRequest => return InputAction::Quit,
         _ => {}
     }
@@ -3091,8 +3131,6 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         Some(Context::ProfileSwitcher | Context::SearchTyping | Context::SearchNavigating)
     ) {
         overlay
-    } else if state.command_palette.active {
-        Some(Context::CommandPalette)
     } else if state.autocomplete.active && state.focus == FocusState::Input {
         Some(Context::Autocomplete)
     } else if state.reverse_search.active {
@@ -3505,20 +3543,29 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
             InputAction::Consumed
         }
         OverlayCmd::PaletteRun => {
-            // Execute selected entry's action
-            let action = state.command_palette.execute_selected();
-            let prev = state.command_palette.dismiss();
-            if let Some(focus) = prev {
-                state.focus = focus;
+            let mut avail = local_avail_ctx(state);
+            avail.frame_origin = state.modal_stack.len() > 1;
+            if let Some(entry) = state.command_palette.selected()
+                && let crate::adapters::tui::keymap::Availability::Unavailable(remedy) =
+                    crate::adapters::tui::keymap::table::palette_availability(&entry.action, &avail)
+            {
+                state.command_palette.refusal = Some(remedy);
+                crate::adapters::tui::notifications::info(
+                    state,
+                    crate::adapters::tui::notifications::NoticeSource::Palette,
+                    remedy,
+                );
+                return InputAction::Consumed;
             }
-            state.needs_redraw = true;
+            let action = state.command_palette.execute_selected();
+            presentation::reducer::close(state, Surface::CommandPalette);
             if let Some(palette_action) = action {
                 return dispatch_palette_action(state, palette_action);
             }
             InputAction::Consumed
         }
         OverlayCmd::PaletteClose => {
-            state.focus = state.command_palette.dismiss().unwrap_or(FocusState::Input);
+            presentation::reducer::close(state, Surface::CommandPalette);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -4555,16 +4602,14 @@ mod tests {
             Row {
                 label: "Overlay(CommandPalette) with palette open",
                 setup: Box::new(|s| {
-                    s.command_palette.open(FocusState::Input);
-                    s.focus = FocusState::Overlay(OverlayType::CommandPalette);
+                    presentation::reducer::open(s, Surface::CommandPalette);
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Overlay(WhichKey) with which-key open",
                 setup: Box::new(|s| {
-                    s.which_key.open(FocusState::Input);
-                    s.focus = FocusState::Overlay(OverlayType::WhichKey);
+                    open_leader(s);
                 }),
                 // A18: the leader stays intact beneath the guarded quit frame.
                 expect: CtrlQRowExpectation::Quit,
@@ -4575,7 +4620,9 @@ mod tests {
             // now passes Ctrl+Q through exactly as it already passed Ctrl+C.
             Row {
                 label: "Overlay(Help) (passes Ctrl+Q through, like Ctrl+C)",
-                setup: overlay(OverlayType::Help),
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::Help);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
@@ -6541,10 +6588,10 @@ mod story21_2_shortcut_tests {
             handle_input(&mut state, &special(DomainKey::CtrlX)),
             InputAction::Consumed
         );
-        assert!(state.which_key.active);
+        assert!(state.pending_leader.is_some());
         let sent = handle_input(&mut state, &special(DomainKey::Enter));
         assert_eq!(sent, InputAction::SubmitMessage("hello\nworld\n".into()));
-        assert!(!state.which_key.active);
+        assert!(state.pending_leader.is_none());
         assert_eq!(state.focus, FocusState::Input);
         assert!(state.input_buffer.is_empty());
         // The leader is consumed: a second Enter sends nothing.
@@ -6559,13 +6606,13 @@ mod story21_2_shortcut_tests {
         let mut state = TuiState::new(80, 24);
         state.focus = FocusState::Chat;
         handle_input(&mut state, &special(DomainKey::CtrlX));
-        assert!(state.which_key.active);
+        assert!(state.pending_leader.is_some());
         handle_input(&mut state, &special(DomainKey::Esc));
-        assert!(!state.which_key.active);
+        assert!(state.pending_leader.is_none());
         assert_eq!(state.focus, FocusState::Chat);
         handle_input(&mut state, &special(DomainKey::CtrlX));
         assert_eq!(handle_input(&mut state, &key('z')), InputAction::Consumed);
-        assert!(!state.which_key.active);
+        assert!(state.pending_leader.is_none());
         assert_eq!(state.focus, FocusState::Chat);
         // The follow-up was consumed: it did not become text or a command.
         assert!(state.input_buffer.is_empty());
@@ -6583,17 +6630,20 @@ mod story21_2_shortcut_tests {
         let mut input = TuiState::new(80, 24);
         handle_input(&mut input, &key('?'));
         assert_eq!(input.input_buffer, "?");
-        assert!(!input.help_overlay.active);
+        assert!(!presentation::is_open(&input, Surface::Help));
         handle_input(&mut input, &special(DomainKey::CtrlX));
         handle_input(&mut input, &key('?'));
-        assert!(input.help_overlay.active, "Ctrl+X ? opens help");
+        assert!(
+            presentation::is_open(&input, Surface::Help),
+            "Ctrl+X ? opens help"
+        );
         handle_input(&mut input, &special(DomainKey::Esc));
         assert_eq!(input.focus, FocusState::Input, "Esc restores Input");
         assert_eq!(input.input_buffer, "?");
         let mut chat = TuiState::new(80, 24);
         chat.focus = FocusState::Chat;
         handle_input(&mut chat, &key('?'));
-        assert!(chat.help_overlay.active);
+        assert!(presentation::is_open(&chat, Surface::Help));
     }
 
     #[test]
@@ -6699,10 +6749,16 @@ mod story21_2_shortcut_tests {
                 handle_input(&mut state, &special(DomainKey::CtrlX)),
                 InputAction::Consumed
             );
-            assert!(state.which_key.active, "the leader opens over the card");
+            assert!(
+                state.pending_leader.is_some(),
+                "the leader opens over the card"
+            );
             let action = handle_input(&mut state, &key(follow_up));
             assert_ne!(action, forbidden, "{follow_up}");
-            assert!(!state.which_key.active, "{follow_up}: the leader closed");
+            assert!(
+                state.pending_leader.is_none(),
+                "{follow_up}: the leader closed"
+            );
             assert!(state.pending_plan_card.is_some(), "{follow_up}: plan kept");
         }
     }

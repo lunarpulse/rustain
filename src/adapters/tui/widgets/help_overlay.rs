@@ -1,11 +1,12 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::modal::{ModalPart, fit_modal};
 use crate::adapters::tui::keymap::render_help::{help_groups, intro, tmux_conflicts};
 use crate::adapters::tui::state::HelpOverlayState;
 use crate::adapters::tui::theme::Theme;
 
-/// Render the help overlay as a large centered popup.
+/// Render the help content into the frame rectangle supplied by compose.
 // Covers: FR108, UX-DR94
 pub fn render(
     frame: &mut Frame,
@@ -14,20 +15,13 @@ pub fn render(
     theme: &Theme,
     tmux_detected: bool,
 ) {
-    if !state.active {
-        return;
-    }
-
-    let overlay_area = centered_area(area, 80, 90);
-
     // Dim the background behind the overlay
     let bg_block = Block::default().style(Style::default().bg(Color::Black));
-    frame.render_widget(Clear, overlay_area);
-    frame.render_widget(bg_block, overlay_area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(bg_block, area);
 
     // Build the content lines
-    let content_lines =
-        build_content_lines(theme, tmux_detected, state.scroll_offset, overlay_area);
+    let content_lines = build_content_lines(theme, tmux_detected, state.scroll_offset, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -41,22 +35,31 @@ pub fn render(
             Style::default().fg(theme.colors.fg_muted),
         ));
 
+    let inner = block.inner(area);
+    let content_lines = fit_modal(
+        vec![ModalPart::Rows {
+            lines: content_lines,
+            selected: (0, 0),
+        }],
+        usize::from(inner.height),
+        usize::from(inner.width),
+    );
     let para = Paragraph::new(content_lines).block(block).style(
         Style::default()
             .fg(theme.colors.fg_primary)
             .bg(theme.colors.bg_secondary),
     );
 
-    frame.render_widget(para, overlay_area);
+    frame.render_widget(para, area);
 }
 
 /// Build the text content for the overlay, applying scroll_offset to skip lines at the top.
-fn build_content_lines<'a>(
-    theme: &'a Theme,
+fn build_content_lines(
+    theme: &Theme,
     tmux_detected: bool,
     scroll_offset: usize,
     area: Rect,
-) -> Vec<Line<'a>> {
+) -> Vec<Line<'static>> {
     let mut all_lines: Vec<Line> = Vec::new();
 
     // Prose introduction
@@ -162,16 +165,6 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
-/// Compute a centered Rect occupying `percent_x`% of the width and `percent_y`% of the height.
-fn centered_area(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    // Use u32 arithmetic to prevent overflow on wide terminals (>819 cols at 80%)
-    let w = (area.width as u32 * percent_x as u32 / 100) as u16;
-    let h = (area.height as u32 * percent_y as u32 / 100) as u16;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w.max(1), h.max(1))
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
@@ -185,17 +178,15 @@ mod tests {
         Theme::dark()
     }
 
-    fn make_state(active: bool) -> HelpOverlayState {
-        let mut s = HelpOverlayState::new();
-        s.active = active;
-        s
+    fn make_state() -> HelpOverlayState {
+        HelpOverlayState::new()
     }
 
     #[test]
     fn test_render_no_crash_when_active() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = make_state(true);
+        let state = make_state();
         let theme = make_theme();
         terminal
             .draw(|frame| {
@@ -208,7 +199,7 @@ mod tests {
     fn test_render_no_crash_with_tmux() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = make_state(true);
+        let state = make_state();
         let theme = make_theme();
         terminal
             .draw(|frame| {
@@ -222,7 +213,7 @@ mod tests {
         // Minimum terminal size: 80x24
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let state = make_state(true);
+        let state = make_state();
         let theme = make_theme();
         terminal
             .draw(|frame| {
@@ -232,21 +223,16 @@ mod tests {
     }
 
     #[test]
-    fn test_render_inactive_skips() {
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let state = make_state(false);
-        let theme = make_theme();
-        // Should complete without touching the frame
+    fn test_render_uses_caller_area_without_ownership_flags() {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let area = Rect::new(7, 3, 80, 20);
         terminal
-            .draw(|frame| {
-                render(frame, frame.area(), &state, &theme, false);
-            })
+            .draw(|frame| render(frame, area, &make_state(), &make_theme(), false))
             .unwrap();
-        // Buffer should be all spaces (nothing rendered)
-        let buf = terminal.backend().buffer().clone();
-        let all_space = buf.content().iter().all(|cell| cell.symbol() == " ");
-        assert!(all_space, "Inactive overlay should render nothing");
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
+        assert_eq!(buffer[(area.right() - 1, area.bottom() - 1)].symbol(), "┘");
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
     }
 
     #[test]
@@ -263,16 +249,27 @@ mod tests {
     }
 
     #[test]
-    fn test_centered_area() {
-        let area = Rect::new(0, 0, 100, 50);
-        let centered = centered_area(area, 80, 90);
-        // Width: 100 * 80 / 100 = 80
-        assert_eq!(centered.width, 80);
-        // Height: 50 * 90 / 100 = 45
-        assert_eq!(centered.height, 45);
-        // Horizontally centered: x = (100 - 80) / 2 = 10
-        assert_eq!(centered.x, 10);
-        // Vertically centered: y = (50 - 45) / 2 = 2
-        assert_eq!(centered.y, 2);
+    fn test_shared_geometry_small_and_wide_help_fit() {
+        use crate::adapters::tui::presentation::geometry;
+
+        for region in [Rect::new(0, 0, 60, 5), Rect::new(0, 0, 130, 30)] {
+            let area = geometry::frame_rect(region);
+            let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
+            terminal
+                .draw(|frame| render(frame, area, &make_state(), &make_theme(), false))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = |y| {
+                (area.x..area.right())
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(area.y).contains("Help — Rustain Keybindings"));
+            assert!(row(area.bottom() - 1).contains("j/k scroll  ? close"));
+            assert!(
+                (area.y + 1..area.bottom() - 1)
+                    .any(|y| { row(y).chars().any(|c| c.is_alphanumeric()) })
+            );
+        }
     }
 }

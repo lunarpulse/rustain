@@ -48,9 +48,8 @@ use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, command_palette as command_palette_widget, help_overlay,
-    input_box, model_selector, profile_switcher, reverse_search, sidebar, status_bar,
-    team_proposal_card, toast_layer, usage_panel, which_key_bar,
+    autocomplete_popup, chat_pane, input_box, model_selector, profile_switcher, reverse_search,
+    sidebar, status_bar, team_proposal_card, toast_layer, usage_panel,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
@@ -457,6 +456,7 @@ pub async fn run(
         state.theme.timing.status_hint_fade_sessions,
         state.is_vscode,
         &state.modal_stack,
+        state.pending_leader,
     );
 
     // Set project context indicator based on persona
@@ -1016,6 +1016,7 @@ pub async fn run(
                             let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog) {
                                 notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
                             } else { notification_log::LogFacts::default() };
+                            let mut pane_action: Option<InputAction> = None;
                             if let Some(effect) = crate::adapters::tui::app::try_with_card_focus_reconcile(
                                 &mut state, |state| presentation::route(state, &domain_event, crate::adapters::tui::keymap::Host::Local, &facts),
                             ) {
@@ -1027,14 +1028,16 @@ pub async fn run(
                                         state.should_quit = true;
                                     }
                                     RouteEffect::Log(outcome) => notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router),
+                                    RouteEffect::Action(action) => pane_action = Some(action),
+                                    RouteEffect::Frame(_) | RouteEffect::Leader | RouteEffect::OpenPalette =>
+                                        unreachable!("attached-only route effect in the local host"),
                                 }
-                                continue;
+                                if pane_action.is_none() { continue; }
                             }
                             // Story 21.1 S2 AC9: the interim decision pane owns every user key
                             // while it is focused (after S-QUIT and S-LOG). A waiting or deferred
                             // item never sees a key, so no stray `y`/`n` can answer it.
-                            let mut pane_action: Option<InputAction> = None;
-                            if state.decisions.is_focused() {
+                            if pane_action.is_none() && state.decisions.is_focused() {
                                 let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
                                 match crate::adapters::tui::decision_pane::handle_domain_event(&mut state, &domain_event, &facts) {
                                     Some(crate::adapters::tui::decision_pane::PaneOutcome::Consumed) => continue,
@@ -1143,6 +1146,7 @@ pub async fn run(
                                     state.theme.timing.status_hint_fade_sessions,
                                     state.is_vscode,
                                     &state.modal_stack,
+                                    state.pending_leader,
                                 );
                             }
 
@@ -7775,7 +7779,6 @@ fn render(
 
     let (recipient_blocked, card) = team_proposal_card::frame(state);
     let permission_mode = security.current_mode();
-    let leader_avail = crate::adapters::tui::app::local_avail_ctx(state);
     let leader_tail = crate::adapters::tui::app::status_tail(state);
 
     // Split borrows: tool_block_states needs &, feedback_blocks needs &
@@ -7807,9 +7810,6 @@ fn render(
         ref reverse_search,
         ref search_state,
         ref autocomplete,
-        ref command_palette,
-        ref which_key,
-        ref help_overlay,
         ref model_selector,
         ref login,
         ref profile_switcher,
@@ -8838,7 +8838,7 @@ fn render(
                     app_layout.input_area,
                     input_buffer,
                     cursor_position,
-                    if state.modal_stack.is_empty() { focus.clone() } else { FocusState::Chat },
+                    if state.modal_stack.is_empty() && state.pending_leader.is_none() { focus.clone() } else { FocusState::Chat },
                     theme,
                     multiline_mode,
                     input_scroll_offset,
@@ -8863,40 +8863,6 @@ fn render(
                     autocomplete_popup::render(frame, app_layout.input_area, autocomplete, theme);
                 }
 
-                // Render command palette overlay (centered, on top of everything)
-                if command_palette.active {
-                    command_palette_widget::render(frame, area, command_palette, theme);
-                }
-
-                // Render which-key hint bar: untimed, wrapped, bottom-anchored ABOVE the
-                // status row (never covering it) and reserving no Stage rows (AC6).
-                if which_key.active {
-                    let above_status = Rect::new(
-                        area.x,
-                        area.y,
-                        area.width,
-                        app_layout.status_bar.y.saturating_sub(area.y),
-                    );
-                    which_key_bar::render(
-                        frame,
-                        above_status,
-                        which_key,
-                        theme,
-                        &leader_avail,
-                    );
-                }
-
-                // Render help overlay (full-screen modal, on top of everything)
-                // Covers: FR108, UX-DR94
-                if help_overlay.active {
-                    help_overlay::render(
-                        frame,
-                        area,
-                        help_overlay,
-                        theme,
-                        state.multiplexer_detected,
-                    );
-                }
 
                 // Render model selector overlay (centered modal, Tier-1)
                 // Story 7.2 AC1

@@ -12,7 +12,6 @@ use rustain::adapters::tui::{
     presentation::{self, Shell, Surface, geometry},
     quit_confirm::{self, QuitFacts, QuitHost, QuitRequest},
     state::TuiState,
-    widgets::help_overlay,
 };
 use rustain::domain::models::visual::DensityMode;
 
@@ -82,15 +81,7 @@ pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) ->
                 &shell,
                 Host::Local,
                 &LogFacts::default(),
-                |frame| {
-                    help_overlay::render(
-                        frame,
-                        shell.area,
-                        &state.help_overlay,
-                        &state.theme,
-                        false,
-                    )
-                },
+                |_| {},
                 |frame| {
                     // M4: observe BEFORE painting status, not just its final unoccluded row.
                     // Correct geometry alone must not let status-before-frames survive.
@@ -106,8 +97,12 @@ pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) ->
                                 .unwrap()
                                 .trim_end_matches(['─', '┐'])
                                 .trim(),
-                            title,
-                            "exact caller-owned frame title: {header:?}"
+                            rustain::adapters::tui::text_geometry::clip(
+                                title,
+                                usize::from(rect.width.saturating_sub(3))
+                            )
+                            .trim_end(),
+                            "caller-owned breadcrumb/title prefix: {header:?}"
                         );
                     }
                     frame.render_widget(Paragraph::new("status-row-sentinel"), shell.status_bar);
@@ -123,14 +118,19 @@ fn status_row_is_painted_last_and_never_covered() {
     // Named viewport/composer witnesses, not a size sweep.
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
-            for route in ["log", "quit", "log-quit", "legacy-help-quit"] {
+            for route in [
+                "log",
+                "quit",
+                "log-quit",
+                "help",
+                "palette",
+                "help-quit",
+                "palette-help-log",
+                "palette-help-log-quit",
+            ] {
                 let mut state = TuiState::new(width, height);
                 if full {
                     state.input_buffer = ["draft"; 8].join("\n");
-                }
-                if route == "legacy-help-quit" {
-                    press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
-                    assert!(state.help_overlay.active);
                 }
                 let before = layout(&state);
                 assert_eq!(before.input_area.height, if full { 10 } else { 3 });
@@ -145,10 +145,37 @@ fn status_row_is_painted_last_and_never_covered() {
                         open_quit(&mut state);
                         "System · Notifications › System · Quit"
                     }
-                    "legacy-help-quit" => {
+                    "help" => {
+                        press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+                        "Help — Rustain Keybindings"
+                    }
+                    "palette" => {
+                        press(&mut state, Key::Ctrl('p'));
+                        "Command Palette"
+                    }
+                    "help-quit" => {
+                        press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
                         open_quit(&mut state);
-                        assert!(state.help_overlay.active, "Quit must not close legacy Help");
-                        "System · Quit"
+                        assert!(presentation::is_open(&state, Surface::Help));
+                        "Help — Rustain Keybindings › System · Quit"
+                    }
+                    "palette-help-log" | "palette-help-log-quit" => {
+                        press_all(
+                            &mut state,
+                            &[
+                                Key::Ctrl('p'),
+                                Key::Ctrl('x'),
+                                Key::Char('?'),
+                                Key::Ctrl('x'),
+                                Key::Char('n'),
+                            ],
+                        );
+                        if route.ends_with("-quit") {
+                            open_quit(&mut state);
+                            "Command Palette › Help — Rustain Keybindings › System · Notifications › System · Quit"
+                        } else {
+                            "Command Palette › Help — Rustain Keybindings › System · Notifications"
+                        }
                     }
                     _ => {
                         open_quit(&mut state);
@@ -404,5 +431,285 @@ fn quit_hides_legacy_search_cursors_and_cancel_restores_them() {
         press(&mut state, Key::Char('n'));
         assert_eq!(state.focus, focus);
         assert!(paint(&state), "{surface}: cancel returns the legacy cursor");
+    }
+}
+
+#[test]
+fn a2a_smoke_help_predicates_match_fitted_frames() {
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut harness = crate::e2e_harness::TestHarness::with_size(width, height);
+        harness.state.input_buffer = "A1-kept-draft".into();
+        harness.state.cursor_position = harness.state.input_buffer.len();
+        for (stage, keys) in [
+            ("help-initial", vec![Key::Ctrl('x'), Key::Char('?')]),
+            ("help-scrolled", vec![Key::Char('j'); 3]),
+            ("help-log", vec![Key::Ctrl('x'), Key::Char('n')]),
+            ("help-restored-log", vec![Key::Esc]),
+            ("help-quit", vec![]),
+            ("help-restored-quit", vec![Key::Char('n')]),
+            ("composer", vec![Key::Esc]),
+        ] {
+            if stage == "help-quit" {
+                open_quit(&mut harness.state);
+            }
+            for key in keys {
+                press(&mut harness.state, key);
+            }
+            harness.render();
+            let buffer = harness.terminal.backend().buffer();
+            let screen = (0..height)
+                .map(|y| row(buffer, buffer.area, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(screen.lines().count(), usize::from(height));
+            assert!(screen.contains("A1-kept-draft"));
+            if stage.starts_with("help") {
+                assert!(screen.contains("Help — Rustain Keybindings"));
+            }
+            println!(
+                "HELP_DESKCHECK_FRAME={}",
+                serde_json::json!([width, height, stage, screen])
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_help_keeps_its_closing_border_scroll_rail() {
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for nested in [false, true] {
+            let mut state = TuiState::new(width, height);
+            if nested {
+                press(&mut state, Key::Ctrl('p'));
+            }
+            press(&mut state, Key::Ctrl('x'));
+            press(&mut state, Key::Char('?'));
+            let layout = layout(&state);
+            let rect = geometry::frame_rect(geometry::modal_region(
+                &layout,
+                Rect::new(0, 0, width, height),
+            ));
+            let buffer = draw(&state, &layout, None);
+            assert!(
+                row(&buffer, rect, rect.bottom() - 1).contains("j/k scroll  ? close"),
+                "{width}x{height} nested={nested}: the breadcrumb cannot erase the Help rail"
+            );
+        }
+    }
+}
+
+#[test]
+fn pending_menu_yields_to_top_quit_and_returns_exactly_on_cancel() {
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut harness = crate::e2e_harness::TestHarness::with_size(width, height);
+        harness.state.input_buffer = "menu caller draft".into();
+        harness.state.cursor_position = 4;
+        for key in [Key::Ctrl('x'), Key::Char('?'), Key::Ctrl('x')] {
+            press(&mut harness.state, key);
+        }
+        let origin = harness.state.pending_leader;
+        let frames: Vec<_> = harness.state.modal_stack.iter().cloned().collect();
+        harness.render();
+        let menu = harness.terminal.backend().buffer().clone();
+        assert!((0..height).any(|y| row(&menu, menu.area, y).contains("┌ Ctrl+X ")));
+        open_quit(&mut harness.state);
+        harness.render();
+        let quit = harness.terminal.backend().buffer();
+        let screen = (0..height)
+            .map(|y| row(quit, quit.area, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            screen.contains("[n/Esc/Enter] Stay"),
+            "{width}x{height}: Quit rail must stay readable"
+        );
+        assert!(
+            !screen.contains("┌ Ctrl+X "),
+            "{width}x{height}: retained menu yields to Quit"
+        );
+        assert_eq!(harness.state.pending_leader, origin);
+        press(&mut harness.state, Key::Char('n'));
+        harness.render();
+        assert_eq!(
+            harness.terminal.backend().buffer(),
+            &menu,
+            "{width}x{height}: exact menu returns"
+        );
+        assert_eq!(
+            harness
+                .state
+                .modal_stack
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            frames
+        );
+        assert_eq!(harness.state.pending_leader, origin);
+    }
+}
+
+#[test]
+fn frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
+    use rustain::adapters::tui::keymap::{
+        Context, resolve::no_binding_text, table::CLOSE_WINDOW_FIRST,
+    };
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for key in [Key::Char('t'), Key::Char('~')] {
+            let mut state = TuiState::new(width, height);
+            state.input_buffer = "kept draft".into();
+            state.cursor_position = 4;
+            press_all(
+                &mut state,
+                &[Key::Ctrl('x'), Key::Char('?'), Key::Ctrl('x')],
+            );
+            let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+            let focus = state.focus.clone();
+            let layout = layout(&state);
+            let count = state.notifications.records().len();
+            let expected = if key == Key::Char('t') {
+                CLOSE_WINDOW_FIRST.to_owned()
+            } else {
+                no_binding_text(key, Context::Help.name())
+            };
+            assert_eq!(press(&mut state, key), InputAction::Consumed);
+            assert_eq!(state.pending_leader, Some(Context::Help));
+            assert_eq!(state.notifications.records().len(), count + 1);
+            assert_eq!(
+                state.notifications.records().next_back().unwrap().message,
+                expected
+            );
+            let menu = draw(&state, &layout, None);
+            let region = geometry::modal_region(&layout, menu.area);
+            let top = (region.y..region.bottom())
+                .find(|&y| row(&menu, region, y).contains("┌ Ctrl+X "))
+                .expect("menu retained");
+            assert!(
+                (top..region.bottom()).any(|y| row(&menu, region, y).contains(&expected)),
+                "{width}x{height} {key:?}: feedback must paint IN WhichKey, not under Help"
+            );
+            if key == Key::Char('t') {
+                let (x, y) = (top..region.bottom())
+                    .find_map(|y| {
+                        let text = row(&menu, region, y);
+                        text.find("Tasks (n/a)")
+                            .map(|x| (text[..x].chars().count() as u16, y))
+                    })
+                    .expect("unavailable Tasks row remains visible");
+                let cell = &menu[(region.x + x, y)];
+                assert!(
+                    cell.modifier
+                        .intersects(Modifier::BOLD | Modifier::REVERSED)
+                        || cell.fg != state.theme.colors.fg_muted,
+                    "pressed unavailable row is emphasized"
+                );
+            }
+            open_quit(&mut state);
+            assert_eq!(state.pending_leader, Some(Context::Help));
+            let quit = draw(&state, &layout, None);
+            assert!((0..height).any(|y| row(&quit, quit.area, y).contains("[n/Esc/Enter] Stay")));
+            assert!(!(0..height).any(|y| row(&quit, quit.area, y).contains("┌ Ctrl+X ")));
+            assert_eq!(press(&mut state, Key::Char('n')), InputAction::Consumed);
+            assert_eq!(
+                draw(&state, &layout, None),
+                menu,
+                "exact menu and feedback return"
+            );
+            assert_eq!(state.pending_leader, Some(Context::Help));
+            assert_eq!(
+                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                frames
+            );
+            assert_eq!(
+                (state.focus, state.input_buffer, state.cursor_position),
+                (focus, "kept draft".into(), 4)
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_palette_refusal_is_visible_without_dispatch() {
+    use rustain::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
+    use rustain::domain::models::{
+        palette::{PaletteAction, PaletteEntry, PaletteScope},
+        visual::PanelType,
+    };
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        state.input_buffer = "palette caller draft".into();
+        state.cursor_position = 5;
+        press_all(
+            &mut state,
+            &[
+                Key::Ctrl('x'),
+                Key::Char('?'),
+                Key::Ctrl('p'),
+                Key::Char('m'),
+            ],
+        );
+        state.command_palette.filtered_entries = ["model first", "model selected"]
+            .map(|name| PaletteEntry {
+                name: name.into(),
+                description: String::new(),
+                shortcut: None,
+                scope: PaletteScope::All,
+                action: PaletteAction::OpenPanel(PanelType::Tasks),
+            })
+            .to_vec();
+        assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);
+        assert_eq!(state.command_palette.selected_index, 1);
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+        let focus = state.focus.clone();
+        let count = state.notifications.records().len();
+        assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
+        assert_eq!(state.notifications.records().len(), count + 1);
+        assert_eq!(
+            state.notifications.records().next_back().unwrap().message,
+            CLOSE_WINDOW_FIRST
+        );
+        assert_eq!(
+            (
+                state.command_palette.filter_text.as_str(),
+                state.command_palette.selected_index
+            ),
+            ("m", 1)
+        );
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames
+        );
+        let layout = layout(&state);
+        let rect = geometry::frame_rect(geometry::modal_region(
+            &layout,
+            Rect::new(0, 0, width, height),
+        ));
+        let painted = draw(&state, &layout, None);
+        assert!(
+            (rect.y + 4..rect.bottom())
+                .any(|y| row(&painted, rect, y).contains(CLOSE_WINDOW_FIRST)),
+            "{width}x{height}: refusal must paint in the palette footer, below query and results"
+        );
+        assert!((rect.y..rect.bottom()).any(|y| row(&painted, rect, y).contains("> m_")));
+        assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);
+        let cleared = draw(&state, &layout, None);
+        assert!(
+            !(rect.y..rect.bottom()).any(|y| row(&cleared, rect, y).contains(CLOSE_WINDOW_FIRST))
+        );
+        assert_eq!(state.command_palette.filter_text, "m");
+        assert_eq!(state.command_palette.selected_index, 0);
+        assert_eq!(state.command_palette.filtered_entries.len(), 2);
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames
+        );
+        assert_eq!(
+            (state.focus, state.input_buffer, state.cursor_position),
+            (focus, "palette caller draft".into(), 5)
+        );
+        assert_eq!(
+            state.notifications.records().len(),
+            count + 1,
+            "next key only clears footer feedback"
+        );
     }
 }

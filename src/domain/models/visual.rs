@@ -185,11 +185,8 @@ pub enum ConfirmationType {
 /// Note: Not Copy because Confirmation contains non-Copy data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
-    CommandPalette,
     ModelSelector,
     ProfileSwitcher,
-    WhichKey,
-    Help,
     Confirmation(ConfirmationType),
     /// Reverse search overlay for input history (Ctrl+R).
     // Covers: UX-DR74

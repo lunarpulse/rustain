@@ -1,40 +1,40 @@
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::hints;
 use rustain::adapters::tui::keymap::render_help;
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::{HelpOverlayState, TuiState};
 use rustain::adapters::tui::version_info;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::OverlayType;
 
 // ============================================================
 // Unit: HelpOverlayState (Task 7.4)
 // ============================================================
 
 #[test]
-fn test_help_overlay_state_open_sets_active() {
-    let mut state = HelpOverlayState::new();
-    assert!(!state.active);
-    state.open(FocusState::Chat);
-    assert!(state.active);
-    assert_eq!(state.scroll_offset, 0);
+fn test_help_overlay_opener_pushes_and_back_restores_chat() {
+    let mut state = TuiState::new(80, 24);
+    state.focus = FocusState::Chat;
+    handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
+    assert!(presentation::is_open(&state, Surface::Help));
+    assert_eq!(state.help_overlay.scroll_offset, 0);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert!(!presentation::is_open(&state, Surface::Help));
+    assert_eq!(state.focus, FocusState::Chat);
 }
 
 #[test]
-fn test_help_overlay_state_close_returns_prior_focus() {
-    let mut state = HelpOverlayState::new();
-    state.open(FocusState::Chat);
-    let restored = state.close();
-    assert!(!state.active);
-    assert_eq!(restored, FocusState::Chat);
+fn test_help_overlay_payload_starts_at_top() {
+    let state = HelpOverlayState::new();
+    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.selected_category, 0);
 }
 
 #[test]
 fn test_help_overlay_state_open_resets_scroll() {
     let mut state = HelpOverlayState::new();
-    state.open(FocusState::Input);
     state.scroll_offset = 10;
-    state.open(FocusState::Chat);
+    state.reset();
     assert_eq!(state.scroll_offset, 0);
 }
 
@@ -76,26 +76,32 @@ fn test_is_multiplexer_session_false_when_unset() {
 
 #[test]
 fn test_contextual_hint_input_focus() {
-    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default());
+    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains('?'));
 }
 
 #[test]
 fn test_contextual_hint_chat_focus() {
-    let hint = hints::contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default());
+    let hint = hints::contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default(), None);
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("j/k"));
 }
 
 #[test]
 fn test_contextual_hint_fades_above_threshold() {
-    assert!(hints::contextual_hint(&FocusState::Input, 6, 5, false, &Default::default()).is_none());
+    assert!(
+        hints::contextual_hint(&FocusState::Input, 6, 5, false, &Default::default(), None)
+            .is_none()
+    );
 }
 
 #[test]
 fn test_contextual_hint_shows_at_threshold() {
-    assert!(hints::contextual_hint(&FocusState::Input, 5, 5, false, &Default::default()).is_some());
+    assert!(
+        hints::contextual_hint(&FocusState::Input, 5, 5, false, &Default::default(), None)
+            .is_some()
+    );
 }
 
 // ============================================================
@@ -121,8 +127,8 @@ fn test_question_mark_opens_help_from_chat() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
 
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
-    assert!(state.help_overlay.active);
+    assert_eq!(state.focus, FocusState::Chat);
+    assert!(presentation::is_open(&state, Surface::Help));
 }
 
 // ============================================================
@@ -153,12 +159,12 @@ fn test_question_mark_closes_help_overlay() {
 
     // Open
     handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
-    assert!(state.help_overlay.active);
+    assert!(presentation::is_open(&state, Surface::Help));
 
     // Close with ?
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.help_overlay.active);
+    assert!(!presentation::is_open(&state, Surface::Help));
     assert_eq!(state.focus, FocusState::Chat);
 }
 
@@ -169,13 +175,12 @@ fn test_question_mark_closes_help_overlay() {
 #[test]
 fn test_esc_closes_help_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
 
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.help_overlay.active);
+    assert!(!presentation::is_open(&state, Surface::Help));
     assert_eq!(state.focus, FocusState::Chat);
 }
 
@@ -186,8 +191,7 @@ fn test_esc_closes_help_overlay() {
 #[test]
 fn test_jk_scrolling_in_help_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     // j increments scroll
     handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
@@ -210,8 +214,7 @@ fn test_jk_scrolling_in_help_overlay() {
 #[test]
 fn test_g_and_shift_g_in_help_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     // G scrolls to bottom (large value)
     handle_input(&mut state, &DomainInputEvent::KeyPress('G'));
@@ -229,14 +232,13 @@ fn test_g_and_shift_g_in_help_overlay() {
 #[test]
 fn test_question_mark_ignored_during_command_palette() {
     let mut state = TuiState::new(80, 24);
-    state.command_palette.open(FocusState::Input);
-    state.focus = FocusState::Overlay(OverlayType::CommandPalette);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
 
     // ? is treated as filter text in command palette, not help toggle
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.command_palette.active);
-    assert!(!state.help_overlay.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert!(!presentation::is_open(&state, Surface::Help));
 }
 
 // ============================================================
@@ -250,12 +252,15 @@ fn test_ctrl_x_question_chord_opens_help() {
 
     // Open which-key
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert_eq!(
+        state.pending_leader,
+        Some(rustain::adapters::tui::keymap::Context::Input)
+    );
 
     // Press ?
     handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
-    assert!(state.help_overlay.active);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
+    assert!(presentation::is_open(&state, Surface::Help));
+    assert_eq!(state.focus, FocusState::Input);
 }
 
 // ============================================================
@@ -265,8 +270,7 @@ fn test_ctrl_x_question_chord_opens_help() {
 #[test]
 fn test_arrow_key_scrolling_in_help_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));
     assert_eq!(state.help_overlay.scroll_offset, 1);
@@ -284,8 +288,7 @@ fn test_version_palette_action_produces_feedback() {
     use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
     let mut state = TuiState::new(80, 24);
-    state.command_palette.open(FocusState::Input);
-    state.focus = FocusState::Overlay(OverlayType::CommandPalette);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
 
     // Manually inject a version entry and select it
     state.command_palette.filtered_entries = vec![PaletteEntry {
@@ -327,7 +330,7 @@ fn test_help_overlay_renders_no_crash() {
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut overlay = HelpOverlayState::new();
-    overlay.open(FocusState::Chat);
+    overlay.reset();
     let theme = Theme::dark();
 
     terminal
@@ -351,7 +354,7 @@ fn test_help_overlay_renders_with_tmux_no_crash() {
     let backend = TestBackend::new(120, 40);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut overlay = HelpOverlayState::new();
-    overlay.open(FocusState::Chat);
+    overlay.reset();
     let theme = Theme::dark();
 
     terminal
@@ -496,22 +499,68 @@ fn test_status_bar_no_hint_when_none() {
 
 #[test]
 fn test_help_overlay_small_terminal_no_crash() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-    use rustain::adapters::tui::theme::Theme;
-    use rustain::adapters::tui::widgets::help_overlay;
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    use rustain::adapters::tui::{
+        keymap::Host,
+        layout::compute_layout,
+        notification_log::LogFacts,
+        presentation::{Shell, compose, geometry},
+    };
+    use rustain::domain::models::visual::DensityMode;
 
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut overlay = HelpOverlayState::new();
-    overlay.open(FocusState::Chat);
-    let theme = Theme::dark();
-
-    terminal
-        .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &overlay, &theme, false);
-        })
+    for (width, height, full) in [(60, 16, true), (130, 30, false)] {
+        let mut state = TuiState::new(width, height);
+        if full {
+            state.input_buffer = ["draft"; 8].join("\n");
+        }
+        open_help_from_chat(&mut state);
+        let area = Rect::new(0, 0, width, height);
+        let layout = compute_layout(
+            area,
+            &state.theme,
+            &state.input_buffer,
+            1,
+            false,
+            DensityMode::Focus,
+        )
         .unwrap();
+        let shell = Shell::new(area, &layout);
+        let rect = geometry::frame_rect(shell.region);
+        if full {
+            assert_eq!(rect.height, 5);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                compose(
+                    frame,
+                    &state,
+                    &shell,
+                    Host::Local,
+                    &LogFacts::default(),
+                    |_| {},
+                    |_| {},
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
+        assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
+        assert!(row(rect.y).contains("Help — Rustain Keybindings"));
+        assert!(row(rect.bottom() - 1).contains("j/k scroll  ? close"));
+        assert!(
+            (rect.y + 1..rect.bottom() - 1).any(|y| row(y).chars().any(|c| c.is_alphanumeric()))
+        );
+        assert_eq!(
+            buffer[(layout.status_bar.x, layout.status_bar.y)].symbol(),
+            " "
+        );
+    }
 }
 
 // ============================================================
@@ -522,7 +571,7 @@ fn test_help_overlay_small_terminal_no_crash() {
 fn test_session_count_parse_valid() {
     // This tests the internal parser indirectly via the module tests
     // The parse logic is covered by hints::tests::test_parse_session_count_*
-    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default());
+    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
     assert!(hint.is_some());
 }
 
@@ -540,24 +589,29 @@ fn test_question_mark_ignored_during_which_key() {
 
     // Open which-key
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
 
     // Press ? — should execute chord (ShowHelp), dismissing which-key
     handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
-    assert!(!state.which_key.active);
-    assert!(state.help_overlay.active);
+    assert!(state.pending_leader.is_none());
+    assert!(presentation::is_open(&state, Surface::Help));
 }
 
 #[test]
-fn test_ctrl_p_blocked_from_help_overlay() {
+fn test_ctrl_p_pushes_palette_over_help_and_back_preserves_scroll() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
-
+    open_help_from_chat(&mut state);
+    handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    // Help overlay consumes all input — Ctrl+P is swallowed, not passed through
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert!(presentation::is_open(&state, Surface::Help));
+    assert_eq!(state.modal_stack.len(), 2);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
+    assert!(presentation::is_open(&state, Surface::Help));
+    assert_eq!(state.help_overlay.scroll_offset, 1);
+    assert_eq!(state.focus, FocusState::Chat);
 }
 
 // ============================================================
@@ -567,14 +621,13 @@ fn test_ctrl_p_blocked_from_help_overlay() {
 #[test]
 fn test_ctrl_c_closes_help_overlay_and_never_cancels() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlC));
     // Ctrl+C closes the overlay and restores the caller; it no longer stops a turn
     // or asks to quit (it returned CancelOrQuit before 21-3 AC13).
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.help_overlay.active);
+    assert!(!presentation::is_open(&state, Surface::Help));
     assert_eq!(state.focus, FocusState::Chat);
 }
 
@@ -585,34 +638,42 @@ fn test_ctrl_c_closes_help_overlay_and_never_cancels() {
 #[test]
 fn test_unrecognized_keys_consumed_by_help_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
+    open_help_from_chat(&mut state);
 
     // Random character should be consumed, not leaked
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.help_overlay.active); // overlay stays open
+    assert!(presentation::is_open(&state, Surface::Help)); // frame stays open
 }
 
 // ============================================================
-// Edge: wide terminal centered_area no overflow (P6)
+// Edge: shared caller geometry on a wide terminal (P6)
 // ============================================================
 
 #[test]
-fn test_centered_area_wide_terminal_no_overflow() {
+fn test_shared_geometry_wide_terminal_no_overflow() {
     use rustain::adapters::tui::widgets::help_overlay;
 
-    // 1000-column terminal should not overflow u16 arithmetic
-    // The centered_area function is private, but we can verify rendering doesn't panic
+    // Exercise the production geometry with a 1000-column region.
     let backend = ratatui::backend::TestBackend::new(1000, 50);
     let mut terminal = ratatui::Terminal::new(backend).unwrap();
     let mut overlay = HelpOverlayState::new();
-    overlay.open(FocusState::Chat);
+    overlay.reset();
     let theme = rustain::adapters::tui::theme::Theme::dark();
 
     terminal
         .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &overlay, &theme, false);
+            let area = presentation::geometry::frame_rect(frame.area());
+            help_overlay::render(frame, area, &overlay, &theme, false);
         })
         .unwrap();
+}
+
+fn open_help_from_chat(state: &mut TuiState) {
+    state.focus = FocusState::Chat;
+    assert_eq!(
+        handle_input(state, &DomainInputEvent::KeyPress('?')),
+        InputAction::Consumed
+    );
+    assert!(presentation::is_open(state, Surface::Help));
 }

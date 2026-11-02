@@ -190,6 +190,8 @@ fn k10_open_surfaces_are_never_taken_from() {
     // One entry per disjunct of the pane's protection test, each setting ONLY its
     // own flag, so dropping any single disjunct leaves exactly one entry failing.
     type Setup = fn(&mut TuiState);
+    use rustain::adapters::tui::keymap::Context;
+    use rustain::adapters::tui::presentation::{Surface, reducer};
     use rustain::domain::models::autocomplete::AutocompleteKind;
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
     let surfaces: [(&str, Setup); 16] = [
@@ -199,13 +201,17 @@ fn k10_open_surfaces_are_never_taken_from() {
             f.composer_draft = true;
             quit_confirm::request(s, f);
         }),
-        ("help overlay", |s| s.help_overlay.active = true),
+        ("help overlay", |s| {
+            reducer::open(s, Surface::Help);
+        }),
         ("model selector", |s| s.model_selector.active = true),
         ("sign-in", |s| s.login.active = true),
         ("profile switcher", |s| s.profile_switcher.active = true),
         ("usage panel", |s| s.usage_panel.active = true),
-        ("palette", |s| s.command_palette.active = true),
-        ("which-key", |s| s.which_key.active = true),
+        ("palette", |s| {
+            reducer::open(s, Surface::CommandPalette);
+        }),
+        ("which-key", |s| s.pending_leader = Some(Context::Chat)),
         ("reverse search", |s| s.reverse_search.active = true),
         ("in-conversation search", |s| s.search_state.active = true),
         ("ask_user_question", |s| {

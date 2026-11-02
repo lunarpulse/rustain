@@ -124,7 +124,7 @@ fn test_e2e_[feature]_[behavior]() {
 
 **Regression Tests:**
 - `test_e2e_palette_empty_entries`
-- `test_e2e_which_key_blocked_when_palette_open`
+- `test_e2e_which_key_routes_from_palette_without_dismissing_it`
 
 ### Story 3.4: Image Attachment & Clipboard Operations
 

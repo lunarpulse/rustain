@@ -16,10 +16,10 @@
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::table_chat::ChatCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::{Direction, TuiState};
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::OverlayType;
 
 use super::support::{assert_global_effect, decode, fresh, global_owned, is_inert, press};
 
@@ -113,18 +113,15 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
         ChatCmd::OpenHelp => {
             let mut state = chat_state();
             assert_eq!(one(&mut state, Key::Char('?')), InputAction::Consumed);
-            assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
-            assert!(state.help_overlay.active);
-            assert_eq!(state.help_overlay.prior_focus, FocusState::Chat);
+            assert_eq!(state.focus, FocusState::Chat);
+            assert!(is_open(&state, Surface::Help));
+            assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
         }
         ChatCmd::OpenPalette => {
             let mut state = chat_state();
             assert_eq!(one(&mut state, Key::Ctrl('p')), InputAction::Consumed);
-            assert_eq!(
-                state.focus,
-                FocusState::Overlay(OverlayType::CommandPalette)
-            );
-            assert!(state.command_palette.active);
+            assert_eq!(state.focus, FocusState::Chat);
+            assert!(is_open(&state, Surface::CommandPalette));
         }
         ChatCmd::CancelOrQuit => {
             let mut state = chat_state();

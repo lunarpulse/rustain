@@ -7,9 +7,10 @@ use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::keymap::table::PANEL_NARROW;
 use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{DensityMode, OverlayType, PanelType};
+use rustain::domain::models::visual::{DensityMode, PanelType};
 
 use super::support::{is_inert, press};
 
@@ -22,7 +23,7 @@ fn wide() -> TuiState {
 
 fn leader(state: &mut TuiState, follow_up: Key) -> InputAction {
     assert_eq!(press(state, Key::Ctrl('x')), InputAction::Consumed);
-    assert!(state.which_key.active, "Ctrl+X opens the leader");
+    assert!(state.pending_leader.is_some(), "Ctrl+X opens the leader");
     press(state, follow_up)
 }
 
@@ -52,7 +53,7 @@ fn every_leader_follow_up_runs_its_command_by_value() {
             InputAction::OpenPanel(panel),
             "{key}"
         );
-        assert!(!state.which_key.active, "{key}: the leader closed");
+        assert!(state.pending_leader.is_none(), "{key}: the leader closed");
         assert_eq!(
             state.focus,
             FocusState::Input,
@@ -109,8 +110,8 @@ fn every_leader_follow_up_runs_its_command_by_value() {
     // `?` opens Help over the origin; `n` opens the Notification Log.
     let mut state = wide();
     assert_eq!(leader(&mut state, Key::Char('?')), InputAction::Consumed);
-    assert!(state.help_overlay.active);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Help));
+    assert!(is_open(&state, Surface::Help));
+    assert_eq!(state.focus, FocusState::Input);
     let mut state = wide();
     assert_eq!(leader(&mut state, Key::Char('n')), InputAction::Consumed);
     assert!(state.notification_log.is_some());
@@ -181,7 +182,7 @@ fn unknown_follow_up_posts_no_binding_toast() {
         state.cursor_position = 4;
         let action = leader(&mut state, key);
         assert!(is_inert(&action), "{label}: {action:?}");
-        assert!(!state.which_key.active, "{label}: the leader closed");
+        assert!(state.pending_leader.is_none(), "{label}: the leader closed");
         assert_eq!(state.focus, FocusState::Input, "{label}: origin restored");
         assert_eq!(state.input_buffer, "keep", "{label}: composer unchanged");
         assert_eq!(
@@ -206,7 +207,7 @@ fn escape_and_ctrl_c_cancel_the_leader_silently() {
         state.focus = FocusState::Chat;
         let action = leader(&mut state, key);
         assert_eq!(action, InputAction::Consumed, "{key:?}: never CancelOrQuit");
-        assert!(!state.which_key.active);
+        assert!(state.pending_leader.is_none());
         assert_eq!(state.focus, FocusState::Chat);
         assert!(notices(&state).is_empty(), "{key:?}: silent");
     }
@@ -242,7 +243,7 @@ fn the_leader_is_untimed_across_ticks() {
     for _ in 0..500 {
         notifications::tick(&mut state);
     }
-    assert!(state.which_key.active, "no timeout closes the menu");
+    assert!(state.pending_leader.is_some(), "no timeout closes the menu");
     assert_eq!(
         press(&mut state, Key::Char('h')),
         InputAction::OpenPanel(PanelType::History)

@@ -97,6 +97,12 @@ const fn g(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
 
 #[rustfmt::skip]
 pub const ROWS: &[Binding] = &[
+    bind(Context::Help, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
+    bind(Context::Help, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
+    bind(Context::CommandPalette, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
+    bind(Context::CommandPalette, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Return to this command palette"),
+    bind(Context::NotificationLog, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
+    bind(Context::NotificationLog, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
     // Legacy windows stay intact beneath S-QUIT until their stack cutover.
     bind(Context::ModelSelector, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the model selector"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the profile switcher"),

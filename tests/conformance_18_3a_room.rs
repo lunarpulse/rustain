@@ -516,7 +516,7 @@ fn ctrl_x_r_dispatches_the_durable_room_panel() {
     for key in ['r', 'R'] {
         let mut state = TuiState::new(160, 24);
         handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-        assert!(state.which_key.active);
+        assert!(state.pending_leader.is_some());
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
             InputAction::OpenPanel(PanelType::Room),

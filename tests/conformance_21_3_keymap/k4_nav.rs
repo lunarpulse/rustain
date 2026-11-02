@@ -17,6 +17,7 @@ use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::{OverlayType, PanelType};
@@ -104,8 +105,8 @@ fn sidebar_salient(state: &TuiState) -> SidebarSalient {
         selected: state.sidebar_selected,
         input: state.input_buffer.clone(),
         cross_search: state.cross_search.active,
-        palette: state.command_palette.active,
-        help: state.help_overlay.active,
+        palette: is_open(state, Surface::CommandPalette),
+        help: is_open(state, Surface::Help),
     }
 }
 
@@ -156,12 +157,10 @@ fn sidebar_witness(cmd: SidebarCmd, keys: &[Key]) {
         SidebarCmd::PrevTab => assert_eq!(press(&mut state, key), InputAction::SwitchToPrevTab),
         SidebarCmd::NewTab => assert_eq!(press(&mut state, key), InputAction::NewTab),
         SidebarCmd::OpenPalette => {
+            let base = state.focus.clone();
             assert_eq!(press(&mut state, key), InputAction::Consumed);
-            assert_eq!(
-                state.focus,
-                FocusState::Overlay(OverlayType::CommandPalette)
-            );
-            assert!(state.command_palette.active);
+            assert_eq!(state.focus, base);
+            assert!(is_open(&state, Surface::CommandPalette));
         }
         SidebarCmd::CancelOrQuit => {
             assert_eq!(press(&mut state, key), InputAction::CancelOrQuit)

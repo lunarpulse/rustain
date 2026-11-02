@@ -61,6 +61,93 @@ pub const PANEL_NARROW: &str =
 
 const SIDEBAR_MIN_WIDTH: u16 = 120;
 
+/// Interim ownership remedy, shared by leader rows and nested palette actions.
+pub const CLOSE_WINDOW_FIRST: &str = "Please close the window first to open this surface.";
+
+fn base_target(c: &AvailCtx) -> Availability {
+    if c.frame_origin {
+        Availability::Unavailable(CLOSE_WINDOW_FIRST)
+    } else {
+        Availability::Available
+    }
+}
+
+use crate::domain::models::palette::PaletteAction;
+
+/// Every action variant and command argument shape declares its presentation
+/// effect here. Unknown extension/skill commands fail closed while nested;
+/// adding a PaletteAction variant requires an exhaustive classification.
+#[derive(Clone, Copy)]
+enum PaletteTarget {
+    NoLegacySurface,
+    LegacySurface,
+    Unclassified,
+}
+
+fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
+    use PaletteTarget::{LegacySurface, NoLegacySurface, Unclassified};
+    let args = args.map(str::trim).filter(|args| !args.is_empty());
+    let subcommand = args.and_then(|args| args.split_whitespace().next());
+    match (name, args) {
+        (
+            "login" | "logout" | "accounts" | "models" | "retract-auto" | "cancel-plan"
+            | "reorder-task",
+            _,
+        ) => LegacySurface,
+        ("room" | "artifacts", None) => LegacySurface,
+        ("artifact", Some(_)) if matches!(subcommand, Some("apply" | "resolve")) => LegacySurface,
+        ("team", Some(_)) if matches!(subcommand, Some("view" | "retract")) => LegacySurface,
+        ("peer", Some(_)) if matches!(subcommand, Some("add" | "reach")) => LegacySurface,
+        ("memory", Some(_)) if matches!(subcommand, Some("forget" | "consolidate")) => {
+            LegacySurface
+        }
+        ("fanout", Some(_)) => LegacySurface,
+        (
+            "new" | "clear" | "export" | "deactivate" | "mode" | "plan" | "compact" | "config"
+            | "persona" | "memory" | "session" | "tools" | "channels" | "scheduler" | "context"
+            | "fanout" | "team" | "peer" | "artifact" | "ml" | "quit" | "notifications" | "detach"
+            | "resume-all-tasks",
+            None,
+        ) => NoLegacySurface,
+        ("mode", Some("plan" | "normal" | "autoedit" | "yolo"))
+        | ("plan", Some("on" | "off" | "toggle")) => NoLegacySurface,
+        ("room" | "artifacts" | "artifact", Some(_))
+            if matches!(subcommand, Some("list" | "show")) =>
+        {
+            NoLegacySurface
+        }
+        ("team", Some(_)) if matches!(subcommand, Some("status" | "board" | "log")) => {
+            NoLegacySurface
+        }
+        ("peer", Some(_)) if matches!(subcommand, Some("list" | "status" | "log")) => {
+            NoLegacySurface
+        }
+        _ => Unclassified,
+    }
+}
+
+/// The same frame-origin flag gates keyboard chords and palette handoffs.
+/// No default-available arm: dynamic entries need an audited command policy;
+/// absent policy (including unrecognized arguments) is unavailable when nested.
+pub fn palette_availability(action: &PaletteAction, c: &AvailCtx) -> Availability {
+    use PaletteAction::*;
+    let target = match action {
+        ExecuteCommand(name, args) => palette_command_target(name, args.as_deref()),
+        OpenPanel(_)
+        | SwitchModel { .. }
+        | SwitchProfile(_)
+        | DeleteAllConversations
+        | PasteImageFromClipboard => PaletteTarget::LegacySurface,
+        InsertMention(_) | ShowVersion | NewTab | CloseTab | ApplyAdapterOverride { .. } | Noop => {
+            PaletteTarget::NoLegacySurface
+        }
+    };
+    match target {
+        PaletteTarget::NoLegacySurface => Availability::Available,
+        PaletteTarget::LegacySurface | PaletteTarget::Unclassified => base_target(c),
+    }
+}
+
 fn attached_profile(c: &AvailCtx) -> Availability {
     host_gate(c, ATTACHED_PROFILE)
 }
@@ -72,6 +159,9 @@ fn attached_density(c: &AvailCtx) -> Availability {
 }
 /// A sidebar panel: local only, and only where the sidebar column fits.
 fn panel(c: &AvailCtx) -> Availability {
+    if c.frame_origin {
+        return base_target(c);
+    }
     match c.host {
         Host::Attached => Availability::Unavailable(attached_panel_remedy()),
         Host::Local if c.width < SIDEBAR_MIN_WIDTH => Availability::Unavailable(PANEL_NARROW),
@@ -83,6 +173,9 @@ fn attached_panel(c: &AvailCtx) -> Availability {
     host_gate(c, attached_panel_remedy())
 }
 fn host_gate(c: &AvailCtx, remedy: &'static str) -> Availability {
+    if c.frame_origin {
+        return base_target(c);
+    }
     match c.host {
         Host::Attached => Availability::Unavailable(remedy),
         Host::Local => Availability::Available,
@@ -125,7 +218,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('?')], LeaderCmd::Help, "Help").help(C, "Ctrl+X, ?", "This help overlay").witness("Keybindings"),
     l(&[Key::Char('n')], LeaderCmd::Notifications, "Notifications").slash("/notifications").help(C, "Ctrl+X, N", "Notification Log (also /notifications); Log !N counts unseen warnings and errors").witness("Notifications"),
     l(&[Key::Char('x')], LeaderCmd::ClearToasts, "Clear toasts").help(C, "Ctrl+X, X", "Clear toasts (hides every visible toast; the log keeps them)"),
-    l(&[Key::Char('q')], LeaderCmd::Decisions, "Decisions").help(C, "Ctrl+X, Q", "Decisions: focus the oldest waiting decision (status cue: Needs you)").witness("No decisions waiting"),
+    l(&[Key::Char('q')], LeaderCmd::Decisions, "Decisions").avail(base_target).help(C, "Ctrl+X, Q", "Decisions: focus the oldest waiting decision (status cue: Needs you)").witness("No decisions waiting"),
     l(&[Key::Enter], LeaderCmd::Send, "Send").help(C, "Ctrl+X, Enter", "Send the composer from any terminal (multi-line safe send)"),
     l(&[Key::Esc], LeaderCmd::Cancel, "Cancel").does("Close the menu without doing anything"),
     l(&[Key::Ctrl('c')], LeaderCmd::Cancel, "").does("Close the menu without doing anything"),

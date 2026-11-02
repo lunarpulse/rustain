@@ -1,11 +1,8 @@
-//! Shared Log/Quit presentation ownership (Story 21.4 Task 1-A1).
+//! Shared frame and routed-leader ownership (Story 21.4 A2a).
 //!
-//! Frames decide whether these surfaces are open; their existing state slots
-//! hold editable payloads only. The reducer alone constructs/clears the slots
-//! and restores their saved caller focus. Opening never changes legacy focus,
-//! so cancelling Quit exposes the exact Log or legacy surface underneath.
-//! Help, palette, the decision pane, WhichKey and autocomplete remain legacy.
-//! Depth-four replacement and continuations are not part of this cutover.
+//! Editable payloads do not answer whether a frame is open. Help, palette,
+//! Log and Quit use this reducer/boundary/compositor in both hosts.
+//! Autocomplete and the local pane remain wholly legacy until A2b.
 
 mod compose;
 pub mod geometry;

@@ -1,4 +1,4 @@
-"""21.4 smoke leg A1: real debug binary, local + attached, one 80x24 viewport.
+"""21.4 smoke legs A1/A2a: real debug binary, both hosts, one 80x24 viewport.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 loopback probe-only provider makes any model turn a failure. Unknown local slash
@@ -36,34 +36,69 @@ NOTICES = ("a1-first-invalid", "a1-second-invalid", "a1-third-invalid")
 DRAFT = "A1-kept-draft"
 LOG = "System · Notifications"
 QUIT = "System · Notifications › System · Quit"
+HELP = "Help — Rustain Keybindings"
+HELP_LOG = HELP+" › System · Notifications"
+HELP_QUIT = HELP+" › System · Quit"
 DEFAULT_EVIDENCE = Path(tempfile.gettempdir()) / "rustain-21-4-smoke"
 
 
-def _box(screen, title, rail):
-    """Only the full-width A1 sheet ending ABOVE status row 20 is settled."""
+def _box(screen, title, rail, closing=None):
+    """Require the exact A8 sheet/centered rectangle, including every border."""
     rows = screen.split("\n")
-    if len(rows) != 24 or any(len(row) != 80 for row in rows):
+    if len(rows) not in (16, 24, 30) or any(len(row) != len(rows[0]) for row in rows):
         return None
-    if not (rows[0].startswith("┌ "+title+" ") and rows[0].endswith("┐")):
+    width, region_height = len(rows[0]), len(rows)-4
+    if width < 60:
         return None
-    if not (rows[19].startswith("└") and rows[19].endswith("┘")):
+    box_width, box_height = ((width, region_height) if width < 100 else
+                            (width*9//10, min(region_height, max(5, region_height*85//100))))
+    left, top = (width-box_width)//2, (region_height-box_height)//2
+    box = [row[left:left+box_width] for row in rows[top:top+box_height]]
+    if not (box[0].startswith("┌ "+title+" ") and box[0].endswith("┐")):
         return None
-    if any(not (row.startswith("│") and row.endswith("│")) for row in rows[1:19]):
+    if not (box[-1].startswith("└") and box[-1].endswith("┘")):
         return None
-    body = tuple(rows[1:19])
-    return body if rail in " ".join(" ".join(body).split()) else None
+    if closing is not None and closing not in box[-1]:
+        return None
+    if closing is None and box[-1] != "└"+"─"*(box_width-2)+"┘":
+        return None
+    if any(not (row.startswith("│") and row.endswith("│")) for row in box[1:-1]):
+        return None
+    body = tuple(box[1:-1])
+    content = [row[1:-1].strip() for row in body if row[1:-1].strip()]
+    return body if not rail or (content and rail in content[-1]) else None
 
 
 def _status(screen):
     rows = screen.split("\n")
-    return (len(rows) == 24 and harness.composer_top(rows) == 21 and "Ready" in rows[20]
-            and rows[23].startswith("└") and rows[23].endswith("┘"))
+    return (len(rows) in (16, 24, 30) and harness.composer_top(rows) == len(rows)-3
+            and "Ready" in rows[-4] and rows[-1].startswith("└") and rows[-1].endswith("┘"))
 
 
 def _composer(screen):
     rows = screen.split("\n")
-    return (rows[22][1:-1].strip() if _status(screen)
-            and rows[22].startswith("│") and rows[22].endswith("│") else None)
+    return (rows[-2][1:-1].strip() if _status(screen)
+            and rows[-2].startswith("│") and rows[-2].endswith("│") else None)
+
+
+def _help_box(screen):
+    return _box(screen, HELP, "", closing="j/k scroll  ? close")
+
+
+def _help_scrolled(screen):
+    """The third scroll's final body row must arrive; the border is unchanged."""
+    body = _help_box(screen)
+    if body is None:
+        return False
+    first, last = body[0][1:-1].strip(), body[-1][1:-1].strip()
+    width = len(screen.split("\n", 1)[0])
+    if width == 60:
+        return first.startswith("Ctrl+X chords.") and last == ""
+    if width == 80:
+        return first == "close." and last.startswith("Hold Shift    Select text for copy")
+    if width == 130:
+        return first == "" and last.startswith("G             Jump to newest message")
+    return False
 
 
 def _notice_ready(screen, command, attached=False):
@@ -123,6 +158,49 @@ def _deskcheck():
     assert _selected(SimpleNamespace(screen=selected)) == NOTICES[1]
     socket_path = Path(tempfile.gettempdir()) / "r214-12345678/attached/data/daemons" / ("0"*16+".sock")
     assert len(os.fsencode(socket_path)) < 108, "scratch socket path exceeds AF_UNIX budget"
+    _deskcheck_help_frames()
+
+
+def _deskcheck_help_frames():
+    """Use saved real TestHarness frames at all three named viewports."""
+    path = Path(os.environ["RUSTAIN_MODAL_STACK_HELP_FRAMES"])
+    frames = {}
+    for line in path.read_text().splitlines():
+        if line.startswith("HELP_DESKCHECK_FRAME="):
+            width, height, stage, screen = json.loads(line.split("=", 1)[1])
+            assert len(screen.split("\n")) == height
+            assert all(len(row) == width for row in screen.split("\n"))
+            frames[width, height, stage] = screen
+    assert len(frames) == 21, frames.keys()
+    for width, height in [(60, 16), (80, 24), (130, 30)]:
+        def frame(stage):
+            screen = frames[width, height, stage]
+            assert _status(screen) and _composer(screen) == DRAFT, (width, height, stage, screen)
+            return screen
+        initial = frame("help-initial")
+        scrolled = frame("help-scrolled")
+        assert _help_box(initial) and _help_box(scrolled), (width, height)
+        assert _help_box(initial) != _help_box(scrolled)
+        assert not _help_scrolled(initial)
+        assert _help_scrolled(scrolled), (width, height)
+        assert _box(frame("help-log"), HELP_LOG, "[Esc] Close")
+        assert _box(frame("help-quit"), HELP_QUIT, "[n/Esc/Enter] Stay")
+        assert _help_box(frame("help-restored-log")) == _help_box(scrolled)
+        assert _help_box(frame("help-restored-quit")) == _help_box(scrolled)
+        assert HELP not in frame("composer")
+        # Independent named-viewport geometry oracle; reject a shifted title
+        # and a complete border whose Help footer has not settled.
+        left, top, box_width, box_height = ((0, 0, width, height-4) if width < 100 else (6, 2, 117, 22))
+        rows = initial.split("\n")
+        assert rows[top].index("┌") == left
+        assert rows[top].index("┐") == left+box_width-1
+        assert rows[top+box_height-1][left] == "└"
+        broken = rows.copy(); broken[top] = " "+broken[top][:-1]
+        assert _help_box("\n".join(broken)) is None
+        broken = rows.copy()
+        footer = top+box_height-1
+        broken[footer] = broken[footer].replace("j/k scroll  ? close", " "*len("j/k scroll  ? close"))
+        assert _help_box("\n".join(broken)) is None
 
 
 class _Terminal:
@@ -268,12 +346,44 @@ def _leg(tui):
     screen = tui.wait(lambda s: LOG not in s and _status(s) and _composer(s) == DRAFT
                       and not tui.screen.cursor.hidden, "composer cursor visible; draft intact")
     tui.capture("05-composer-restored", screen)
+    _help_leg(tui)
     tui.exit()
+
+
+def _help_leg(tui):
+    tui.send("Ctrl+X ? opens Help", b"\x18?")
+    initial = tui.wait(lambda s: _help_box(s) and _status(s) and tui.screen.cursor.hidden,
+                       "complete Help with footer and intact status")
+    tui.send("scroll Help three rows", b"jjj")
+    screen = tui.wait(lambda s: _help_scrolled(s) and _status(s) and tui.screen.cursor.hidden,
+                      "third Help scroll's final row settled")
+    before = _help_box(screen)
+    tui.capture("06-help-scrolled", screen)
+    tui.send("Ctrl+X n from Help", b"\x18n")
+    screen = tui.wait(lambda s: _box(s, HELP_LOG, "[Esc] Close") and _status(s)
+                      and tui.screen.cursor.hidden, "Help › Log breadcrumb and rail")
+    tui.capture("07-help-log", screen)
+    tui.send("Esc restores Help", b"\x1b")
+    screen = tui.wait(lambda s: _help_box(s) == before and _status(s)
+                      and tui.screen.cursor.hidden, "exact scrolled Help restored from Log")
+    tui.capture("08-exact-help-from-log", screen)
+    tui.send("Ctrl+Q over Help", b"\x11")
+    screen = tui.wait(lambda s: _box(s, HELP_QUIT, "[n/Esc/Enter] Stay") and _status(s)
+                      and tui.screen.cursor.hidden, "Help › Quit breadcrumb and intact status")
+    tui.capture("09-help-quit", screen)
+    tui.send("cancel Quit over Help", b"n")
+    screen = tui.wait(lambda s: _help_box(s) == before and _status(s)
+                      and tui.screen.cursor.hidden, "exact scrolled Help restored from Quit")
+    tui.capture("10-exact-help-from-quit", screen)
+    tui.send("Esc closes Help", b"\x1b")
+    screen = tui.wait(lambda s: HELP not in s and _status(s) and _composer(s) == DRAFT
+                      and not tui.screen.cursor.hidden, "Help returns to draft and composer cursor")
+    tui.capture("11-help-composer-restored", screen)
 
 
 @pytest.mark.flaky(reruns=0)
 @pytest.mark.timeout(240)
-def test_modal_stack_a1_local_and_attached_80x24():
+def test_modal_stack_a1_a2a_local_and_attached_80x24():
     if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
         _deskcheck()
         return
@@ -281,7 +391,7 @@ def test_modal_stack_a1_local_and_attached_80x24():
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
     parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", DEFAULT_EVIDENCE)).resolve()
     parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-4-a1-", dir=parent))
+    evidence = Path(tempfile.mkdtemp(prefix="21-4-a2a-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING", "legs": ["local", "attached"]}
@@ -343,4 +453,4 @@ def test_modal_stack_a1_local_and_attached_80x24():
     finally:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        print(f"NATIVE_21_4_A1_EVIDENCE={evidence}", flush=True)
+        print(f"NATIVE_21_4_A2A_EVIDENCE={evidence}", flush=True)

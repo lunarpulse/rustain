@@ -101,7 +101,7 @@ pub fn global_owned(context: rustain::adapters::tui::keymap::Context, key: Key) 
 pub fn assert_global_effect(state: &mut TuiState, key: Key) {
     let action = press(state, key);
     match key {
-        Key::Ctrl('x') => assert!(state.which_key.active, "Ctrl+X opens the leader"),
+        Key::Ctrl('x') => assert!(state.pending_leader.is_some(), "Ctrl+X opens the leader"),
         Key::Ctrl('q') => assert_eq!(action, InputAction::Quit, "Ctrl+Q quits"),
         other => panic!("{other:?} is not a Global key"),
     }

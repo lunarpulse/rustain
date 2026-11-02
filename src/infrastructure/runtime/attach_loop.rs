@@ -2267,7 +2267,6 @@ fn handle_attached_paste(state: &mut TuiState, input: &mut String, text: &str, c
     }
     if !card_pending
         && state.recipient_surface.is_none()
-        && !attach_keys::paste_blocked(state)
         && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
         && state.pending_team_retract.is_none()
     {
@@ -3548,7 +3547,11 @@ pub async fn run_attached(
                 f,
                 layout.input_area,
                 display_input,
-                if state.modal_stack.is_empty() { state.focus.clone() } else { FocusState::Chat },
+                if state.modal_stack.is_empty() && state.pending_leader.is_none() {
+                    state.focus.clone()
+                } else {
+                    FocusState::Chat
+                },
                 &state.theme,
                 state.multiline_mode,
                 if read_only {

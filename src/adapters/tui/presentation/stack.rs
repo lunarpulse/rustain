@@ -1,8 +1,10 @@
-//! Log/Quit frame identities. Only the presentation reducer mutates the stack.
+//! Frame identities. Only the presentation reducer mutates the stack.
 
-/// Surfaces migrated in Task 1-A1; every other surface remains legacy-owned.
+/// The four migrated surfaces. The pane and fifth-surface continuations land in A2b.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
+    CommandPalette,
+    Help,
     NotificationLog,
     QuitConfirm,
 }
@@ -11,8 +13,20 @@ impl Surface {
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
+            Self::CommandPalette => "Command Palette",
+            Self::Help => "Help — Rustain Keybindings",
             Self::NotificationLog => "System · Notifications",
             Self::QuitConfirm => "System · Quit",
+        }
+    }
+
+    pub const fn context(self) -> crate::adapters::tui::keymap::Context {
+        use crate::adapters::tui::keymap::Context;
+        match self {
+            Self::CommandPalette => Context::CommandPalette,
+            Self::Help => Context::Help,
+            Self::NotificationLog => Context::NotificationLog,
+            Self::QuitConfirm => Context::QuitConfirm,
         }
     }
 }
@@ -53,9 +67,10 @@ impl ModalStack {
     }
 }
 
-/// Duplicate opens preserve both the frame identity and its payload.
+/// Reopening a covered surface closes the frames above it without resetting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opened {
     Pushed,
     Unchanged,
+    Truncated,
 }

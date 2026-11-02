@@ -11,7 +11,7 @@ use rustain::adapters::tui::keymap::table::{
 };
 use rustain::adapters::tui::keymap::{AvailCtx, Key};
 use rustain::adapters::tui::notifications::NoticeSeverity;
-use rustain::adapters::tui::state::{TuiState, WhichKeyState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::which_key_bar;
 use rustain::domain::models::FocusState;
@@ -27,11 +27,9 @@ use unicode_width::UnicodeWidthStr;
 use super::support::{fresh, press};
 
 fn paint(width: u16, height: u16, avail: &AvailCtx) -> String {
-    let mut wk = WhichKeyState::new();
-    wk.open(FocusState::Input);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
-        .draw(|frame| which_key_bar::render(frame, frame.area(), &wk, &Theme::dark(), avail))
+        .draw(|frame| which_key_bar::render(frame, frame.area(), &Theme::dark(), avail, None))
         .expect("draw");
     let buffer = terminal.backend().buffer().clone();
     (0..height)
@@ -173,8 +171,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     let foci = [
         ("Input", FocusState::Input),
         ("Chat", FocusState::Chat),
-        ("Help", overlay(OverlayType::Help)),
-        ("CommandPalette", overlay(OverlayType::CommandPalette)),
+        ("Help", FocusState::Chat),
+        ("CommandPalette", FocusState::Input),
         ("ModelSelector", overlay(OverlayType::ModelSelector)),
         ("ProfileSwitcher", overlay(OverlayType::ProfileSwitcher)),
         ("Search", overlay(OverlayType::Search)),
@@ -191,18 +189,24 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     for (name, focus) in foci {
         let mut state = fresh();
         state.focus = focus;
+        if name == "Help" {
+            press(&mut state, Key::Char('?'));
+        } else if name == "CommandPalette" {
+            press(&mut state, Key::Ctrl('p'));
+        }
         let offered = status_tail(&state) == StatusTail::Menu;
         press(&mut state, Key::Ctrl('x'));
         assert_eq!(
-            offered, state.which_key.active,
+            offered,
+            state.pending_leader.is_some(),
             "{name}: ^X menu offered iff Ctrl+X opens"
         );
         if offered { opened += 1 } else { blocked += 1 }
     }
     assert_eq!(
         (opened, blocked),
-        (2, 10),
-        "Input and Chat open; every overlay blocks"
+        (4, 8),
+        "Input, Chat, Help and palette open; remaining legacy overlays block"
     );
 }
 

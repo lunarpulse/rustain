@@ -16,6 +16,7 @@ use rustain::adapters::tui::keymap::table_permission::PermissionCmd;
 use rustain::adapters::tui::keymap::{
     CommandId, Context, Host, Hosts, Key, Resolved, resolve, table,
 };
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::{PendingPermission, TuiState};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::ToolRisk;
@@ -88,8 +89,8 @@ fn salient(state: &TuiState) -> Salient {
         buffer: state.input_buffer.clone(),
         cursor: state.cursor_position,
         multiline: state.multiline_mode,
-        palette: state.command_palette.active,
-        which_key: state.which_key.active,
+        palette: is_open(state, Surface::CommandPalette),
+        which_key: state.pending_leader.is_some(),
         quit_confirm: state.quit_confirm.is_some(),
         history_len: state.input_history.len(),
     }

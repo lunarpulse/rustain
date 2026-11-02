@@ -8,6 +8,7 @@ use rustain::adapters::tui::decision_pane::{
 };
 use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::adapters::tui::presentation::{Surface, reducer};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::DomainInputEvent;
@@ -492,7 +493,7 @@ async fn k05_review_rewraps_same_request_on_resize() {
 
 #[tokio::test]
 async fn k05_passive_overlay_dismissals_surface_deferred_approval() {
-    use rustain::domain::models::OverlayType;
+    use rustain::adapters::tui::keymap::Context;
 
     for (overlay, dismiss) in [
         ("help", KeyCode::Esc),
@@ -506,16 +507,13 @@ async fn k05_passive_overlay_dismissals_surface_deferred_approval() {
         f.state.input_buffer = "composer draft".into();
         match overlay {
             "help" => {
-                f.state.help_overlay.open(FocusState::Chat);
-                f.state.focus = FocusState::Overlay(OverlayType::Help);
+                reducer::open(&mut f.state, Surface::Help);
             }
             "which-key" => {
-                f.state.which_key.open(FocusState::Chat);
-                f.state.focus = FocusState::Overlay(OverlayType::WhichKey);
+                f.state.pending_leader = Some(Context::Chat);
             }
             _ => {
-                f.state.command_palette.open(FocusState::Chat);
-                f.state.focus = FocusState::Overlay(OverlayType::CommandPalette);
+                reducer::open(&mut f.state, Surface::CommandPalette);
             }
         }
         let input = json!({"command": "printf AFTER-PASSIVE-OVERLAY"});
@@ -538,13 +536,12 @@ async fn k05_passive_overlay_dismissals_surface_deferred_approval() {
 
 #[tokio::test]
 async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
-    use rustain::domain::models::OverlayType;
+    use rustain::adapters::tui::keymap::Context;
 
     let mut f = Fixture::new(64).await;
-    // Since 3-A the open leader owns every key, so Help can no longer sit on top of it: the
-    // leader menu itself is the higher owner the permission waits behind.
-    f.state.which_key.open(FocusState::Chat);
-    f.state.focus = FocusState::Overlay(OverlayType::WhichKey);
+    // The routed leader is the higher owner the permission waits behind.
+    f.state.focus = FocusState::Chat;
+    f.state.pending_leader = Some(Context::Chat);
     f.submit(vec![(
         "Bash",
         json!({"command": "printf AFTER-HIGHER-OWNER"}),
@@ -552,7 +549,7 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     .await;
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
-    assert_eq!(f.state.focus, FocusState::Overlay(OverlayType::WhichKey));
+    assert_eq!(f.state.pending_leader, Some(Context::Chat));
     assert!(f.state.pending_permission.is_none());
     assert_eq!(f.state.permission_queue.len(), 1);
     f.state.pending_large_image = Some(ImageAttachment {
@@ -568,8 +565,7 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     assert_eq!(f.state.permission_queue.len(), 1);
     assert!(f.tools.executed.lock().is_empty());
     f.state.pending_large_image = None;
-    f.state.help_overlay.open(FocusState::Chat);
-    f.state.focus = FocusState::Overlay(OverlayType::Help);
+    reducer::open(&mut f.state, Surface::Help);
     f.key(KeyCode::Esc).await;
     assert_eq!(f.current_id(), id);
     f.key(KeyCode::Char('n')).await;
@@ -640,8 +636,7 @@ async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
     let feedback_focus = FocusState::Overlay(OverlayType::Confirmation(
         ConfirmationType::PermissionFeedback,
     ));
-    f.state.help_overlay.open(feedback_focus.clone());
-    f.state.focus = FocusState::Overlay(OverlayType::Help);
+    reducer::open(&mut f.state, Surface::Help);
     f.submit(vec![(
         "Bash",
         json!({"command": "printf QUEUED-BEHIND-FEEDBACK"}),

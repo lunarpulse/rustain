@@ -12,6 +12,7 @@ use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_
 use rustain::adapters::tui::hints::contextual_hint;
 use rustain::adapters::tui::keymap::render_help::help_rows;
 use rustain::adapters::tui::keymap::{AvailCtx, render::leader_menu};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::quit_confirm::{
     self, QuitFacts, QuitHost, QuitKey, QuitKeyOutcome, QuitRequest,
 };
@@ -87,17 +88,17 @@ fn k1_slash_parity_per_host() {
 /// K5 — help and hints tell the current truth.
 #[test]
 fn k5_help_and_hints_tell_the_truth() {
-    let hint =
-        contextual_hint(&FocusState::Input, 1, 5, false, &Default::default()).expect("input hint");
+    let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None)
+        .expect("input hint");
     assert!(hint.contains("Ctrl+X ?"), "{hint}");
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &key('?'));
     assert_eq!(state.input_buffer, "?", "bare ? is literal in Input");
-    assert!(!state.help_overlay.active);
+    assert!(!is_open(&state, Surface::Help));
     let mut chat = TuiState::new(80, 24);
     chat.focus = FocusState::Chat;
     handle_input(&mut chat, &key('?'));
-    assert!(chat.help_overlay.active, "Chat ? still opens help");
+    assert!(is_open(&chat, Surface::Help), "Chat ? still opens help");
 
     let all = help_rows();
     let braces = all.iter().find(|b| b.key == "{ / }").expect("brace row");
@@ -179,23 +180,22 @@ fn k6_leader_inventory_is_complete_untimed_and_structurally_clean() {
             "{name}: timeout token survived"
         );
     }
-    let which_key_state = state_src
-        .split("pub struct WhichKeyState")
-        .nth(1)
-        .and_then(|rest| rest.split("impl WhichKeyState").next())
-        .expect("WhichKeyState definition");
     assert!(
-        !which_key_state.contains("started_at"),
-        "WhichKeyState.started_at survived"
+        !state_src.contains("pub struct WhichKeyState"),
+        "the old leader owner is gone, so it cannot retain started_at"
+    );
+    assert!(
+        state_src.contains("pending_leader: Option<"),
+        "the untimed leader retains only its context, never a deadline"
     );
 
     // Untimed behaviour through the real key path: Esc restores the origin focus.
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
     handle_input(&mut state, &special(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
     handle_input(&mut state, &special(DomainKey::Esc));
-    assert!(!state.which_key.active);
+    assert!(state.pending_leader.is_none());
     assert_eq!(state.focus, FocusState::Chat);
     // Portable send: Ctrl+X Enter sends once; Esc never submits a multiline draft.
     let mut state = TuiState::new(80, 24);

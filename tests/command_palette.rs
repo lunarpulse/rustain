@@ -4,7 +4,8 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::palette_registry::PaletteRegistry;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::keymap::{AvailCtx, Context, Host, Key, Resolved, resolve};
-use rustain::adapters::tui::state::{CommandPaletteState, Direction, TuiState, WhichKeyState};
+use rustain::adapters::tui::presentation::{self, Surface};
+use rustain::adapters::tui::state::{CommandPaletteState, Direction, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{command_palette, which_key_bar};
 use rustain::domain::events::{DomainInputEvent, DomainKey};
@@ -113,26 +114,46 @@ fn test_fuzzy_filter_empty_query_returns_all() {
 // ============================================================
 
 #[test]
-fn test_command_palette_state_open_dismiss() {
+fn test_command_palette_frontdoor_open_dismiss() {
+    let mut state = TuiState::new(80, 24);
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.command_palette.filter_text.is_empty());
+    assert_eq!(state.command_palette.selected_index, 0);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.command_palette.filter_text.is_empty());
+}
+
+#[test]
+fn test_command_palette_reset_and_clear_only_change_payload() {
     let mut state = CommandPaletteState::new();
-    assert!(!state.active);
-
-    state.open(FocusState::Input);
-    assert!(state.active);
-    assert_eq!(state.previous_focus, Some(FocusState::Input));
+    state.filter_text = "stale".to_owned();
+    state.filtered_entries = vec![make_entry("/old", "Old", PaletteScope::SlashCommand)];
+    state.selected_index = 3;
+    state.scroll_offset = 2;
+    state.current_scope = Some(PaletteScope::SlashCommand);
+    let epoch = state.open_epoch;
+    state.reset();
+    assert_eq!(state.open_epoch, epoch.wrapping_add(1));
     assert!(state.filter_text.is_empty());
+    assert!(state.filtered_entries.is_empty());
     assert_eq!(state.selected_index, 0);
-
-    let prev = state.dismiss();
-    assert!(!state.active);
-    assert_eq!(prev, Some(FocusState::Input));
+    assert_eq!(state.scroll_offset, 0);
+    assert_eq!(state.current_scope, None);
+    state.filter_text.push('x');
+    state.clear();
     assert!(state.filter_text.is_empty());
+    assert_eq!(state.open_epoch, epoch.wrapping_add(1));
 }
 
 #[test]
 fn test_command_palette_navigate_wraps() {
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.filtered_entries = vec![
         make_entry("/a", "A", PaletteScope::SlashCommand),
         make_entry("/b", "B", PaletteScope::SlashCommand),
@@ -153,7 +174,7 @@ fn test_command_palette_navigate_wraps() {
 #[test]
 fn test_command_palette_selected_entry() {
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.filtered_entries = vec![make_entry("/new", "New", PaletteScope::SlashCommand)];
 
     let selected = state.selected();
@@ -164,7 +185,7 @@ fn test_command_palette_selected_entry() {
 #[test]
 fn test_command_palette_execute_selected() {
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.filtered_entries = vec![PaletteEntry {
         name: "/new".to_string(),
         description: "New".to_string(),
@@ -183,7 +204,7 @@ fn test_command_palette_execute_selected() {
 #[test]
 fn test_command_palette_filter_update_resets_selection() {
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.selected_index = 5;
 
     state.update_filter(
@@ -199,7 +220,7 @@ fn test_command_palette_filter_update_resets_selection() {
 #[test]
 fn test_command_palette_scroll_behavior() {
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     // Create more entries than MAX_VISIBLE (12)
     state.filtered_entries = (0..20)
         .map(|i| {
@@ -219,21 +240,19 @@ fn test_command_palette_scroll_behavior() {
 }
 
 // ============================================================
-// Unit: WhichKeyState (Task 9.4)
+// Integration: Routed pending leader (Task 9.4)
 // ============================================================
 
 #[test]
 fn test_which_key_open_dismiss() {
-    let mut wk = WhichKeyState::new();
-    assert!(!wk.active);
-
-    wk.open(FocusState::Input);
-    assert!(wk.active);
-    assert_eq!(wk.previous_focus, Some(FocusState::Input));
-
-    let prev = wk.dismiss();
-    assert!(!wk.active);
-    assert_eq!(prev, Some(FocusState::Input));
+    let mut state = TuiState::new(80, 24);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+    assert_eq!(state.pending_leader, Some(Context::Input));
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert!(state.pending_leader.is_none());
+    assert_eq!(state.focus, FocusState::Input);
 }
 
 #[test]
@@ -289,11 +308,8 @@ fn test_ctrl_p_opens_palette_from_input() {
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
-    );
-    assert!(state.command_palette.active);
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]
@@ -303,24 +319,25 @@ fn test_ctrl_p_opens_palette_from_chat() {
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
-    );
-    assert!(state.command_palette.active);
-    assert_eq!(state.command_palette.previous_focus, Some(FocusState::Chat));
+    assert_eq!(state.focus, FocusState::Chat);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]
-fn test_ctrl_p_not_from_existing_overlay() {
+fn test_ctrl_p_pushes_over_existing_help_frame() {
     let mut state = TuiState::new(80, 24);
-    state.help_overlay.open(FocusState::Chat);
-    state.focus = FocusState::Overlay(OverlayType::Help);
-
+    state.focus = FocusState::Chat;
+    handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    // Help overlay consumes all input — Ctrl+P is swallowed, palette not opened
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.modal_stack.len(), 2);
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::CommandPalette
+    );
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
 }
 
 // ============================================================
@@ -337,10 +354,13 @@ fn test_ctrl_p_opens_palette_from_sidebar() {
     };
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
     assert_eq!(
         state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
+        FocusState::Sidebar {
+            panel: PanelType::History,
+            selected: 0,
+        }
     );
 }
 
@@ -355,8 +375,8 @@ fn test_ctrl_x_opens_which_key_from_input() {
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::WhichKey));
-    assert!(state.which_key.active);
+    assert_eq!(state.focus, FocusState::Input);
+    assert_eq!(state.pending_leader, Some(Context::Input));
 }
 
 #[test]
@@ -365,8 +385,8 @@ fn test_ctrl_x_opens_which_key_from_chat() {
     state.focus = FocusState::Chat;
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::WhichKey));
+    assert_eq!(state.pending_leader, Some(Context::Chat));
+    assert_eq!(state.focus, FocusState::Chat);
 }
 
 #[test]
@@ -379,8 +399,14 @@ fn test_ctrl_x_opens_which_key_from_sidebar() {
     };
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::WhichKey));
+    assert!(state.pending_leader.is_some());
+    assert_eq!(
+        state.focus,
+        FocusState::Sidebar {
+            panel: PanelType::History,
+            selected: 0,
+        }
+    );
 }
 
 #[test]
@@ -388,26 +414,49 @@ fn test_ctrl_x_second_key_dispatches_chord() {
     let mut state = TuiState::new(80, 24);
     // Open which-key
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
 
     // Press 'm' — wired to OpenModelSelector (Story 7.2)
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('m'));
     assert_eq!(action, InputAction::OpenModelSelector);
-    assert!(!state.which_key.active);
+    assert!(state.pending_leader.is_none());
     assert_eq!(state.focus, FocusState::Input);
+}
+
+#[test]
+fn test_ctrl_x_from_palette_routes_help_and_preserves_query_on_back() {
+    let mut state = TuiState::new(80, 24);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
+    handle_input(&mut state, &DomainInputEvent::KeyPress('m'));
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+    assert_eq!(state.pending_leader, Some(Context::CommandPalette));
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::CommandPalette
+    );
+    handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
+    assert!(state.pending_leader.is_none());
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
+    assert_eq!(state.command_palette.filter_text, "m");
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::CommandPalette
+    );
+    assert_eq!(state.command_palette.filter_text, "m");
 }
 
 #[test]
 fn test_ctrl_x_invalid_key_dismisses() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
 
     // Press an unbound key: consumed, dismissed, and the miss is announced once
     // (Story 21.3 AC2: no silent swallow).
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('z'));
     assert_eq!(action, InputAction::Consumed);
-    assert!(!state.which_key.active); // Dismissed
+    assert!(state.pending_leader.is_none()); // Dismissed
     assert_eq!(state.focus, FocusState::Input);
     let notices: Vec<_> = state
         .notifications
@@ -429,7 +478,7 @@ fn test_palette_scope_prefix_detection() {
     let mut state = TuiState::new(80, 24);
     // Open palette
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
 
     // Type '/' prefix
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
@@ -479,7 +528,7 @@ fn test_palette_opens_without_interrupting_stream() {
     // Ctrl+P should still open palette
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
     // Streaming status should NOT be affected (it's the event loop's concern, not app.rs)
     assert_eq!(
         state.status,
@@ -492,24 +541,66 @@ fn test_palette_opens_without_interrupting_stream() {
 // ============================================================
 
 #[test]
-fn test_command_palette_renders_centered() {
-    let backend = TestBackend::new(80, 24);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = Theme::dark();
+fn test_command_palette_renders_caller_geometry() {
+    use rustain::adapters::tui::{
+        layout::compute_layout,
+        notification_log::LogFacts,
+        presentation::{Shell, compose, geometry},
+    };
 
-    let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
-    state.filter_text = "test".to_string();
-
-    terminal
-        .draw(|frame| {
-            let area = frame.area();
-            command_palette::render(frame, area, &state, &theme);
-        })
+    for (width, height, full) in [(60, 16, true), (130, 30, false)] {
+        let mut state = TuiState::new(width, height);
+        if full {
+            state.input_buffer = ["draft"; 8].join("\n");
+        }
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
+        state.command_palette.filter_text = "test".to_owned();
+        state.command_palette.filtered_entries = vec![make_entry(
+            "/test",
+            "body-witness",
+            PaletteScope::SlashCommand,
+        )];
+        let area = ratatui::layout::Rect::new(0, 0, width, height);
+        let layout = compute_layout(
+            area,
+            &state.theme,
+            &state.input_buffer,
+            1,
+            false,
+            DensityMode::Focus,
+        )
         .unwrap();
-
-    let buffer = terminal.backend().buffer().clone();
-    assert!(buffer_contains_text(&buffer, "Command Palette"));
+        let shell = Shell::new(area, &layout);
+        let rect = geometry::frame_rect(shell.region);
+        if full {
+            assert_eq!(rect.height, 5);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                compose(
+                    frame,
+                    &state,
+                    &shell,
+                    Host::Local,
+                    &LogFacts::default(),
+                    |_| {},
+                    |_| {},
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
+        assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
+        assert!(buffer_contains_text(buffer, "Command Palette"));
+        assert!(buffer_contains_text(buffer, "> test_"));
+        assert!(buffer_contains_text(buffer, "body-witness"));
+        assert!(buffer_contains_text(buffer, "close"));
+        assert_eq!(
+            buffer[(layout.status_bar.x, layout.status_bar.y)].symbol(),
+            " "
+        );
+    }
 }
 
 #[test]
@@ -519,7 +610,7 @@ fn test_command_palette_renders_with_entries() {
     let theme = Theme::dark();
 
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.filtered_entries = vec![make_entry(
         "/new",
         "Start new session",
@@ -545,7 +636,7 @@ fn test_command_palette_renders_no_matches() {
     let theme = Theme::dark();
 
     let mut state = CommandPaletteState::new();
-    state.open(FocusState::Input);
+    state.reset();
     state.filter_text = "xyz".to_string();
     // No entries
 
@@ -570,18 +661,15 @@ fn test_which_key_bar_renders_chord_labels() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
 
-    let mut state = WhichKeyState::new();
-    state.open(FocusState::Input);
-
     terminal
         .draw(|frame| {
             let area = frame.area();
             which_key_bar::render(
                 frame,
                 area,
-                &state,
                 &theme,
                 &AvailCtx::local(120, DensityMode::Focus),
+                None,
             );
         })
         .unwrap();
@@ -602,8 +690,8 @@ fn test_adding_palette_state_doesnt_break_autocomplete() {
 
     // Autocomplete should still work normally
     assert!(!state.autocomplete.active);
-    assert!(!state.command_palette.active);
-    assert!(!state.which_key.active);
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
+    assert!(state.pending_leader.is_none());
 
     // Type '/' to trigger autocomplete (simulating what event_loop does)
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
@@ -626,7 +714,7 @@ fn test_ctrl_p_dismisses_autocomplete_before_opening() {
     // Ctrl+P should dismiss autocomplete and open palette
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert!(!state.autocomplete.active);
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]
@@ -636,7 +724,7 @@ fn test_ctrl_x_dismisses_autocomplete_before_opening() {
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert!(!state.autocomplete.active);
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
 }
 
 #[test]
@@ -649,7 +737,7 @@ fn test_ctrl_p_dismisses_reverse_search() {
     // and open command palette.
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
     assert!(!state.reverse_search.active);
 }
 
@@ -663,7 +751,7 @@ fn test_ctrl_x_while_reverse_search_opens_which_key() {
     // and open which-key.
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.which_key.active);
+    assert!(state.pending_leader.is_some());
     assert!(!state.reverse_search.active);
 }
 
@@ -677,20 +765,17 @@ fn test_palette_rapid_dismiss_reopen() {
 
     // Open
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert!(state.command_palette.active);
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
 
     // Dismiss via Esc
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert!(!state.command_palette.active);
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
     assert_eq!(state.focus, FocusState::Input);
 
     // Re-open immediately
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert!(state.command_palette.active);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
-    );
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.focus, FocusState::Input);
 }
 
 // ============================================================
@@ -703,14 +788,12 @@ fn test_palette_esc_restores_chat_focus() {
     state.focus = FocusState::Chat;
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::CommandPalette)
-    );
+    assert!(presentation::is_open(&state, Surface::CommandPalette));
+    assert_eq!(state.focus, FocusState::Chat);
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(state.focus, FocusState::Chat);
-    assert!(!state.command_palette.active);
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]
@@ -735,7 +818,7 @@ fn test_palette_enter_executes_command() {
             args: None
         }
     );
-    assert!(!state.command_palette.active);
+    assert!(!presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! The common paint boundary: toasts, unchanged legacy surfaces, frames, status.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use super::{Surface, geometry};
 use crate::adapters::tui::{
@@ -10,7 +10,7 @@ use crate::adapters::tui::{
     notification_log::{self, LogFacts},
     quit_confirm,
     state::TuiState,
-    widgets::toast_layer,
+    widgets::{command_palette, help_overlay, toast_layer, which_key_bar},
 };
 
 /// Snapshot the unreserved layout before legacy search/bookmark reservations.
@@ -45,7 +45,7 @@ pub fn compose(
     frame: &mut Frame,
     state: &TuiState,
     shell: &Shell,
-    _host: Host,
+    host: Host,
     facts: &LogFacts,
     paint_legacy: impl FnOnce(&mut Frame),
     paint_status: impl FnOnce(&mut Frame),
@@ -54,9 +54,8 @@ pub fn compose(
     toast_layer::render(frame, shell.chat_pane, &state.notifications, theme, facts);
     paint_legacy(frame);
 
-    // Both A1 frames clear the same rectangle. Dim the base once, not once per
-    // frame; a lower frame is wholly covered by the next frame's own clear.
-    if !state.modal_stack.is_empty() {
+    let rect = geometry::frame_rect(shell.region);
+    for (depth, modal) in state.modal_stack.iter().enumerate() {
         for area in [shell.region, shell.input_area]
             .into_iter()
             .chain(shell.sidebar)
@@ -65,10 +64,17 @@ pub fn compose(
                 .buffer_mut()
                 .set_style(area, Style::default().add_modifier(Modifier::DIM));
         }
-    }
-    let rect = geometry::frame_rect(shell.region);
-    for (depth, modal) in state.modal_stack.iter().enumerate() {
         match modal.surface {
+            Surface::Help => help_overlay::render(
+                frame,
+                rect,
+                &state.help_overlay,
+                theme,
+                state.multiplexer_detected,
+            ),
+            Surface::CommandPalette => {
+                command_palette::render(frame, rect, &state.command_palette, theme)
+            }
             Surface::NotificationLog => notification_log::render(
                 frame,
                 rect,
@@ -102,20 +108,43 @@ pub fn compose(
             title.push(Span::styled(modal.surface.title(), current));
             title.push(Span::raw(" "));
             let border = match modal.surface {
-                Surface::NotificationLog => theme.colors.accent,
+                Surface::NotificationLog | Surface::Help | Surface::CommandPalette => {
+                    theme.colors.accent
+                }
                 Surface::QuitConfirm => theme.colors.warning,
             };
-            // Block bounds the styled title to the border's available cells;
-            // repainting the chrome leaves the fitted body untouched.
-            frame.render_widget(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(border))
-                    .title(Line::from(title))
-                    .style(Style::default().bg(theme.colors.bg_surface)),
-                rect,
-            );
+            // Replace only the top rail: redrawing every border would erase
+            // widget-owned closing-border titles such as Help's scroll rail.
+            let top = Rect::new(rect.x + 1, rect.y, rect.width.saturating_sub(2), 1);
+            for x in top.x..top.right() {
+                let cell = &mut frame.buffer_mut()[(x, top.y)];
+                cell.reset();
+                cell.set_symbol("─")
+                    .set_style(Style::default().fg(border).bg(theme.colors.bg_surface));
+            }
+            frame.render_widget(Line::from(title), top);
         }
+    }
+    if state.pending_leader.is_some()
+        && state
+            .modal_stack
+            .top()
+            .is_none_or(|frame| frame.surface != Surface::QuitConfirm)
+    {
+        let mut avail = match host {
+            Host::Local => crate::adapters::tui::app::local_avail_ctx(state),
+            Host::Attached => {
+                crate::adapters::tui::keymap::AvailCtx::attached(state.terminal_width, false)
+            }
+        };
+        avail.frame_origin = !state.modal_stack.is_empty();
+        which_key_bar::render(
+            frame,
+            shell.region,
+            theme,
+            &avail,
+            state.leader_feedback.as_ref(),
+        );
     }
     paint_status(frame);
 }

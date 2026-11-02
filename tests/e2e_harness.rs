@@ -260,7 +260,7 @@ impl TestHarness {
         };
         let input_buffer = &self.state.input_buffer;
         let cursor_position = self.state.cursor_position;
-        let focus = if state.modal_stack.is_empty() {
+        let focus = if state.modal_stack.is_empty() && state.pending_leader.is_none() {
             state.focus.clone()
         } else {
             FocusState::Chat

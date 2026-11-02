@@ -8,6 +8,7 @@
 //! - Shortcut graduation display
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 
@@ -26,7 +27,7 @@ fn test_e2e_palette_opens_with_ctrl_p() {
     // From any focus, Ctrl+P opens palette
     let action = h.press_key(DomainKey::CtrlP);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.command_palette.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
 }
 
 /// Covers: AC1 — Palette shows with text input and results
@@ -37,7 +38,7 @@ fn test_e2e_palette_shows_input_and_results() {
     h.press_key(DomainKey::CtrlP);
 
     // Palette should be active
-    assert!(h.state.command_palette.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
 
     // Should have filtered entries available
     h.render();
@@ -109,11 +110,11 @@ fn test_e2e_palette_esc_closes() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlP);
-    assert!(h.state.command_palette.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
 
     let action = h.press_key(DomainKey::Esc);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.command_palette.active);
+    assert!(!is_open(&h.state, Surface::CommandPalette));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -199,7 +200,7 @@ fn test_e2e_which_key_opens() {
 
     let action = h.press_key(DomainKey::CtrlX);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 }
 
 /// Covers: AC3 — Hint bar shows chord options
@@ -212,7 +213,7 @@ fn test_e2e_which_key_shows_options() {
     h.render();
 
     // Should show which-key bar
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 }
 
 /// Covers: AC3 — Valid second key opens corresponding panel
@@ -225,7 +226,7 @@ fn test_e2e_which_key_valid_chord() {
     h.type_char('?');
 
     // Which-key should close
-    assert!(!h.state.which_key.active);
+    assert!(h.state.pending_leader.is_none());
 }
 
 /// Covers: AC3 — Invalid key dismisses hint bar
@@ -234,11 +235,11 @@ fn test_e2e_which_key_invalid_dismisses() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlX);
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 
     // Invalid key
     h.type_char('z');
-    assert!(!h.state.which_key.active);
+    assert!(h.state.pending_leader.is_none());
     // Story 21.3 AC2: the miss is announced once instead of swallowed silently.
     assert_eq!(
         h.state
@@ -258,10 +259,10 @@ fn test_e2e_which_key_esc_restores_origin_focus() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlX);
-    assert!(h.state.which_key.active);
+    assert!(h.state.pending_leader.is_some());
 
     h.press_key(DomainKey::Esc);
-    assert!(!h.state.which_key.active);
+    assert!(h.state.pending_leader.is_none());
     assert_eq!(h.state.focus, rustain::domain::models::FocusState::Input);
 }
 
@@ -306,7 +307,7 @@ fn test_e2e_palette_opens_during_stream() {
 
     // Palette should still open
     let _action = h.press_key(DomainKey::CtrlP);
-    assert!(h.state.command_palette.active);
+    assert!(is_open(&h.state, Surface::CommandPalette));
     // Streaming should still be active
     assert!(h.streaming.is_streaming);
 }
@@ -328,19 +329,26 @@ fn test_e2e_palette_empty_entries() {
 
     h.render();
     // Main UI still renders
-    h.assert_screen_contains("Welcome to Rustain", "Main UI visible");
+    h.assert_screen_contains("Command Palette", "Empty palette still paints its frame");
+    h.assert_screen_contains("mock-model", "Main UI status remains visible");
 }
 
 /// Covers: Which-key chord while palette open
 #[test]
-fn test_e2e_which_key_blocked_when_palette_open() {
+fn test_e2e_which_key_routes_from_palette_without_dismissing_it() {
     let mut h = TestHarness::new();
 
     // Open palette
     h.press_key(DomainKey::CtrlP);
+    h.type_char('v');
+    let filter = h.state.command_palette.filter_text.clone();
+    let caller = h.state.modal_stack.top().unwrap().clone();
 
-    // Ctrl+X should be consumed
-    let _action = h.press_key(DomainKey::CtrlX);
-    // Palette should remain state
-    assert!(h.state.command_palette.active);
+    // Ctrl+X carries the frame context without changing the palette's payload.
+    h.press_key(DomainKey::CtrlX);
+    assert!(is_open(&h.state, Surface::CommandPalette));
+    assert!(h.state.pending_leader.is_some());
+    h.press_key(DomainKey::Esc);
+    assert_eq!(h.state.modal_stack.top(), Some(&caller));
+    assert_eq!(h.state.command_palette.filter_text, filter);
 }

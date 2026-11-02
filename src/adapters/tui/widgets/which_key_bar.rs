@@ -3,7 +3,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::adapters::tui::keymap::AvailCtx;
 use crate::adapters::tui::keymap::render::{self, MenuItem};
-use crate::adapters::tui::state::WhichKeyState;
+use crate::adapters::tui::state::LeaderFeedback;
 use crate::adapters::tui::theme::Theme;
 
 /// Rows (borders included) the menu needs inside `width` columns.
@@ -24,11 +24,11 @@ pub fn bar_height(avail: &AvailCtx, width: u16) -> u16 {
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    state: &WhichKeyState,
     theme: &Theme,
     avail: &AvailCtx,
+    feedback: Option<&LeaderFeedback>,
 ) {
-    if !state.active || area.width < 4 || area.height < 3 {
+    if area.width < 4 || area.height < 3 {
         return;
     }
 
@@ -48,13 +48,19 @@ pub fn render(
 
     frame.render_widget(Clear, bar_area);
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.accent))
         .title(format!(
             " {} ",
             crate::adapters::tui::keymap::Key::Ctrl('x').label()
         ));
+    if let Some(feedback) = feedback {
+        block = block.title_bottom(Line::from(Span::styled(
+            feedback.message.as_ref(),
+            Style::default().fg(theme.colors.accent),
+        )));
+    }
 
     let visible_rows = usize::from(height.saturating_sub(2));
     let lines: Vec<Line> = rows
@@ -66,7 +72,9 @@ pub fn render(
                 if position > 0 {
                     spans.push(Span::raw("  "));
                 }
-                spans.extend(item_spans(&items[index], theme));
+                let pressed =
+                    feedback.is_some_and(|feedback| feedback.command == Some(items[index].command));
+                spans.extend(item_spans(&items[index], theme, pressed));
             }
             Line::from(spans)
         })
@@ -84,8 +92,8 @@ pub fn render(
     frame.render_widget(content, bar_area);
 }
 
-fn item_spans<'a>(item: &MenuItem, theme: &Theme) -> Vec<Span<'a>> {
-    let (key_style, label_style) = if item.available {
+fn item_spans<'a>(item: &MenuItem, theme: &Theme, pressed: bool) -> Vec<Span<'a>> {
+    let (mut key_style, mut label_style) = if item.available {
         (
             Style::default()
                 .fg(theme.colors.accent)
@@ -98,6 +106,13 @@ fn item_spans<'a>(item: &MenuItem, theme: &Theme) -> Vec<Span<'a>> {
             Style::default().fg(theme.colors.fg_muted),
         )
     };
+    if pressed {
+        let emphasis = Style::default()
+            .fg(theme.colors.accent)
+            .add_modifier(Modifier::BOLD);
+        key_style = key_style.patch(emphasis);
+        label_style = label_style.patch(emphasis);
+    }
     let suffix = if item.available { "" } else { " (n/a)" };
     vec![
         Span::styled(format!("[{}]", item.key), key_style),
@@ -116,13 +131,11 @@ mod tests {
     }
 
     fn paint(width: u16, height: u16, avail: &AvailCtx) -> String {
-        let mut wk = WhichKeyState::new();
-        wk.open(crate::domain::models::FocusState::Input);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render(frame, area, &wk, &Theme::dark(), avail);
+                render(frame, area, &Theme::dark(), avail, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -180,8 +193,6 @@ mod tests {
 
     #[test]
     fn story21_2_which_key_stays_above_the_status_row() {
-        let mut wk = WhichKeyState::new();
-        wk.open(crate::domain::models::FocusState::Input);
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
             .draw(|frame| {
@@ -189,7 +200,7 @@ mod tests {
                 // Status row is the last row; the menu area ends above it.
                 let above = Rect::new(full.x, full.y, full.width, full.height - 1);
                 frame.render_widget(Paragraph::new("STATUS-ROW-CANARY"), Rect::new(0, 11, 80, 1));
-                render(frame, above, &wk, &Theme::dark(), &local(80));
+                render(frame, above, &Theme::dark(), &local(80), None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
