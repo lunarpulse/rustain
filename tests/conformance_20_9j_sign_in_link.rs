@@ -98,11 +98,11 @@ fn browser_section(url: &str, launch: &str) -> LoginSection {
 }
 fn running(sections: Vec<LoginSection>, field: bool, progress: bool) -> LoginOverlayState {
     let mut state = LoginOverlayState::default();
-    state.active = true;
     state.view = LoginView::Running;
     let (tx, _rx) = tokio::sync::oneshot::channel();
     state.running = Some(RunningLogin {
         login_id: 1,
+        generation: state.generation,
         provider_id: "example".into(),
         display: "Example".into(),
         origin: LoginOrigin::Slash,
@@ -321,9 +321,9 @@ fn try_read_link(
     }
 }
 
-/// The modal's inner width for a terminal `width` (login_dialog geometry).
+/// The content budget of the caller-supplied sheet (one border cell per side).
 fn inner_width(width: u16) -> usize {
-    width.saturating_sub(4).clamp(40, 100).min(width) as usize - 2
+    width.saturating_sub(2) as usize
 }
 /// AC1: the link is one row iff `label value` fits before the last cell.
 fn one_row(label: &str, url: &str, inner_width: usize) -> bool {
@@ -758,11 +758,15 @@ fn k3_every_url_glyph_on_every_row_is_linked_to_the_full_url() {
 
 #[test]
 fn k3_identical_rows_with_different_full_targets_each_keep_their_own() {
+    let (width, height) = (140u16, 40u16);
+    // The painter now uses its caller's rect: retain three complete URL rows,
+    // with only the middle row distinguishing the two full targets.
+    let content_width = usize::from(width - 2);
     let make = |mark: &str| {
         format!(
             "https://auth.example/{}{mark}{}",
-            "p".repeat(100),
-            "q".repeat(100)
+            "p".repeat(content_width),
+            "q".repeat(content_width)
         )
     };
     let (first, second) = (make("A"), make("B"));
@@ -774,7 +778,7 @@ fn k3_identical_rows_with_different_full_targets_each_keep_their_own() {
         false,
         false,
     );
-    let frame = Frame::new(&buffer(&state, true, 140, 40));
+    let frame = Frame::new(&buffer(&state, true, width, height));
     let rows = frame.inner();
     let heads: Vec<&Inner> = rows
         .iter()
@@ -802,7 +806,10 @@ fn k3_identical_rows_with_different_full_targets_each_keep_their_own() {
     assert_eq!(visible[0][0], visible[1][0]);
     assert_eq!(visible[0][2], visible[1][2]);
     assert_ne!(visible[0][1], visible[1][1]);
-    assert_eq!(Frame::new(&buffer(&state, false, 140, 40)).envelopes(), 0);
+    assert_eq!(
+        Frame::new(&buffer(&state, false, width, height)).envelopes(),
+        0
+    );
 }
 
 // ---------------------------------------------------------------- K4

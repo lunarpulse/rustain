@@ -11,6 +11,7 @@ use rustain::adapters::tui::keymap::table::{
 };
 use rustain::adapters::tui::keymap::{AvailCtx, Key};
 use rustain::adapters::tui::notifications::NoticeSeverity;
+use rustain::adapters::tui::presentation::{Surface, reducer};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::which_key_bar;
@@ -173,17 +174,18 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("Chat", FocusState::Chat),
         ("Help", FocusState::Chat),
         ("CommandPalette", FocusState::Input),
-        ("ModelSelector", overlay(OverlayType::ModelSelector)),
-        ("ProfileSwitcher", overlay(OverlayType::ProfileSwitcher)),
+        ("ModelSelector", FocusState::Input),
+        ("ProfileSwitcher", FocusState::Input),
         ("Search", overlay(OverlayType::Search)),
         ("CrossSearch", overlay(OverlayType::CrossSearch)),
         ("BookmarkList", overlay(OverlayType::BookmarkList)),
-        ("UsagePanel", overlay(OverlayType::UsagePanel)),
+        ("UsagePanel", FocusState::Input),
         ("WaveOverlay", overlay(OverlayType::WaveOverlay)),
         (
             "Confirmation",
             overlay(OverlayType::Confirmation(ConfirmationType::Fork)),
         ),
+        ("Login", FocusState::Input),
     ];
     let (mut opened, mut blocked) = (0, 0);
     for (name, focus) in foci {
@@ -193,6 +195,14 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
             press(&mut state, Key::Char('?'));
         } else if name == "CommandPalette" {
             press(&mut state, Key::Ctrl('p'));
+        } else if let Some(surface) = match name {
+            "ModelSelector" => Some(Surface::ModelSelector),
+            "ProfileSwitcher" => Some(Surface::ProfileSwitcher),
+            "UsagePanel" => Some(Surface::UsagePanel),
+            "Login" => Some(Surface::Login),
+            _ => None,
+        } {
+            reducer::open(&mut state, surface);
         }
         let offered = status_tail(&state) == StatusTail::Menu;
         press(&mut state, Key::Ctrl('x'));
@@ -205,8 +215,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     }
     assert_eq!(
         (opened, blocked),
-        (4, 8),
-        "Input, Chat, Help and palette open; remaining legacy overlays block"
+        (8, 5),
+        "Input, Chat and migrated frames open; remaining legacy overlays block"
     );
 }
 

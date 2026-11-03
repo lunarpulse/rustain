@@ -1,4 +1,4 @@
-//! Shared frame, routed popup and pending-leader ownership (Story 21.4 A2b).
+//! Shared frame, routed popup and pending-leader ownership (Story 21.4 Ba).
 //!
 //! Editable payloads never answer whether a frame is open. The local pane
 //! carries its queue identity in the same stack used by both hosts.
@@ -76,10 +76,6 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
         || state.pending_leader.is_some()
         || state.ask_user_question.is_some()
         || app::proposal_higher_confirmation_active(state)
-        || state.model_selector.active
-        || state.login.active
-        || state.profile_switcher.active
-        || state.usage_panel.active
         || state.reverse_search.active
         || state.search_state.active
         || !matches!(
@@ -90,8 +86,10 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
         return false;
     }
     state.modal_stack.top().is_none_or(|frame| {
-        !matches!(frame.surface, Surface::DecisionPane | Surface::QuitConfirm)
-            && !typing_context(frame.surface.context())
+        !matches!(
+            frame.surface,
+            Surface::DecisionPane | Surface::QuitConfirm | Surface::Login
+        ) && !typing_context(frame.surface.context())
     })
 }
 

@@ -9,9 +9,9 @@ use super::common::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::tui::presentation::{Surface, reducer};
+use rustain::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
 use rustain::adapters::tui::state::{LoginSection, LoginView};
-use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::login_dialog;
 use rustain::domain::events::{DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, Credential, CredentialOrigin, FocusState};
 use rustain::domain::ports::AuthStorePort;
@@ -171,9 +171,10 @@ async fn k03_body() {
         },
     )
     .unwrap();
+    let buffer = tui.login_buffer_at(80, 24, true);
     terminal
         .draw(|frame| {
-            login_dialog::render(frame, frame.area(), &tui.state.login, &Theme::dark(), true);
+            frame.buffer_mut().clone_from(&buffer);
         })
         .unwrap();
     let bytes = String::from_utf8_lossy(&bytes.lock().unwrap()).into_owned();
@@ -228,10 +229,26 @@ async fn k03_body() {
     assert!(!frame.contains(CODE), "{frame}");
     assert!(frame.contains("> •••"), "{frame}");
     tui.key(DomainKey::Enter);
+    // Completion must hand Login off beneath a higher Quit, not steal its keys.
+    let mut facts = QuitFacts::idle(QuitHost::Local);
+    facts.streams = 1;
+    reducer::request_quit(&mut tui.state, facts);
     tui.until_login("login finished", |event| {
         matches!(event, LoginEvent::Finished { .. })
     })
     .await;
+    assert_eq!(
+        tui.state.modal_stack.top().unwrap().surface,
+        Surface::QuitConfirm
+    );
+    reducer::back(&mut tui.state);
+    assert_eq!(
+        tui.state.modal_stack.top().unwrap().surface,
+        Surface::ModelSelector
+    );
+    tui.key(DomainKey::Esc);
+    assert!(tui.state.modal_stack.is_empty());
+    assert_eq!(tui.state.focus, FocusState::Input);
     assert_eq!(
         tui.feedback().lines().next(),
         Some("Logged in to Anthropic (Claude Pro/Max) as op@example.test (Ops)")

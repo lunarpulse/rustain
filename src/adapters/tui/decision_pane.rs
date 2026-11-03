@@ -743,12 +743,8 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
     let (kind, conversation_id) = (item.kind, item.conversation_id.clone());
     let item_key = item.key();
     let resolve = |state: &mut TuiState, effect: DecisionEffect| {
-        let has_caller = state
-            .modal_stack
-            .all_frames()
-            .any(|frame| frame.surface != Surface::DecisionPane);
         if let keymap::Availability::Unavailable(remedy) =
-            keymap::table::pane_effect_availability(effect, has_caller)
+            keymap::table::pane_effect_availability(effect)
         {
             state.decisions.feedback = Some(remedy);
             return PaneOutcome::Consumed;
@@ -1573,7 +1569,7 @@ mod tests {
     #[test]
     fn story21_3_card_arrival_takes_chat_focus_only_from_an_empty_input() {
         use crate::domain::models::visual::OverlayType;
-        let overlay = FocusState::Overlay(OverlayType::ModelSelector);
+        let overlay = FocusState::Overlay(OverlayType::Search);
         // (focus, can answer, user mid-sentence) -> (focus after, moved)
         let cases = [
             (FocusState::Input, true, false, FocusState::Chat, true),
@@ -1606,13 +1602,19 @@ mod tests {
         typing.needs_redraw = false;
         take_chat_focus_for_local_card(&mut typing);
         assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
+        let mut selector = TuiState::new(80, 24);
+        presentation::reducer::open(&mut selector, Surface::ModelSelector);
+        let frame = selector.modal_stack.top().cloned();
+        take_chat_focus_for_local_card(&mut selector);
+        assert_eq!(selector.focus, FocusState::Input);
+        assert_eq!(selector.modal_stack.top(), frame.as_ref());
     }
 
     #[test]
-    fn story21_4_pane_legacy_effect_refusal_preserves_owner() {
+    fn story21_4_pane_model_effect_keeps_its_interrupted_caller() {
         use crate::adapters::tui::app::handle_input;
         use crate::domain::events::DomainKey;
-        // By-value audit of every currently legacy-opening pane action.
+        // The migrated model destination is available from base and nested panes.
         for (kind, key, effect) in [(
             DecisionKind::Budget,
             's',
@@ -1632,27 +1634,25 @@ mod tests {
                     Arrival::Requested,
                 );
                 ready(&mut state, &clock);
-                let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
-                let items: Vec<_> = state.decisions.items().cloned().collect();
+                let caller: Vec<_> = state
+                    .modal_stack
+                    .iter()
+                    .take(usize::from(nested))
+                    .cloned()
+                    .collect();
                 let notices = state.notifications.records().len();
                 let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
-                if nested {
-                    assert_eq!(action, InputAction::Consumed);
-                    assert_eq!(
-                        state.modal_stack.iter().cloned().collect::<Vec<_>>(),
-                        frames
-                    );
-                    assert_eq!(state.decisions.items().cloned().collect::<Vec<_>>(), items);
-                    assert_eq!(
-                        state.notifications.records().len(),
-                        notices,
-                        "no hidden toast"
-                    );
-                } else {
-                    assert_eq!(action, effect.into_action(), "base-origin control");
-                    assert!(state.modal_stack.is_empty());
-                    assert!(state.decisions.is_empty());
-                }
+                assert_eq!(action, effect.into_action());
+                assert_eq!(
+                    state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    caller
+                );
+                assert!(state.decisions.is_empty());
+                assert_eq!(
+                    state.notifications.records().len(),
+                    notices,
+                    "no refusal toast"
+                );
                 assert_eq!(state.input_buffer, "untouched draft");
                 assert_eq!(state.focus, FocusState::Chat);
             }

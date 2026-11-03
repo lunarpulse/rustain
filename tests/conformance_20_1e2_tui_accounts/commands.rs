@@ -9,9 +9,9 @@ use rustain::adapters::auth_store::FileAuthStore;
 use rustain::adapters::command_registry::CommandRegistry;
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::notifications::{NoticeSeverity, NoticeSource};
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::{LoginView, OverlayMode};
 use rustain::domain::events::DomainKey;
-use rustain::domain::models::visual::OverlayType;
 use rustain::domain::models::{AppConfig, FocusState};
 use rustain::domain::ports::AuthStorePort;
 use serial_test::serial;
@@ -30,8 +30,6 @@ fn assert_routed(action: &InputAction, name: &str, args: Option<&str>) {
         other => panic!("`/{name}` must reach its ExecuteCommand arm, got {other:?}"),
     }
 }
-
-const LOGIN: FocusState = FocusState::Overlay(OverlayType::Login);
 
 /// The newest account-result notice (Story 21.1: a store notice, no longer
 /// the replaced `accounts-result` feedback block); severity is the old level.
@@ -85,7 +83,11 @@ async fn k6_logout_and_accounts_route_open_and_report_empty_stores() {
     ] {
         let action = tui.submit(line);
         assert_routed(&action, name, args);
-        assert_eq!(tui.state.focus, LOGIN, "{line}");
+        assert_eq!(
+            tui.state.modal_stack.top().unwrap().surface,
+            Surface::Login,
+            "{line}"
+        );
         assert_eq!(tui.state.login.mode, mode, "{line}");
         let view = if args.is_some() {
             LoginView::AccountPicker
@@ -95,7 +97,10 @@ async fn k6_logout_and_accounts_route_open_and_report_empty_stores() {
         assert_eq!(tui.state.login.view, view, "{line}");
         let frame = tui.frame();
         assert!(frame.contains(title), "{line}\n{frame}");
-        tui.until(line, |tui| !tui.state.login.active).await;
+        tui.until(line, |tui| {
+            !presentation::is_open(&tui.state, Surface::Login)
+        })
+        .await;
         assert_eq!(tui.state.focus, FocusState::Input, "{line}");
         assert_eq!(
             block(&tui),
@@ -105,7 +110,10 @@ async fn k6_logout_and_accounts_route_open_and_report_empty_stores() {
     }
 
     tui.submit("/logout nosuch");
-    tui.until("unknown", |tui| !tui.state.login.active).await;
+    tui.until("unknown", |tui| {
+        !presentation::is_open(&tui.state, Surface::Login)
+    })
+    .await;
     assert_eq!(
         block(&tui),
         (
@@ -166,7 +174,7 @@ async fn account_step_escape_rules_and_busy_keys() {
     );
     tui.key(DomainKey::Esc);
     assert!(tui.state.login.query.is_empty(), "Esc clears the query");
-    assert!(tui.state.login.active);
+    assert!(presentation::is_open(&tui.state, Surface::Login));
     tui.key(DomainKey::Esc);
     assert_eq!(tui.state.focus, FocusState::Input, "Esc closes");
 
@@ -296,8 +304,10 @@ async fn disabled_row_notice_and_store_failure() {
     assert!(message.starts_with("Account update failed: "), "{message}");
 
     tui.submit("/logout");
-    tui.until("unreadable store", |tui| !tui.state.login.active)
-        .await;
+    tui.until("unreadable store", |tui| {
+        !presentation::is_open(&tui.state, Surface::Login)
+    })
+    .await;
     assert_eq!(tui.state.focus, FocusState::Input);
     let (level, message) = block(&tui);
     assert_eq!(level, NoticeSeverity::Error);

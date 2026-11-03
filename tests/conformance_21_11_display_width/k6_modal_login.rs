@@ -53,9 +53,7 @@ fn inner_rows(buffer: &Buffer) -> Vec<String> {
 
 fn account_state(texts: &[&str], selected: usize, notice: Option<&str>) -> LoginOverlayState {
     let mut state = LoginOverlayState::default();
-    state.active = true;
-    state.view = LoginView::AccountPicker;
-    state.mode = OverlayMode::Accounts;
+    state.open_accounts(OverlayMode::Accounts, "anthropic".into(), false);
     state.account = Some(AccountStep {
         provider: "anthropic".into(),
         listing: Some(AccountListing {
@@ -83,7 +81,14 @@ fn account_state(texts: &[&str], selected: usize, notice: Option<&str>) -> Login
 fn draw_login(state: &LoginOverlayState, osc8: bool, width: u16, height: u16) -> Buffer {
     let theme = Theme::dark();
     paint(width, height, |f| {
-        login_dialog::render(f, f.area(), state, &theme, osc8);
+        // Content-width controls supply their own sheet, independent of shell geometry.
+        let sheet = ratatui::layout::Rect::new(
+            0,
+            0,
+            width.saturating_sub(4).clamp(40, 100).min(width),
+            height,
+        );
+        login_dialog::render(f, sheet, state, &theme, osc8);
     })
     .buffer
 }
@@ -179,10 +184,10 @@ fn account_notice_shrinks_without_splitting_a_grapheme() {
 
 fn browser(url: &str) -> LoginOverlayState {
     let mut state = LoginOverlayState::default();
-    state.active = true;
     state.view = LoginView::Running;
     state.running = Some(RunningLogin {
         login_id: 1,
+        generation: state.generation,
         provider_id: "example".into(),
         display: "Example".into(),
         origin: LoginOrigin::Slash,
@@ -362,6 +367,55 @@ fn masked_field_paints_bullets_only() {
     );
     assert!(!screen(&buffer).contains(C));
     assert_no_partial_family(&screen(&buffer));
+}
+
+#[test]
+fn story21_4_running_secret_body_and_keys_fit_minimum_and_wide_sheets() {
+    let mut state = browser(LONG);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let mut field = PendingField::text(FieldKind::Secret, "API key:".into(), LoginReply(tx));
+    let canary = "private-canary";
+    field.buffer.push_str(canary);
+    state.running.as_mut().unwrap().field = Some(field);
+    let theme = Theme::dark();
+    for (width, height) in [(60, 16), (130, 30)] {
+        for osc8 in [false, true] {
+            let painted = paint(width, height, |frame| {
+                let layout = rustain::adapters::tui::layout::compute_layout(
+                    frame.area(),
+                    &theme,
+                    "1\n2\n3\n4\n5\n6\n7\n8",
+                    1,
+                    false,
+                    rustain::domain::models::visual::DensityMode::Focus,
+                )
+                .unwrap();
+                let region = rustain::adapters::tui::presentation::geometry::modal_region(
+                    &layout,
+                    frame.area(),
+                );
+                let sheet = rustain::adapters::tui::presentation::geometry::frame_rect(region);
+                if width == 60 {
+                    assert_eq!(sheet.height, 5);
+                }
+                login_dialog::render(frame, sheet, &state, &theme, osc8);
+                assert_eq!(frame.buffer_mut()[(sheet.x, sheet.y)].symbol(), "┌");
+                assert_eq!(
+                    frame.buffer_mut()[(sheet.right() - 1, sheet.bottom() - 1)].symbol(),
+                    "┘"
+                );
+            });
+            let text = screen(&painted.buffer);
+            assert!(
+                text.contains(&format!("> {}", "•".repeat(canary.len()))),
+                "{text}"
+            );
+            assert!(text.contains("Enter submit"), "{text}");
+            assert!(text.contains("Esc cancel"), "{text}");
+            assert!(!text.contains(canary));
+            assert_whole_clusters(&painted.buffer);
+        }
+    }
 }
 
 // ── permission rail ───────────────────────────────────────────────────────

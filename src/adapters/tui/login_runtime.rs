@@ -237,7 +237,8 @@ mod auth_outcome_tests;
 mod tests {
     use super::*;
     use crate::adapters::tui::app::InputAction;
-    use crate::adapters::tui::handlers::login::{LOGIN, LoginAction, on_event, on_key};
+    use crate::adapters::tui::handlers::login::{LoginAction, on_event, on_key};
+    use crate::adapters::tui::presentation::{self, Surface, reducer};
     use crate::adapters::tui::state::{
         LoginOrigin, LoginSection, PendingField, RunningLogin, SecretField, TuiState,
     };
@@ -250,6 +251,7 @@ mod tests {
         let login_id = state.login.next_login_id();
         state.login.start_running(RunningLogin {
             login_id,
+            generation: state.login.generation,
             provider_id: "anthropic".into(),
             display: "Anthropic".into(),
             origin: LoginOrigin::Slash,
@@ -266,7 +268,7 @@ mod tests {
             progress: Vec::new(),
             field: None,
         });
-        state.focus = LOGIN;
+        reducer::open(state, Surface::Login);
         cancel
     }
 
@@ -337,12 +339,15 @@ mod tests {
         use crate::domain::models::FocusState;
         use crate::domain::models::visual::{ConfirmationType, OverlayType};
         let mut state = TuiState::new(80, 24);
-        state.login.open_picker(
-            FocusState::Input,
-            LoginOrigin::Slash,
-            crate::adapters::tui::state::OverlayMode::Login,
-        );
-        state.focus = LOGIN;
+        state
+            .login
+            .open_picker(
+                &state.modal_stack,
+                LoginOrigin::Slash,
+                crate::adapters::tui::state::OverlayMode::Login,
+            )
+            .expect("fresh Login fixture");
+        crate::adapters::tui::app::advance_deferred_permission(&mut state);
         state
             .permission_queue
             .push(crate::adapters::tui::state::PendingPermission {
@@ -387,7 +392,7 @@ mod tests {
         assert_eq!(key(&mut state, DomainKey::Esc), InputAction::Consumed);
         assert!(cancel.is_cancelled());
         // The overlay keeps focus until the flow reports `Login cancelled`.
-        assert_eq!(state.focus, LOGIN);
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Login);
         assert_eq!(key(&mut state, DomainKey::CtrlQ), InputAction::Quit);
     }
 
@@ -445,9 +450,21 @@ mod tests {
             }
         }
         let mut state = TuiState::new(80, 24);
+        crate::adapters::tui::app::handle_input(
+            &mut state,
+            &DomainInputEvent::SpecialKey(DomainKey::Esc),
+        );
+        assert_eq!(state.focus, crate::domain::models::FocusState::Chat);
+        reducer::open(&mut state, Surface::CommandPalette);
+        state.command_palette.filter_text = "mo".into();
         running(&mut state, true);
         key(&mut state, DomainKey::Esc);
         let login_id = state.login.running.as_ref().unwrap().login_id;
+        let mut facts = crate::adapters::tui::quit_confirm::QuitFacts::idle(
+            crate::adapters::tui::quit_confirm::QuitHost::Local,
+        );
+        facts.streams = 1;
+        reducer::request_quit(&mut state, facts);
         on_event(
             &mut state,
             &AppConfig::default(),
@@ -461,7 +478,19 @@ mod tests {
                 }),
             },
         );
-        assert!(!state.login.active);
+        assert!(!presentation::is_open(&state, Surface::Login));
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::QuitConfirm
+        );
+        reducer::back(&mut state);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        assert_eq!(state.command_palette.filter_text, "mo");
+        reducer::back(&mut state);
+        assert_eq!(state.focus, crate::domain::models::FocusState::Chat);
         // Story 21.1: the result is a Login-source Success notice in the store.
         let record = state
             .notifications

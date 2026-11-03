@@ -8,6 +8,10 @@ pub enum Surface {
     NotificationLog,
     QuitConfirm,
     DecisionPane,
+    ModelSelector,
+    ProfileSwitcher,
+    UsagePanel,
+    Login,
 }
 
 impl Surface {
@@ -19,6 +23,10 @@ impl Surface {
             Self::NotificationLog => "System · Notifications",
             Self::QuitConfirm => "System · Quit",
             Self::DecisionPane => "System · Decisions",
+            Self::ModelSelector => "Select Model",
+            Self::ProfileSwitcher => "Profile Switcher",
+            Self::UsagePanel => "Usage & Cost",
+            Self::Login => "Sign in",
         }
     }
 
@@ -30,12 +38,19 @@ impl Surface {
             Self::NotificationLog => Context::NotificationLog,
             Self::QuitConfirm => Context::QuitConfirm,
             Self::DecisionPane => Context::DecisionPane,
+            Self::ModelSelector => Context::ModelSelector,
+            Self::ProfileSwitcher => Context::ProfileSwitcher,
+            Self::UsagePanel => Context::UsagePanel,
+            Self::Login => Context::Login,
         }
     }
 
     /// Drill-downs replace at the cap; the other classes retain one return frame.
     pub(super) const fn keeps_continuation(self) -> bool {
-        !matches!(self, Self::CommandPalette)
+        !matches!(
+            self,
+            Self::CommandPalette | Self::ModelSelector | Self::ProfileSwitcher | Self::UsagePanel
+        )
     }
 }
 
@@ -47,6 +62,9 @@ pub struct Frame {
     pub conversation_id: Option<String>,
     /// Queue item identity belongs to the frame, never to the queue payload.
     pub decision: Option<crate::adapters::tui::decision_pane::DecisionKey>,
+    /// One-shot payload preparation after an effect opens a fresh frame.
+    /// This is not presence: only membership in the stack owns visibility.
+    pub(super) needs_initialization: bool,
 }
 
 impl Frame {
@@ -84,6 +102,19 @@ impl ModalStack {
         self.frames
             .iter()
             .chain(self.continuations.iter().map(|c| &c.frame))
+    }
+
+    pub(crate) fn all_frames_mut(&mut self) -> impl Iterator<Item = &mut Frame> {
+        self.frames
+            .iter_mut()
+            .chain(self.continuations.iter_mut().map(|c| &mut c.frame))
+    }
+
+    /// The owned Login frame's one-shot initialization debt, including continuations.
+    pub fn login_initialization(&self) -> Option<bool> {
+        self.all_frames()
+            .find(|frame| frame.surface == Surface::Login)
+            .map(|frame| frame.needs_initialization)
     }
 
     #[must_use]

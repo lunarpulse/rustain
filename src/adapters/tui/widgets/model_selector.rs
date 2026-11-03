@@ -1,25 +1,19 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use super::modal::{ModalPart, fit_modal, modal_area, wrapped};
+use super::modal::{ModalPart, fit_modal, wrapped};
 use crate::adapters::tui::state::ModelSelectorState;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::provider::{DiscoveryStatus, ModelCapability};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: &Theme) {
-    if !state.active {
-        return;
-    }
+    frame.render_widget(Clear, area);
 
-    let modal_area = calculate_centered_area(area);
-    frame.render_widget(Clear, modal_area);
-
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.accent))
         .title(Span::styled(" Select Model ", theme.typography.heading));
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
+    let inner = block.inner(area);
 
     let muted = Style::default().fg(theme.colors.fg_muted);
     let accent = Style::default()
@@ -259,31 +253,40 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
         )));
     }
     if let Some(warning) = &state.pending_context_warning {
-        // A pending y/n question belongs to the footer: no height may shrink
-        // or drop it while the picker waits for the answer.
-        let mut prompt = wrapped(
-            &format!(
-                "⚠ Current context ({} tokens) exceeds {} limit ({}). Compact context? [{}/{}]",
-                humanize_ctx(warning.current_tokens),
-                warning.model_display_name,
-                humanize_ctx(warning.context_window),
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnYes
-                ),
-                crate::adapters::tui::keymap::render::key_text(
-                    crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnNo
-                )
-            ),
-            Style::default().fg(theme.colors.warning),
-            width,
+        // Keep the question and answer keys even when only one body row fits.
+        let yes = crate::adapters::tui::keymap::render::key_text(
+            crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnYes,
         );
-        prompt.append(&mut footer);
-        footer = prompt;
+        let no = crate::adapters::tui::keymap::render::key_text(
+            crate::adapters::tui::keymap::table_overlay::OverlayCmd::ModelWarnNo,
+        );
+        let question = format!(
+            "⚠ Current context ({} tokens) exceeds {} limit ({}). Compact context? [{yes}/{no}]",
+            humanize_ctx(warning.current_tokens),
+            warning.model_display_name,
+            humanize_ctx(warning.context_window),
+        );
+        let mut prompt = wrapped(&question, Style::default().fg(theme.colors.warning), width);
+        if prompt.len() + footer.len() + 2 > inner.height as usize {
+            let mut rail = Line::from(Span::styled(format!("[{yes}/{no}] "), muted));
+            for line in &mut footer {
+                rail.spans.append(&mut line.spans);
+                rail.spans.push(Span::raw(" "));
+            }
+            block = block.title_bottom(rail);
+            footer = vec![Line::from(Span::styled(
+                format!("⚠ Compact context? [{yes}/{no}]"),
+                Style::default().fg(theme.colors.warning),
+            ))];
+        } else {
+            prompt.append(&mut footer);
+            footer = prompt;
+        }
     }
     parts.push(ModalPart::Footer(footer));
 
-    // Chrome, notices and the footer are fitted to the inner height; the
-    // catalogue keeps at least min(3, rows) lines and scrolls to the selection.
+    frame.render_widget(block, area);
+    // Keep chrome and the selected catalogue row inside the caller's sheet.
     let lines = fit_modal(parts, inner.height as usize, width);
     frame.render_widget(
         Paragraph::new(lines).style(
@@ -293,14 +296,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ModelSelectorState, theme: 
         ),
         inner,
     );
-}
-
-fn calculate_centered_area(area: Rect) -> Rect {
-    modal_area(
-        area,
-        (area.width * 60 / 100).clamp(40, 80),
-        area.height.saturating_sub(4).clamp(8, 20),
-    )
 }
 
 pub(crate) fn humanize_ctx(tokens: u32) -> String {
@@ -316,6 +311,7 @@ pub(crate) fn humanize_ctx(tokens: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::tui::presentation::geometry::frame_rect;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -328,11 +324,22 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_standard_area_wide() {
+        let area = frame_rect(Rect::new(0, 0, 120, 40));
+        assert_eq!(area, Rect::new(6, 3, 108, 34));
+    }
+
+    #[test]
+    fn test_shared_standard_area_min() {
+        let region = Rect::new(0, 0, 60, 5);
+        assert_eq!(frame_rect(region), region);
+    }
+
+    #[test]
     fn test_render_no_crash_80x24() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = make_state();
-        state.active = true;
+        let state = make_state();
         let theme = make_theme();
         terminal
             .draw(|frame| {
@@ -345,32 +352,13 @@ mod tests {
     fn test_render_no_crash_120x40() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut state = make_state();
-        state.active = true;
+        let state = make_state();
         let theme = make_theme();
         terminal
             .draw(|frame| {
                 render(frame, frame.area(), &state, &theme);
             })
             .unwrap();
-    }
-
-    #[test]
-    fn test_calculate_centered_area() {
-        let area = Rect::new(0, 0, 120, 40);
-        let centered = calculate_centered_area(area);
-        assert_eq!(centered.width, 72);
-        assert_eq!(centered.height, 20);
-        assert_eq!(centered.x, 24);
-        assert_eq!(centered.y, 10);
-    }
-
-    #[test]
-    fn test_calculate_centered_area_min() {
-        let area = Rect::new(0, 0, 60, 16);
-        let centered = calculate_centered_area(area);
-        assert!(centered.width >= 36);
-        assert!(centered.height >= 8);
     }
 
     // Story 7.6 AC9 — render tests
@@ -401,16 +389,19 @@ mod tests {
         let backend = TestBackend::new(120, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut state = ModelSelectorState::new();
-        state.active = true;
-        state.columns = vec![ProviderColumn {
-            provider_id: "openrouter".to_string(),
-            display_name: "OpenRouter".to_string(),
-            healthy: true,
-            locked_hint: None,
-            sign_in_hint: None,
-            discovery: None,
-            models: vec![],
-        }];
+        state.initialize(
+            vec![ProviderColumn {
+                provider_id: "openrouter".to_string(),
+                display_name: "OpenRouter".to_string(),
+                healthy: true,
+                locked_hint: None,
+                sign_in_hint: None,
+                discovery: None,
+                models: vec![],
+            }],
+            "openrouter",
+            "",
+        );
         term.draw(|frame| {
             render(frame, frame.area(), &state, &theme());
         })
@@ -433,38 +424,41 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut state = ModelSelectorState::new();
-        state.active = true;
-        state.columns = vec![ProviderColumn {
-            provider_id: "openrouter".to_string(),
-            display_name: "OpenRouter".to_string(),
-            healthy: true,
-            locked_hint: None,
-            sign_in_hint: None,
-            discovery: None,
-            models: vec![
-                // Kept visible after credential rejection, not a removed live ID.
-                ModelDescriptor {
-                    model_id: "live-model".to_string(),
-                    display_name: "Live Model".to_string(),
-                    provider_id: "openrouter".to_string(),
-                    context_window: 128_000,
-                    capabilities: Default::default(),
-                    pricing_tier: None,
-                    stale: false,
-                    wire_model_id: None,
-                },
-                ModelDescriptor {
-                    model_id: "ghost-model".to_string(),
-                    display_name: "Ghost Model".to_string(),
-                    provider_id: "openrouter".to_string(),
-                    context_window: 128_000,
-                    capabilities: Default::default(),
-                    pricing_tier: None,
-                    stale: true,
-                    wire_model_id: None,
-                },
-            ],
-        }];
+        state.initialize(
+            vec![ProviderColumn {
+                provider_id: "openrouter".to_string(),
+                display_name: "OpenRouter".to_string(),
+                healthy: true,
+                locked_hint: None,
+                sign_in_hint: None,
+                discovery: None,
+                models: vec![
+                    // Kept visible after credential rejection, not a removed live ID.
+                    ModelDescriptor {
+                        model_id: "live-model".to_string(),
+                        display_name: "Live Model".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        context_window: 128_000,
+                        capabilities: Default::default(),
+                        pricing_tier: None,
+                        stale: false,
+                        wire_model_id: None,
+                    },
+                    ModelDescriptor {
+                        model_id: "ghost-model".to_string(),
+                        display_name: "Ghost Model".to_string(),
+                        provider_id: "openrouter".to_string(),
+                        context_window: 128_000,
+                        capabilities: Default::default(),
+                        pricing_tier: None,
+                        stale: true,
+                        wire_model_id: None,
+                    },
+                ],
+            }],
+            "openrouter",
+            "live-model",
+        );
         term.draw(|frame| {
             render(frame, frame.area(), &state, &theme());
         })
@@ -511,7 +505,7 @@ mod tests {
     }
 
     fn inner_text(term: &Terminal<TestBackend>) -> String {
-        let modal = calculate_centered_area(Rect::new(0, 0, 80, 24));
+        let modal = Rect::new(0, 0, 80, 24);
         let inner = modal.inner(Margin::new(1, 1));
         let buffer = term.backend().buffer();
         let mut text = String::new();
@@ -528,7 +522,6 @@ mod tests {
 
     #[test]
     fn locked_hint_catalog_and_single_header_are_fully_visible_at_80x24() {
-        use crate::domain::models::FocusState;
         let mut state = ModelSelectorState::new();
         let mut locked = catalog_column("anthropic", "Anthropic", 5);
         locked.locked_hint = Some(
@@ -536,8 +529,7 @@ mod tests {
                 .into(),
         );
         locked.discovery = Some(DiscoveryStatus::Unauthenticated);
-        state.open(
-            FocusState::Input,
+        state.initialize(
             vec![
                 catalog_column("available", "Other Provider", 1),
                 locked,
@@ -571,7 +563,6 @@ mod tests {
 
     #[test]
     fn available_discovery_statuses_and_footer_survive_long_catalog_at_80x24() {
-        use crate::domain::models::FocusState;
         for (status, expected) in [
             (
                 DiscoveryStatus::Unauthenticated,
@@ -601,12 +592,7 @@ mod tests {
                 }
             }
             let mut state = ModelSelectorState::new();
-            state.open(
-                FocusState::Input,
-                vec![column],
-                "openrouter",
-                "catalog-model-11",
-            );
+            state.initialize(vec![column], "openrouter", "catalog-model-11");
             let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
             term.draw(|frame| render(frame, frame.area(), &state, &theme()))
                 .unwrap();
@@ -640,8 +626,11 @@ mod tests {
     fn a_pending_context_question_survives_the_smallest_picker() {
         let mut term = Terminal::new(TestBackend::new(60, 16)).unwrap();
         let mut state = ModelSelectorState::new();
-        state.active = true;
-        state.columns = vec![catalog_column("anthropic", "Anthropic", 30)];
+        state.initialize(
+            vec![catalog_column("anthropic", "Anthropic", 30)],
+            "anthropic",
+            "catalog-model-0",
+        );
         state.columns[0].discovery = Some(DiscoveryStatus::Unauthenticated);
         state.connecting = Some("anthropic".into());
         state.pending_context_warning = Some(crate::adapters::tui::state::ContextWarning {
@@ -654,7 +643,84 @@ mod tests {
         term.draw(|frame| render(frame, frame.area(), &state, &theme()))
             .unwrap();
         let text = buffer_text(&term);
+        assert!(text.contains("Compact context? [y/n]"), "{text}");
         assert!(text.contains("[y/n]"), "{text}");
         assert!(text.contains("Esc close"), "{text}");
+    }
+
+    #[test]
+    fn story21_4_model_selected_row_and_warning_fit_caller_sheet() {
+        let mut state = ModelSelectorState::new();
+        state.initialize(
+            vec![catalog_column("anthropic", "Anthropic", 30)],
+            "anthropic",
+            "catalog-model-29",
+        );
+        state.pending_context_warning = Some(crate::adapters::tui::state::ContextWarning {
+            provider_id: "anthropic".into(),
+            model_id: "catalog-model-29".into(),
+            model_display_name: "Catalog Model 29".into(),
+            context_window: 8_000,
+            current_tokens: 120_000,
+        });
+        let long = "Catalog Model 29 With A Very Long Descriptive Model Name";
+        let wide = "Catalog Model 29 模型模型模型模型模型模型模型模型模型模型";
+        for (width, height, name) in [
+            (60, 16, "Catalog Model 29"),
+            (60, 16, long),
+            (60, 16, wide),
+            (130, 30, "Catalog Model 29"),
+            (130, 30, long),
+            (130, 30, wide),
+        ] {
+            state
+                .pending_context_warning
+                .as_mut()
+                .unwrap()
+                .model_display_name = name.into();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let theme = theme();
+            terminal
+                .draw(|frame| {
+                    let layout = crate::adapters::tui::layout::compute_layout(
+                        frame.area(),
+                        &theme,
+                        "1\n2\n3\n4\n5\n6\n7\n8",
+                        1,
+                        false,
+                        crate::domain::models::visual::DensityMode::Focus,
+                    )
+                    .unwrap();
+                    let region = crate::adapters::tui::presentation::geometry::modal_region(
+                        &layout,
+                        frame.area(),
+                    );
+                    let sheet = crate::adapters::tui::presentation::geometry::frame_rect(region);
+                    render(frame, sheet, &state, &theme);
+                    assert_eq!(frame.buffer_mut()[(sheet.x, sheet.y)].symbol(), "┌");
+                    assert_eq!(
+                        frame.buffer_mut()[(sheet.right() - 1, sheet.bottom() - 1)].symbol(),
+                        "┘"
+                    );
+                })
+                .unwrap();
+            let text = buffer_text(&terminal);
+            let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            for expected in [
+                "Anthropic",
+                "▸ Catalog Model 29",
+                "Compact context?",
+                "[y/n]",
+                "Esc close",
+                "/ search",
+            ] {
+                assert!(plain.contains(expected), "{expected}: {text}");
+            }
+            if height == 30 {
+                for expected in ["Current context", "120k tokens", "8k"] {
+                    assert!(plain.contains(expected), "{expected}: {text}");
+                }
+            }
+        }
     }
 }

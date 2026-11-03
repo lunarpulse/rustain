@@ -101,26 +101,29 @@ def _legacy_status_row(rows):
     return top - 1
 
 
-def _modal_complete(screen):
-    """The legacy rectangle is complete, with A8's settled status cutout."""
+def _modal_complete(screen, title="Select Model"):
+    """The complete caller-supplied A8 sheet (0, 0, 80, 20), above chat chrome."""
     rows = screen.split("\n")
-    top = next((y for y, row in enumerate(rows) if "┌ Select Model" in row), None)
-    if top is None:
+    prefix = f"┌ {title} "
+    if (len(rows) != 24 or any(len(row) != 80 for row in rows)
+            or _legacy_status_row(rows) != 20
+            or rows[0] != prefix + "─" * (79 - len(prefix)) + "┐"
+            or rows[19] != "└" + "─" * 78 + "┘"
+            or not rows[21].startswith("┌ Message")
+            or rows[22][0] != "│" or rows[22][-1] != "│"
+            or rows[23] != "└" + "─" * 78 + "┘"):
         return False
-    left = rows[top].index("┌ Select Model")
-    right = rows[top].rfind("┐")
-    if right <= left:
+    if any(row[0] != "│" or row[-1] != "│" for row in rows[1:19]):
         return False
-    status = _legacy_status_row(rows)
-    bottom = next((y for y in range(top + 1, len(rows))
-                   if len(rows[y]) > right and rows[y][left] == "└"),
-                  status if status == len(rows) - top - 1 else None)
-    if bottom is None:
-        return False
-    if bottom != status and (rows[bottom][right] != "┘" or set(rows[bottom][left + 1:right]) != {"─"}):
-        return False
-    return all(len(rows[y]) > right and rows[y][left] == "│" and rows[y][right] == "│"
-               for y in range(top + 1, bottom) if y != status)
+    content = [row[1:-1].strip() for row in rows[1:19] if row[1:-1].strip()]
+    footers = {
+        "Select Model": r"(?:Enter sign in · ←→ provider|←→ provider|↑↓ navigate · Enter select) · Esc close(?: · / search)?",
+        "Log out": r"↑↓ navigate · Enter choose · Esc close",
+        "Log out of OpenAI": r"↑↓ navigate · Enter log out · Esc back",
+        "OpenAI accounts": r"↑↓ navigate · Enter make active · Esc close",
+    }
+    footer = footers.get(title, r"(?:↑↓ navigate · Enter select · Esc close|Enter submit(?: · Alt\+C copy link · Alt\+L copy local link)? · Esc cancel)")
+    return bool(content and re.fullmatch(footer, content[-1]))
 
 
 def status_ready(text):
@@ -348,9 +351,8 @@ def _exercise(binary, evidence, root, monkeypatch):
                            "open selector rebuilt by the models.dev remerge refresh event")
             _capture(tui, evidence, "04-anthropic-locked", screen)
             tui.send("\r")
-            # Locked Enter opens the sign-in chooser; cancelling must restore
-            # the same selector without selecting a model.
-            _wait(tui, lambda value: "Sign in to Anthropic" in value
+            # Login's existing domain Back reopens the picker through a new handoff.
+            _wait(tui, lambda value: _modal_complete(value, "Sign in to Anthropic")
                   and "Choose a login method" in value, "locked Enter opens sign-in")
             tui.send("\x1b")
             _wait(tui, with_metadata, "cancel sign-in restores locked selector")

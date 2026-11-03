@@ -122,7 +122,7 @@ fn fresh_adapter_uses_bundled_models_before_discovery() {
 }
 
 #[test]
-fn keyword_search_filters_and_dismisses() {
+fn keyword_search_filters_and_clears_payload() {
     use rustain::adapters::tui::state::ModelSelectorState;
 
     let mut ms = ModelSelectorState::new();
@@ -144,8 +144,8 @@ fn keyword_search_filters_and_dismisses() {
     assert_eq!(ms.filtered_indices.len(), 1);
     assert_eq!(ms.filtered_indices[0], 1);
 
-    // Dismiss clears search
-    ms.dismiss();
+    // Payload teardown clears search; frame ownership is separate.
+    ms.clear();
     assert!(!ms.search_active);
     assert!(ms.search_query.is_empty());
 }
@@ -185,7 +185,6 @@ fn empty_catalog_renders_hint() {
     use rustain::adapters::tui::state::{ModelSelectorState, ProviderColumn};
 
     let mut ms = ModelSelectorState::new();
-    ms.active = true;
     ms.columns = vec![ProviderColumn {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),
@@ -204,7 +203,6 @@ fn rejected_credential_stale_render_smoke() {
     use rustain::adapters::tui::state::{ModelSelectorState, ProviderColumn};
 
     let mut ms = ModelSelectorState::new();
-    ms.active = true;
     ms.columns = vec![ProviderColumn {
         provider_id: "openrouter".to_string(),
         display_name: "OpenRouter".to_string(),

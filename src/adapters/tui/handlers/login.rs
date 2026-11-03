@@ -1,6 +1,6 @@
 //! Sign-in from the TUI: `/login [provider]`, Ctrl+X I and Enter on a locked
-//! model-picker column. Command/action handlers return data-only work requests;
-//! dispatch constructs tasks and binds cancellation before running the workers.
+//! model-picker column. Credential-free frame requests settle synchronously;
+//! command/action work requests leave task construction and cancellation to dispatch.
 //! `handle_input` routes overlay keys to `on_key`; results remain `LoginEvent`s.
 //!
 //! MIT License
@@ -34,12 +34,11 @@ use crate::adapters::tui::login_runtime::Copier;
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::state::{
-    FieldKind, LOGIN_PICKER_ROWS, LoginOrigin, LoginSection, LoginView, OverlayMode, PendingField,
-    TuiState,
+    FieldKind, LOGIN_PICKER_ROWS, LoginFrameIntent, LoginOrigin, LoginSection, LoginView,
+    OverlayMode, PendingField, TuiState,
 };
 use crate::domain::events::{DomainInputEvent, DomainKey, LoginEvent, LoginFailure, LoginSummary};
-use crate::domain::models::visual::OverlayType;
-use crate::domain::models::{AppConfig, AuthMethod, FocusState};
+use crate::domain::models::{AppConfig, AuthMethod};
 use crate::domain::ports::ProviderInfoPort;
 
 /// What the event loop's login arm performs for an overlay key or a picker.
@@ -68,8 +67,6 @@ pub enum LoginAction {
 pub(crate) fn display_text(text: &str) -> String {
     crate::adapters::auth::bounded_provider_text(text)
 }
-
-pub(crate) const LOGIN: FocusState = FocusState::Overlay(OverlayType::Login);
 
 /// `/login [provider]` (`ExecuteCommand "login"`).
 pub fn command(state: &mut TuiState, app: &AppConfig, args: Option<&str>) -> HandlerOutcome {
@@ -116,6 +113,7 @@ pub fn on_action(
         }
         LoginAction::Closed { origin } => {
             if let LoginOrigin::Picker { column } = origin {
+                state.login.frame_intent = Some(LoginFrameIntent::ReturnToModel);
                 super::model_switch::open_selector(state, info, app, Some(&column));
             }
             HandlerOutcome::Quiet
@@ -124,35 +122,25 @@ pub fn on_action(
     }
 }
 
-/// The focus a login overlay returns to: the model picker is closed first when
-/// the sign-in started there.
-pub(super) fn take_focus(state: &mut TuiState) -> FocusState {
-    if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {
-        state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
-    }
-    state.focus.clone()
-}
-
 fn open(
     state: &mut TuiState,
     app: &AppConfig,
     provider: Option<String>,
     origin: LoginOrigin,
 ) -> HandlerOutcome {
-    if state.login.running.is_some() {
-        // One login at a time: the running view keeps (or regains) focus.
-        state.focus = LOGIN;
-        state.needs_redraw = true;
+    let generation = state
+        .login
+        .open_picker(&state.modal_stack, origin, OverlayMode::Login);
+    crate::adapters::tui::app::advance_deferred_permission(state);
+    let Some(generation) = generation else {
         return HandlerOutcome::Quiet;
-    }
+    };
     match provider {
-        Some(provider) => begin(state, app, &provider, origin, false),
+        Some(provider) => {
+            let origin = state.login.origin.clone();
+            begin(state, app, &provider, origin, false)
+        }
         None => {
-            let previous = take_focus(state);
-            let generation = state
-                .login
-                .open_picker(previous, origin, OverlayMode::Login);
-            state.focus = LOGIN;
             state.needs_redraw = true;
             HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Targets {
                 generation,
@@ -184,19 +172,16 @@ fn begin(
         );
         return HandlerOutcome::Quiet;
     }
-    let previous = take_focus(state);
     if let [method] = plan.methods {
-        state.login.previous_focus.get_or_insert(previous);
         return start(state, plan, method, origin);
     }
     state.login.open_methods(
-        previous,
         origin,
         (plan.provider_id.clone(), plan.display.clone()),
         plan.methods,
         from_picker,
     );
-    state.focus = LOGIN;
+    crate::adapters::tui::app::advance_deferred_permission(state);
     state.needs_redraw = true;
     HandlerOutcome::Quiet
 }
@@ -211,15 +196,10 @@ fn failed_to_start(state: &mut TuiState, error: &str) {
 }
 
 pub(super) fn close(state: &mut TuiState) {
-    if state.login.active {
-        let previous = state.login.close();
-        if state.focus == LOGIN {
-            state.focus = previous.unwrap_or(FocusState::Input);
-        }
-        // A permission that arrived while the overlay owned focus was queued
-        // behind it; surface it now, as closing any other overlay does.
-        crate::adapters::tui::app::advance_deferred_permission(state);
-    }
+    state.login.frame_intent = Some(LoginFrameIntent::Close);
+    // A permission that arrived while the overlay owned focus was queued
+    // behind it; surface it now, as closing any other overlay does.
+    crate::adapters::tui::app::advance_deferred_permission(state);
     state.needs_redraw = true;
 }
 
@@ -235,6 +215,7 @@ fn start(
     origin: LoginOrigin,
 ) -> HandlerOutcome {
     let login_id = state.login.next_login_id();
+    crate::adapters::tui::app::advance_deferred_permission(state);
     HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Login {
         login_id,
         plan,
@@ -258,12 +239,20 @@ pub fn on_event(
         event @ (LoginEvent::Accounts { .. } | LoginEvent::AccountsChanged { .. }) => {
             super::accounts::on_event(state, event)
         }
-        LoginEvent::Targets { generation, rows } => state.login.set_rows(generation, rows),
+        LoginEvent::Targets { generation, rows } => {
+            if generation == state.login.generation {
+                state.login.set_rows(generation, rows);
+            }
+        }
         LoginEvent::Validated {
             generation,
             provider,
             valid,
-        } => state.login.set_validation(generation, &provider, valid),
+        } => {
+            if generation == state.login.generation {
+                state.login.set_validation(generation, &provider, valid);
+            }
+        }
         LoginEvent::AuthUrl {
             login_id,
             url,
@@ -330,9 +319,7 @@ pub fn on_event(
             outcome,
         } => finished(state, app, info, login_id, &provider, outcome),
         LoginEvent::Discovered { provider, line } => {
-            if state.model_selector.active {
-                state.model_selector.bloom = Some((provider, line));
-            }
+            state.model_selector.bloom = Some((provider, line));
         }
     }
 }
@@ -348,8 +335,11 @@ fn finished(
     if state.login.running.as_ref().map(|r| r.login_id) != Some(login_id) {
         return;
     }
+    let owned = match state.login.running.as_ref() {
+        Some(running) => running.generation == state.login.generation,
+        None => false,
+    };
     let running = state.login.running.take();
-    close(state);
     let picker_column = match running.map(|running| running.origin) {
         Some(LoginOrigin::Picker { column }) => Some(column),
         _ => None,
@@ -359,14 +349,17 @@ fn finished(
         // cancelled after it was persisted.
         Ok(summary) => {
             feedback(state, NoticeSeverity::Success, summary.lines.join("\n"));
-            let column = picker_column.unwrap_or_else(|| {
-                host::login_targets(app)
-                    .into_iter()
-                    .find(|target| target.id == provider)
-                    .and_then(|target| target.entries.into_iter().next())
-                    .unwrap_or_else(|| provider.to_owned())
-            });
-            super::model_switch::open_selector(state, info, app, Some(&column));
+            if owned {
+                let column = picker_column.unwrap_or_else(|| {
+                    host::login_targets(app)
+                        .into_iter()
+                        .find(|target| target.id == provider)
+                        .and_then(|target| target.entries.into_iter().next())
+                        .unwrap_or_else(|| provider.to_owned())
+                });
+                state.login.frame_intent = Some(LoginFrameIntent::ReturnToModel);
+                super::model_switch::open_selector(state, info, app, Some(&column));
+            }
         }
         Err(failure) => {
             match failure {
@@ -381,8 +374,13 @@ fn finished(
                     );
                 }
             }
-            if let Some(column) = picker_column {
-                super::model_switch::open_selector(state, info, app, Some(&column));
+            if owned {
+                if let Some(column) = picker_column {
+                    state.login.frame_intent = Some(LoginFrameIntent::ReturnToModel);
+                    super::model_switch::open_selector(state, info, app, Some(&column));
+                } else {
+                    close(state);
+                }
             }
         }
     }
@@ -466,7 +464,9 @@ pub(super) fn move_cursor(selected: usize, len: usize, event: &DomainInputEvent)
 
 pub(super) fn closed(state: &mut TuiState) -> InputAction {
     let origin = state.login.origin.clone();
-    close(state);
+    if let LoginOrigin::Slash | LoginOrigin::Chord = origin {
+        close(state);
+    }
     InputAction::Login(LoginAction::Closed { origin })
 }
 

@@ -244,6 +244,79 @@ impl TestHarness {
         self.render_with_host(rustain::adapters::tui::keymap::Host::Local);
     }
 
+    /// Render the actual active tab, including its view and TUI-owned cache.
+    pub fn render_active_tab(&mut self, tabs: &rustain::domain::models::TabManager) {
+        let tab = tabs.active_tab();
+        assert_eq!(self.state.active_tab_id, tab.id);
+        let state = &mut self.state;
+        let theme = &self.theme;
+        self.terminal
+            .draw(|frame| {
+                let app_layout = layout::compute_layout(
+                    frame.area(),
+                    theme,
+                    &state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .expect("active-tab fixture fits");
+                let result = chat_pane::render_with_search(
+                    frame,
+                    app_layout.chat_pane,
+                    &tab.conversation,
+                    tab.reducer.open_turn.as_ref(),
+                    &tab.streaming,
+                    &tab.view_state,
+                    &*tab.clock,
+                    tab.view_state.scroll_offset,
+                    matches!(
+                        tab.view_state.mode,
+                        rustain::domain::models::AnchorMode::Following
+                    ),
+                    theme,
+                    state.tab_render_states.entry(tab.id).or_default(),
+                    &state.tool_block_states,
+                    &tab.feedback_blocks,
+                    None,
+                    None,
+                    &[],
+                    &tab.session_meta.bookmarks,
+                    state.pending_plan_card.as_ref(),
+                    None,
+                    tab.reducer.open_prose.as_deref(),
+                    state.focused_tool_id.as_deref(),
+                );
+                state.total_content_height = result.total_content_height;
+                state.viewport_height = app_layout.chat_pane.height;
+                input_box::render(
+                    frame,
+                    app_layout.input_area,
+                    &state.input_buffer,
+                    state.cursor_position,
+                    state.focus.clone(),
+                    theme,
+                    state.multiline_mode,
+                    state.input_scroll_offset,
+                    None,
+                );
+                let shell = Shell::new(frame.area(), &app_layout);
+                presentation::compose(
+                    frame,
+                    state,
+                    &shell,
+                    rustain::adapters::tui::keymap::Host::Local,
+                    &rustain::adapters::tui::notification_log::LogFacts {
+                        active_conversation_id: Some(tab.conversation.id.clone()),
+                        ..Default::default()
+                    },
+                    |_| {},
+                    |_| {},
+                );
+            })
+            .unwrap();
+    }
+
     /// Shared compositor fixture for host-qualified popup/menu geometry.
     pub fn render_with_host(&mut self, host: rustain::adapters::tui::keymap::Host) {
         let conv = &self.conversation;

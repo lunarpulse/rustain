@@ -418,6 +418,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the model selector | local | portable |  |
 | `Left` | Select the previous provider column | local | portable |  |
 | `h` | Select the previous provider column | local | portable |  |
@@ -439,6 +441,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the profile switcher | local | portable |  |
 | `Up` | Select the previous profile | local | portable |  |
 | `Down` | Select the next profile | local | portable |  |
@@ -452,6 +456,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing usage | local | portable |  |
 | `Esc` | Close the usage panel | local | portable |  |
 | `Ctrl+C` | Close the usage panel (back one frame) | local | portable |  |
@@ -572,6 +578,8 @@ A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit,
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Esc` | Clear the search; go back a step; close the overlay | local | portable |  |
 | `Ctrl+C` | Clear the search; go back a step; close the overlay (back one frame) | local | portable |  |
 | `Enter` | Choose the selected provider or method | local | portable |  |

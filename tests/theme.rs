@@ -340,7 +340,7 @@ fn test_focus_state_variants() {
         panel: PanelType::History,
         selected: 0,
     };
-    let overlay = FocusState::Overlay(OverlayType::ModelSelector);
+    let overlay = FocusState::Overlay(OverlayType::Search);
 
     // Chat is a unit variant (scroll state owned by TuiState)
     assert_eq!(chat, FocusState::Chat);
@@ -356,12 +356,20 @@ fn test_focus_state_variants() {
 fn test_overlay_type_variants() {
     use rustain::domain::models::visual::OverlayType;
 
-    // Help, palette and which-key are frame/routed contexts, not legacy overlays.
-    let variants = [OverlayType::ModelSelector, OverlayType::ProfileSwitcher];
+    // Ba selectors and Login are frames, not legacy focus variants.
+    let variants = [OverlayType::Search, OverlayType::CrossSearch];
     assert_eq!(variants.len(), 2);
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::Surface;
     assert_ne!(Surface::Help, Surface::CommandPalette);
+    for (surface, context) in [
+        (Surface::ModelSelector, Context::ModelSelector),
+        (Surface::ProfileSwitcher, Context::ProfileSwitcher),
+        (Surface::UsagePanel, Context::UsagePanel),
+        (Surface::Login, Context::Login),
+    ] {
+        assert_eq!(surface.context(), context);
+    }
     assert_eq!(Context::Leader.name(), "Leader");
 }
 

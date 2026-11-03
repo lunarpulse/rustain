@@ -8,18 +8,17 @@
 //! - Esc dismisses and restores focus (AC1)
 //! - Single-provider Left/Right is a no-op (AC7)
 //! - Ctrl+C dismisses like Esc (AC1)
-//! - Ctrl+X,M blocked when command palette is open
+//! - Ctrl+X,M remains available above an open command palette
 
 use std::collections::HashSet;
 
 use rustain::adapters::tui::app::InputAction;
-use rustain::adapters::tui::presentation::{Surface, is_open};
+use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
 use rustain::adapters::tui::state::ProviderColumn;
 use rustain::adapters::tui::widgets::model_selector;
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::FocusState;
 use rustain::domain::models::provider::ModelDescriptor;
-use rustain::domain::models::visual::OverlayType;
 
 use crate::e2e_harness;
 use e2e_harness::TestHarness;
@@ -83,13 +82,10 @@ fn single_provider_columns() -> Vec<ProviderColumn> {
 }
 
 fn open_selector(h: &mut TestHarness, columns: Vec<ProviderColumn>) {
-    h.state.model_selector.open(
-        h.state.focus.clone(),
-        columns,
-        "anthropic",
-        "claude-sonnet-4",
-    );
-    h.state.focus = FocusState::Overlay(OverlayType::ModelSelector);
+    reducer::open(&mut h.state, Surface::ModelSelector);
+    h.state
+        .model_selector
+        .initialize(columns, "anthropic", "claude-sonnet-4");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -293,11 +289,12 @@ fn test_esc_dismisses_selector() {
     let mut h = TestHarness::new();
     h.state.focus = FocusState::Chat;
     open_selector(&mut h, two_provider_columns());
-    assert!(h.state.model_selector.active);
+    assert!(is_open(&h.state, Surface::ModelSelector));
 
     let action = h.press_key(DomainKey::Esc);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.model_selector.active);
+    assert!(!is_open(&h.state, Surface::ModelSelector));
+    assert!(h.state.modal_stack.is_empty());
     assert!(matches!(h.state.focus, FocusState::Chat));
 }
 
@@ -306,11 +303,12 @@ fn test_ctrl_c_dismisses_selector() {
     let mut h = TestHarness::new();
     h.state.focus = FocusState::Input;
     open_selector(&mut h, two_provider_columns());
-    assert!(h.state.model_selector.active);
+    assert!(is_open(&h.state, Surface::ModelSelector));
 
     let action = h.press_key(DomainKey::CtrlC);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.model_selector.active);
+    assert!(!is_open(&h.state, Surface::ModelSelector));
+    assert!(h.state.modal_stack.is_empty());
     assert!(matches!(h.state.focus, FocusState::Input));
 }
 
@@ -420,7 +418,7 @@ fn test_n_cancels_context_warning() {
     let action = h.type_char('n');
     assert!(matches!(action, InputAction::Consumed));
     assert!(h.state.model_selector.pending_context_warning.is_none());
-    assert!(h.state.model_selector.active);
+    assert!(is_open(&h.state, Surface::ModelSelector));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -466,7 +464,7 @@ fn test_model_selector_renders_with_single_provider() {
 #[test]
 fn test_model_selector_inactive_render_no_crash() {
     let h = TestHarness::new();
-    assert!(!h.state.model_selector.active);
+    assert!(!is_open(&h.state, Surface::ModelSelector));
 
     let mut terminal = h.terminal;
     let state = &h.state.model_selector;
@@ -480,11 +478,11 @@ fn test_model_selector_inactive_render_no_crash() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Regression: Ctrl+X,M blocked when command palette is open
+// Regression: Ctrl+X,M is available while retaining the command-palette caller
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_model_selector_blocked_when_command_palette_open() {
+fn test_model_selector_route_available_when_command_palette_open() {
     let mut h = TestHarness::new();
 
     h.press_key(DomainKey::CtrlP);
@@ -492,17 +490,19 @@ fn test_model_selector_blocked_when_command_palette_open() {
     let caller = h.state.modal_stack.top().unwrap().clone();
     h.press_key(DomainKey::CtrlX);
     assert!(h.state.pending_leader.is_some());
-    assert_eq!(h.type_char('m'), InputAction::Consumed);
+    assert_eq!(h.type_char('m'), InputAction::OpenModelSelector);
     assert!(is_open(&h.state, Surface::CommandPalette));
-    assert_eq!(h.state.pending_leader, Some(caller.surface.context()));
-    assert_eq!(h.state.modal_stack.top(), Some(&caller));
-    assert!(!h.state.model_selector.active);
-    assert!(
-        h.state
-            .notifications
-            .records()
-            .any(|r| r.message.contains("close the window first"))
+    assert!(h.state.pending_leader.is_none());
+    assert_eq!(
+        h.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+        vec![caller]
     );
+    assert_eq!(h.state.focus, FocusState::Input);
+    assert!(
+        !is_open(&h.state, Surface::ModelSelector),
+        "runtime applies the returned open effect"
+    );
+    assert_eq!(h.state.notifications.records().count(), 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -513,14 +513,12 @@ fn test_model_selector_blocked_when_command_palette_open() {
 fn test_open_seeds_active_provider_and_model() {
     let mut h = TestHarness::new();
 
-    h.state.model_selector.open(
-        FocusState::Input,
-        two_provider_columns(),
-        "openai",
-        "gpt-4o-mini",
-    );
+    reducer::open(&mut h.state, Surface::ModelSelector);
+    h.state
+        .model_selector
+        .initialize(two_provider_columns(), "openai", "gpt-4o-mini");
 
-    assert!(h.state.model_selector.active);
+    assert!(is_open(&h.state, Surface::ModelSelector));
     assert_eq!(h.state.model_selector.selected_provider, 1);
     assert_eq!(h.state.model_selector.selected_model, 1);
 }
@@ -529,29 +527,31 @@ fn test_open_seeds_active_provider_and_model() {
 fn test_open_seeds_default_on_unknown_model() {
     let mut h = TestHarness::new();
 
-    h.state.model_selector.open(
-        FocusState::Chat,
-        two_provider_columns(),
-        "unknown-provider",
-        "unknown-model",
-    );
+    h.state.focus = FocusState::Chat;
+    reducer::open(&mut h.state, Surface::ModelSelector);
+    h.state
+        .model_selector
+        .initialize(two_provider_columns(), "unknown-provider", "unknown-model");
 
-    assert!(h.state.model_selector.active);
+    assert!(is_open(&h.state, Surface::ModelSelector));
     assert_eq!(h.state.model_selector.selected_provider, 0);
     assert_eq!(h.state.model_selector.selected_model, 0);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Focus state is Overlay(ModelSelector) when selector is active
+// The selector frame owns input while base focus remains the caller's
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_focus_is_model_selector_overlay_when_open() {
+fn test_model_selector_frame_preserves_caller_focus_when_open() {
     let mut h = TestHarness::new();
     open_selector(&mut h, two_provider_columns());
 
-    assert!(matches!(
-        h.state.focus,
-        FocusState::Overlay(OverlayType::ModelSelector)
-    ));
+    assert!(is_open(&h.state, Surface::ModelSelector));
+    assert_eq!(h.state.modal_stack.len(), 1);
+    assert_eq!(
+        h.state.modal_stack.top().unwrap().surface,
+        Surface::ModelSelector
+    );
+    assert_eq!(h.state.focus, FocusState::Input);
 }

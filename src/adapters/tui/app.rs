@@ -1,4 +1,4 @@
-use crate::adapters::tui::handlers::login::LoginAction;
+use crate::adapters::tui::handlers::{login::LoginAction, profile_switch};
 use crate::adapters::tui::keymap::table::GlobalCmd;
 use crate::adapters::tui::keymap::table_chat::ChatCmd;
 use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
@@ -8,7 +8,7 @@ use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
-use crate::adapters::tui::presentation::{self, Surface};
+use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::widgets::chat_pane::virtual_scroll::find_next_boundary;
@@ -16,6 +16,7 @@ use crate::adapters::tui::widgets::input_box;
 use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
 use crate::domain::models::autocomplete::AutocompleteKind;
+use crate::domain::models::palette::PaletteAction;
 use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::services::slash_command::parse_slash_command;
 
@@ -609,9 +610,10 @@ pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
             ))
 }
 
-/// Shared handoff for input-only dismissals and runtime-driven resolutions.
+/// Settles synchronous Login framing before the existing deferred permission handoff.
 pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
-    if state.pending_permission.is_some() || permission_modal_owns_focus(state) {
+    let ready = reducer::settle_login(state);
+    if !ready || state.pending_permission.is_some() || permission_modal_owns_focus(state) {
         return;
     }
     state.permission_reader = Default::default();
@@ -722,18 +724,7 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
     ) {
         return effect.into_action();
     }
-    // The login overlay owns every key while it has focus (Ctrl+Q still quits).
-    if state.focus == FocusState::Overlay(OverlayType::Login)
-        && !matches!(
-            event,
-            DomainInputEvent::Resize(..)
-                | DomainInputEvent::FocusGained
-                | DomainInputEvent::FocusLost
-        )
-    {
-        return crate::adapters::tui::handlers::login::on_key(state, event);
-    }
-    // Alt+C/L/U belong to the login overlay only (handled above); anywhere else
+    // Alt+C/L/U belong to the Login frame only (handled by its boundary); elsewhere
     // they are consumed no-ops, never the plain letter (Story 21.3 AC12, PC-13).
     let action = dispatch_input(state, event);
     if state.focus == FocusState::Input
@@ -763,15 +754,11 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
                     && !matches!(
                         state.focus,
                         FocusState::Overlay(
-                            OverlayType::ModelSelector
-                                | OverlayType::ProfileSwitcher
-                                | OverlayType::Search
+                            OverlayType::Search
                                 | OverlayType::CrossSearch
                                 | OverlayType::BookmarkList
                                 | OverlayType::Confirmation(_)
-                                | OverlayType::UsagePanel
                                 | OverlayType::WaveOverlay
-                                | OverlayType::Login
                         )
                     )
             }
@@ -1078,22 +1065,18 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
 // through one `execute`. The inline cards (FR-21-3-b / A9) and the login overlay keep
 // their own arms.
 
-/// The overlays that own the character keys before any card: the palette, the focus
-/// overlays (help, model selector, usage, profile switcher) and reverse search.
+/// A frame or the still-routed legacy reverse search owns character keys.
 fn char_overlay_context(state: &TuiState) -> Option<Context> {
-    if presentation::is_open(state, Surface::CommandPalette) {
-        return Some(Context::CommandPalette);
-    }
-    match overlay_focus_context(state) {
-        Some(
-            context @ (Context::Help
-            | Context::ModelSelector
-            | Context::UsagePanel
-            | Context::ProfileSwitcher),
-        ) => Some(context),
-        _ if state.reverse_search.active => Some(Context::ReverseSearch),
-        _ => None,
-    }
+    state
+        .modal_stack
+        .top()
+        .map(|frame| frame.surface.context())
+        .or_else(|| {
+            state
+                .reverse_search
+                .active
+                .then_some(Context::ReverseSearch)
+        })
 }
 
 /// The overlay context the focus names, if any.
@@ -1103,9 +1086,6 @@ pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
         return None;
     };
     Some(match overlay {
-        OverlayType::ModelSelector => Context::ModelSelector,
-        OverlayType::UsagePanel => Context::UsagePanel,
-        OverlayType::ProfileSwitcher => Context::ProfileSwitcher,
         OverlayType::Search => match state.search_state.substate {
             SearchSubstate::Typing => Context::SearchTyping,
             SearchSubstate::Navigating => Context::SearchNavigating,
@@ -1113,7 +1093,6 @@ pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
         OverlayType::CrossSearch => Context::CrossSearch,
         OverlayType::BookmarkList => Context::BookmarkList,
         OverlayType::WaveOverlay => Context::WaveOverlay,
-        OverlayType::Login => Context::Login,
         _ => return None,
     })
 }
@@ -1160,7 +1139,7 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
 /// One key in `context`: its row's command runs through `execute`; a command that
 /// declines in the current state hands the key to its row's parent context; a key
 /// without a row takes the context's typing or default arm.
-fn dispatch(state: &mut TuiState, context: Context, key: Key) -> InputAction {
+fn dispatch(state: &mut TuiState, context: Context, key: Key, host: Host) -> InputAction {
     if let Some(done) = typed_before_rows(state, context, key) {
         return done;
     }
@@ -1169,7 +1148,7 @@ fn dispatch(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         Context::Chat | Context::ChatWave | Context::ChatReorder
     ) && let Key::Char(c) = key
     {
-        if let Some(done) = chat_sequence(state, context, c) {
+        if let Some(done) = chat_sequence(state, context, c, host) {
             return done;
         }
         if state.pending_g && c != 'g' {
@@ -1178,9 +1157,9 @@ fn dispatch(state: &mut TuiState, context: Context, key: Key) -> InputAction {
     }
     let mut from = context;
     loop {
-        match resolve(from, Host::Local, &[key]) {
+        match resolve(from, host, &[key]) {
             Resolved::Hit(row) => {
-                if let Some(action) = execute(state, context, row.command, &[key]) {
+                if let Some(action) = execute(state, context, row.command, &[key], host) {
                     return action;
                 }
                 match row.context.parents().first() {
@@ -1205,7 +1184,12 @@ fn dispatch(state: &mut TuiState, context: Context, key: Key) -> InputAction {
 
 /// The second key of a vim `z` / `[` / `]` sequence: the row of both keys runs, any
 /// other key cancels the sequence.
-fn chat_sequence(state: &mut TuiState, context: Context, c: char) -> Option<InputAction> {
+fn chat_sequence(
+    state: &mut TuiState,
+    context: Context,
+    c: char,
+    host: Host,
+) -> Option<InputAction> {
     let first = if state.pending_z {
         state.pending_z = false;
         'z'
@@ -1214,9 +1198,9 @@ fn chat_sequence(state: &mut TuiState, context: Context, c: char) -> Option<Inpu
     };
     state.needs_redraw = true;
     let keys = [Key::Char(first), Key::Char(c)];
-    Some(match resolve(context, Host::Local, &keys) {
+    Some(match resolve(context, host, &keys) {
         Resolved::Hit(row) => {
-            execute(state, context, row.command, &keys).unwrap_or(InputAction::Consumed)
+            execute(state, context, row.command, &keys, host).unwrap_or(InputAction::Consumed)
         }
         _ => InputAction::Consumed,
     })
@@ -1261,7 +1245,7 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
             // Any other special key dismisses the popup and then acts normally.
             state.autocomplete.dismiss();
             state.needs_redraw = true;
-            return dispatch(state, Context::Input, key);
+            return dispatch(state, Context::Input, key, Host::Local);
         }
         return if ignores {
             InputAction::Ignored
@@ -1322,6 +1306,7 @@ fn execute(
     context: Context,
     command: CommandId,
     keys: &[Key],
+    host: Host,
 ) -> Option<InputAction> {
     let key = keys[keys.len() - 1];
     Some(match command {
@@ -1333,7 +1318,7 @@ fn execute(
         CommandId::Search(cmd) => exec_search(state, cmd),
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
         CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
-        CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key),
+        CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Inspector(cmd) => exec_inspector(state, cmd),
         CommandId::Leader(_) | CommandId::Permission(_) | CommandId::Card(_) => {
             InputAction::Consumed
@@ -1407,8 +1392,13 @@ pub(crate) fn open_palette(state: &mut TuiState) -> InputAction {
 }
 
 /// Shared frame commands; callers have already established top ownership.
-pub(crate) fn dispatch_frame_key(state: &mut TuiState, context: Context, key: Key) -> InputAction {
-    dispatch(state, context, key)
+pub(crate) fn dispatch_frame_key(
+    state: &mut TuiState,
+    context: Context,
+    key: Key,
+    host: Host,
+) -> InputAction {
+    dispatch(state, context, key, host)
 }
 
 /// One priority for inline cue, dispatch and paint: the last covering card wins.
@@ -2297,10 +2287,16 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
     })
 }
 
-fn exec_overlay(state: &mut TuiState, context: Context, cmd: OverlayCmd, key: Key) -> InputAction {
+fn exec_overlay(
+    state: &mut TuiState,
+    context: Context,
+    cmd: OverlayCmd,
+    key: Key,
+    host: Host,
+) -> InputAction {
     match context {
         Context::Help => exec_help(state, cmd),
-        Context::CommandPalette => exec_palette(state, cmd),
+        Context::CommandPalette => exec_palette(state, cmd, host),
         Context::ModelSelector => exec_model_selector(state, cmd, key),
         Context::ProfileSwitcher => exec_profile(state, cmd),
         Context::UsagePanel => exec_usage(state, cmd),
@@ -2415,17 +2411,16 @@ fn exec_cross_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
 
 fn exec_profile(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
     let previewing = state.profile_switcher.preview.is_some();
-    let confirm = |state: &mut TuiState| {
-        let profile_name = state
-            .profile_switcher
-            .selected_profile()
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
-        state.needs_redraw = true;
-        InputAction::ConfirmProfileSwitch(profile_name)
-    };
     match cmd {
-        OverlayCmd::ProfileEnter | OverlayCmd::ProfileYes if previewing => return confirm(state),
+        OverlayCmd::ProfileEnter | OverlayCmd::ProfileYes if previewing => {
+            let name = state
+                .profile_switcher
+                .selected_profile()
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            state.needs_redraw = true;
+            return InputAction::ConfirmProfileSwitch(name);
+        }
         OverlayCmd::ProfileBack | OverlayCmd::ProfileNo if previewing => {
             state.profile_switcher.exit_preview();
             state.needs_redraw = true;
@@ -2439,20 +2434,8 @@ fn exec_profile(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
             state.profile_switcher.navigate(1);
             state.needs_redraw = true;
         }
-        OverlayCmd::ProfileEnter => {
-            if let Some(selected) = state.profile_switcher.selected_profile().cloned()
-                && let Some(plan) = state.profile_switcher.compute_diff_for_selected(&selected)
-            {
-                state.profile_switcher.enter_preview(plan);
-                state.needs_redraw = true;
-            }
-        }
-        OverlayCmd::ProfileBack => {
-            if let Some(prev) = state.profile_switcher.dismiss() {
-                state.focus = prev;
-            }
-            state.needs_redraw = true;
-        }
+        OverlayCmd::ProfileEnter => profile_switch::preview(state, None),
+        OverlayCmd::ProfileBack => presentation::reducer::close(state, Surface::ProfileSwitcher),
         _ => {}
     }
     InputAction::Consumed
@@ -2603,8 +2586,7 @@ fn exec_model_selector(state: &mut TuiState, cmd: OverlayCmd, key: Key) -> Input
                 state.needs_redraw = true;
                 return InputAction::Consumed;
             }
-            state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
+            presentation::reducer::close(state, Surface::ModelSelector);
             InputAction::Consumed
         }
         OverlayCmd::ModelBackspace => {
@@ -2689,7 +2671,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     // The palette, help, model selector, usage panel, profile switcher and reverse
     // search own the character keys (registry contexts, AC10).
     if let Some(context) = char_overlay_context(state) {
-        return dispatch(state, context, Key::Char(c));
+        return dispatch(state, context, Key::Char(c), Host::Local);
     }
 
     if state.pending_artifact_card.is_some()
@@ -2909,7 +2891,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             }
         }
         _ => match focus_context(state) {
-            Some(context) => dispatch(state, context, Key::Char(c)),
+            Some(context) => dispatch(state, context, Key::Char(c), Host::Local),
             None => InputAction::Ignored,
         },
     }
@@ -3097,16 +3079,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // Help, the model selector and the usage panel own every special key (AC10).
     let overlay = overlay_focus_context(state);
     let k = Key::from_domain_key(key);
-    if let Some(context @ (Context::Help | Context::ModelSelector | Context::UsagePanel)) = overlay
-    {
-        return dispatch(state, context, k);
-    }
 
-    // The profile switcher, palette, autocomplete popup, reverse search and the
-    // conversation search own every special key (AC10).
+    // The remaining legacy search popups own every special key.
     let early = if matches!(
         overlay,
-        Some(Context::ProfileSwitcher | Context::SearchTyping | Context::SearchNavigating)
+        Some(Context::SearchTyping | Context::SearchNavigating)
     ) {
         overlay
     } else if state.autocomplete.is_open() && state.focus == FocusState::Input {
@@ -3117,11 +3094,11 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         None
     };
     if let Some(context) = early {
-        return dispatch(state, context, k);
+        return dispatch(state, context, k, Host::Local);
     }
 
     let context = focus_context(state);
-    dispatch(state, context.unwrap_or(Context::Global), k)
+    dispatch(state, context.unwrap_or(Context::Global), k, Host::Local)
 }
 
 /// Insert a newline at cursor position.
@@ -3509,7 +3486,7 @@ fn edit_field(text: &mut String, key: DomainKey) {
 
 /// Handle special keys while command palette is active.
 // Covers: UX-DR18
-fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+fn exec_palette(state: &mut TuiState, cmd: OverlayCmd, host: Host) -> InputAction {
     match cmd {
         OverlayCmd::PaletteUp => {
             state.command_palette.navigate(Direction::Up);
@@ -3523,6 +3500,7 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         }
         OverlayCmd::PaletteRun => {
             let mut avail = local_avail_ctx(state);
+            avail.host = host;
             avail.frame_origin = state.modal_stack.len() > 1;
             if let Some(entry) = state.command_palette.selected()
                 && let crate::adapters::tui::keymap::Availability::Unavailable(remedy) =
@@ -3537,7 +3515,24 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
                 return InputAction::Consumed;
             }
             let action = state.command_palette.execute_selected();
-            presentation::reducer::close(state, Surface::CommandPalette);
+            if host == Host::Attached {
+                presentation::reducer::close(state, Surface::CommandPalette);
+            } else {
+                match action.as_ref() {
+                    Some(PaletteAction::SwitchProfile(_)) => {
+                        reducer::handoff(state, Surface::CommandPalette, Surface::ProfileSwitcher);
+                    }
+                    Some(PaletteAction::ExecuteCommand(name, _)) if name == "models" => {
+                        reducer::handoff(state, Surface::CommandPalette, Surface::ModelSelector);
+                    }
+                    // These handlers validate before deciding whether to open a
+                    // sheet, then hand off or close the retained palette themselves.
+                    Some(PaletteAction::SwitchModel { .. }) => {}
+                    Some(PaletteAction::ExecuteCommand(name, _))
+                        if matches!(name.as_str(), "login" | "logout" | "accounts") => {}
+                    _ => presentation::reducer::close(state, Surface::CommandPalette),
+                }
+            }
             if let Some(palette_action) = action {
                 return dispatch_palette_action(state, palette_action);
             }
@@ -3545,7 +3540,6 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         }
         OverlayCmd::PaletteClose => {
             presentation::reducer::close(state, Surface::CommandPalette);
-            state.needs_redraw = true;
             InputAction::Consumed
         }
         OverlayCmd::PaletteBackspace => palette_edit(state, DomainKey::Backspace),
@@ -3559,8 +3553,7 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
 fn exec_usage(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
     match cmd {
         OverlayCmd::UsageClose => {
-            state.focus = state.usage_panel.dismiss().unwrap_or(FocusState::Input);
-            state.needs_redraw = true;
+            presentation::reducer::close(state, Surface::UsagePanel);
             InputAction::Consumed
         }
         OverlayCmd::UsagePrev => {
@@ -3586,8 +3579,6 @@ pub(crate) fn dispatch_palette_action(
     state: &mut TuiState,
     action: crate::domain::models::palette::PaletteAction,
 ) -> InputAction {
-    use crate::domain::models::palette::PaletteAction;
-
     match action {
         PaletteAction::ExecuteCommand(name, args) => {
             // Story 6.4: route task-control palette commands to dedicated InputAction variants
@@ -4061,15 +4052,15 @@ mod tests {
         let mut state = make_state();
         state
             .model_selector
-            .open(FocusState::Input, columns, "locked", "public-catalog-model");
-        state.focus = FocusState::Overlay(OverlayType::ModelSelector);
+            .initialize(columns, "locked", "public-catalog-model");
+        presentation::reducer::open(&mut state, Surface::ModelSelector);
         assert!(state.model_selector.selected().is_none());
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::Consumed
         );
-        assert!(state.model_selector.active);
-        assert_eq!(state.focus, FocusState::Overlay(OverlayType::ModelSelector));
+        assert!(presentation::is_open(&state, Surface::ModelSelector));
+        assert_eq!(state.focus, FocusState::Input);
 
         state.model_selector.navigate_provider(Direction::Left);
         assert_eq!(
@@ -4111,7 +4102,7 @@ mod tests {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
             InputAction::Consumed
         );
-        assert!(state.model_selector.active);
+        assert!(presentation::is_open(&state, Surface::ModelSelector));
 
         // A locked column advertises only ←→ and Esc: '/' starts no hidden
         // search, so Esc closes the selector instead of clearing invisible input.
@@ -4129,7 +4120,7 @@ mod tests {
         }
         assert!(!state.model_selector.search_active);
         let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-        assert!(!state.model_selector.active);
+        assert!(!presentation::is_open(&state, Surface::ModelSelector));
     }
 
     #[derive(Debug)]
@@ -4602,18 +4593,24 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(ModelSelector)",
-                setup: overlay(OverlayType::ModelSelector),
+                label: "ModelSelector frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::ModelSelector);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Login) (owns every key but Ctrl+Q; quitting cancels the login)",
-                setup: overlay(OverlayType::Login),
+                label: "Login frame (Ctrl+Q preserves the login beneath Quit)",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::Login);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(ProfileSwitcher)",
-                setup: overlay(OverlayType::ProfileSwitcher),
+                label: "ProfileSwitcher frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::ProfileSwitcher);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
@@ -4645,8 +4642,10 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(UsagePanel)",
-                setup: overlay(OverlayType::UsagePanel),
+                label: "UsagePanel frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::UsagePanel);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {

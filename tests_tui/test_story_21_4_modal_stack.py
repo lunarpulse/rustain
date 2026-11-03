@@ -1,4 +1,4 @@
-"""21.4 smoke legs A1/A2a/A2b: debug binary, both hosts, one 80x24 viewport.
+"""21.4 smoke legs A1/A2a/A2b/Ba: debug binary, both hosts, one 80x24 viewport.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 held loopback model turn crosses a tiny budget over scrolled Help. Unknown local
@@ -114,6 +114,28 @@ def _help_scrolled(screen):
     if width == 130:
         return first == "" and last.startswith("G             Jump to newest message")
     return False
+
+
+def _model_box(screen, title="Select Model"):
+    body = _box(screen, title, "Esc close")
+    return body if body and any(row[1:-1].strip().startswith("▸ ") for row in body) else None
+
+
+def _palette_unfiltered(screen):
+    body = _box(screen, HELP+" › Command Palette", "Up/Down move  Enter run  Esc close", closing="1/")
+    count = re.search(r"(?m)^ *└ 1/([1-9]\d*) ─+┘ *$", screen)
+    return body if (body and count and body[0][1:-1].strip() == "> _"
+                    and 3 < sum(bool(row[1:-1].strip()) for row in body) <= int(count[1])+2) else None
+
+
+def _palette_models(screen):
+    body = _box(screen, HELP+" › Command Palette", "")
+    if not body:
+        return None
+    content = [row[1:-1].strip() for row in body if row[1:-1].strip()]
+    return body if (len(content) == 3 and content[0] == "> /models_"
+                    and content[1].split()[0] == "/models"
+                    and all(key in content[-1] for key in ("Enter", "run", "Esc", "close"))) else None
 
 
 def _bottom_box(screen, title, width, bottom, closing=None):
@@ -232,6 +254,7 @@ def _deskcheck():
     assert len(os.fsencode(socket_path)) < 108, "scratch socket path exceeds AF_UNIX budget"
     _deskcheck_help_frames()
     _deskcheck_a2b_frames()
+    _deskcheck_ba_frames()
     _deskcheck_saved_frames()
 
 
@@ -326,6 +349,46 @@ def _deskcheck_a2b_frames():
         rows = menu.split("\n"); rows[-5] = " "*width
         assert _no_decisions_menu("\n".join(rows)) is None
 
+
+
+def _deskcheck_ba_frames():
+    frames = {}
+    for line in Path(os.environ["RUSTAIN_MODAL_STACK_BA_FRAMES"]).read_text().splitlines():
+        if line.startswith("BA_DESKCHECK_FRAME="):
+            width, height, stage, screen = json.loads(line.split("=", 1)[1])
+            assert len(screen.split("\n")) == height
+            assert all(len(row) == width for row in screen.split("\n"))
+            assert (width, height, stage) not in frames
+            frames[width, height, stage] = screen
+    assert len(frames) == 24, frames.keys()
+    for width, height in [(60, 16), (80, 24), (130, 30)]:
+        def frame(stage):
+            screen = frames[width, height, stage]
+            assert _status(screen) and _composer(screen) == DRAFT, (stage, screen)
+            return screen
+        for stage, title in [("model-alone", "Select Model"), ("help-model", HELP+" › Select Model")]:
+            screen = frame(stage)
+            body = _model_box(screen, title)
+            assert body, (stage, screen)
+            rows = screen.split("\n")
+            top = next(y for y, row in enumerate(rows) if "┌ "+title+" " in row)
+            bottom = top+len(body)+1
+            selected = next(y for y in range(top+1, bottom) if "▸ " in rows[y])
+            footer = next(y for y in range(top+1, bottom) if "Esc close" in rows[y])
+            for y in (top, top+1, bottom, selected, footer):
+                torn = rows.copy(); torn[y] = " "*width
+                assert _model_box("\n".join(torn), title) is None
+        palette = frame("palette-models")
+        assert _palette_models(palette), palette
+        for before, after in [("> /models_", "> /model _"), ("/models ", "/model  "), ("Enter", "     ")]:
+            assert _palette_models(palette.replace(before, after)) is None
+        rows = palette.split("\n")
+        bottom = next(y for y, row in enumerate(rows[:-4]) if "┘" in row)
+        rows[bottom] = " "*width
+        assert _palette_models("\n".join(rows)) is None
+        assert _help_box(frame("help-before")) == _help_box(frame("help-return"))
+        base = frame("base-return")
+        assert HELP not in base and "Select Model" not in base and "Command Palette" not in base
 
 def _deskcheck_saved_frames():
     """Reuse published A2a native screens, independently of Rust fixture output."""
@@ -491,6 +554,8 @@ def _leg(tui, held, release):
     tui.capture("05-composer-restored", screen)
     _help_leg(tui)
     _a2b_leg(tui, held, release)
+    if not attached:
+        _ba_leg(tui)
     tui.exit()
 
 
@@ -605,6 +670,43 @@ def _a2b_leg(tui, held, release):
     tui.capture("19-a2b-final-draft", screen)
 
 
+def _ba_leg(tui):
+    tui.send("Ba direct model opener", b"\x18m")
+    screen = tui.wait(lambda s: _model_box(s) and _status(s) and _composer(s) == DRAFT
+                      and tui.screen.cursor.hidden, "Ba complete Standard model sheet")
+    tui.capture("20-ba-model-sheet", screen)
+    tui.send("Ba direct model back", b"\x1b")
+    tui.wait(lambda s: "Select Model" not in s and _composer(s) == DRAFT
+             and not tui.screen.cursor.hidden, "Ba direct opener restores base")
+    tui.send("Ba caller Help", b"\x18?")
+    tui.wait(lambda s: _help_box(s) and _status(s) and tui.screen.cursor.hidden, "Ba Help caller ready")
+    tui.send("Ba caller scroll", b"jjj")
+    screen = tui.wait(lambda s: _help_scrolled(s) and _status(s), "Ba exact scrolled Help caller")
+    caller = _help_box(screen)
+    tui.capture("21-ba-help-caller", screen)
+    tui.send("Ba nested palette", b"\x10")
+    tui.wait(lambda s: _palette_unfiltered(s) and _status(s)
+             and tui.screen.cursor.hidden, "Ba palette above Help")
+    tui.send("Ba unique models palette entry", b"/models")
+    screen = tui.wait(lambda s: _palette_models(s) and _status(s)
+                      and tui.screen.cursor.hidden, "Ba settled unique models entry")
+    tui.capture("22-ba-models-entry", screen)
+    tui.send("Ba palette action handoff", b"\r")
+    screen = tui.wait(lambda s: _model_box(s, HELP+" › Select Model") and _status(s)
+                      and "Command Palette" not in s and _composer(s) == DRAFT
+                      and tui.screen.cursor.hidden, "Ba handoff closes palette, retains Help caller")
+    tui.capture("23-ba-model-handoff", screen)
+    tui.send("Ba model returns to palettes caller", b"\x1b")
+    screen = tui.wait(lambda s: _help_box(s) == caller and "Select Model" not in s
+                      and "Command Palette" not in s and _status(s)
+                      and tui.screen.cursor.hidden, "Ba exact Help caller restored, not palette")
+    tui.capture("24-ba-exact-caller", screen)
+    tui.send("Ba close restored caller", b"\x1b")
+    screen = tui.wait(lambda s: HELP not in s and _composer(s) == DRAFT
+                      and not tui.screen.cursor.hidden, "Ba caller returns to unchanged draft")
+    tui.capture("25-ba-final-draft", screen)
+
+
 def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
     """Filesystem-only controls: no binary resolution, server, socket or TUI."""
     with tempfile.TemporaryDirectory(prefix="r214-paths-", dir="/tmp") as directory:
@@ -647,10 +749,11 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
     parent = _evidence_parent()
     parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-4-a2b-", dir=parent))
+    evidence = Path(tempfile.mkdtemp(prefix="21-4-ba-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
-                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING", "legs": ["local", "attached"]}
+                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
+                "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba"]}
     errors, posts = queue.Queue(), []
     held, release = threading.Event(), threading.Event()
     try:
@@ -663,7 +766,7 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
                     self.send_response(200); self.send_header("Content-Type", "application/json")
                     self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
                 def do_GET(self):
-                    self.reply(b"{}" if self.path.split("?", 1)[0] == "/api.json" else b'{"data":[],"has_more":false}')
+                    self.reply(b"{}" if self.path.split("?", 1)[0] == "/api.json" else b'{"data":[{"id":"claude-sonnet-4-6","type":"model","display_name":"Claude Sonnet 4.6","created_at":"2025-01-01T00:00:00Z"}],"has_more":false}')
                 def do_POST(self):
                     try:
                         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -742,4 +845,4 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
     finally:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        print(f"NATIVE_21_4_A2B_EVIDENCE={evidence}", flush=True)
+        print(f"NATIVE_21_4_BA_EVIDENCE={evidence}", flush=True)

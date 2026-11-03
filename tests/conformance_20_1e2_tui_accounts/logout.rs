@@ -8,11 +8,11 @@ use super::common::{
     until_changed,
 };
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::LoginView;
 use rustain::domain::events::DomainKey;
 use rustain::domain::models::CredentialId;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::OverlayType;
 use rustain::domain::ports::{AuthStorePort, ProviderInfoPort, StreamingProvider};
 use serial_test::serial;
 use std::sync::Arc;
@@ -298,8 +298,11 @@ async fn k4_stale_row_keeps_the_step_open_with_fresh_rows() {
         LoginView::AccountPicker,
         "the step stays open"
     );
-    assert!(tui.state.login.active, "the overlay stays open");
-    assert_eq!(tui.state.focus, FocusState::Overlay(OverlayType::Login));
+    assert!(
+        presentation::is_open(&tui.state, Surface::Login),
+        "the overlay stays open"
+    );
+    assert_eq!(tui.state.modal_stack.top().unwrap().surface, Surface::Login);
     let frame = tui.frame();
     assert!(
         frame.contains(&format!("Credential #{id2} for OpenAI no longer exists.")),

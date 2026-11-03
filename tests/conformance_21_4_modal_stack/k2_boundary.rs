@@ -39,14 +39,18 @@ fn request_permission(state: &mut TuiState) -> RequestId {
     id
 }
 
-#[test]
-fn only_the_top_frame_receives_keys() {
+#[tokio::test]
+async fn only_the_top_frame_receives_keys() {
     for surface in [
         Surface::NotificationLog,
         Surface::Help,
         Surface::CommandPalette,
         Surface::DecisionPane,
         Surface::QuitConfirm,
+        Surface::ModelSelector,
+        Surface::ProfileSwitcher,
+        Surface::UsagePanel,
+        Surface::Login,
     ] {
         for key in Key::universe() {
             let mut state = log();
@@ -77,6 +81,21 @@ fn only_the_top_frame_receives_keys() {
                     },
                 );
             }
+            if matches!(
+                surface,
+                Surface::ModelSelector
+                    | Surface::ProfileSwitcher
+                    | Surface::UsagePanel
+                    | Surface::Login
+            ) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    super::k7_surfaces::open(&mut state, surface),
+                )
+                .await
+                .expect("bounded real opener");
+            }
+            assert_eq!(state.modal_stack.top().unwrap().surface, surface);
             let before = (
                 state.input_buffer.clone(),
                 state.cursor_position,
@@ -137,6 +156,21 @@ fn only_the_top_frame_receives_keys() {
                     },
                 );
             }
+            if matches!(
+                surface,
+                Surface::ModelSelector
+                    | Surface::ProfileSwitcher
+                    | Surface::UsagePanel
+                    | Surface::Login
+            ) {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    super::k7_surfaces::open(&mut state, surface),
+                )
+                .await
+                .expect("bounded real opener");
+            }
+            assert_eq!(state.modal_stack.top().unwrap().surface, surface);
             let draft = state.input_buffer.clone();
             let action = handle_input(&mut state, &event);
             assert_eq!(action, InputAction::Consumed);
@@ -433,20 +467,6 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             InputAction::OpenPanel(PanelType::History),
         ),
         (
-            PaletteAction::SwitchModel {
-                provider_id: "provider".into(),
-                model_id: "model".into(),
-            },
-            InputAction::SwitchModelProvider {
-                provider_id: Some("provider".into()),
-                model_id: "model".into(),
-            },
-        ),
-        (
-            PaletteAction::SwitchProfile("profile".into()),
-            InputAction::ProfileSwitchRequested("profile".into()),
-        ),
-        (
             PaletteAction::DeleteAllConversations,
             InputAction::DeleteAllConversations,
         ),
@@ -468,7 +488,7 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
             InputAction::OpenPanel(panel),
         ));
     }
-    for name in ["login", "logout", "accounts", "models", "room", "artifacts"] {
+    for name in ["room", "artifacts"] {
         targets.push((
             PaletteAction::ExecuteCommand(name.into(), None),
             InputAction::ExecuteCommand {

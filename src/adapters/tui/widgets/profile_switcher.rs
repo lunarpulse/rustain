@@ -1,18 +1,18 @@
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::modal::{ModalPart, fit_modal, wrapped};
 use crate::adapters::tui::state::ProfileSwitcherState;
 use crate::adapters::tui::theme::Theme;
-use crate::domain::services::swap_tier::{SwapTier, TransitionPlan};
+use crate::domain::services::swap_tier::SwapTier;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, theme: &Theme) {
-    let overlay_area = centered_rect(60, 70, area);
-    frame.render_widget(Clear, overlay_area);
+    frame.render_widget(Clear, area);
 
     if state.preview.is_some() {
-        render_preview(frame, overlay_area, state, theme);
+        render_preview(frame, area, state, theme);
     } else {
-        render_list(frame, overlay_area, state, theme);
+        render_list(frame, area, state, theme);
     }
 }
 
@@ -23,7 +23,8 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, them
         .border_style(Style::default().fg(theme.colors.accent))
         .style(Style::default().bg(theme.colors.bg_surface));
 
-    let items: Vec<ListItem> = state
+    let mut selected = (0, 0);
+    let items = state
         .profiles
         .iter()
         .enumerate()
@@ -40,6 +41,7 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, them
             let swatch_color = profile.identity_color.0;
 
             let line = Line::from(vec![
+                Span::raw(if i == state.selected { "> " } else { "  " }),
                 Span::raw(active_marker),
                 Span::styled("█", Style::default().fg(Color::Indexed(swatch_color))),
                 Span::raw(" "),
@@ -51,9 +53,14 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, them
             ]);
 
             if i == state.selected {
-                ListItem::new(line).style(Style::default().fg(theme.colors.fg_primary))
+                selected = (i, i + 1);
+                line.style(
+                    Style::default()
+                        .fg(theme.colors.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
             } else {
-                ListItem::new(line)
+                line
             }
         })
         .collect();
@@ -78,35 +85,24 @@ fn render_list(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, them
         String::new()
     };
 
-    let list_area = if footer.is_empty() || area.height < 4 {
-        area
-    } else {
-        Rect {
-            height: area.height.saturating_sub(2),
-            ..area
-        }
-    };
-
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-
-    frame.render_widget(list, list_area);
-
-    if !footer.is_empty() && area.height >= 4 {
-        let footer_area = Rect {
-            y: area.y + area.height.saturating_sub(2),
-            height: 2,
-            ..area
-        };
-        let footer_para = Paragraph::new(footer).style(Style::default().fg(theme.colors.fg_muted));
-        frame.render_widget(footer_para, footer_area);
-    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = fit_modal(
+        vec![
+            ModalPart::Rows {
+                lines: items,
+                selected,
+            },
+            ModalPart::Footer(wrapped(
+                &footer,
+                Style::default().fg(theme.colors.fg_muted),
+                inner.width as usize,
+            )),
+        ],
+        inner.height as usize,
+        inner.width as usize,
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, theme: &Theme) {
@@ -200,8 +196,8 @@ fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, t
     }
 
     // Footer
-    lines.push(Line::from(Span::styled(
-        format!(
+    let footer = wrapped(
+        &format!(
             "Estimated time: ~{}ms  |  [{}] confirm  [{}] cancel",
             plan.estimated_ms,
             crate::adapters::tui::keymap::render::key_text(
@@ -212,29 +208,116 @@ fn render_preview(frame: &mut Frame, area: Rect, state: &ProfileSwitcherState, t
             )
         ),
         Style::default().fg(theme.colors.fg_muted),
-    )));
+        area.width.saturating_sub(2) as usize,
+    );
 
-    let paragraph = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
-
-    frame.render_widget(paragraph, area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let lines = lines
+        .into_iter()
+        .flat_map(|line| {
+            let style = line
+                .spans
+                .first()
+                .map_or(Style::default(), |span| span.style);
+            wrapped(&line.to_string(), style, inner.width as usize)
+        })
+        .collect();
+    let lines = fit_modal(
+        vec![
+            ModalPart::Rows {
+                lines,
+                selected: (0, 1),
+            },
+            ModalPart::Footer(footer),
+        ],
+        inner.height as usize,
+        inner.width as usize,
+    );
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(r);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{
+        ProfileDescriptor, ProfileIdentityColor, ProfileSelection, ProfileSource,
+    };
+    use crate::domain::services::swap_tier::TransitionPlan;
+    use ratatui::{Terminal, backend::TestBackend};
 
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(popup_layout[1])[1]
+    #[test]
+    fn story21_4_profile_selection_and_preview_footer_fit_caller_sheet() {
+        let mut state = ProfileSwitcherState::new();
+        state.initialize(
+            (0..8)
+                .map(|i| ProfileDescriptor {
+                    name: format!("profile-{i}"),
+                    description: None,
+                    preview: false,
+                    identity_color: ProfileIdentityColor(4),
+                    source: ProfileSource::Builtin,
+                    source_origin: None,
+                    selection: ProfileSelection::default(),
+                })
+                .collect(),
+            "profile-7",
+            Default::default(),
+        );
+        for (width, height) in [(60, 16), (130, 30)] {
+            for preview in [false, true] {
+                state.preview = preview.then(|| {
+                    TransitionPlan::from_selections(
+                        &Default::default(),
+                        &Default::default(),
+                        "profile-7",
+                        4,
+                        None,
+                    )
+                });
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let theme = Theme::dark();
+                terminal
+                    .draw(|frame| {
+                        let layout = crate::adapters::tui::layout::compute_layout(
+                            frame.area(),
+                            &theme,
+                            "1\n2\n3\n4\n5\n6\n7\n8",
+                            1,
+                            false,
+                            crate::domain::models::visual::DensityMode::Focus,
+                        )
+                        .unwrap();
+                        let region = crate::adapters::tui::presentation::geometry::modal_region(
+                            &layout,
+                            frame.area(),
+                        );
+                        let sheet =
+                            crate::adapters::tui::presentation::geometry::frame_rect(region);
+                        render(frame, sheet, &state, &theme);
+                        assert_eq!(frame.buffer_mut()[(sheet.x, sheet.y)].symbol(), "┌");
+                        assert_eq!(
+                            frame.buffer_mut()[(sheet.right() - 1, sheet.bottom() - 1)].symbol(),
+                            "┘"
+                        );
+                    })
+                    .unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                if preview {
+                    assert!(text.contains("No changes — already active"), "{text}");
+                    assert!(text.contains("[y] confirm"), "{text}");
+                    assert!(text.contains("[Esc] cancel"), "{text}");
+                } else {
+                    assert!(text.contains("> ● █ profile-7"), "{text}");
+                    assert!(text.contains("Unable to compute diff"), "{text}");
+                }
+            }
+        }
+    }
 }

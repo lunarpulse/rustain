@@ -4,6 +4,8 @@
 
 use super::common::{Tui, World};
 use rustain::adapters::auth_store::FileAuthStore;
+use rustain::adapters::tui::presentation::{Surface, reducer};
+use rustain::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
 use rustain::adapters::tui::state::Validation;
 use rustain::domain::events::{DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, Credential, CredentialOrigin};
@@ -132,6 +134,11 @@ async fn k07_provider_picker_provenance_validation_search_and_generation() {
         &(super::common::NOW + 7_200_000).to_string(),
     );
     tui.submit("/login");
+    let generation = tui.state.login.generation;
+    let mut facts = QuitFacts::idle(QuitHost::Local);
+    facts.streams = 1;
+    reducer::request_quit(&mut tui.state, facts);
+    let quit_id = tui.state.modal_stack.top().unwrap().id;
     tui.until("validated rows", |tui| {
         !tui.state.login.loading
             && tui
@@ -142,6 +149,13 @@ async fn k07_provider_picker_provenance_validation_search_and_generation() {
                 .all(|row| row.row.source.is_none() || row.validation != Validation::Checking)
     })
     .await;
+    assert_eq!(tui.state.login.generation, generation);
+    assert_eq!(tui.state.modal_stack.top().unwrap().id, quit_id);
+    assert_eq!(
+        tui.state.modal_stack.top().unwrap().surface,
+        Surface::QuitConfirm
+    );
+    reducer::back(&mut tui.state);
     let frame = tui.frame();
     assert!(
         row_line(&frame, "Anthropic").contains("Anthropic · ✘ invalid · oauth"),

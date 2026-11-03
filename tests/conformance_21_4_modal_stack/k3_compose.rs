@@ -969,7 +969,7 @@ fn autocomplete_is_painted_only_without_a_frame_and_returns_after_quit() {
 }
 
 #[test]
-fn pane_legacy_effect_refusal_is_visible() {
+fn pane_model_effect_paints_its_destination_and_restores_the_caller() {
     use rustain::adapters::tui::{
         decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
         notifications::NotificationStore,
@@ -982,38 +982,43 @@ fn pane_legacy_effect_refusal_is_visible() {
         state.notifications =
             NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
         press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+        let caller = state.modal_stack.iter().cloned().collect::<Vec<_>>();
         decision_pane::raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Budget, "budget detail"),
             Arrival::Requested,
         );
-        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
         let layout = layout(&state);
         draw(&state, &layout, None);
         decision_pane::note_painted(&mut state);
         clock.advance(decision_pane::INERT_AFTER_PAINT);
-        assert_eq!(press(&mut state, Key::Char('s')), InputAction::Consumed);
+        assert_eq!(
+            press(&mut state, Key::Char('s')),
+            InputAction::Decision(
+                rustain::adapters::tui::decision_pane::DecisionEffect::BudgetSwitchCheaper
+            )
+        );
+        rustain::adapters::tui::handlers::model_switch::open_selector(
+            &mut state,
+            &super::k7_surfaces::Info,
+            &rustain::domain::models::AppConfig::default(),
+            None,
+        );
         let painted = draw(&state, &layout, None);
         let rect = top_rect(&state, &layout, &painted);
+        assert!((rect.y..rect.bottom()).any(|y| row(&painted, rect, y).contains("Select Model")));
         assert!(
-            (rect.y + 1..rect.bottom() - 1)
-                .any(|y| row(&painted, rect, y).contains("Please close the window first")),
-            "remedy must paint inside the owning pane at {width} columns"
+            (rect.y + 1..rect.bottom() - 1).any(|y| row(&painted, rect, y).contains("Model one"))
         );
+        assert!(
+            !(rect.y..rect.bottom())
+                .any(|y| row(&painted, rect, y).contains("Please close the window first"))
+        );
+        assert!(!state.decisions.holds(DecisionKind::Budget));
+        assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
         assert_eq!(
             state.modal_stack.iter().cloned().collect::<Vec<_>>(),
-            frames
-        );
-        assert!(state.decisions.holds(DecisionKind::Budget));
-        assert_eq!(press(&mut state, Key::Char('z')), InputAction::Consumed);
-        let cleared = draw(&state, &layout, None);
-        assert!(
-            !(rect.y + 1..rect.bottom() - 1)
-                .any(|y| row(&cleared, rect, y).contains("Please close the window first"))
-        );
-        assert!(
-            (rect.y + 1..rect.bottom() - 1)
-                .any(|y| row(&cleared, rect, y).contains("budget detail"))
+            caller
         );
     }
 }

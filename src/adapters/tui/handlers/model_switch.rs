@@ -30,6 +30,7 @@
 use tokio::sync::mpsc;
 
 use crate::adapters::tui::notifications::{self, NoticeSource};
+use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{Conversation, NoticeLevel, StreamingState};
@@ -62,22 +63,41 @@ pub fn open_selector(
     app: &crate::domain::models::AppConfig,
     column: Option<&str>,
 ) {
+    let returning = state.login.frame_intent
+        == Some(crate::adapters::tui::state::LoginFrameIntent::ReturnToModel);
+    if returning {
+        state.login.frame_intent = None;
+        reducer::handoff(state, Surface::Login, Surface::ModelSelector);
+    } else {
+        reducer::open(state, Surface::ModelSelector);
+    }
+    initialize_selector(state, info, app, column);
+    if returning {
+        crate::adapters::tui::app::advance_deferred_permission(state);
+    }
+}
+
+fn initialize_selector(
+    state: &mut TuiState,
+    info: &dyn ProviderInfoPort,
+    app: &crate::domain::models::AppConfig,
+    column: Option<&str>,
+) {
+    if !reducer::initialize_surface(state, Surface::ModelSelector) {
+        return;
+    }
     let columns = crate::adapters::tui::state::model_selector_columns(info);
     if columns.is_empty() {
+        reducer::close(state, Surface::ModelSelector);
         notifications::info(state, NoticeSource::Model, "No models available");
     } else {
-        let active = column.map_or_else(|| info.active_delegate_id(), str::to_owned);
-        let model = state
-            .selected_model
-            .clone()
-            .unwrap_or_else(|| app.model.clone());
-        state
-            .model_selector
-            .open(state.focus.clone(), columns, &active, &model);
-        state.model_selector.sign_in = sign_in_map(app);
-        state.focus = crate::domain::models::FocusState::Overlay(
-            crate::domain::models::visual::OverlayType::ModelSelector,
+        let active = column.map_or_else(
+            || std::borrow::Cow::Owned(info.active_delegate_id()),
+            std::borrow::Cow::Borrowed,
         );
+        let model = state.selected_model.as_deref().unwrap_or(&app.model);
+        state.model_selector.initialize(columns, &active, model);
+        state.model_selector.sign_in = sign_in_map(app);
     }
     state.needs_redraw = true;
 }
@@ -91,7 +111,7 @@ pub fn on_catalog_refreshed(
     info: &dyn ProviderInfoPort,
     app: &crate::domain::models::AppConfig,
 ) {
-    if state.model_selector.active {
+    if presentation::is_open(state, Surface::ModelSelector) {
         state
             .model_selector
             .refresh_columns(crate::adapters::tui::state::model_selector_columns(info));
@@ -139,6 +159,10 @@ pub async fn handle_apply_model_switch(
     provider_id: Option<String>,
     model_id: String,
 ) -> HandlerOutcome {
+    let from_palette = state
+        .modal_stack
+        .top()
+        .is_some_and(|f| f.surface == Surface::CommandPalette);
     let resolved_pid = match provider_id {
         Some(pid) => pid,
         None => {
@@ -151,6 +175,9 @@ pub async fn handle_apply_model_switch(
                         level: NoticeLevel::Warning,
                         message: format!("Unknown model: {}", model_id),
                     });
+                    if from_palette {
+                        reducer::close(state, Surface::CommandPalette);
+                    }
                     return HandlerOutcome::Quiet;
                 }
             }
@@ -163,6 +190,9 @@ pub async fn handle_apply_model_switch(
             level: NoticeLevel::Info,
             message: "Cannot switch model while streaming".to_string(),
         });
+        if from_palette {
+            reducer::close(state, Surface::CommandPalette);
+        }
         return HandlerOutcome::Quiet;
     }
 
@@ -177,6 +207,9 @@ pub async fn handle_apply_model_switch(
         .unwrap_or_else(|| resolved_pid.clone());
 
     if !is_healthy {
+        if from_palette {
+            reducer::close(state, Surface::CommandPalette);
+        }
         if let Some(provider) = info.get_provider(&resolved_pid) {
             state.model_selector.connecting = Some(provider_display_name.clone());
             state.needs_redraw = true;
@@ -196,7 +229,7 @@ pub async fn handle_apply_model_switch(
         }
     }
 
-    // If triggered from palette (model selector not open), open it for context-warning display
+    // A palette selection replaces its frame only once the model is known.
     let model_desc = info.get_model(&resolved_pid, &model_id);
     let context_window = model_desc.as_ref().map_or(0, |m| m.context_window);
     let model_display_name = model_desc
@@ -204,16 +237,26 @@ pub async fn handle_apply_model_switch(
         .map(|m| m.display_name.clone())
         .unwrap_or_else(|| model_id.clone());
 
-    if !state.model_selector.active && model_desc.is_some() {
+    if model_desc.is_some()
+        && (from_palette || !presentation::is_open(state, Surface::ModelSelector))
+    {
         let columns = crate::adapters::tui::state::model_selector_columns(info);
         if !columns.is_empty() {
-            state
-                .model_selector
-                .open(state.focus.clone(), columns, &resolved_pid, &model_id);
-            state.focus = crate::domain::models::FocusState::Overlay(
-                crate::domain::models::visual::OverlayType::ModelSelector,
-            );
+            if from_palette {
+                reducer::handoff(state, Surface::CommandPalette, Surface::ModelSelector);
+            } else {
+                reducer::open(state, Surface::ModelSelector);
+            }
+            if reducer::initialize_surface(state, Surface::ModelSelector) {
+                state
+                    .model_selector
+                    .initialize(columns, &resolved_pid, &model_id);
+            }
+        } else if from_palette {
+            reducer::close(state, Surface::CommandPalette);
         }
+    } else if from_palette {
+        reducer::close(state, Surface::CommandPalette);
     }
 
     if let Some(ref warning) = state.model_selector.pending_context_warning {
@@ -301,12 +344,7 @@ pub async fn handle_complete_model_switch(
         }
     }
 
-    if state.model_selector.active {
-        state.focus = state
-            .model_selector
-            .dismiss()
-            .unwrap_or(crate::domain::models::FocusState::Input);
-    }
+    reducer::close(state, Surface::ModelSelector);
     state.needs_redraw = true;
     HandlerOutcome::Quiet
 }

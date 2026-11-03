@@ -324,8 +324,11 @@ async fn k8_long_device_url_wraps_all_or_none_and_copies_the_full_url() {
 
     // The device link shares the code header: fit keeps the whole header or its
     // first line (the code), so the link is whole or gone; the code always stays.
+    // A full composer supplies the smallest sheet while every terminal stays
+    // within the shared 60x16 minimum; retain both whole-link and code-only cases.
+    tui.state.input_buffer = ["composer"; 10].join("\n");
     let (mut whole, mut code_only) = (false, false);
-    for height in 8..=24 {
+    for height in 16..=32 {
         let frame = tui.frame_at(60, height);
         assert!(frame.contains(USER_CODE), "{height}\n{frame}");
         assert!(frame.contains("Esc cancel"), "{height}\n{frame}");

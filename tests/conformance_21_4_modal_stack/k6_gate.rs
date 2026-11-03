@@ -202,17 +202,16 @@ const PINS: &[Pin<'_>] = &[
         r###"focus-write|open_leader|state.focus = FocusState::Input;"###, r###"focus-write|open_palette|state.focus = FocusState::Input;"###, r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###,
         r###"focus-write|exec_chat|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Chat;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"focus-write|sidebar_move|state.focus = FocusState::Sidebar {"###,
         r###"focus-write|exec_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|exec_panel|state.focus = FocusState::Chat;"###, r###"focus-write|exec_recipient|state.focus = surface.prior_focus;"###,
-        r###"focus-write|exec_profile|state.focus = prev;"###, r###"focus-write|exec_model_selector|state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|handle_char|state.focus = FocusState::Input;"###,
-        r###"focus-write|exec_usage|state.focus = state.usage_panel.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###,
+        r###"focus-write|handle_char|state.focus = FocusState::Input;"###,
+        r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###,
     ]),
     ("src/adapters/tui/app.rs", "4-B", &[
-        r###"overlay|overlay_focus_context|OverlayType::Login => Context::Login,"###,
         r###"overlay|open_leader|FocusState::Input | FocusState::Overlay(OverlayType::ReverseSearch) => Context::Input,"###,
         r###"overlay|open_leader|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {"###,
         r###"overlay|open_palette|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {"###,
-        r###"prior|exec_input|state.search_state.prior_focus = Some(prior);"###, r###"overlay|handle_input_inner|if state.focus == FocusState::Overlay(OverlayType::Login)"###, r###"overlay|ctrl_x_opens_leader|OverlayType::ModelSelector"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::ProfileSwitcher"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::Search"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::CrossSearch"###,
-        r###"overlay|ctrl_x_opens_leader|| OverlayType::BookmarkList"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::UsagePanel"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::WaveOverlay"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::Login"###, r###"overlay|overlay_focus_context|OverlayType::ModelSelector => Context::ModelSelector,"###, r###"overlay|overlay_focus_context|OverlayType::UsagePanel => Context::UsagePanel,"###,
-        r###"overlay|overlay_focus_context|OverlayType::ProfileSwitcher => Context::ProfileSwitcher,"###, r###"overlay|overlay_focus_context|OverlayType::Search => match state.search_state.substate {"###, r###"overlay|overlay_focus_context|OverlayType::CrossSearch => Context::CrossSearch,"###, r###"overlay|overlay_focus_context|OverlayType::BookmarkList => Context::BookmarkList,"###, r###"overlay|overlay_focus_context|OverlayType::WaveOverlay => Context::WaveOverlay,"###, r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###,
+        r###"prior|exec_input|state.search_state.prior_focus = Some(prior);"###, r###"overlay|ctrl_x_opens_leader|OverlayType::Search"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::CrossSearch"###,
+        r###"overlay|ctrl_x_opens_leader|| OverlayType::BookmarkList"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::WaveOverlay"###,
+        r###"overlay|overlay_focus_context|OverlayType::Search => match state.search_state.substate {"###, r###"overlay|overlay_focus_context|OverlayType::CrossSearch => Context::CrossSearch,"###, r###"overlay|overlay_focus_context|OverlayType::BookmarkList => Context::BookmarkList,"###, r###"overlay|overlay_focus_context|OverlayType::WaveOverlay => Context::WaveOverlay,"###, r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###,
         r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###, r###"overlay|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"overlay|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###,
     ]),
     ("src/adapters/tui/app.rs", "21-8", &[
@@ -221,9 +220,6 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/decision_pane.rs", "4-C", &[
         r###"focus-write|settle_borrowed_card_focus|state.focus = state.card_focus_borrowed_from.take().unwrap();"###, r###"focus-borrow|take_chat_focus_for_local_card|&mut state.focus,"###,
         r###"focus-write|apply_resolved_action|state.focus = FocusState::Input;"###, r###"focus-write|apply_resolved_action|state.focus = if state.sidebar_visible {"###,
-    ]),
-    ("src/adapters/tui/handlers/accounts.rs", "4-C", &[
-        r###"focus-write|command|state.focus = LOGIN;"###, r###"focus-write|command|state.focus = LOGIN;"###,
     ]),
     ("src/adapters/tui/handlers/artifact_command.rs", "4-C", &[
         r###"focus-write|resolve_apply_card|state.focus = card.prior_focus.clone();"###,
@@ -239,18 +235,6 @@ const PINS: &[Pin<'_>] = &[
     ]),
     ("src/adapters/tui/handlers/export.rs", "4-C", &[
         r###"focus-write|apply_confirm_export_overwrite|state.focus = FocusState::Chat;"###, r###"focus-write|apply_cancel_export_overwrite|state.focus = FocusState::Chat;"###, r###"focus-write|apply_export_command|state.focus ="###,
-    ]),
-    ("src/adapters/tui/handlers/login.rs", "4-C", &[
-        r###"focus-write|take_focus|state.focus = state.model_selector.dismiss().unwrap_or(FocusState::Input);"###, r###"focus-write|open|state.focus = LOGIN;"###, r###"focus-write|open|state.focus = LOGIN;"###, r###"focus-write|begin|state.focus = LOGIN;"###, r###"focus-write|close|state.focus = previous.unwrap_or(FocusState::Input);"###,
-    ]),
-    ("src/adapters/tui/handlers/login.rs", "4-B", &[
-        r###"previous|begin|state.login.previous_focus.get_or_insert(previous);"###, r###"overlay|display_text|pub(crate) const LOGIN: FocusState = FocusState::Overlay(OverlayType::Login);"###, r###"overlay|take_focus|if state.focus == FocusState::Overlay(OverlayType::ModelSelector) {"###,
-    ]),
-    ("src/adapters/tui/handlers/model_switch.rs", "4-C", &[
-        r###"focus-write|open_selector|state.focus = crate::domain::models::FocusState::Overlay("###, r###"focus-write|handle_apply_model_switch|state.focus = crate::domain::models::FocusState::Overlay("###, r###"focus-write|handle_complete_model_switch|state.focus = state"###,
-    ]),
-    ("src/adapters/tui/handlers/model_switch.rs", "4-B", &[
-        r###"overlay|open_selector|crate::domain::models::visual::OverlayType::ModelSelector,"###, r###"overlay|handle_apply_model_switch|crate::domain::models::visual::OverlayType::ModelSelector,"###,
     ]),
     ("src/adapters/tui/handlers/notice.rs", "4-C", &[
         r###"focus-write|apply_density_transition|state.focus = crate::domain::models::FocusState::Sidebar {"###, r###"focus-write|apply_density_transition|state.focus = crate::domain::models::FocusState::Chat;"###,
@@ -270,22 +254,13 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/handlers/transparency.rs", "4-C", &[
         r###"focus-borrow|synchronize_sidebar_selection|} = &mut state.focus"###,
     ]),
-    ("src/adapters/tui/handlers/usage_panel.rs", "4-C", &[
-        r###"focus-write|handle_open_usage_panel|state.focus = crate::domain::models::FocusState::Overlay("###,
-    ]),
-    ("src/adapters/tui/handlers/usage_panel.rs", "4-B", &[
-        r###"overlay|handle_open_usage_panel|crate::domain::models::visual::OverlayType::UsagePanel,"###,
-    ]),
     ("src/adapters/tui/layout.rs", "4-B", &[
         r###"reservation|AppLayout|pub search_bar: Option<Rect>,"###, r###"reservation|AppLayout|pub bookmark_panel: Option<Rect>,"###, r###"reservation|AppLayout|pub fn reserve_search_bar(&mut self, active: bool) {"###, r###"reservation|impl AppLayout::reserve_search_bar|self.search_bar = Some(bar);"###, r###"reservation|impl AppLayout::reserve_search_bar|pub fn reserve_bookmark_panel(&mut self, requested_height: u16) {"###, r###"reservation|impl AppLayout::reserve_bookmark_panel|self.bookmark_panel = Some(panel);"###,
         r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
         r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
     ]),
     ("src/adapters/tui/state.rs", "4-B", &[
-        r###"previous|ModelSelectorState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl ModelSelectorState::new|previous_focus: None,"###, r###"previous|impl ModelSelectorState::open|self.previous_focus = Some(current_focus);"###, r###"previous|impl ModelSelectorState::dismiss|self.previous_focus.take()"###, r###"previous|ProfileSwitcherState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl ProfileSwitcherState::new|previous_focus: None,"###,
-        r###"previous|impl ProfileSwitcherState::open|self.previous_focus = Some(current_focus);"###, r###"previous|impl ProfileSwitcherState::dismiss|self.previous_focus.take()"###, r###"previous|UsagePanelState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl UsagePanelState::new|previous_focus: None,"###, r###"previous|impl UsagePanelState::open|self.previous_focus = Some(current_focus);"###, r###"previous|impl UsagePanelState::dismiss|self.previous_focus.take()"###,
-        r###"prior|SearchState|pub prior_focus: Option<FocusState>,"###, r###"prior|impl SearchState::new|prior_focus: None,"###, r###"active|ReverseSearchState|pub active: bool,"###, r###"active|SearchState|pub active: bool,"###, r###"active|CrossSearchState|pub active: bool,"###, r###"active|ModelSelectorState|pub active: bool,"###,
-        r###"active|ProfileSwitcherState|pub active: bool,"###, r###"active|UsagePanelState|pub active: bool,"###,
+        r###"prior|SearchState|pub prior_focus: Option<FocusState>,"###, r###"prior|impl SearchState::new|prior_focus: None,"###, r###"active|ReverseSearchState|pub active: bool,"###, r###"active|SearchState|pub active: bool,"###, r###"active|CrossSearchState|pub active: bool,"###,
     ]),
     ("src/adapters/tui/state.rs", "21-6", &[
         r###"prior|PendingArtifactCard|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingPeerAdd|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingTeamRetract|pub prior_focus: crate::domain::models::FocusState,"###,
@@ -293,16 +268,12 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/state.rs", "21-8", &[
         r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
     ]),
-    ("src/adapters/tui/state/login_overlay.rs", "4-B", &[
-        r###"previous|LoginOverlayState|pub previous_focus: Option<FocusState>,"###, r###"previous|impl Default for LoginOverlayState::default|previous_focus: None,"###, r###"previous|impl LoginOverlayState::open_picker|self.previous_focus.get_or_insert(previous);"###, r###"previous|impl LoginOverlayState::open_accounts|self.previous_focus.get_or_insert(previous);"###, r###"previous|impl LoginOverlayState::open_methods|self.previous_focus.get_or_insert(previous);"###, r###"previous|impl LoginOverlayState::close|self.previous_focus.take()"###,
-        r###"active|LoginOverlayState|pub active: bool,"###,
-    ]),
     ("src/adapters/tui/widgets/mod.rs", "4-B", &[
         r###"reservation|<module>|pub mod search_bar;"###,
     ]),
     ("src/domain/models/visual.rs", "4-B", &[
-        r###"variant|OverlayType|ModelSelector,"###, r###"variant|OverlayType|ProfileSwitcher,"###, r###"variant|OverlayType|ReverseSearch,"###, r###"variant|OverlayType|Search,"###, r###"variant|OverlayType|CrossSearch,"###, r###"variant|OverlayType|BookmarkList,"###,
-        r###"variant|OverlayType|UsagePanel,"###, r###"variant|OverlayType|WaveOverlay,"###, r###"variant|OverlayType|Login,"###,
+        r###"variant|OverlayType|ReverseSearch,"###, r###"variant|OverlayType|Search,"###, r###"variant|OverlayType|CrossSearch,"###, r###"variant|OverlayType|BookmarkList,"###,
+        r###"variant|OverlayType|WaveOverlay,"###,
     ]),
     ("src/infrastructure/runtime/approval_bridge.rs", "4-C", &[
         r###"focus-write|apply|state.focus ="###, r###"focus-write|handle_action|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|handle_action|state.focus ="###,
@@ -317,7 +288,7 @@ const PINS: &[Pin<'_>] = &[
         r###"focus-write|execute_attached|ctx.state.focus = FocusState::Input;"###,
         r###"focus-write|execute_attached|FocusState::Input => ctx.state.focus = FocusState::Chat,"###, r###"focus-write|execute_attached|FocusState::Chat => ctx.state.focus = FocusState::Input,"###,
         r###"focus-write|begin_retract|ctx.state.focus = FocusState::Chat;"###, r###"focus-borrow|begin_retract|&mut ctx.state.focus,"###, r###"attached|attached_card_context|fn with_lent_input<R>("###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);"###,
-        r###"attached|popup_delegate|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|palette_delegate|let action = with_lent_input(ctx.state, ctx.input, |state| handle_input(state, &event));"###,
+        r###"attached|popup_delegate|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|palette_delegate|let action = with_lent_input(ctx.state, ctx.input, |state| {"###,
     ]),
     ("src/infrastructure/runtime/attach_loop.rs", "4-C", &[
         r###"focus-write|open_response_surface|state.focus = FocusState::Chat;"###, r###"focus-write|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"focus-write|recipient_surface_key|state.focus = FocusState::Input;"###, r###"focus-write|attached_proposal_key|state.focus = surface.prior_focus;"###, r###"focus-write|run_attached|state.focus = FocusState::Chat;"###, r###"focus-borrow|open_response_surface|None => (std::mem::replace(&mut state.focus, FocusState::Chat), None),"###,
@@ -329,21 +300,20 @@ const PINS: &[Pin<'_>] = &[
     ]),
     ("src/infrastructure/runtime/event_loop.rs", "4-C", &[
         r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
-        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = handlers::login::LOGIN;"###,
+        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
         r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = prior;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###, r###"focus-write|run|state.focus = handlers::login::LOGIN;"###, r###"focus-write|run|state.focus = crate::domain::models::FocusState::Overlay("###,
-        r###"focus-write|run|state.focus = crate::domain::models::FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
+        r###"focus-write|run|state.focus = prior;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###,
+        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
         r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
-        r###"focus-write|run|state.focus = prev;"###, r###"focus-write|run|state.focus = prev;"###, r###"focus-write|apply_open_cross_search_result|state.focus = FocusState::Chat;"###, r###"focus-write|restore_focus_after_modal|state.focus = if state.pending_feedback_input.is_some() {"###, r###"focus-write|surface_deferred_modal|state.focus ="###, r###"focus-write|advance_skill_trust_queue|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));"###,
+        r###"focus-write|apply_open_cross_search_result|state.focus = FocusState::Chat;"###, r###"focus-write|restore_focus_after_modal|state.focus = if state.pending_feedback_input.is_some() {"###, r###"focus-write|surface_deferred_modal|state.focus ="###, r###"focus-write|advance_skill_trust_queue|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));"###,
     ]),
     ("src/infrastructure/runtime/event_loop.rs", "4-B", &[
         r###"prior|run|.prior_focus"###, r###"reservation|render|app_layout.reserve_search_bar(search_state.active);"###, r###"reservation|render|app_layout.reserve_bookmark_panel(requested_height);"###, r###"reservation|render|if let Some(search_bar_area) = app_layout.search_bar {"###, r###"reservation|render|crate::adapters::tui::widgets::search_bar::render("###, r###"reservation|render|if let Some(bookmark_panel_area) = app_layout.bookmark_panel {"###,
-        r###"overlay|run|crate::domain::models::visual::OverlayType::ProfileSwitcher,"###, r###"overlay|run|crate::domain::models::visual::OverlayType::ProfileSwitcher,"###, r###"overlay|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"overlay|run|crate::domain::models::visual::OverlayType::ProfileSwitcher,"###, r###"overlay|run|crate::domain::models::visual::OverlayType::ProfileSwitcher,"###, r###"overlay|render|crate::domain::models::visual::OverlayType::BookmarkList,"###,
-        r###"overlay|render|} else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {"###, r###"render|render|let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay("###, r###"render|render|crate::adapters::tui::widgets::search_bar::render(frame, search_bar_area, search_state, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::cross_search::render(frame, sidebar_area, &state.cross_search, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::bookmark_list::render("###, r###"render|render|model_selector::render(frame, area, model_selector, theme);"###,
-        r###"render|render|crate::adapters::tui::widgets::login_dialog::render("###, r###"render|render|usage_panel::render(frame, area, usage_panel, theme);"###, r###"render|render|profile_switcher::render(frame, area, profile_switcher, theme);"###,
+        r###"overlay|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"overlay|render|crate::domain::models::visual::OverlayType::BookmarkList,"###,
+        r###"overlay|render|} else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {"###, r###"render|render|let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay("###, r###"render|render|crate::adapters::tui::widgets::search_bar::render(frame, search_bar_area, search_state, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::cross_search::render(frame, sidebar_area, &state.cross_search, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::bookmark_list::render("###,
         r###"render|render|reverse_search::render(frame, app_layout.input_area, reverse_search, theme, state.modal_stack.is_empty());"###,
     ]),
     ("src/infrastructure/runtime/panel_bridge.rs", "4-C", &[
@@ -411,7 +381,7 @@ const RULES: &[(&str, &str)] = &[
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
-        r"\b(?:WhichKeyState|which_key)\b|OverlayType\s*::\s*(?:Help|CommandPalette|WhichKey)\b|\.\s*(?:help_overlay|command_palette)\s*\.\s*(?:active|previous_focus|prior_focus|open|close|dismiss|is_open)\b|\b(?:HelpOverlayState|CommandPaletteState)\s*\{[^{}]*\b(?:active|previous_focus|prior_focus)\b|\b(?:help_overlay|command_palette)\s*:\s*(?:bool|Option\s*<)",
+        r"\b(?:WhichKeyState|which_key)\b|OverlayType\s*::\s*(?:Help|CommandPalette|WhichKey|ModelSelector|ProfileSwitcher|UsagePanel|Login)\b|\.\s*(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login)\s*\.\s*(?:active|previous_focus|prior_focus|open|close|dismiss|is_open)\b|\b(?:HelpOverlayState|CommandPaletteState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState)\s*\{[^{}]*\b(?:active|previous_focus|prior_focus)\b|\b(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login)\s*:\s*(?:bool|Option\s*<)",
     ),
     (
         "migrated-payload-owner",
@@ -461,13 +431,19 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             r"NotificationLog|QuitConfirm|CommandPalette|HelpOverlay|WhichKey|Autocomplete|ReverseSearch|SearchState|CrossSearch|ModelSelector|ProfileSwitcher|UsagePanel|LoginOverlay",
         )
     });
-    static MIGRATED: LazyLock<Regex> =
-        LazyLock::new(|| re(r"\b(?:Help|CommandPalette|WhichKey|Autocomplete)\b"));
-    static PAYLOAD: LazyLock<Regex> =
-        LazyLock::new(|| re(r"\b(?:HelpOverlayState|CommandPaletteState|WhichKeyState)\b"));
+    static MIGRATED: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"\b(?:Help|CommandPalette|WhichKey|Autocomplete|ModelSelector|ProfileSwitcher|UsagePanel|Login)\b",
+        )
+    });
+    static PAYLOAD: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"\b(?:HelpOverlayState|CommandPaletteState|WhichKeyState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState)\b",
+        )
+    });
     static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup)\b",
+            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog)\b",
         )
     });
     let mut errors = Vec::new();
@@ -656,6 +632,14 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
             1
         );
     }
+    assert_eq!(
+        PINS.iter()
+            .filter(|(_, owner, _)| *owner == "4-B")
+            .map(|(_, _, sites)| sites.len())
+            .sum::<usize>(),
+        58,
+        "exactly the 49 Ba pins are gone"
+    );
     let errors = scan(&files, PINS);
     assert!(errors.is_empty(), "{errors:#?}");
 }
@@ -868,16 +852,12 @@ fn k6_named_pins_survive_formatting_not_scope_tokens_or_multiplicity_changes() {
         )
         .is_empty()
     );
-    const ARG: &[Pin<'_>] = &[(
-        "src/x.rs",
-        "4-B",
-        &["overlay|real|OverlayType::ModelSelector,"],
-    )];
+    const ARG: &[Pin<'_>] = &[("src/x.rs", "4-B", &["overlay|real|OverlayType::Search,"])];
     assert!(
         scan(
             &[(
                 "src/x.rs".into(),
-                "fn real() { open(OverlayType::ModelSelector,); }".into()
+                "fn real() { open(OverlayType::Search,); }".into()
             )],
             ARG
         )
@@ -993,6 +973,18 @@ fn k6_a2a_ownership_reads_patterns_and_painters_are_unpinnable() {
         "struct DecisionPane { focused: Option<Key> }",
         "decision_pane::render(f);",
         "autocomplete_popup::render(f);",
+        "s.model_selector.active;",
+        "matches!(&s.profile_switcher.active, true);",
+        "match &s.usage_panel.previous_focus { Some(_) => (), None => () }",
+        "let LoginOverlayState { active, .. } = payload;",
+        "impl ModelSelectorState { fn open(&mut self) {} }",
+        "s.login.is_open();",
+        "struct TuiState { usage_panel: Option<UsagePanelState> }",
+        "let o = OverlayType::Login;",
+        "model_selector::render(f);",
+        "profile_switcher::render(f);",
+        "usage_panel::render(f);",
+        "login_dialog::render(f);",
     ] {
         let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
         let first = scan(&files, &[]);
@@ -1022,7 +1014,15 @@ fn k6_a2a_ownership_reads_patterns_and_painters_are_unpinnable() {
     }
     let payload = "struct HelpOverlayState { scroll_offset: usize } impl HelpOverlayState { fn reset(&mut self) { self.scroll_offset = 0; } }";
     assert!(scan(&[("src/x.rs".into(), payload.into())], &[]).is_empty());
-    for variant in ["Help", "CommandPalette", "WhichKey"] {
+    for variant in [
+        "Help",
+        "CommandPalette",
+        "WhichKey",
+        "ModelSelector",
+        "ProfileSwitcher",
+        "UsagePanel",
+        "Login",
+    ] {
         let path = "src/domain/models/visual.rs";
         let source = format!("enum OverlayType {{\n {variant},\n}}");
         let site = format!("variant|OverlayType|{variant},");

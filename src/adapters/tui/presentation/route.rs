@@ -133,6 +133,11 @@ pub fn route(
         super::reducer::close(state, Surface::DecisionPane);
         return route(state, event, host, facts);
     }
+    if surface == Surface::Login && Key::from_domain(event).is_none() {
+        return Some(RouteEffect::Action(
+            crate::adapters::tui::handlers::login::on_key(state, event),
+        ));
+    }
     if Key::from_domain(event).is_none() {
         return Some(RouteEffect::Consumed);
     }
@@ -167,10 +172,23 @@ pub fn route(
             LogOutcome::Quit => RouteEffect::QuitRequest,
             effect => RouteEffect::Log(effect),
         },
-        Surface::Help | Surface::CommandPalette if host == Host::Local => {
-            RouteEffect::Action(app::dispatch_frame_key(state, context, key))
+        Surface::Login => {
+            RouteEffect::Action(crate::adapters::tui::handlers::login::on_key(state, event))
         }
-        Surface::Help | Surface::CommandPalette => RouteEffect::Frame(context),
+        Surface::Help
+        | Surface::CommandPalette
+        | Surface::ModelSelector
+        | Surface::ProfileSwitcher
+        | Surface::UsagePanel
+            if host == Host::Local =>
+        {
+            RouteEffect::Action(app::dispatch_frame_key(state, context, key, host))
+        }
+        Surface::Help
+        | Surface::CommandPalette
+        | Surface::ModelSelector
+        | Surface::ProfileSwitcher
+        | Surface::UsagePanel => RouteEffect::Frame(context),
         Surface::QuitConfirm => unreachable!("Quit handled before the pending leader"),
     })
 }

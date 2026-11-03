@@ -75,7 +75,6 @@ fn render(state: &ModelSelectorState) -> String {
 #[test]
 fn k10_model_picker_panes_fit_60x16() {
     let mut state = ModelSelectorState::new();
-    state.active = true;
     state.columns = vec![
         ProviderColumn {
             provider_id: "anthropic".into(),

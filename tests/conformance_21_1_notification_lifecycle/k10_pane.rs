@@ -214,23 +214,34 @@ fn k10_a_typing_composer_is_never_interrupted() {
 
 #[test]
 fn k10_open_surfaces_are_never_taken_from() {
-    // Keep every legacy protection branch. Non-text Help/S-LOG now have
-    // separate eligible-preemption controls below (21.4 AC7).
+    // Text ModelSelector/Login and legacy protections remain ineligible.
+    // Non-text Help/S-LOG/Profile/Usage have eligible-preemption controls below.
     type Setup = fn(&mut TuiState);
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::reducer;
     use rustain::domain::models::autocomplete::AutocompleteKind;
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-    let surfaces: [(&str, Setup); 14] = [
+    let surfaces: [(&str, Setup); 12] = [
         ("S-QUIT", |s| {
             let mut f = QuitFacts::idle(QuitHost::Local);
             f.composer_draft = true;
             quit_confirm::request(s, f);
         }),
-        ("model selector", |s| s.model_selector.active = true),
-        ("sign-in", |s| s.login.active = true),
-        ("profile switcher", |s| s.profile_switcher.active = true),
-        ("usage panel", |s| s.usage_panel.active = true),
+        ("model selector", |s| {
+            reducer::open(s, Surface::ModelSelector);
+            s.model_selector.initialize(vec![], "", "");
+        }),
+        ("sign-in", |s| {
+            reducer::open(s, Surface::Login);
+            s.login
+                .open_picker(
+                    &s.modal_stack,
+                    rustain::adapters::tui::state::LoginOrigin::Slash,
+                    rustain::adapters::tui::state::OverlayMode::Login,
+                )
+                .expect("fresh Login fixture");
+            reducer::settle_login(s);
+        }),
         ("palette", |s| {
             reducer::open(s, Surface::CommandPalette);
         }),
@@ -290,8 +301,13 @@ fn k10_open_surfaces_are_never_taken_from() {
 }
 
 #[test]
-fn k10_non_text_help_and_log_allow_arrival_and_restore_the_interrupted_frame() {
-    for surface in [Surface::Help, Surface::NotificationLog] {
+fn k10_non_text_frames_allow_arrival_and_restore_the_interrupted_frame() {
+    for surface in [
+        Surface::Help,
+        Surface::NotificationLog,
+        Surface::ProfileSwitcher,
+        Surface::UsagePanel,
+    ] {
         let (mut state, clock) = clocked(80, 24);
         state.focus = FocusState::Chat;
         match surface {
@@ -309,10 +325,22 @@ fn k10_non_text_help_and_log_allow_arrival_and_restore_the_interrupted_frame() {
                     &LogFacts::default(),
                 );
             }
+            Surface::ProfileSwitcher => {
+                rustain::adapters::tui::handlers::profile_switch::open(&mut state, |selector| {
+                    selector.initialize(vec![], "base", Default::default());
+                });
+            }
+            Surface::UsagePanel => {
+                presentation::reducer::open(&mut state, surface);
+                state.usage_panel.initialize();
+                state.usage_panel.selected_section = 2;
+            }
             _ => unreachable!(),
         }
         let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
         let log = state.notification_log.clone();
+        let profile = format!("{:?}", state.profile_switcher);
+        let usage_section = state.usage_panel.selected_section;
         advance(&clock, Duration::from_secs(1));
         assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Focused);
         assert_eq!(state.modal_stack.len(), frames.len() + 1);
@@ -343,6 +371,17 @@ fn k10_non_text_help_and_log_allow_arrival_and_restore_the_interrupted_frame() {
         );
         if surface == Surface::Help {
             assert_eq!(state.help_overlay.scroll_offset, 3);
+        } else if surface == Surface::ProfileSwitcher {
+            assert_eq!(
+                format!("{:?}", state.profile_switcher),
+                profile,
+                "profile payload restored"
+            );
+        } else if surface == Surface::UsagePanel {
+            assert_eq!(
+                state.usage_panel.selected_section, usage_section,
+                "usage cursor restored"
+            );
         }
     }
 }

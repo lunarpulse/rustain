@@ -2,8 +2,8 @@
 //! provider step over every provider with stored rows, then one provider's
 //! account step (Enter logs out of, or makes active, the row under the cursor;
 //! no confirmation, as omp's logout selector). The event loop reaches this
-//! module through data-only command/action outcomes; dispatch launches the
-//! non-spawning workers in `tui::accounts_runtime`, which report `LoginEvent`s.
+//! module through data-only command/action outcomes; frame requests settle
+//! synchronously before dispatch launches the non-spawning workers.
 //!
 //! Account step behaviour adapted from oh-my-pi's logout account selector.
 //!
@@ -31,7 +31,7 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 
-use super::login::{LOGIN, LoginAction, close, closed, is_cancel, move_cursor, take_focus};
+use super::login::{LoginAction, close, closed, is_cancel, move_cursor};
 use super::{AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::accounts_runtime::Change;
 use crate::adapters::tui::app::InputAction;
@@ -54,37 +54,31 @@ pub enum AccountAction {
 /// `/logout [provider]` and `/accounts [provider]` (`ExecuteCommand`); `name`
 /// is `logout` or `accounts`.
 pub fn command(state: &mut TuiState, name: &str, args: Option<&str>) -> HandlerOutcome {
-    if state.login.running.is_some() {
-        // One overlay at a time: the running login keeps (or regains) focus.
-        state.focus = LOGIN;
-        state.needs_redraw = true;
-        return HandlerOutcome::Quiet;
-    }
     let mode = if name == "logout" {
         OverlayMode::Logout
     } else {
         OverlayMode::Accounts
     };
-    let previous = take_focus(state);
-    state.focus = LOGIN;
-    state.needs_redraw = true;
+    let generation = state
+        .login
+        .open_picker(&state.modal_stack, LoginOrigin::Slash, mode);
+    crate::adapters::tui::app::advance_deferred_permission(state);
+    let Some(generation) = generation else {
+        return HandlerOutcome::Quiet;
+    };
     match args.map(str::trim).filter(|arg| !arg.is_empty()) {
         Some(provider) => {
-            let generation = state
-                .login
-                .open_accounts(previous, mode, provider.to_owned(), false);
+            let generation = state.login.open_accounts(mode, provider.to_owned(), false);
+            crate::adapters::tui::app::advance_deferred_permission(state);
             HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Listing {
                 generation,
                 mode,
                 provider: provider.to_owned(),
             }))
         }
-        None => {
-            let generation = state.login.open_picker(previous, LoginOrigin::Slash, mode);
-            HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Providers {
-                generation,
-            }))
-        }
+        None => HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Providers {
+            generation,
+        })),
     }
 }
 
@@ -95,11 +89,10 @@ pub fn on_action(state: &mut TuiState, action: AccountAction) -> HandlerOutcome 
         AccountAction::List { provider } => {
             let mode = state.login.mode;
             let from_picker = state.login.view == LoginView::ProviderPicker;
-            let previous = state.focus.clone();
-            let generation =
-                state
-                    .login
-                    .open_accounts(previous, mode, provider.clone(), from_picker);
+            let generation = state
+                .login
+                .open_accounts(mode, provider.clone(), from_picker);
+            crate::adapters::tui::app::advance_deferred_permission(state);
             state.needs_redraw = true;
             HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(AuthWork::Listing {
                 generation,
@@ -155,12 +148,9 @@ fn nothing_stored(mode: OverlayMode) -> &'static str {
 /// `AccountsChanged` (delegated by `login::on_event`).
 pub fn on_event(state: &mut TuiState, event: LoginEvent) {
     state.needs_redraw = true;
-    let current = |state: &TuiState, generation: u64| {
-        generation == state.login.generation && state.login.active
-    };
     match event {
         LoginEvent::Targets { generation, rows } => {
-            if !current(state, generation) {
+            if generation != state.login.generation {
                 return;
             }
             if rows.is_empty() {
@@ -179,7 +169,11 @@ pub fn on_event(state: &mut TuiState, event: LoginEvent) {
         LoginEvent::Accounts {
             generation,
             listing,
-        } => state.login.set_accounts(generation, listing, None),
+        } => {
+            if generation == state.login.generation {
+                state.login.set_accounts(generation, listing, None);
+            }
+        }
         LoginEvent::AccountsChanged {
             generation,
             level,
@@ -187,7 +181,7 @@ pub fn on_event(state: &mut TuiState, event: LoginEvent) {
             lines,
             listing,
         } => {
-            if !current(state, generation) {
+            if generation != state.login.generation {
                 return;
             }
             match listing {
@@ -248,6 +242,7 @@ pub fn on_key(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::tui::presentation::{self, Surface, reducer};
     use crate::domain::models::FocusState;
 
     /// Esc on a step opened by id (`/accounts openai`) closes it, even after
@@ -258,13 +253,10 @@ mod tests {
         state.login.origin = LoginOrigin::Picker {
             column: "openai".into(),
         };
-        state.login.open_accounts(
-            FocusState::Input,
-            OverlayMode::Accounts,
-            "openai".into(),
-            false,
-        );
-        state.focus = LOGIN;
+        state
+            .login
+            .open_accounts(OverlayMode::Accounts, "openai".into(), false);
+        crate::adapters::tui::app::advance_deferred_permission(&mut state);
         assert_eq!(
             crate::adapters::tui::app::handle_input(
                 &mut state,
@@ -274,6 +266,37 @@ mod tests {
                 origin: LoginOrigin::Slash
             })
         );
+        assert_eq!(state.focus, FocusState::Input);
+    }
+
+    #[test]
+    fn account_result_closes_beneath_quit_without_losing_its_caller() {
+        use crate::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
+        let mut state = TuiState::new(80, 24);
+        reducer::open(&mut state, Surface::Help);
+        state.help_overlay.scroll_offset = 7;
+        command(&mut state, "accounts", Some("openai"));
+        let generation = state.login.generation;
+        let mut facts = QuitFacts::idle(QuitHost::Local);
+        facts.streams = 1;
+        reducer::request_quit(&mut state, facts);
+        let quit_id = state.modal_stack.top().unwrap().id;
+        let result = |generation| LoginEvent::AccountsChanged {
+            generation,
+            level: FeedbackLevel::Info,
+            changed: true,
+            lines: vec!["Account selected".into()],
+            listing: None,
+        };
+        on_event(&mut state, result(generation + 1));
+        assert!(presentation::is_open(&state, Surface::Login));
+        on_event(&mut state, result(generation));
+        assert!(!presentation::is_open(&state, Surface::Login));
+        assert_eq!(state.modal_stack.top().unwrap().id, quit_id);
+        reducer::back(&mut state);
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
+        assert_eq!(state.help_overlay.scroll_offset, 7);
+        reducer::back(&mut state);
         assert_eq!(state.focus, FocusState::Input);
     }
 }

@@ -105,7 +105,15 @@ pub const ROWS: &[Binding] = &[
     bind(Context::NotificationLog, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
     bind(Context::DecisionPane, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
     bind(Context::DecisionPane, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
-    // Legacy windows stay intact beneath S-QUIT until their stack cutover.
+    bind(Context::ModelSelector, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::ModelSelector, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::ProfileSwitcher, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::ProfileSwitcher, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::UsagePanel, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::UsagePanel, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::Login, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::Login, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    // Quit preserves both migrated frames and the remaining legacy windows.
     bind(Context::ModelSelector, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the model selector"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the profile switcher"),
     bind(Context::UsagePanel, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing usage"),

@@ -1194,7 +1194,16 @@ async fn palette_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) else {
         return KeyFlow::Continue;
     };
-    let action = with_lent_input(ctx.state, ctx.input, |state| handle_input(state, &event));
+    let action = with_lent_input(ctx.state, ctx.input, |state| {
+        crate::adapters::tui::app::with_card_focus_reconcile(state, |state| {
+            crate::adapters::tui::app::dispatch_frame_key(
+                state,
+                Context::CommandPalette,
+                Key::from_domain(&event).unwrap_or(Key::Other),
+                Host::Attached,
+            )
+        })
+    });
     ctx.chrome.sync_palette(ctx.state, ctx.workspace).await;
     match action {
         InputAction::ExecuteCommand { name, args } => run_palette_command(ctx, name, args).await,
@@ -4670,7 +4679,11 @@ mod tests {
                             rig.ctrl('q').await;
                         }
                     }
-                    Surface::DecisionPane => unreachable!("attached has no decision pane"),
+                    Surface::DecisionPane
+                    | Surface::ModelSelector
+                    | Surface::ProfileSwitcher
+                    | Surface::UsagePanel
+                    | Surface::Login => unreachable!("surface not offered attached"),
                 }
                 let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
                 let flow = rig.key(key).await;

@@ -7,7 +7,7 @@
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::notification_log::{self, LogFacts};
-use rustain::adapters::tui::presentation::{Surface, is_open};
+use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
@@ -19,17 +19,18 @@ use super::support::{fresh, press};
 /// Everything a surface can leave open, in one comparable string.
 fn open_surfaces(s: &TuiState) -> String {
     format!(
-        "{:?} help={} palette={} model={} profile={} usage={} reverse={} popup={} log={} surface={}",
+        "{:?} help={} palette={} model={} profile={} usage={} reverse={} popup={} log={} surface={} frames={:?}",
         s.focus,
         is_open(s, Surface::Help),
         is_open(s, Surface::CommandPalette),
-        s.model_selector.active,
-        s.profile_switcher.active,
-        s.usage_panel.active,
+        is_open(s, Surface::ModelSelector),
+        is_open(s, Surface::ProfileSwitcher),
+        is_open(s, Surface::UsagePanel),
         s.reverse_search.active,
         s.autocomplete.is_open(),
         s.notification_log.is_some(),
         s.recipient_surface.is_some(),
+        s.modal_stack.iter().collect::<Vec<_>>(),
     )
 }
 
@@ -60,25 +61,25 @@ const SURFACES: &[(&str, Open, Option<InputAction>)] = &[
     (
         "ModelSelector",
         |s| {
-            s.model_selector.open(FocusState::Input, vec![], "p", "m");
-            overlay(s, OverlayType::ModelSelector);
+            reducer::open(s, Surface::ModelSelector);
+            s.model_selector.initialize(vec![], "p", "m");
         },
         None,
     ),
     (
         "ProfileSwitcher",
         |s| {
-            s.profile_switcher
-                .open(FocusState::Input, vec![], "x", Default::default());
-            overlay(s, OverlayType::ProfileSwitcher);
+            rustain::adapters::tui::handlers::profile_switch::open(s, |selector| {
+                selector.initialize(vec![], "x", Default::default());
+            });
         },
         None,
     ),
     (
         "UsagePanel",
         |s| {
-            s.usage_panel.open(FocusState::Input);
-            overlay(s, OverlayType::UsagePanel);
+            reducer::open(s, Surface::UsagePanel);
+            s.usage_panel.initialize();
         },
         None,
     ),

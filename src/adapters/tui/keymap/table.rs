@@ -84,12 +84,11 @@ fn decisions(c: &AvailCtx) -> Availability {
 /// a new effect cannot silently inherit permission to open an unmigrated surface.
 pub fn pane_effect_availability(
     effect: crate::adapters::tui::decision_pane::DecisionEffect,
-    has_caller: bool,
 ) -> Availability {
     use crate::adapters::tui::decision_pane::DecisionEffect;
-    let legacy_target = match effect {
-        DecisionEffect::BudgetSwitchCheaper => true,
-        DecisionEffect::RecoveryContinue
+    match effect {
+        DecisionEffect::BudgetSwitchCheaper
+        | DecisionEffect::RecoveryContinue
         | DecisionEffect::RecoveryNewSession
         | DecisionEffect::CarryoverAccept
         | DecisionEffect::CarryoverDecline
@@ -99,12 +98,7 @@ pub fn pane_effect_availability(
         | DecisionEffect::AttachLargeImage
         | DecisionEffect::CancelLargeImage
         | DecisionEffect::ConfirmDelete
-        | DecisionEffect::CancelDelete => false,
-    };
-    if has_caller && legacy_target {
-        Availability::Unavailable(CLOSE_WINDOW_FIRST)
-    } else {
-        Availability::Available
+        | DecisionEffect::CancelDelete => Availability::Available,
     }
 }
 
@@ -125,20 +119,19 @@ use crate::domain::models::palette::PaletteAction;
 #[derive(Clone, Copy)]
 enum PaletteTarget {
     NoLegacySurface,
+    /// Migrated only in the local host; attached interim routes stay unchanged.
+    LocalSurface,
     LegacySurface,
     Unclassified,
 }
 
 fn palette_command_target(name: &str, args: Option<&str>) -> PaletteTarget {
-    use PaletteTarget::{LegacySurface, NoLegacySurface, Unclassified};
+    use PaletteTarget::{LegacySurface, LocalSurface, NoLegacySurface, Unclassified};
     let args = args.map(str::trim).filter(|args| !args.is_empty());
     let subcommand = args.and_then(|args| args.split_whitespace().next());
     match (name, args) {
-        (
-            "login" | "logout" | "accounts" | "models" | "retract-auto" | "cancel-plan"
-            | "reorder-task",
-            _,
-        ) => LegacySurface,
+        ("login" | "logout" | "accounts" | "models", _) => LocalSurface,
+        ("retract-auto" | "cancel-plan" | "reorder-task", _) => LegacySurface,
         ("room" | "artifacts", None) => LegacySurface,
         ("artifact", Some(_)) if matches!(subcommand, Some("apply" | "resolve")) => LegacySurface,
         ("team", Some(_)) if matches!(subcommand, Some("view" | "retract")) => LegacySurface,
@@ -178,26 +171,26 @@ pub fn palette_availability(action: &PaletteAction, c: &AvailCtx) -> Availabilit
     use PaletteAction::*;
     let target = match action {
         ExecuteCommand(name, args) => palette_command_target(name, args.as_deref()),
-        OpenPanel(_)
-        | SwitchModel { .. }
-        | SwitchProfile(_)
-        | DeleteAllConversations
-        | PasteImageFromClipboard => PaletteTarget::LegacySurface,
+        OpenPanel(_) | DeleteAllConversations | PasteImageFromClipboard => {
+            PaletteTarget::LegacySurface
+        }
+        SwitchModel { .. } | SwitchProfile(_) => PaletteTarget::LocalSurface,
         InsertMention(_) | ShowVersion | NewTab | CloseTab | ApplyAdapterOverride { .. } | Noop => {
             PaletteTarget::NoLegacySurface
         }
     };
     match target {
-        PaletteTarget::NoLegacySurface => Availability::Available,
+        PaletteTarget::LocalSurface if c.host == Host::Attached => base_target(c),
+        PaletteTarget::NoLegacySurface | PaletteTarget::LocalSurface => Availability::Available,
         PaletteTarget::LegacySurface | PaletteTarget::Unclassified => base_target(c),
     }
 }
 
 fn attached_profile(c: &AvailCtx) -> Availability {
-    host_gate(c, ATTACHED_PROFILE)
+    local_surface(c, ATTACHED_PROFILE)
 }
 fn attached_sign_in(c: &AvailCtx) -> Availability {
-    host_gate(c, ATTACHED_SIGN_IN)
+    local_surface(c, ATTACHED_SIGN_IN)
 }
 fn attached_density(c: &AvailCtx) -> Availability {
     host_gate(c, ATTACHED_DENSITY)
@@ -215,7 +208,13 @@ fn panel(c: &AvailCtx) -> Availability {
 }
 /// Overlays that are local only but do not need the sidebar column (Usage).
 fn attached_panel(c: &AvailCtx) -> Availability {
-    host_gate(c, attached_panel_remedy())
+    local_surface(c, attached_panel_remedy())
+}
+fn local_surface(c: &AvailCtx, remedy: &'static str) -> Availability {
+    match c.host {
+        Host::Attached => host_gate(c, remedy),
+        Host::Local => Availability::Available,
+    }
 }
 fn host_gate(c: &AvailCtx, remedy: &'static str) -> Availability {
     if c.frame_origin {

@@ -31,10 +31,10 @@ const DEVICE: &str = "https://device.example/verify?user_code=ABCD";
 
 fn state(sections: Vec<LoginSection>) -> LoginOverlayState {
     let mut state = LoginOverlayState::default();
-    state.active = true;
     state.view = LoginView::Running;
     state.running = Some(RunningLogin {
         login_id: 1,
+        generation: state.generation,
         provider_id: "example".into(),
         display: "Example".into(),
         origin: LoginOrigin::Slash,
@@ -69,6 +69,42 @@ fn buffer(
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|f| login_dialog::render(f, f.area(), state, theme, support))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn sheet_buffer(login: LoginOverlayState, theme: &Theme) -> Buffer {
+    use rustain::adapters::tui::{
+        handlers, keymap::Host, layout, notification_log::LogFacts, presentation, state::TuiState,
+    };
+    let mut state = TuiState::new(80, 24);
+    state.theme = theme.clone();
+    handlers::login::command(&mut state, &Default::default(), None);
+    state.login = login;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            let layout = layout::compute_layout(
+                frame.area(),
+                theme,
+                "",
+                1,
+                false,
+                rustain::domain::models::visual::DensityMode::Focus,
+            )
+            .unwrap();
+            let mut shell = presentation::Shell::new(frame.area(), &layout);
+            shell.supports_osc8 = false;
+            presentation::compose(
+                frame,
+                &state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                |_| {},
+                |_| {},
+            );
+        })
         .unwrap();
     terminal.backend().buffer().clone()
 }
@@ -315,8 +351,8 @@ fn k5_browser_and_device_80x24_snapshots() {
         ("dark", Theme::dark()),
         ("color16", Theme::for_capability(ColorCapability::Color16)),
     ] {
-        let browser = projection(&buffer(&browser(AUTH, LOCAL), &theme, false, 80, 24));
-        let device = projection(&buffer(&device(DEVICE, "ABCD-EFGH"), &theme, false, 80, 24));
+        let browser = projection(&sheet_buffer(browser(AUTH, LOCAL), &theme));
+        let device = projection(&sheet_buffer(device(DEVICE, "ABCD-EFGH"), &theme));
         insta::assert_snapshot!(format!("login_browser_{name}_80x24"), browser);
         insta::assert_snapshot!(format!("login_device_{name}_80x24"), device);
     }
@@ -785,6 +821,10 @@ fn k3_crossterm_incremental_frames_and_middle_overlay() {
     draw(&state, None, &mut terminal);
     terminal.resize(Rect::new(0, 0, 80, 24)).unwrap();
     draw(&state, None, &mut terminal);
-    state.active = false;
-    draw(&state, None, &mut terminal);
+    // The next paint has no frame: the incremental backend must erase every
+    // old linked cell, not leave a terminal hyperlink active after dismissal.
+    let empty = terminal.draw(|_| {}).unwrap().buffer.clone();
+    observer.replay(&sink.take());
+    observer.compare(&empty);
+    assert!(links(&empty, &theme).is_empty());
 }

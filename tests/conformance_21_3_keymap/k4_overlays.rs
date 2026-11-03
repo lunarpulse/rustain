@@ -48,6 +48,42 @@ fn focused(overlay: OverlayType) -> TuiState {
     s
 }
 
+/// Ba rows retain their caller frame and base focus, including menu/palette entry.
+fn ba_door(s: &mut TuiState, key: Key) -> (String, bool) {
+    let caller = s.modal_stack.top().expect("Ba fixture frame").clone();
+    let frames = s.modal_stack.iter().cloned().collect::<Vec<_>>();
+    let focus = s.focus.clone();
+    let outcome = local_door(s, key);
+    assert_eq!(s.focus, focus, "Ba dispatch retains base focus");
+    if key == Key::Ctrl('p') {
+        assert_eq!(s.modal_stack.len(), frames.len() + 1);
+        assert_eq!(
+            s.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        assert_eq!(
+            s.modal_stack
+                .iter()
+                .take(frames.len())
+                .cloned()
+                .collect::<Vec<_>>(),
+            frames
+        );
+    } else if is_open(s, caller.surface) {
+        assert_eq!(s.modal_stack.iter().cloned().collect::<Vec<_>>(), frames);
+    } else {
+        assert!(
+            s.modal_stack.is_empty(),
+            "Back removes only the fixture frame"
+        );
+    }
+    assert_eq!(
+        s.pending_leader,
+        (key == Key::Ctrl('x')).then_some(caller.surface.context())
+    );
+    outcome
+}
+
 #[rustfmt::skip]
 const HELP: &[W] = &[
     w(&[Key::Char('j')], "Consumed | scroll=4 active=true focus=Chat"),
@@ -169,50 +205,52 @@ fn warning(s: &mut TuiState) {
 
 #[rustfmt::skip]
 const SELECTOR: &[W] = &[
-    w(&[Key::Left], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('h')], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Right], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('l')], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Up], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('k')], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Down], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('j')], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Enter], "SwitchModelProvider { provider_id: Some(\"b\"), model_id: \"b-2\" } | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
+    w(&[Key::Left], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('h')], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Right], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('l')], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Up], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('k')], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Down], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('j')], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Enter], "SwitchModelProvider { provider_id: Some(\"b\"), model_id: \"b-2\" } | p=1 m=1 active=true search=false q= warn=false focus=Input"),
     w(&[Key::Esc], "Consumed | p=1 m=1 active=false search=false q= warn=false focus=Input"),
     w(&[Key::Ctrl('c')], "Consumed | p=1 m=1 active=false search=false q= warn=false focus=Input"),
-    wp(&[Key::Backspace], "Consumed | p=1 m=0 active=true search=true q=b warn=false focus=Overlay(ModelSelector)", searching),
-    w(&[Key::Char('/')], "Consumed | p=1 m=1 active=true search=true q= warn=false focus=Overlay(ModelSelector)"),
-    wp(&[Key::Char('y')], "CompactThenSwitchModel { provider_id: \"b\", model_id: \"b-3\" } | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)", warning),
-    wp(&[Key::Char('n')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)", warning),
+    wp(&[Key::Backspace], "Consumed | p=1 m=0 active=true search=true q=b warn=false focus=Input", searching),
+    w(&[Key::Char('/')], "Consumed | p=1 m=1 active=true search=true q= warn=false focus=Input"),
+    wp(&[Key::Char('y')], "CompactThenSwitchModel { provider_id: \"b\", model_id: \"b-3\" } | p=1 m=1 active=true search=false q= warn=false focus=Input", warning),
+    wp(&[Key::Char('n')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input", warning),
     // The arms lower-case the key: the capitals are the same rows (`folds_case`).
-    w(&[Key::Char('H')], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('L')], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('K')], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('J')], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Ctrl('q')], "Quit | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
+    w(&[Key::Char('H')], "Consumed | p=0 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('L')], "Consumed | p=2 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('K')], "Consumed | p=1 m=0 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('J')], "Consumed | p=1 m=2 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Ctrl('q')], "Quit | p=1 m=1 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input"),
 ];
 
 /// Off-state (R3): while searching every letter types (`y n j k H` are not commands), and with no
 /// warning shown `y` / `n` and, with one, `Enter` / `j` do nothing.
 #[rustfmt::skip]
 const SELECTOR_OFF: &[W] = &[
-    w(&[Key::Char('y')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    w(&[Key::Char('n')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
-    wp(&[Key::Char('y'), Key::Char('n'), Key::Char('j'), Key::Char('k'), Key::Char('H')], "Consumed | p=1 m=0 active=true search=true q=b-ynjkH warn=false focus=Overlay(ModelSelector)", searching),
-    wp(&[Key::Enter], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Overlay(ModelSelector)", warning),
-    wp(&[Key::Char('j')], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Overlay(ModelSelector)", warning),
-    wp(&[Key::Char('Y')], "CompactThenSwitchModel { provider_id: \"b\", model_id: \"b-3\" } | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)", warning),
+    w(&[Key::Char('y')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input"),
+    w(&[Key::Char('n')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input"),
+    wp(&[Key::Char('y'), Key::Char('n'), Key::Char('j'), Key::Char('k'), Key::Char('H')], "Consumed | p=1 m=0 active=true search=true q=b-ynjkH warn=false focus=Input", searching),
+    wp(&[Key::Enter], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Input", warning),
+    wp(&[Key::Char('j')], "Consumed | p=1 m=1 active=true search=false q= warn=true focus=Input", warning),
+    wp(&[Key::Char('Y')], "CompactThenSwitchModel { provider_id: \"b\", model_id: \"b-3\" } | p=1 m=1 active=true search=false q= warn=false focus=Input", warning),
     // FieldEdit parent (DF-21-3-TEXTFIELD-CTRL-H-GAPS): `Ctrl+H` edits the search like `Backspace`, and is inert without one.
-    wp(&[Key::Ctrl('h')], "Consumed | p=1 m=0 active=true search=true q=b warn=false focus=Overlay(ModelSelector)", searching),
-    w(&[Key::Ctrl('h')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Overlay(ModelSelector)"),
+    wp(&[Key::Ctrl('h')], "Consumed | p=1 m=0 active=true search=true q=b warn=false focus=Input", searching),
+    w(&[Key::Ctrl('h')], "Consumed | p=1 m=1 active=true search=false q= warn=false focus=Input"),
 ];
 
 /// Three columns of three models; the middle model of the middle column is selected.
 fn selector() -> TuiState {
-    let mut s = focused(OverlayType::ModelSelector);
+    let mut s = fresh();
+    presentation::reducer::open(&mut s, Surface::ModelSelector);
     let columns = ["a", "b", "c"].map(column).into();
-    s.model_selector
-        .open(FocusState::Input, columns, "b", "b-2");
+    s.model_selector.initialize(columns, "b", "b-2");
     s
 }
 
@@ -248,7 +286,7 @@ fn model_selector_rows_by_value_and_every_other_key_is_inert() {
             "p={} m={} active={} search={} q={} warn={} focus={:?}",
             m.selected_provider,
             m.selected_model,
-            m.active,
+            is_open(s, Surface::ModelSelector),
             m.search_active,
             m.search_query,
             m.pending_context_warning.is_some(),
@@ -257,6 +295,7 @@ fn model_selector_rows_by_value_and_every_other_key_is_inert() {
     };
     run(&Case {
         off: SELECTOR_OFF,
+        door: ba_door,
         ..local(Context::ModelSelector, selector, salient, SELECTOR)
     });
 }
@@ -268,25 +307,27 @@ fn into_preview(s: &mut TuiState) {
 
 #[rustfmt::skip]
 const PROFILES: &[W] = &[
-    w(&[Key::Up], "Consumed | sel=0 preview=false active=true focus=Overlay(ProfileSwitcher)"),
-    w(&[Key::Down], "Consumed | sel=2 preview=false active=true focus=Overlay(ProfileSwitcher)"),
-    w(&[Key::Enter], "Consumed | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)"),
+    w(&[Key::Up], "Consumed | sel=0 preview=false active=true focus=Input"),
+    w(&[Key::Down], "Consumed | sel=2 preview=false active=true focus=Input"),
+    w(&[Key::Enter], "Consumed | sel=1 preview=true active=true focus=Input"),
     w(&[Key::Esc], "Consumed | sel=1 preview=false active=false focus=Input"),
     w(&[Key::Ctrl('c')], "Consumed | sel=1 preview=false active=false focus=Input"),
-    wp(&[Key::Esc], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)", into_preview),
-    wp(&[Key::Char('y')], "ConfirmProfileSwitch(\"p2\") | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)", into_preview),
-    wp(&[Key::Char('n')], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)", into_preview),
-    w(&[Key::Ctrl('q')], "Quit | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)"),
+    wp(&[Key::Esc], "Consumed | sel=1 preview=false active=true focus=Input", into_preview),
+    wp(&[Key::Char('y')], "ConfirmProfileSwitch(\"p2\") | sel=1 preview=true active=true focus=Input", into_preview),
+    wp(&[Key::Char('n')], "Consumed | sel=1 preview=false active=true focus=Input", into_preview),
+    w(&[Key::Ctrl('q')], "Quit | sel=1 preview=false active=true focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | sel=1 preview=false active=true focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | sel=1 preview=false active=true focus=Input"),
 ];
 
 /// Off-state (R3): with no preview `y` / `n` do nothing; inside it Up / Down do nothing and `Y` confirms.
 #[rustfmt::skip]
 const PROFILES_OFF: &[W] = &[
-    w(&[Key::Char('y')], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)"),
-    w(&[Key::Char('n')], "Consumed | sel=1 preview=false active=true focus=Overlay(ProfileSwitcher)"),
-    wp(&[Key::Up], "Consumed | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)", into_preview),
-    wp(&[Key::Down], "Consumed | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)", into_preview),
-    wp(&[Key::Char('Y')], "ConfirmProfileSwitch(\"p2\") | sel=1 preview=true active=true focus=Overlay(ProfileSwitcher)", into_preview),
+    w(&[Key::Char('y')], "Consumed | sel=1 preview=false active=true focus=Input"),
+    w(&[Key::Char('n')], "Consumed | sel=1 preview=false active=true focus=Input"),
+    wp(&[Key::Up], "Consumed | sel=1 preview=true active=true focus=Input", into_preview),
+    wp(&[Key::Down], "Consumed | sel=1 preview=true active=true focus=Input", into_preview),
+    wp(&[Key::Char('Y')], "ConfirmProfileSwitch(\"p2\") | sel=1 preview=true active=true focus=Input", into_preview),
 ];
 /// Catches Enter that skips the preview, Esc that closes from inside it, and y/n that act without one.
 #[test]
@@ -307,10 +348,11 @@ fn profile_switcher_rows_by_value_and_every_other_key_is_inert() {
             _config: None,
         };
         let dims = BTreeMap::from([(PortDimension::Persona, adapter)]);
-        let mut s = focused(OverlayType::ProfileSwitcher);
+        let mut s = fresh();
         let profiles = ["p1", "p2", "p3"].map(profile).to_vec();
-        s.profile_switcher
-            .open(FocusState::Input, profiles, "p2", dims);
+        rustain::adapters::tui::handlers::profile_switch::open(&mut s, |selector| {
+            selector.initialize(profiles, "p2", dims);
+        });
         s
     };
     let salient = |s: &TuiState| {
@@ -319,12 +361,13 @@ fn profile_switcher_rows_by_value_and_every_other_key_is_inert() {
             "sel={} preview={} active={} focus={:?}",
             p.selected,
             p.preview.is_some(),
-            p.active,
+            is_open(s, Surface::ProfileSwitcher),
             s.focus
         )
     };
     run(&Case {
         off: PROFILES_OFF,
+        door: ba_door,
         ..local(Context::ProfileSwitcher, setup, salient, PROFILES)
     });
 }
@@ -333,26 +376,35 @@ fn profile_switcher_rows_by_value_and_every_other_key_is_inert() {
 const USAGE: &[W] = &[
     w(&[Key::Esc], "Consumed | section=0 active=false focus=Chat"),
     w(&[Key::Ctrl('c')], "Consumed | section=0 active=false focus=Chat"),
-    w(&[Key::Up], "Consumed | section=3 active=true focus=Overlay(UsagePanel)"),
-    w(&[Key::Down], "Consumed | section=1 active=true focus=Overlay(UsagePanel)"),
-    w(&[Key::Ctrl('q')], "Quit | section=0 active=true focus=Overlay(UsagePanel)"),
+    w(&[Key::Up], "Consumed | section=3 active=true focus=Chat"),
+    w(&[Key::Down], "Consumed | section=1 active=true focus=Chat"),
+    w(&[Key::Ctrl('q')], "Quit | section=0 active=true focus=Chat"),
+    w(&[Key::Ctrl('x')], "Consumed | section=0 active=true focus=Chat"),
+    w(&[Key::Ctrl('p')], "Consumed | section=0 active=true focus=Chat"),
 ];
 
 /// Catches an Up that fails to wrap to the last section or a close that loses the previous focus.
 #[test]
 fn usage_panel_rows_by_value_and_every_other_key_is_inert() {
     let setup = || {
-        let mut s = focused(OverlayType::UsagePanel);
-        s.usage_panel.open(FocusState::Chat);
+        let mut s = fresh();
+        s.focus = FocusState::Chat;
+        presentation::reducer::open(&mut s, Surface::UsagePanel);
+        s.usage_panel.initialize();
         s
     };
     let salient = |s: &TuiState| {
         format!(
             "section={} active={} focus={:?}",
-            s.usage_panel.selected_section, s.usage_panel.active, s.focus
+            s.usage_panel.selected_section,
+            is_open(s, Surface::UsagePanel),
+            s.focus
         )
     };
-    run(&local(Context::UsagePanel, setup, salient, USAGE));
+    run(&Case {
+        door: ba_door,
+        ..local(Context::UsagePanel, setup, salient, USAGE)
+    });
 }
 
 #[rustfmt::skip]
@@ -604,7 +656,7 @@ fn running(s: &mut TuiState, sections: Vec<LoginSection>) {
     let cancel = CancellationToken::new();
     let (login_id, provider_id, display) = (1, "example".into(), "Example".into());
     let (origin, progress, field) = (LoginOrigin::Slash, Vec::new(), None);
-    s.login.start_running(RunningLogin { login_id, provider_id, display, origin, cancel, sections, progress, field });
+    s.login.start_running(RunningLogin { login_id, generation: s.login.generation, provider_id, display, origin, cancel, sections, progress, field });
 }
 
 #[rustfmt::skip]
@@ -620,23 +672,25 @@ fn device(s: &mut TuiState) {
 }
 
 #[rustfmt::skip]
-const LOGIN: &[W] = &[
+const LOGIN_ROWS: &[W] = &[
     w(&[Key::Esc], "Login(Closed { origin: Slash }) | view=ProviderPicker q= sel=5 active=false focus=Input"),
-    wp(&[Key::Esc], "Consumed | view=ProviderPicker q= sel=0 active=true focus=Overlay(Login)", typed),
+    wp(&[Key::Esc], "Consumed | view=ProviderPicker q= sel=0 active=true focus=Input", typed),
     w(&[Key::Ctrl('c')], "Login(Closed { origin: Slash }) | view=ProviderPicker q= sel=5 active=false focus=Input"),
-    w(&[Key::Enter], "Login(Choose { provider: \"p5\" }) | view=ProviderPicker q= sel=5 active=true focus=Overlay(Login)"),
-    w(&[Key::Up], "Consumed | view=ProviderPicker q= sel=4 active=true focus=Overlay(Login)"),
-    w(&[Key::Down], "Consumed | view=ProviderPicker q= sel=6 active=true focus=Overlay(Login)"),
-    w(&[Key::PageUp], "Consumed | view=ProviderPicker q= sel=0 active=true focus=Overlay(Login)"),
-    w(&[Key::PageDown], "Consumed | view=ProviderPicker q= sel=14 active=true focus=Overlay(Login)"),
-    wp(&[Key::Backspace], "Consumed | view=ProviderPicker q=p sel=0 active=true focus=Overlay(Login)", typed),
-    w(&[Key::Ctrl('q')], "Quit | view=ProviderPicker q= sel=5 active=true focus=Overlay(Login)"),
-    wp(&[Key::Alt('c')], "Login(Copy(\"https://a.test/x\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", browser),
-    wp(&[Key::Alt('l')], "Login(Copy(\"http://localhost:1455/go\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", browser),
-    wp(&[Key::Alt('u')], "Login(Copy(\"https://a.test/dev\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", device),
-    wp(&[Key::Char('c')], "Login(Copy(\"https://a.test/x\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", browser),
-    wp(&[Key::Char('l')], "Login(Copy(\"http://localhost:1455/go\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", browser),
-    wp(&[Key::Char('u')], "Login(Copy(\"https://a.test/dev\")) | view=Running q= sel=5 active=true focus=Overlay(Login)", device),
+    w(&[Key::Enter], "Login(Choose { provider: \"p5\" }) | view=ProviderPicker q= sel=5 active=true focus=Input"),
+    w(&[Key::Up], "Consumed | view=ProviderPicker q= sel=4 active=true focus=Input"),
+    w(&[Key::Down], "Consumed | view=ProviderPicker q= sel=6 active=true focus=Input"),
+    w(&[Key::PageUp], "Consumed | view=ProviderPicker q= sel=0 active=true focus=Input"),
+    w(&[Key::PageDown], "Consumed | view=ProviderPicker q= sel=14 active=true focus=Input"),
+    wp(&[Key::Backspace], "Consumed | view=ProviderPicker q=p sel=0 active=true focus=Input", typed),
+    w(&[Key::Ctrl('q')], "Quit | view=ProviderPicker q= sel=5 active=true focus=Input"),
+    wp(&[Key::Alt('c')], "Login(Copy(\"https://a.test/x\")) | view=Running q= sel=5 active=true focus=Input", browser),
+    wp(&[Key::Alt('l')], "Login(Copy(\"http://localhost:1455/go\")) | view=Running q= sel=5 active=true focus=Input", browser),
+    wp(&[Key::Alt('u')], "Login(Copy(\"https://a.test/dev\")) | view=Running q= sel=5 active=true focus=Input", device),
+    wp(&[Key::Char('c')], "Login(Copy(\"https://a.test/x\")) | view=Running q= sel=5 active=true focus=Input", browser),
+    wp(&[Key::Char('l')], "Login(Copy(\"http://localhost:1455/go\")) | view=Running q= sel=5 active=true focus=Input", browser),
+    wp(&[Key::Char('u')], "Login(Copy(\"https://a.test/dev\")) | view=Running q= sel=5 active=true focus=Input", device),
+    w(&[Key::Ctrl('x')], "Consumed | view=ProviderPicker q= sel=5 active=true focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | view=ProviderPicker q= sel=5 active=true focus=Input"),
 ];
 
 /// Catches a Login row that picks the wrong provider, pages by one, closes with a search typed, or copies the wrong link.
@@ -651,11 +705,13 @@ fn login_rows_by_value_and_every_other_non_text_key_is_inert() {
             status: String::new(),
             search: format!("p{n}"),
         };
-        let mut s = focused(OverlayType::Login);
-        let previous = FocusState::Input;
+        let mut s = fresh();
+        presentation::reducer::open(&mut s, Surface::Login);
         let generation = s
             .login
-            .open_picker(previous, LoginOrigin::Slash, OverlayMode::Login);
+            .open_picker(&s.modal_stack, LoginOrigin::Slash, OverlayMode::Login)
+            .unwrap();
+        presentation::reducer::settle_login(&mut s);
         s.login.set_rows(generation, (0..15).map(row).collect());
         s.login.selected = 5;
         s
@@ -664,12 +720,17 @@ fn login_rows_by_value_and_every_other_non_text_key_is_inert() {
         let l = &s.login;
         format!(
             "view={:?} q={} sel={} active={} focus={:?}",
-            l.view, l.query, l.selected, l.active, s.focus
+            l.view,
+            l.query,
+            l.selected,
+            is_open(s, Surface::Login),
+            s.focus
         )
     };
     run(&Case {
         acts_without_row: printable,
-        ..local(Context::Login, setup, salient, LOGIN)
+        door: ba_door,
+        ..local(Context::Login, setup, salient, LOGIN_ROWS)
     });
 }
 

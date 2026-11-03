@@ -659,7 +659,7 @@ fn k5b_tool_block_expanded_chrome_spans_the_pane_and_keeps_raw_input() {
 
 fn usage_state(model: &str) -> UsagePanelState {
     let mut state = UsagePanelState::new();
-    state.active = true;
+    state.initialize();
     state.turn_rows.push(TurnUsageRow {
         turn_index: 0,
         model: model.to_string(),

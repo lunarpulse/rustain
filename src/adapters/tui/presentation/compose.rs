@@ -11,7 +11,10 @@ use crate::adapters::tui::{
     notification_log::{self, LogFacts},
     quit_confirm,
     state::TuiState,
-    widgets::{autocomplete_popup, command_palette, help_overlay, toast_layer, which_key_bar},
+    widgets::{
+        autocomplete_popup, command_palette, help_overlay, login_dialog, model_selector,
+        profile_switcher, toast_layer, usage_panel, which_key_bar,
+    },
 };
 
 /// Snapshot the unreserved layout before legacy search/bookmark reservations.
@@ -23,6 +26,7 @@ pub struct Shell {
     pub chat_pane: Rect,
     pub input_area: Rect,
     pub status_bar: Rect,
+    pub supports_osc8: bool,
     sidebar: Option<Rect>,
 }
 
@@ -35,6 +39,7 @@ impl Shell {
             chat_pane: layout.chat_pane,
             input_area: layout.input_area,
             status_bar: layout.status_bar,
+            supports_osc8: crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8(),
             sidebar: layout.sidebar,
         }
     }
@@ -88,6 +93,16 @@ pub fn compose(
             Surface::CommandPalette => {
                 command_palette::render(frame, rect, &state.command_palette, theme)
             }
+            Surface::ModelSelector => {
+                model_selector::render(frame, rect, &state.model_selector, theme)
+            }
+            Surface::ProfileSwitcher => {
+                profile_switcher::render(frame, rect, &state.profile_switcher, theme)
+            }
+            Surface::UsagePanel => usage_panel::render(frame, rect, &state.usage_panel, theme),
+            Surface::Login => {
+                login_dialog::render(frame, rect, &state.login, theme, shell.supports_osc8)
+            }
             Surface::NotificationLog => notification_log::render(
                 frame,
                 rect,
@@ -124,7 +139,11 @@ pub fn compose(
                 Surface::NotificationLog
                 | Surface::Help
                 | Surface::CommandPalette
-                | Surface::DecisionPane => theme.colors.accent,
+                | Surface::DecisionPane
+                | Surface::ModelSelector
+                | Surface::ProfileSwitcher
+                | Surface::UsagePanel
+                | Surface::Login => theme.colors.accent,
                 Surface::QuitConfirm => theme.colors.warning,
             };
             // Replace only the top rail: redrawing every border would erase

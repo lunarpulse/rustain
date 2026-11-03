@@ -11,6 +11,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::modal::{ModalPart, fit_modal};
 use crate::adapters::tui::state::{SessionUsageSummary, UsagePanelState};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -42,12 +43,7 @@ fn format_elapsed(secs: i64) -> String {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Theme) {
-    if !state.active {
-        return;
-    }
-
-    let modal_area = calculate_centered_area(area);
-    frame.render_widget(Clear, modal_area);
+    frame.render_widget(Clear, area);
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -57,10 +53,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Th
             " Esc: close ",
             Style::default().fg(theme.colors.fg_muted),
         ));
-    let inner = block.inner(modal_area);
-    frame.render_widget(block, modal_area);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut sections = [0; 4];
 
     // ── Section 1 — Turn breakdown ────────────────────────────────────
     lines.push(Line::from(Span::styled(
@@ -91,6 +88,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Th
     section_rule(&mut lines, inner.width, theme);
 
     // ── Section 2 — Today ──────────────────────────────────────────────
+    sections[1] = lines.len();
     lines.push(Line::from(Span::styled(
         "Today",
         Style::default()
@@ -111,6 +109,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Th
     section_rule(&mut lines, inner.width, theme);
 
     // ── Section 3 — Context window + cache ─────────────────────────────
+    sections[2] = lines.len();
     lines.push(Line::from(Span::styled(
         "Context window",
         Style::default()
@@ -158,6 +157,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Th
     // ── Section 4 — Per-model breakdown (only when >1 model) ───────────
     if state.per_model.len() > 1 {
         section_rule(&mut lines, inner.width, theme);
+        sections[3] = lines.len();
         lines.push(Line::from(Span::styled(
             "Per-model",
             Style::default()
@@ -205,9 +205,18 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UsagePanelState, theme: &Th
     }
 
     // ── Footer (AC4) ───────────────────────────────────────────────────
-    section_rule(&mut lines, inner.width, theme);
-    lines.push(footer_line(today, theme));
-
+    let start = sections[state.selected_section.min(3)];
+    let lines = fit_modal(
+        vec![
+            ModalPart::Rows {
+                lines,
+                selected: (start, start + 2),
+            },
+            ModalPart::Footer(vec![footer_line(today, theme)]),
+        ],
+        inner.height as usize,
+        inner.width as usize,
+    );
     let content = Paragraph::new(lines).style(
         Style::default()
             .fg(theme.colors.fg_primary)
@@ -249,14 +258,6 @@ fn truncate_model(s: &str, max: usize) -> String {
     format!("{}…", geom::clip(s, max))
 }
 
-fn calculate_centered_area(area: Rect) -> Rect {
-    let width = (area.width * 70 / 100).clamp(50, 80).min(area.width);
-    let height = (area.height * 70 / 100).clamp(12, 24).min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,27 +288,94 @@ mod tests {
 
     #[test]
     fn renders_inactive_panel_as_noop() {
-        let backend = TestBackend::new(80, 24);
-        let mut term = Terminal::new(backend).unwrap();
-        let state = UsagePanelState::new();
-        term.draw(|frame| {
-            render(frame, frame.area(), &state, &theme());
-        })
-        .unwrap();
-        // Inactive — no title rendered
-        let txt = buffer_text(&term);
+        use crate::adapters::tui::{
+            keymap::Host, layout, notification_log::LogFacts, presentation, state::TuiState,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let mut paint = |state: &TuiState| {
+            terminal
+                .draw(|frame| {
+                    let layout = layout::compute_layout(
+                        frame.area(),
+                        &state.theme,
+                        "",
+                        1,
+                        false,
+                        crate::domain::models::visual::DensityMode::Focus,
+                    )
+                    .unwrap();
+                    let shell = presentation::Shell::new(frame.area(), &layout);
+                    presentation::compose(
+                        frame,
+                        state,
+                        &shell,
+                        Host::Local,
+                        &LogFacts::default(),
+                        |_| {},
+                        |_| {},
+                    );
+                })
+                .unwrap();
+            buffer_text(&terminal)
+        };
+        let mut state = TuiState::new(80, 24);
         assert!(
-            !txt.contains("Usage & Cost"),
-            "inactive panel shouldn't render title"
+            !paint(&state).contains("Usage & Cost"),
+            "closed payload never paints"
+        );
+        presentation::reducer::open(&mut state, presentation::Surface::UsagePanel);
+        assert!(
+            paint(&state).contains("Usage & Cost"),
+            "open-frame positive control"
+        );
+        presentation::reducer::close(&mut state, presentation::Surface::UsagePanel);
+        assert!(
+            !paint(&state).contains("Usage & Cost"),
+            "closing erases the sheet"
         );
     }
 
     #[test]
-    fn renders_active_panel_with_title_and_no_turns_message() {
+    fn story21_4_usage_fits_caller_sheet_and_keeps_footer() {
+        for (width, height) in [(60, 16), (130, 30)] {
+            let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let state = UsagePanelState::new();
+            let theme = theme();
+            term.draw(|frame| {
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    frame.area(),
+                    &theme,
+                    "1\n2\n3\n4\n5\n6\n7\n8",
+                    1,
+                    false,
+                    crate::domain::models::visual::DensityMode::Focus,
+                )
+                .unwrap();
+                let region = crate::adapters::tui::presentation::geometry::modal_region(
+                    &layout,
+                    frame.area(),
+                );
+                let sheet = crate::adapters::tui::presentation::geometry::frame_rect(region);
+                render(frame, sheet, &state, &theme);
+                assert_eq!(frame.buffer_mut()[(sheet.x, sheet.y)].symbol(), "┌");
+                assert_eq!(
+                    frame.buffer_mut()[(sheet.right() - 1, sheet.bottom() - 1)].symbol(),
+                    "┘"
+                );
+            })
+            .unwrap();
+            let text = buffer_text(&term);
+            assert!(text.contains("Usage & Cost"), "{text}");
+            assert!(text.contains("(no turns yet)"), "{text}");
+            assert!(text.contains("0 tasks · 0m 0s"), "{text}");
+        }
+    }
+
+    #[test]
+    fn renders_panel_with_title_and_no_turns_message() {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
-        let mut state = UsagePanelState::new();
-        state.active = true;
+        let state = UsagePanelState::new();
         term.draw(|frame| {
             render(frame, frame.area(), &state, &theme());
         })
@@ -325,7 +393,6 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut state = UsagePanelState::new();
-        state.active = true;
         state.turn_rows.push(TurnUsageRow {
             turn_index: 0,
             model: "unknown-model".to_string(),
@@ -353,7 +420,6 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut state = UsagePanelState::new();
-        state.active = true;
         state.session_today = SessionUsageSummary {
             tokens_in: 0,
             tokens_out: 0,
@@ -379,7 +445,6 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut term = Terminal::new(backend).unwrap();
         let mut state = UsagePanelState::new();
-        state.active = true;
         let mut pm: BTreeMap<String, ModelCost> = BTreeMap::new();
         pm.insert(
             "sonnet".to_string(),

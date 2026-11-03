@@ -2,8 +2,8 @@
 //!
 //! `handle_open_usage_panel` (formerly `open_usage_panel`) is an async
 //! `HandlerOutcome::Quiet` handler — heavy async I/O (reads via
-//! `UsageLedgerPort`), mutates `state.usage_panel` + `state.focus` +
-//! `state.needs_redraw`. No event emission, no spawn.
+//! `UsageLedgerPort`), mutates the usage payload and opens its reducer-owned
+//! frame. No event emission, no spawn.
 //!
 //! Takes TWO domain ports: `&dyn UsageLedgerPort` (for ledger reads) +
 //! `&dyn ProviderInfoPort` (for active provider lookup + model metadata
@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+use crate::adapters::tui::presentation::{Surface, reducer};
 use crate::adapters::tui::state::{SessionUsageSummary, TuiState, TurnUsageRow};
 use crate::domain::models::{AppConfig, Conversation, MessageRole, SessionManager, SessionState};
 use crate::domain::ports::{ProviderInfoPort, UsageLedgerPort};
@@ -29,6 +30,11 @@ pub async fn handle_open_usage_panel(
     config: &AppConfig,
     session_manager: &SessionManager,
 ) -> HandlerOutcome {
+    reducer::open(state, Surface::UsagePanel);
+    if !reducer::initialize_surface(state, Surface::UsagePanel) {
+        return HandlerOutcome::Quiet;
+    }
+    state.usage_panel.initialize();
     let since = info.today_start_unix_ms();
     let entries_today = usage_ledger.read_since(since).await.unwrap_or_default();
 
@@ -140,10 +146,7 @@ pub async fn handle_open_usage_panel(
     state.usage_panel.missing_pricing_models = breakdown.missing_pricing_models;
     state.usage_panel.context_used_tokens = token_usage_in;
     state.usage_panel.context_window_tokens = context_window_tokens;
-    state.usage_panel.open(state.focus.clone());
-    state.focus = crate::domain::models::FocusState::Overlay(
-        crate::domain::models::visual::OverlayType::UsagePanel,
-    );
+    reducer::handoff(state, Surface::UsagePanel, Surface::UsagePanel);
     state.needs_redraw = true;
     HandlerOutcome::Quiet
 }

@@ -35,7 +35,7 @@ use crate::adapters::skill_activation::SkillActivator;
 use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
-use crate::adapters::tui::app::{InputAction, convert_crossterm_event, handle_input};
+use crate::adapters::tui::app::{self, InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
@@ -48,8 +48,8 @@ use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, input_box, model_selector, profile_switcher, reverse_search,
-    sidebar, status_bar, team_proposal_card, toast_layer, usage_panel,
+    autocomplete_popup, chat_pane, input_box, reverse_search, sidebar, status_bar,
+    team_proposal_card, toast_layer,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
@@ -1781,6 +1781,7 @@ pub async fn run(
                                                     state.login.origin = origin.clone();
                                                     state.login.start_running(RunningLogin {
                                                         login_id,
+                                                        generation: state.login.generation,
                                                         provider_id: plan.provider_id.clone(),
                                                         display: handlers::login::display_text(&plan.display),
                                                         origin,
@@ -1789,7 +1790,7 @@ pub async fn run(
                                                         progress: Vec::new(),
                                                         field: None,
                                                     });
-                                                    state.focus = handlers::login::LOGIN;
+                                                    presentation::reducer::handoff(&mut state, presentation::Surface::Login, presentation::Surface::Login);
                                                     state.needs_redraw = true;
                                                     tokio::spawn(login_runtime::run_login(ctx, app, login_id, plan, method, ui));
                                                 }
@@ -4423,6 +4424,7 @@ pub async fn run(
                                                 state.login.origin = origin.clone();
                                                 state.login.start_running(RunningLogin {
                                                     login_id,
+                                                    generation: state.login.generation,
                                                     provider_id: plan.provider_id.clone(),
                                                     display: handlers::login::display_text(&plan.display),
                                                     origin,
@@ -4431,7 +4433,7 @@ pub async fn run(
                                                     progress: Vec::new(),
                                                     field: None,
                                                 });
-                                                state.focus = handlers::login::LOGIN;
+                                                presentation::reducer::handoff(&mut state, presentation::Surface::Login, presentation::Surface::Login);
                                                 state.needs_redraw = true;
                                                 tokio::spawn(login_runtime::run_login(ctx, app, login_id, plan, method, ui));
                                             }
@@ -4506,58 +4508,20 @@ pub async fn run(
                                     )
                                     .await;
                                 }
-                                InputAction::OpenProfileSwitcher => {
-                                    let resolver = app_state.profile_resolver.load_full();
-                                    let profiles = resolver.list_profiles();
-                                    let current_config = app_state.app_config.load_full();
-                                    let active_name = &current_config.active_profile;
-                                    let current_dims = resolver
-                                        .resolve_active()
-                                        .map(|r| r.selection.dimensions)
-                                        .unwrap_or_default();
-                                    state.profile_switcher.open(
-                                        state.focus.clone(),
-                                        profiles,
-                                        active_name,
-                                        current_dims,
-                                    );
-                                    state.focus = crate::domain::models::FocusState::Overlay(
-                                        crate::domain::models::visual::OverlayType::ProfileSwitcher,
-                                    );
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::ProfileSwitchRequested(name) => {
-                                    let resolver = app_state.profile_resolver.load_full();
-                                    let profiles = resolver.list_profiles();
-                                    let current_config = app_state.app_config.load_full();
-                                    let active_name = &current_config.active_profile;
-                                    let current_dims = resolver
-                                        .resolve_active()
-                                        .map(|r| r.selection.dimensions)
-                                        .unwrap_or_default();
-                                    state.profile_switcher.open(
-                                        state.focus.clone(),
-                                        profiles,
-                                        active_name,
-                                        current_dims,
-                                    );
-                                    if let Some(idx) = state.profile_switcher.profiles.iter().position(|p| p.name == name) {
-                                        state.profile_switcher.selected = idx;
+                                action @ (InputAction::OpenProfileSwitcher | InputAction::ProfileSwitchRequested(_)) => {
+                                    handlers::profile_switch::open(&mut state, |selector| {
+                                        let resolver = app_state.profile_resolver.load_full();
+                                        let profiles = resolver.list_profiles();
+                                        let current_config = app_state.app_config.load_full();
+                                        let current_dims = resolver
+                                            .resolve_active()
+                                            .map(|r| r.selection.dimensions)
+                                            .unwrap_or_default();
+                                        selector.initialize(profiles, &current_config.active_profile, current_dims);
+                                    });
+                                    if let InputAction::ProfileSwitchRequested(name) = action {
+                                        handlers::profile_switch::preview(&mut state, Some(&name));
                                     }
-                                    if let Some(profile) = state.profile_switcher
-                                        .selected_profile()
-                                        .cloned()
-                                    {
-                                        if let Some(plan) = state.profile_switcher
-                                            .compute_diff_for_selected(&profile)
-                                        {
-                                            state.profile_switcher.enter_preview(plan);
-                                        }
-                                    }
-                                    state.focus = crate::domain::models::FocusState::Overlay(
-                                        crate::domain::models::visual::OverlayType::ProfileSwitcher,
-                                    );
-                                    state.needs_redraw = true;
                                 }
                                 InputAction::ConfirmProfileSwitch(target_name) => {
                                     let mut mcp_config_notices = Vec::new();
@@ -6683,15 +6647,7 @@ pub async fn run(
                             state.session_overrides.clear();
                             tracing::info!(cleared_count, "Session adapter overrides cleared on profile switch");
                         }
-                        if state.focus
-                            == crate::domain::models::FocusState::Overlay(
-                                crate::domain::models::visual::OverlayType::ProfileSwitcher,
-                            )
-                        {
-                            if let Some(prev) = state.profile_switcher.dismiss() {
-                                state.focus = prev;
-                            }
-                        }
+                        handlers::profile_switch::complete(&mut state);
                         notifications::success(&mut state, NoticeSource::Profile, format!("Profile switched to '{profile_name}' — {summary}"));
                         state.needs_redraw = true;
                     }
@@ -6700,15 +6656,7 @@ pub async fn run(
                         error,
                         rolled_back,
                     } => {
-                        if state.focus
-                            == crate::domain::models::FocusState::Overlay(
-                                crate::domain::models::visual::OverlayType::ProfileSwitcher,
-                            )
-                        {
-                            if let Some(prev) = state.profile_switcher.dismiss() {
-                                state.focus = prev;
-                            }
-                        }
+                        handlers::profile_switch::complete(&mut state);
                         let rollback_note = if rolled_back {
                             " (previous adapters preserved)"
                         } else {
@@ -7770,11 +7718,7 @@ fn render(
         input_scroll_offset,
         ref reverse_search,
         ref search_state,
-        ref model_selector,
-        ref login,
-        ref profile_switcher,
         active_profile: ref _active_profile,
-        ref usage_panel,
         ref selected_model,
         ref image_indicator,
         ref current_hint,
@@ -8820,28 +8764,6 @@ fn render(
 
 
 
-                // Render model selector overlay (centered modal, Tier-1)
-                // Story 7.2 AC1
-                if model_selector.active {
-                    model_selector::render(frame, area, model_selector, theme);
-                }
-                crate::adapters::tui::widgets::login_dialog::render(
-                    frame,
-                    area,
-                    login,
-                    theme,
-                    crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8(),
-                );
-
-                // Render usage/cost panel overlay (Story 7.5 AC3)
-                if usage_panel.active {
-                    usage_panel::render(frame, area, usage_panel, theme);
-                }
-
-                // Render profile switcher overlay (Story 8.4 AC-1)
-                if profile_switcher.active {
-                    profile_switcher::render(frame, area, profile_switcher, theme);
-                }
 
                     }, paint_status,
                 );
@@ -9476,6 +9398,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn story21_4_profile_completion_preserves_base_and_higher_quit_at_both_depths() {
+        use crate::adapters::tui::{
+            presentation::{Surface, is_open},
+            quit_confirm::{self, QuitFacts, QuitHost},
+        };
+        use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
+        for base in [FocusState::Input, FocusState::Chat] {
+            for capped in [false, true] {
+                let mut state = TuiState::new(80, 24);
+                state.focus = base.clone();
+                if capped {
+                    for event in [
+                        E::SpecialKey(K::CtrlP),
+                        E::SpecialKey(K::CtrlX),
+                        E::KeyPress('?'),
+                        E::SpecialKey(K::CtrlX),
+                        E::KeyPress('n'),
+                    ] {
+                        handle_input(&mut state, &event);
+                    }
+                }
+                let caller = state.modal_stack.iter().cloned().collect::<Vec<_>>();
+                handle_input(&mut state, &E::SpecialKey(K::CtrlX));
+                assert_eq!(
+                    handle_input(&mut state, &E::KeyPress('p')),
+                    InputAction::OpenProfileSwitcher
+                );
+                handlers::profile_switch::open(&mut state, |selector| {
+                    selector.initialize(vec![], "", Default::default());
+                });
+                assert_eq!(
+                    handle_input(&mut state, &E::SpecialKey(K::CtrlQ)),
+                    InputAction::Quit
+                );
+                quit_confirm::request(
+                    &mut state,
+                    QuitFacts {
+                        streams: 1,
+                        ..QuitFacts::idle(QuitHost::Local)
+                    },
+                );
+                let quit = state.modal_stack.top().cloned();
+                handlers::profile_switch::complete(&mut state);
+                assert!(!is_open(&state, Surface::ProfileSwitcher));
+                assert_eq!(state.modal_stack.top(), quit.as_ref());
+                assert_eq!(state.focus, base);
+                handle_input(&mut state, &E::SpecialKey(K::Esc));
+                assert_eq!(
+                    state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    caller
+                );
+                assert_eq!(state.focus, base);
+                assert!(presentation::consistent(&state));
+            }
+        }
+    }
+
+    #[test]
     fn story21_4_pane_effects_preserve_the_interrupted_base_focus() {
         use crate::adapters::tui::{
             decision_pane::{self, Arrival, DecisionDraft, DecisionEffect, DecisionKind},
@@ -9627,26 +9607,31 @@ mod tests {
 
     fn retained_card_arrival(mut arrive: impl FnMut(&mut TuiState), recovers_input: bool) {
         use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
-        for (focus, draft, expected) in [
-            (FocusState::Input, "", FocusState::Chat),
+        for (focus, draft, expected, model) in [
+            (FocusState::Input, "", FocusState::Chat, false),
             (
                 FocusState::Input,
                 "  exact draft λ\nsecond line  ",
                 FocusState::Input,
+                false,
             ),
-            (
-                FocusState::Overlay(OverlayType::ModelSelector),
-                "overlay draft",
-                FocusState::Overlay(OverlayType::ModelSelector),
-            ),
+            (FocusState::Input, "overlay draft", FocusState::Input, true),
         ] {
             let mut state = TuiState::new(80, 24);
             state.focus = focus;
             state.input_buffer = draft.into();
+            if model {
+                presentation::reducer::open(&mut state, presentation::Surface::ModelSelector);
+            }
+            let frames = state.modal_stack.iter().cloned().collect::<Vec<_>>();
             arrive(&mut state);
             assert_eq!(state.focus, expected);
             assert_eq!(state.input_buffer, draft);
-            if matches!(expected, FocusState::Overlay(_)) {
+            assert_eq!(
+                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                frames
+            );
+            if model {
                 continue;
             }
             if state.focus == FocusState::Input {

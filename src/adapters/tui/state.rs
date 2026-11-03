@@ -1174,13 +1174,10 @@ pub struct ContextWarning {
 }
 
 /// State for the model/provider selector overlay (Ctrl+X, M) (Story 7.2 AC1).
-/// Modelled on `CommandPaletteState` (uses previous_focus + open/dismiss).
 pub struct ModelSelectorState {
-    pub active: bool,
     pub columns: Vec<ProviderColumn>,
     pub selected_provider: usize,
     pub selected_model: usize,
-    pub previous_focus: Option<FocusState>,
     pub connecting: Option<String>,
     pub pending_context_warning: Option<ContextWarning>,
     pub refreshing: Arc<RefreshTracker>,
@@ -1196,11 +1193,9 @@ pub struct ModelSelectorState {
 impl ModelSelectorState {
     pub fn new() -> Self {
         Self {
-            active: false,
             columns: Vec::new(),
             selected_provider: 0,
             selected_model: 0,
-            previous_focus: None,
             connecting: None,
             pending_context_warning: None,
             refreshing: RefreshTracker::new(),
@@ -1212,16 +1207,13 @@ impl ModelSelectorState {
         }
     }
 
-    /// Open the model selector, seeding selection to the currently-active provider+model.
-    pub fn open(
+    /// Prepare a fresh frame, seeding the active provider and model.
+    pub fn initialize(
         &mut self,
-        current_focus: FocusState,
         columns: Vec<ProviderColumn>,
         active_provider_id: &str,
         active_model_id: &str,
     ) {
-        self.active = true;
-        self.previous_focus = Some(current_focus);
         self.connecting = None;
         self.pending_context_warning = None;
         self.search_active = false;
@@ -1281,16 +1273,14 @@ impl ModelSelectorState {
         .unwrap_or(0);
     }
 
-    /// Dismiss the selector, returning the previous focus to restore.
-    pub fn dismiss(&mut self) -> Option<FocusState> {
-        self.active = false;
+    /// Release the closed frame's editable payload.
+    pub fn clear(&mut self) {
         self.columns.clear();
         self.connecting = None;
         self.pending_context_warning = None;
         self.search_active = false;
         self.search_query.clear();
         self.filtered_indices.clear();
-        self.previous_focus.take()
     }
 
     /// Navigate between providers (Left/Right). Wraps around; no-op when ≤1 column (AC7).
@@ -1407,15 +1397,12 @@ impl Default for ModelSelectorState {
 // ── ProfileSwitcher (Story 8.4 AC-1) ─────────────────────────────────────
 
 /// State for the profile switcher overlay (Ctrl+X, P).
-/// Modelled on `ModelSelectorState` (uses previous_focus + open/dismiss).
 #[derive(Debug, Clone)]
 pub struct ProfileSwitcherState {
-    pub active: bool,
     pub profiles: Vec<crate::domain::models::ProfileDescriptor>,
     pub selected: usize,
     pub active_index: Option<usize>,
     pub preview: Option<crate::domain::services::swap_tier::TransitionPlan>,
-    pub previous_focus: Option<FocusState>,
     pub current_dimensions: std::collections::BTreeMap<
         crate::domain::models::PortDimension,
         crate::domain::models::AdapterRef,
@@ -1425,19 +1412,16 @@ pub struct ProfileSwitcherState {
 impl ProfileSwitcherState {
     pub fn new() -> Self {
         Self {
-            active: false,
             profiles: Vec::new(),
             selected: 0,
             active_index: None,
             preview: None,
-            previous_focus: None,
             current_dimensions: std::collections::BTreeMap::new(),
         }
     }
 
-    pub fn open(
+    pub fn initialize(
         &mut self,
-        current_focus: FocusState,
         profiles: Vec<crate::domain::models::ProfileDescriptor>,
         active_name: &str,
         current_dims: std::collections::BTreeMap<
@@ -1445,19 +1429,15 @@ impl ProfileSwitcherState {
             crate::domain::models::AdapterRef,
         >,
     ) {
-        self.active = true;
         self.profiles = profiles;
         self.active_index = self.profiles.iter().position(|p| p.name == active_name);
         self.selected = self.active_index.unwrap_or(0);
-        self.previous_focus = Some(current_focus);
         self.current_dimensions = current_dims;
         self.preview = None;
     }
 
-    pub fn dismiss(&mut self) -> Option<FocusState> {
-        self.active = false;
+    pub fn clear(&mut self) {
         self.preview = None;
-        self.previous_focus.take()
     }
 
     pub fn navigate(&mut self, direction: i32) {
@@ -1551,10 +1531,7 @@ impl DailyBudgetState {
 }
 
 /// State for the usage/cost panel overlay (Ctrl+X, U). Story 7.5 AC3 / UX-DR111.
-/// Modelled on `ModelSelectorState` (open/dismiss + previous_focus).
 pub struct UsagePanelState {
-    pub active: bool,
-    pub previous_focus: Option<FocusState>,
     /// Logical section cursor (0..4) — visual highlight only.
     pub selected_section: usize,
     pub turn_rows: Vec<TurnUsageRow>,
@@ -1572,8 +1549,6 @@ pub struct UsagePanelState {
 impl UsagePanelState {
     pub fn new() -> Self {
         Self {
-            active: false,
-            previous_focus: None,
             selected_section: 0,
             turn_rows: Vec::new(),
             session_today: SessionUsageSummary::default(),
@@ -1584,17 +1559,13 @@ impl UsagePanelState {
         }
     }
 
-    /// Open the panel and stash the previous focus for Esc-dismiss.
-    pub fn open(&mut self, current_focus: FocusState) {
-        self.active = true;
-        self.previous_focus = Some(current_focus);
+    /// Prepare the selection for a fresh Usage frame.
+    pub fn initialize(&mut self) {
         self.selected_section = 0;
     }
 
-    /// Dismiss the panel, returning the focus to restore.
-    pub fn dismiss(&mut self) -> Option<FocusState> {
-        self.active = false;
-        self.previous_focus.take()
+    pub fn clear(&mut self) {
+        self.selected_section = 0;
     }
 }
 
@@ -3919,8 +3890,15 @@ mod tests {
 
     #[test]
     fn test_model_selector_open_seeds_selection() {
+        use crate::adapters::tui::presentation::{Surface, is_open, reducer};
         use crate::domain::models::provider::ModelDescriptor;
-        let mut ms = ModelSelectorState::new();
+        let mut state = TuiState::new(80, 24);
+        reducer::open(&mut state, Surface::ModelSelector);
+        assert!(reducer::initialize_surface(
+            &mut state,
+            Surface::ModelSelector
+        ));
+        let ms = &mut state.model_selector;
         ms.columns = vec![ProviderColumn {
             provider_id: "anthropic".to_string(),
             display_name: "Anthropic".to_string(),
@@ -3951,15 +3929,12 @@ mod tests {
                 },
             ],
         }];
-        ms.open(
-            FocusState::Input,
-            ms.columns.clone(),
-            "anthropic",
-            "claude-sonnet",
-        );
-        assert!(ms.active);
+        ms.initialize(ms.columns.clone(), "anthropic", "claude-sonnet");
+        assert_eq!(ms.columns.len(), 1);
         assert_eq!(ms.selected_provider, 0);
         assert_eq!(ms.selected_model, 1);
+        assert!(is_open(&state, Surface::ModelSelector));
+        assert_eq!(state.focus, FocusState::Input);
     }
 
     #[test]
@@ -4018,21 +3993,28 @@ mod tests {
 
     #[test]
     fn catalog_refresh_preserves_provider_and_model_ids_after_reordering() {
-        let mut state = make_test_selector();
-        state.active = true;
+        let mut tui = TuiState::new(80, 24);
+        crate::adapters::tui::presentation::reducer::open(
+            &mut tui,
+            crate::adapters::tui::presentation::Surface::ModelSelector,
+        );
+        tui.model_selector = make_test_selector();
+        let state = &mut tui.model_selector;
         state.selected_model = 1;
-        state.previous_focus = Some(FocusState::Input);
         let mut updated = state.columns[0].clone();
         updated.models.swap(0, 1);
         updated.discovery = Some(crate::domain::models::provider::DiscoveryStatus::Cached);
         let mut inserted = updated.clone();
         inserted.provider_id = "inserted".into();
         state.refresh_columns(vec![inserted, updated]);
-        assert!(state.active);
+        assert_eq!(
+            tui.modal_stack.top().unwrap().surface,
+            crate::adapters::tui::presentation::Surface::ModelSelector
+        );
         assert_eq!(state.selected_provider, 1);
         assert_eq!(state.selected_model, 0);
         assert_eq!(state.selected().unwrap().1.model_id, "openai/gpt-4o");
-        assert_eq!(state.previous_focus, Some(FocusState::Input));
+        assert_eq!(tui.focus, FocusState::Input);
         assert_eq!(
             state.columns[1].discovery,
             Some(crate::domain::models::provider::DiscoveryStatus::Cached)
@@ -4045,15 +4027,23 @@ mod tests {
         assert_eq!(state.selected_model, 0);
         assert!(state.selected().is_none());
         state.refresh_columns(Vec::new());
-        assert!(state.active);
+        assert_eq!(
+            tui.modal_stack.top().unwrap().surface,
+            crate::adapters::tui::presentation::Surface::ModelSelector
+        );
         assert!(state.columns.is_empty());
         assert!(state.selected().is_none());
     }
 
     #[test]
     fn catalog_refresh_recomputes_search_and_retains_matching_model_id() {
-        let mut state = make_test_selector();
-        state.active = true;
+        let mut tui = TuiState::new(80, 24);
+        crate::adapters::tui::presentation::reducer::open(
+            &mut tui,
+            crate::adapters::tui::presentation::Surface::ModelSelector,
+        );
+        tui.model_selector = make_test_selector();
+        let state = &mut tui.model_selector;
         state.search_active = true;
         state.search_query = "gpt".into();
         state.recompute_filter();
@@ -4064,6 +4054,10 @@ mod tests {
         assert!(state.search_active);
         assert_eq!(state.filtered_indices, [0]);
         assert_eq!(state.selected().unwrap().1.model_id, "openai/gpt-4o");
+        assert_eq!(
+            tui.modal_stack.top().unwrap().surface,
+            crate::adapters::tui::presentation::Surface::ModelSelector
+        );
     }
 
     #[test]

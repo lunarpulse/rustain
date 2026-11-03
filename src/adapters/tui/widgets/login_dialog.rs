@@ -30,7 +30,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::hyperlink;
-use super::modal::{ModalPart, fit_modal_indexed, modal_area, wrapped};
+use super::modal::{ModalPart, fit_modal_indexed, wrapped};
 use crate::adapters::tui::login_ui::safe_url;
 use crate::adapters::tui::state::{
     FieldKind, LOGIN_PICKER_ROWS, LoginOverlayState, LoginSection, LoginView, OverlayMode,
@@ -173,9 +173,6 @@ pub fn render(
     theme: &Theme,
     supports_osc8: bool,
 ) {
-    if !state.active {
-        return;
-    }
     let styles = Styles {
         muted: Style::default().fg(theme.colors.fg_muted),
         accent: Style::default()
@@ -183,10 +180,9 @@ pub fn render(
             .add_modifier(Modifier::BOLD),
         text: Style::default().fg(theme.colors.fg_primary),
     };
-    let width = area.width.saturating_sub(4).clamp(40, 100).min(area.width);
-    let inner_width = width.saturating_sub(2) as usize;
+    let inner_width = area.width.saturating_sub(2) as usize;
     let mut links = Vec::new();
-    let (title, parts) = match state.view {
+    let (title, mut parts) = match state.view {
         LoginView::ProviderPicker => (
             match state.mode {
                 OverlayMode::Login => " Sign in ",
@@ -215,28 +211,42 @@ pub fn render(
             )
         }
     };
-    let wanted: usize = parts
+    // Preserve source part indices for OSC 8. At the smallest sheet, whole
+    // link headers yield before the selected field; never clip a URL fragment.
+    let footer_rows: usize = parts
         .iter()
         .map(|part| match part {
-            ModalPart::Header(lines) | ModalPart::Notice(lines) | ModalPart::Footer(lines) => {
-                lines.len()
-            }
-            ModalPart::Rows { lines, .. } => lines.len(),
+            ModalPart::Footer(lines) => lines.len(),
+            _ => 0,
         })
         .sum();
-    // `wanted` is unbounded (a provider URL wraps over as many rows as it needs):
-    // clamp to the viewport while still a usize, then convert.
-    let height = (wanted + 2)
-        .min(area.height.saturating_sub(2) as usize)
-        .max(8.min(area.height) as usize) as u16;
-    let modal = modal_area(area, width, height);
-    frame.render_widget(Clear, modal);
+    let body_rows = usize::from(
+        parts
+            .iter()
+            .any(|part| matches!(part, ModalPart::Rows { lines, .. } if !lines.is_empty())),
+    );
+    let mut header_rows = parts
+        .iter()
+        .filter(|part| matches!(part, ModalPart::Header(lines) if !lines.is_empty()))
+        .count();
+    for part in &mut parts {
+        if footer_rows + body_rows + header_rows <= area.height.saturating_sub(2) as usize {
+            break;
+        }
+        if let ModalPart::Header(lines) = part
+            && !lines.is_empty()
+        {
+            lines.clear();
+            header_rows -= 1;
+        }
+    }
+    frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.accent))
         .title(Span::styled(title, theme.typography.heading));
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let fitted = fit_modal_indexed(parts, inner.height as usize, inner.width as usize);
     let lines: Vec<_> = fitted
         .into_iter()
@@ -674,11 +684,11 @@ mod tests {
     }
     fn running_state(sections: Vec<LoginSection>, field: bool) -> LoginOverlayState {
         let mut state = LoginOverlayState::default();
-        state.active = true;
         state.view = LoginView::Running;
         let (tx, _rx) = tokio::sync::oneshot::channel();
         state.running = Some(RunningLogin {
             login_id: 1,
+            generation: state.generation,
             provider_id: "example".into(),
             display: "Example".into(),
             origin: LoginOrigin::Slash,
@@ -970,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn an_oversized_value_clamps_the_modal_to_the_viewport() {
+    fn an_oversized_value_fits_the_caller_viewport() {
         let url = format!("https://claude.ai/{}", "p".repeat(37 * 70_000));
         let state = browser(&url, "http://localhost:43123/launch", true);
         for osc8 in [false, true] {

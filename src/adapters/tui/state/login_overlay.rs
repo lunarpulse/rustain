@@ -2,8 +2,9 @@
 //! running login (browser link, device code, progress, one pending field), and
 //! the same overlay's `/logout` and `/accounts` provider and account steps.
 
+use crate::adapters::tui::presentation::{ModalStack, Surface};
 use crate::domain::events::{AccountListing, LoginReply, LoginTargetRow};
-use crate::domain::models::{AuthMethod, FocusState, SecretString};
+use crate::domain::models::{AuthMethod, SecretString};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -65,6 +66,17 @@ pub enum LoginOrigin {
     Slash,
     Chord,
     Picker { column: String },
+}
+
+/// Credential-free reducer requests; only stack membership owns visibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginFrameIntent {
+    Open,
+    FromPalette,
+    FromModel,
+    Refresh,
+    Close,
+    ReturnToModel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +185,7 @@ impl PendingField {
 #[derive(Debug)]
 pub struct RunningLogin {
     pub login_id: u64,
+    pub generation: u64,
     pub provider_id: String,
     pub display: String,
     pub origin: LoginOrigin,
@@ -184,9 +197,8 @@ pub struct RunningLogin {
 
 #[derive(Debug)]
 pub struct LoginOverlayState {
-    pub active: bool,
+    pub frame_intent: Option<LoginFrameIntent>,
     pub view: LoginView,
-    pub previous_focus: Option<FocusState>,
     pub origin: LoginOrigin,
     /// Discards picker data and validation results of a closed or reopened picker.
     pub generation: u64,
@@ -212,9 +224,8 @@ pub struct LoginOverlayState {
 impl Default for LoginOverlayState {
     fn default() -> Self {
         Self {
-            active: false,
+            frame_intent: None,
             view: LoginView::ProviderPicker,
-            previous_focus: None,
             origin: LoginOrigin::Slash,
             generation: 0,
             rows: Vec::new(),
@@ -239,51 +250,70 @@ pub const LOGIN_PICKER_ROWS: usize = 10;
 
 impl LoginOverlayState {
     pub fn next_login_id(&mut self) -> u64 {
+        self.frame_intent = Some(LoginFrameIntent::Refresh);
         self.last_login_id += 1;
         self.last_login_id
     }
 
-    /// Opens the provider picker in its loading state; returns the generation
-    /// its data and validation results must carry.
+    /// Requests the picker without resetting an initialized frame or running flow.
+    /// Fresh data returns the generation its asynchronous results must carry.
     pub fn open_picker(
         &mut self,
-        previous: FocusState,
+        stack: &ModalStack,
         origin: LoginOrigin,
         mode: OverlayMode,
-    ) -> u64 {
+    ) -> Option<u64> {
+        // A released flow retains only its completion receipt, never a new UI lease.
+        if self.running.as_ref().is_some_and(|running| {
+            running.cancel.is_cancelled() && running.generation != self.generation
+        }) {
+            self.frame_intent = None;
+            return None;
+        }
+        let intent = match &origin {
+            LoginOrigin::Picker { .. } => LoginFrameIntent::FromModel,
+            LoginOrigin::Slash
+                if stack
+                    .top()
+                    .is_some_and(|frame| frame.surface == Surface::CommandPalette) =>
+            {
+                LoginFrameIntent::FromPalette
+            }
+            _ => LoginFrameIntent::Open,
+        };
+        self.frame_intent = Some(intent);
+        let initialization = stack.login_initialization();
+        if initialization == Some(false) || self.running.is_some() {
+            if initialization != Some(false)
+                && let Some(running) = &mut self.running
+            {
+                running.generation = self.generation;
+            }
+            return None;
+        }
         self.generation += 1;
-        self.active = true;
         self.view = LoginView::ProviderPicker;
         self.mode = mode;
         self.account = None;
-        self.previous_focus.get_or_insert(previous);
         self.origin = origin;
         self.rows.clear();
         self.loading = true;
         self.query.clear();
         self.filtered.clear();
         self.selected = 0;
-        self.generation
+        Some(self.generation)
     }
 
-    /// Opens the account step of `provider` in its loading state; the provider
-    /// picker's rows, query and selection stay for Esc. Returns the generation
-    /// the listing must carry.
-    pub fn open_accounts(
-        &mut self,
-        previous: FocusState,
-        mode: OverlayMode,
-        provider: String,
-        from_picker: bool,
-    ) -> u64 {
+    /// Opens an account step; provider rows, query and selection stay for Esc.
+    /// Returns the generation the listing must carry.
+    pub fn open_accounts(&mut self, mode: OverlayMode, provider: String, from_picker: bool) -> u64 {
+        self.frame_intent = Some(LoginFrameIntent::Refresh);
         self.generation += 1;
-        self.active = true;
         self.view = LoginView::AccountPicker;
         self.mode = mode;
         // Account steps open only from `/logout` and `/accounts`: an earlier
         // login's model-picker origin must not reopen the picker on Esc.
         self.origin = LoginOrigin::Slash;
-        self.previous_focus.get_or_insert(previous);
         self.account = Some(AccountStep {
             provider,
             listing: None,
@@ -303,7 +333,7 @@ impl LoginOverlayState {
         listing: AccountListing,
         notice: Option<String>,
     ) {
-        if generation != self.generation || !self.active {
+        if generation != self.generation {
             return;
         }
         let Some(step) = self.account.as_mut() else {
@@ -323,7 +353,7 @@ impl LoginOverlayState {
     }
 
     pub fn set_rows(&mut self, generation: u64, rows: Vec<LoginTargetRow>) {
-        if generation != self.generation || !self.active {
+        if generation != self.generation {
             return;
         }
         self.loading = false;
@@ -384,14 +414,12 @@ impl LoginOverlayState {
 
     pub fn open_methods(
         &mut self,
-        previous: FocusState,
         origin: LoginOrigin,
         target: (String, String),
         methods: &'static [AuthMethod],
         from_picker: bool,
     ) {
-        self.active = true;
-        self.previous_focus.get_or_insert(previous);
+        self.frame_intent = Some(LoginFrameIntent::Refresh);
         self.origin = origin;
         self.view = LoginView::MethodPicker;
         self.mode = OverlayMode::Login;
@@ -402,7 +430,6 @@ impl LoginOverlayState {
     }
 
     pub fn start_running(&mut self, running: RunningLogin) {
-        self.active = true;
         self.view = LoginView::Running;
         self.mode = OverlayMode::Login;
         self.running = Some(running);
@@ -412,7 +439,7 @@ impl LoginOverlayState {
     pub fn running_mut(&mut self, login_id: u64) -> Option<&mut RunningLogin> {
         self.running
             .as_mut()
-            .filter(|running| running.login_id == login_id)
+            .filter(|running| running.login_id == login_id && !running.cancel.is_cancelled())
     }
 
     /// Cancels the running login (its late callbacks are then ignored).
@@ -426,9 +453,19 @@ impl LoginOverlayState {
         }
     }
 
-    /// Closes the overlay; returns the focus to restore.
-    pub fn close(&mut self) -> Option<FocusState> {
-        self.active = false;
+    /// Releases ownership, cancelling and dropping all prompt/link data.
+    /// Only the id/lease/cancellation bookkeeping remains until Finished so a
+    /// credential already persisted is still reported without reopening UI.
+    pub fn clear(&mut self) {
+        self.cancel_running();
+        if let Some(running) = &mut self.running {
+            running.provider_id.clear();
+            running.display.clear();
+            running.origin = LoginOrigin::Slash;
+            running.sections.clear();
+            running.progress.clear();
+        }
+        self.frame_intent = None;
         self.generation += 1;
         self.rows.clear();
         self.query.clear();
@@ -436,6 +473,38 @@ impl LoginOverlayState {
         self.target = None;
         self.mode = OverlayMode::Login;
         self.account = None;
-        self.previous_focus.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_frame_schema_is_credential_free_by_value() {
+        fn consume(intent: LoginFrameIntent) {
+            match intent {
+                LoginFrameIntent::Open
+                | LoginFrameIntent::FromPalette
+                | LoginFrameIntent::FromModel
+                | LoginFrameIntent::Refresh
+                | LoginFrameIntent::Close
+                | LoginFrameIntent::ReturnToModel => {}
+            }
+        }
+        for intent in [
+            LoginFrameIntent::Open,
+            LoginFrameIntent::FromPalette,
+            LoginFrameIntent::FromModel,
+            LoginFrameIntent::Refresh,
+            LoginFrameIntent::Close,
+            LoginFrameIntent::ReturnToModel,
+        ] {
+            consume(intent);
+            consume(intent); // A copied by-value payload cannot hide a secret owner.
+        }
+        let Surface::Login = Surface::Login else {
+            panic!("Login's stored surface variant remains fieldless");
+        };
     }
 }

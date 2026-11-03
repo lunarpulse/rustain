@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arc_swap::ArcSwap;
 
 use crate::adapters::tui::handlers::HandlerOutcome;
-use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::presentation::{self, Surface};
+use crate::adapters::tui::state::{ProfileSwitcherState, TuiState};
 use crate::domain::errors::TransitionError;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{PortDimension, ProfileIdentityColor, TransitionState};
@@ -20,6 +21,39 @@ use crate::domain::ports::{ChannelPort, MemoryPort, ProfileResolver, SchedulerPo
 use crate::domain::services::swap_tier::{PortDiff, SwapPolicy, SwapTier, TransitionPlan};
 use crate::infrastructure::composition::ComposeContext;
 use crate::infrastructure::runtime::agent_core::AgentCore;
+
+/// Initialize opening data lazily; reopening retains the existing sheet.
+pub fn open(state: &mut TuiState, initialize: impl FnOnce(&mut ProfileSwitcherState)) {
+    presentation::reducer::open(state, Surface::ProfileSwitcher);
+    if presentation::reducer::initialize_surface(state, Surface::ProfileSwitcher) {
+        initialize(&mut state.profile_switcher);
+    }
+}
+
+/// Preview either the named palette target or the currently selected profile.
+pub fn preview(state: &mut TuiState, name: Option<&str>) {
+    if let Some(name) = name
+        && let Some(index) = state
+            .profile_switcher
+            .profiles
+            .iter()
+            .position(|p| p.name == name)
+    {
+        state.profile_switcher.selected = index;
+        state.needs_redraw = true;
+    }
+    if let Some(profile) = state.profile_switcher.selected_profile()
+        && let Some(plan) = state.profile_switcher.compute_diff_for_selected(profile)
+    {
+        state.profile_switcher.enter_preview(plan);
+        state.needs_redraw = true;
+    }
+}
+
+/// Completion releases only its sheet, never the interrupted base or a higher frame.
+pub fn complete(state: &mut TuiState) {
+    presentation::reducer::close(state, Surface::ProfileSwitcher);
+}
 
 static SWITCH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 

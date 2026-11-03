@@ -3,8 +3,8 @@
 //! (`handlers::login::{command, on_action, on_event}`,
 //! `handlers::model_switch::{open_selector, on_catalog_refreshed}`), and a
 //! `LiveProviders` built from the production `init_provider_layer`. Rendering
-//! goes through the production widgets into a `TestBackend`. Every wait is on
-//! an event or a stub request, under a hang guard.
+//! goes through the production compositor into a `TestBackend`. Every wait is
+//! on an event or a stub request, under a hang guard.
 #![allow(dead_code)]
 
 pub(crate) use crate::conformance_20_1d1b_codex_replay_discovery::common::{
@@ -16,10 +16,13 @@ use rustain::adapters::tui::clipboard::ClipboardResult;
 use rustain::adapters::tui::handlers::{
     AuthWork, HandlerOutcome, SpawnRequest, accounts, login, model_switch,
 };
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::{self, Shell, Surface, reducer};
 use rustain::adapters::tui::refresh_tracker::RefreshTracker;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::{login_dialog, model_selector};
 use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey, LoginEvent};
 use rustain::domain::models::{AppConfig, ProviderConfig};
 use rustain::infrastructure::live_providers::LiveProviders;
@@ -130,7 +133,6 @@ impl Tui {
     fn consume(&mut self, outcome: HandlerOutcome) {
         use rustain::adapters::tui::state::RunningLogin;
         use rustain::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
-        use rustain::domain::models::{FocusState, visual::OverlayType};
         use tokio_util::sync::CancellationToken;
 
         let HandlerOutcome::RequestSpawn(SpawnRequest::Authentication(work)) = outcome else {
@@ -155,6 +157,7 @@ impl Tui {
                 self.state.login.origin = origin.clone();
                 self.state.login.start_running(RunningLogin {
                     login_id,
+                    generation: self.state.login.generation,
                     provider_id: plan.provider_id.clone(),
                     display: rustain::adapters::auth::bounded_provider_text(&plan.display),
                     origin,
@@ -163,7 +166,7 @@ impl Tui {
                     progress: Vec::new(),
                     field: None,
                 });
-                self.state.focus = FocusState::Overlay(OverlayType::Login);
+                reducer::handoff(&mut self.state, Surface::Login, Surface::Login);
                 self.state.needs_redraw = true;
                 tokio::spawn(login_runtime::run_login(
                     ctx, app, login_id, plan, method, ui,
@@ -294,7 +297,7 @@ impl Tui {
             .is_some_and(|running| running.field.is_some())
     }
 
-    /// Renders both overlays with deterministic plain-link capability.
+    /// Renders the real stack with deterministic plain-link capability.
     pub(crate) fn frame_at(&mut self, width: u16, height: u16) -> String {
         let buffer = self.login_buffer_at(width, height, false);
         let text = buffer_text(&buffer);
@@ -312,13 +315,25 @@ impl Tui {
         let theme = Theme::dark();
         terminal
             .draw(|frame| {
-                model_selector::render(frame, frame.area(), &self.state.model_selector, &theme);
-                login_dialog::render(
-                    frame,
+                let layout = compute_layout(
                     frame.area(),
-                    &self.state.login,
                     &theme,
-                    supports_osc8,
+                    &self.state.input_buffer,
+                    1,
+                    false,
+                    self.state.density_mode,
+                )
+                .expect("fixture terminal meets the minimum");
+                let mut shell = Shell::new(frame.area(), &layout);
+                shell.supports_osc8 = supports_osc8;
+                presentation::compose(
+                    frame,
+                    &self.state,
+                    &shell,
+                    Host::Local,
+                    &LogFacts::default(),
+                    |_| {},
+                    |_| {},
                 );
             })
             .unwrap();

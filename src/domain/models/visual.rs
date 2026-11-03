@@ -185,8 +185,6 @@ pub enum ConfirmationType {
 /// Note: Not Copy because Confirmation contains non-Copy data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
-    ModelSelector,
-    ProfileSwitcher,
     Confirmation(ConfirmationType),
     /// Reverse search overlay for input history (Ctrl+R).
     // Covers: UX-DR74
@@ -200,15 +198,10 @@ pub enum OverlayType {
     /// Bookmark list bottom panel (' key).
     // Covers: UX-DR91, Story 4-4 AC10
     BookmarkList,
-    /// Usage / cost panel (Ctrl+X, U). Story 7.5 AC3 (UX-DR111).
-    UsagePanel,
     /// Wave overlay for fan-out result rows (Story 14.3a AC5). Opened by
     /// expanding the wave strip; intercepts j/k/↵/r/d/s/Esc before the
     /// chat/drill-down handlers.
     WaveOverlay,
-    /// Sign-in overlay (`/login`, Ctrl+X I, or Enter on a locked provider):
-    /// provider and method pickers and the running login.
-    Login,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).
