@@ -254,3 +254,122 @@ fn forty_cell_model_cannot_clip_ready_or_the_log_fact() {
         );
     }
 }
+
+#[test]
+fn dense_which_key_keeps_every_registry_key_with_a_full_composer() {
+    use super::keymap_support::{press, press_all};
+    use ratatui::{style::Modifier, widgets::Paragraph};
+    use rustain::adapters::tui::{
+        keymap::{AvailCtx, Host, Key, render::leader_menu},
+        notification_log::LogFacts,
+        presentation,
+    };
+
+    // Attached is a host-availability paint twin; ingress uses the real local
+    // Ctrl+X handler, never a fabricated pending-leader slot.
+    for host in [Host::Local, Host::Attached] {
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            for frame_origin in [false, true] {
+                let mut state = TuiState::new(width, height);
+                state.input_buffer = ["draft"; 8].join("\n");
+                let before = layout(&state);
+                if frame_origin {
+                    press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+                }
+                press(&mut state, Key::Ctrl('x'));
+                if frame_origin {
+                    press(&mut state, Key::Char('t'));
+                }
+                assert!(state.pending_leader.is_some());
+                let mut avail = match host {
+                    Host::Local => AvailCtx::local(width, DensityMode::Focus),
+                    Host::Attached => AvailCtx::attached(width, false),
+                };
+                avail.frame_origin = frame_origin;
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        let shell = Shell::new(frame.area(), &before);
+                        assert_eq!(shell.input_area.height, 10);
+                        if width == 60 {
+                            assert_eq!(shell.region.height, 5);
+                        }
+                        presentation::compose(
+                            frame,
+                            &state,
+                            &shell,
+                            host,
+                            &LogFacts::default(),
+                            |_| {},
+                            |frame| {
+                                frame.render_widget(
+                                    Paragraph::new("STATUS untouched"),
+                                    shell.status_bar,
+                                )
+                            },
+                        );
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let region = geometry::modal_region(&before, buffer.area);
+                let text = (region.y..region.bottom())
+                    .map(|y| row(buffer, region, y))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for item in leader_menu(&avail) {
+                    let key = format!("[{}]", item.key);
+                    let (x, y) = (region.y..region.bottom())
+                        .find_map(|y| {
+                            let line = row(buffer, region, y);
+                            line.find(&key).map(|byte| {
+                                (
+                                    rustain::adapters::tui::text_geometry::cells(&line[..byte])
+                                        as u16,
+                                    y,
+                                )
+                            })
+                        })
+                        .unwrap_or_else(|| {
+                            panic!("{host:?} {width}x{height}: {key} missing in\n{text}")
+                        });
+                    let cell = &buffer[(region.x + x, y)];
+                    let pressed = state
+                        .leader_feedback
+                        .as_ref()
+                        .is_some_and(|feedback| feedback.command == Some(item.command));
+                    assert_eq!(
+                        cell.fg,
+                        if item.available || pressed {
+                            state.theme.colors.accent
+                        } else {
+                            state.theme.colors.fg_muted
+                        }
+                    );
+                    if pressed {
+                        assert!(cell.modifier.contains(Modifier::BOLD));
+                    }
+                    if width == 130 {
+                        assert!(text.contains(&item.text()), "full label lost: {text}");
+                    }
+                }
+                if let Some(feedback) = &state.leader_feedback {
+                    assert!(
+                        row(buffer, region, region.bottom() - 1)
+                            .contains(feedback.message.as_ref()),
+                        "feedback must own the bottom border: {text}"
+                    );
+                }
+                assert!(
+                    row(buffer, before.status_bar, before.status_bar.y)
+                        .contains("STATUS untouched")
+                );
+                let after = layout(&state);
+                assert_eq!(
+                    (after.chat_pane, after.input_area, after.status_bar),
+                    (before.chat_pane, before.input_area, before.status_bar)
+                );
+                assert_eq!(state.input_buffer, ["draft"; 8].join("\n"));
+            }
+        }
+    }
+}

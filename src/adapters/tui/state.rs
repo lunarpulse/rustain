@@ -860,8 +860,8 @@ pub struct ResolvedMention {
 /// State for inline autocomplete popup (/ commands and @ file mentions).
 // Covers: UX-DR75
 pub struct AutocompleteState {
-    pub active: bool,
-    pub kind: AutocompleteKind,
+    /// Routed popup identity; `None` means closed. Autocomplete is not a frame.
+    pub kind: Option<AutocompleteKind>,
     /// Cursor position where the trigger character (/ or @) was typed.
     pub trigger_position: usize,
     /// Characters typed after the trigger, used for filtering.
@@ -890,8 +890,7 @@ pub struct SlashRollback {
 impl AutocompleteState {
     pub fn new() -> Self {
         Self {
-            active: false,
-            kind: AutocompleteKind::SlashCommand,
+            kind: None,
             trigger_position: 0,
             filter_text: String::new(),
             suggestions: Vec::new(),
@@ -902,15 +901,13 @@ impl AutocompleteState {
     }
 
     /// Open autocomplete with the given kind and trigger position.
-    #[allow(dead_code)]
     pub fn open(
         &mut self,
         kind: AutocompleteKind,
         trigger_position: usize,
         suggestions: Vec<AutocompleteSuggestion>,
     ) {
-        self.active = true;
-        self.kind = kind;
+        self.kind = Some(kind);
         self.trigger_position = trigger_position;
         self.filter_text.clear();
         self.suggestions = suggestions;
@@ -921,12 +918,16 @@ impl AutocompleteState {
 
     /// Dismiss the autocomplete popup.
     pub fn dismiss(&mut self) {
-        self.active = false;
+        self.kind = None;
         self.filter_text.clear();
         self.suggestions.clear();
         self.selected_index = 0;
         self.scroll_offset = 0;
         self.slash_rollback = None;
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.kind.is_some()
     }
 
     /// Record the composer as it was before a slash trigger was typed, so the
@@ -947,7 +948,9 @@ impl AutocompleteState {
     /// snapshot is never restored. Ownership is always cleared.
     pub fn take_slash_rollback(&mut self, buffer: &str, cursor: usize) -> Option<SlashRollback> {
         let rollback = self.slash_rollback.take()?;
-        if self.kind != AutocompleteKind::SlashCommand || self.trigger_position != rollback.cursor {
+        if self.kind != Some(AutocompleteKind::SlashCommand)
+            || self.trigger_position != rollback.cursor
+        {
             return None;
         }
         let split = rollback

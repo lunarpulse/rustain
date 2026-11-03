@@ -5,12 +5,13 @@ use ratatui::widgets::Paragraph;
 
 use super::{Surface, geometry};
 use crate::adapters::tui::{
+    decision_pane,
     keymap::Host,
     layout::AppLayout,
     notification_log::{self, LogFacts},
     quit_confirm,
     state::TuiState,
-    widgets::{command_palette, help_overlay, toast_layer, which_key_bar},
+    widgets::{autocomplete_popup, command_palette, help_overlay, toast_layer, which_key_bar},
 };
 
 /// Snapshot the unreserved layout before legacy search/bookmark reservations.
@@ -49,13 +50,15 @@ pub fn compose(
     facts: &LogFacts,
     paint_legacy: impl FnOnce(&mut Frame),
     paint_status: impl FnOnce(&mut Frame),
-) {
+) -> bool {
     let theme = &state.theme;
     toast_layer::render(frame, shell.chat_pane, &state.notifications, theme, facts);
     paint_legacy(frame);
 
-    let rect = geometry::frame_rect(shell.region);
+    let standard_rect = geometry::frame_rect(shell.region);
+    let mut pane_painted = false;
     for (depth, modal) in state.modal_stack.iter().enumerate() {
+        let mut rect = standard_rect;
         for area in [shell.region, shell.input_area]
             .into_iter()
             .chain(shell.sidebar)
@@ -65,6 +68,16 @@ pub fn compose(
                 .set_style(area, Style::default().add_modifier(Modifier::DIM));
         }
         match modal.surface {
+            Surface::DecisionPane => {
+                let Some(pane_rect) =
+                    decision_pane::render(frame, shell.chat_pane, state, facts, theme)
+                else {
+                    continue;
+                };
+                rect = pane_rect;
+                pane_painted =
+                    depth + 1 == state.modal_stack.len() && state.pending_leader.is_none();
+            }
             Surface::Help => help_overlay::render(
                 frame,
                 rect,
@@ -102,15 +115,16 @@ pub fn compose(
             let mut title = Vec::with_capacity(depth * 2 + 3);
             title.push(Span::raw(" "));
             for prior in state.modal_stack.iter().take(depth) {
-                title.push(Span::styled(prior.surface.title(), ancestor));
+                title.push(Span::styled(prior.title(), ancestor));
                 title.push(Span::styled(" › ", ancestor));
             }
-            title.push(Span::styled(modal.surface.title(), current));
+            title.push(Span::styled(modal.title(), current));
             title.push(Span::raw(" "));
             let border = match modal.surface {
-                Surface::NotificationLog | Surface::Help | Surface::CommandPalette => {
-                    theme.colors.accent
-                }
+                Surface::NotificationLog
+                | Surface::Help
+                | Surface::CommandPalette
+                | Surface::DecisionPane => theme.colors.accent,
                 Surface::QuitConfirm => theme.colors.warning,
             };
             // Replace only the top rail: redrawing every border would erase
@@ -124,6 +138,9 @@ pub fn compose(
             }
             frame.render_widget(Line::from(title), top);
         }
+    }
+    if state.modal_stack.is_empty() && state.focus == crate::domain::models::FocusState::Input {
+        autocomplete_popup::render(frame, shell.input_area, &state.autocomplete, theme);
     }
     if state.pending_leader.is_some()
         && state
@@ -147,6 +164,7 @@ pub fn compose(
         );
     }
     paint_status(frame);
+    pane_painted
 }
 
 /// Both hosts use exactly the same minimum-terminal message.

@@ -540,7 +540,7 @@ fn test_help_overlay_small_terminal_no_crash() {
                     &LogFacts::default(),
                     |_| {},
                     |_| {},
-                )
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();

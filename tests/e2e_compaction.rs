@@ -26,7 +26,13 @@ fn test_context_warning_decision_renders_in_the_pane() {
         &conversation_id,
         85,
     );
-    assert!(h.state.decisions.is_focused(), "the 0→1 arrival took focus");
+    assert!(
+        rustain::adapters::tui::presentation::is_open(
+            &h.state,
+            rustain::adapters::tui::presentation::Surface::DecisionPane
+        ),
+        "the 0→1 arrival took focus"
+    );
     h.render();
 
     let text = h.screen_text();

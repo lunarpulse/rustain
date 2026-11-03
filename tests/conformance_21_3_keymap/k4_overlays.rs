@@ -10,8 +10,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::time::Instant;
 
+use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::decision_pane::{
-    self, Arrival, DecisionDraft, DecisionKind, INERT_AFTER_PAINT, PaneOutcome,
+    self, Arrival, DecisionDraft, DecisionKind, INERT_AFTER_PAINT,
 };
 use rustain::adapters::tui::keymap::resolve::rows_of;
 use rustain::adapters::tui::keymap::{Context, Host, Key};
@@ -455,11 +456,12 @@ fn reverse_search_rows_by_value_and_every_other_non_text_key_is_inert() {
 fn autocomplete() -> TuiState {
     let slash = |name: &str| AutocompleteSuggestion::SlashCommand { name: name.into(), description: String::new() };
     let mut s = fresh();
-    s.input_buffer = "/h".into();
-    s.cursor_position = 2;
-    s.autocomplete.open(AutocompleteKind::SlashCommand, 0, ["help", "hist", "home"].map(slash).to_vec());
-    s.autocomplete.own_slash_edit("", 0, 0);
-    s.autocomplete.filter_text = "h".into();
+    press(&mut s, Key::Char('/'));
+    press(&mut s, Key::Char('h'));
+    assert_eq!(s.autocomplete.kind, Some(AutocompleteKind::SlashCommand));
+    assert_eq!(s.focus, FocusState::Input);
+    assert!(s.modal_stack.is_empty());
+    s.autocomplete.suggestions = ["help", "hist", "home"].map(slash).to_vec();
     s.autocomplete.selected_index = 1;
     s
 }
@@ -498,9 +500,17 @@ fn autocomplete_rows_by_value() {
         let a = &s.autocomplete;
         let salient = format!(
             "buf={} cur={} sel={} active={} filter={}",
-            s.input_buffer, s.cursor_position, a.selected_index, a.active, a.filter_text
+            s.input_buffer,
+            s.cursor_position,
+            a.selected_index,
+            a.is_open(),
+            a.filter_text
         );
         assert_eq!(format!("{last} | {salient}"), w.expect, "keys {:?}", w.keys);
+        assert!(
+            s.modal_stack.is_empty(),
+            "the popup is routed, never a frame"
+        );
     }
 }
 
@@ -510,7 +520,8 @@ fn autocomplete_rowless_key_dismisses_the_popup_and_leaves_the_composer() {
     for key in [Key::Left, Key::Ctrl('z'), Key::F(1)] {
         let mut s = autocomplete();
         press(&mut s, key);
-        assert!(!s.autocomplete.active, "{key:?} left the popup open");
+        assert!(!s.autocomplete.is_open(), "{key:?} left the popup open");
+        assert!(s.modal_stack.is_empty());
         assert_eq!(s.input_buffer, "/h", "{key:?} edited the composer");
     }
 }
@@ -783,19 +794,21 @@ fn pane(kind: DecisionKind) -> TuiState {
 
 #[rustfmt::skip]
 const PANE: &[W] = &[
-    w(&[Key::Ctrl('c')], "Quit | focused=true items=[(Budget, false)]"),
+    w(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Budget, true)]"),
     w(&[Key::Ctrl('q')], "Quit | focused=true items=[(Budget, false)]"),
-    wp(&[Key::Enter], "Effect(RecoveryContinue) | focused=false items=[]", |s| *s = pane(DecisionKind::Recovery)),
+    wp(&[Key::Enter], "Decision(RecoveryContinue) | focused=false items=[]", |s| *s = pane(DecisionKind::Recovery)),
     w(&[Key::Esc], "Consumed | focused=false items=[(Budget, true)]"),
-    w(&[Key::Char('y')], "Effect(BudgetContinue) | focused=false items=[]"),
-    wp(&[Key::Char('n')], "Effect(CarryoverDecline) | focused=false items=[]", |s| *s = pane(DecisionKind::Carryover)),
-    w(&[Key::Char('s')], "Effect(BudgetSwitchCheaper) | focused=false items=[]"),
-    w(&[Key::Char('p')], "Effect(BudgetPause) | focused=false items=[]"),
-    wp(&[Key::Char('k')], "Effect(ContextCompact) | focused=false items=[]", |s| *s = pane(DecisionKind::ContextWarning)),
-    wp(&[Key::Char('y')], "Effect(ConfirmDelete) | focused=false items=[]", |s| *s = pane(DecisionKind::DeleteConversations)),
-    wp(&[Key::Char('y')], "Effect(AttachLargeImage) | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
-    wp(&[Key::Char('n')], "Effect(CancelLargeImage) | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
+    w(&[Key::Char('y')], "Decision(BudgetContinue) | focused=false items=[]"),
+    wp(&[Key::Char('n')], "Decision(CarryoverDecline) | focused=false items=[]", |s| *s = pane(DecisionKind::Carryover)),
+    w(&[Key::Char('s')], "Decision(BudgetSwitchCheaper) | focused=false items=[]"),
+    w(&[Key::Char('p')], "Decision(BudgetPause) | focused=false items=[]"),
+    wp(&[Key::Char('k')], "Decision(ContextCompact) | focused=false items=[]", |s| *s = pane(DecisionKind::ContextWarning)),
+    wp(&[Key::Char('y')], "ConfirmDelete | focused=false items=[]", |s| *s = pane(DecisionKind::DeleteConversations)),
+    wp(&[Key::Char('y')], "ImageConfirmAttach | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
+    wp(&[Key::Char('n')], "ImageConfirmCancel | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
     wp(&[Key::Char('n')], "Consumed | focused=true items=[(Carryover, false)]", |s| *s = pane(DecisionKind::ContextWarning)),
+    w(&[Key::Ctrl('x')], "Consumed | focused=true items=[(Budget, false)]"),
+    w(&[Key::Ctrl('p')], "Consumed | focused=true items=[(Budget, false)]"),
 ];
 
 /// A key of another kind's decision does nothing: the pane stays, the decision stays (R7).
@@ -813,16 +826,80 @@ const PANE_OFF: &[W] = &[
 /// Catches a pane key that runs the wrong effect for its decision kind, resolves twice, or defers destructively.
 #[test]
 fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
+    assert!(matches!(
+        rustain::adapters::tui::keymap::resolve(
+            Context::DecisionPane,
+            Host::Local,
+            &[Key::Ctrl('c')]
+        ),
+        rustain::adapters::tui::keymap::Resolved::Hit(row)
+            if row.command == rustain::adapters::tui::keymap::CommandId::Overlay(
+                rustain::adapters::tui::keymap::table_overlay::OverlayCmd::PaneBack
+            )
+    ));
     let door = |state: &mut TuiState, key| {
-        let out = decode(key).and_then(|e| decision_pane::handle_domain_event(state, &e, &facts()));
-        (
-            shown(&out),
-            matches!(out, None | Some(PaneOutcome::Consumed)),
-        )
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+        let draft = (state.input_buffer.clone(), state.cursor_position);
+        let focus = state.focus.clone();
+        let out = match decode(key) {
+            Some(event) => presentation::route(state, &event, Host::Local, &facts())
+                .expect("the pane boundary owns every decoded key")
+                .into_action(),
+            None => InputAction::Ignored,
+        };
+        assert!(presentation::consistent(state));
+        assert_eq!(state.focus, focus, "pane keys preserve base focus");
+        assert_eq!(
+            (state.input_buffer.as_str(), state.cursor_position),
+            (draft.0.as_str(), draft.1),
+            "pane keys never edit the composer"
+        );
+        if matches!(
+            rustain::adapters::tui::keymap::resolve(Context::DecisionPane, Host::Local, &[key]),
+            rustain::adapters::tui::keymap::Resolved::Miss
+        ) {
+            assert_eq!(
+                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                frames
+            );
+        }
+        if key == Key::Ctrl('x') {
+            assert_eq!(state.pending_leader, Some(Context::DecisionPane));
+            assert_eq!(
+                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                frames
+            );
+        }
+        if key == Key::Ctrl('p') {
+            assert_eq!(
+                state.modal_stack.top().unwrap().surface,
+                Surface::CommandPalette
+            );
+            assert_eq!(
+                state
+                    .modal_stack
+                    .iter()
+                    .take(frames.len())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                frames,
+                "palette preserves its pane caller"
+            );
+        }
+        (format!("{out:?}"), is_inert(&out))
     };
     let salient = |s: &TuiState| {
         let items: Vec<_> = s.decisions.items().map(|i| (i.kind, i.deferred)).collect();
-        format!("focused={} items={items:?}", s.decisions.is_focused())
+        assert!(presentation::consistent(s));
+        assert_eq!(
+            s.modal_stack.len(),
+            usize::from(is_open(s, Surface::DecisionPane))
+                + usize::from(is_open(s, Surface::CommandPalette))
+        );
+        format!(
+            "focused={} items={items:?}",
+            is_open(s, Surface::DecisionPane)
+        )
     };
     let setup = || pane(DecisionKind::Budget);
     run(&Case {

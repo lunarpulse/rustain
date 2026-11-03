@@ -45,6 +45,7 @@ fn only_the_top_frame_receives_keys() {
         Surface::NotificationLog,
         Surface::Help,
         Surface::CommandPalette,
+        Surface::DecisionPane,
         Surface::QuitConfirm,
     ] {
         for key in Key::universe() {
@@ -56,6 +57,16 @@ fn only_the_top_frame_receives_keys() {
             }
             if surface == Surface::CommandPalette {
                 press(&mut state, Key::Ctrl('p'));
+            }
+            if surface == Surface::DecisionPane {
+                rustain::adapters::tui::decision_pane::raise(
+                    &mut state,
+                    rustain::adapters::tui::decision_pane::DecisionDraft::new(
+                        rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                        "pane owns the key",
+                    ),
+                    rustain::adapters::tui::decision_pane::Arrival::Requested,
+                );
             }
             if surface == Surface::QuitConfirm {
                 quit_confirm::request(
@@ -106,6 +117,16 @@ fn only_the_top_frame_receives_keys() {
             }
             if surface == Surface::CommandPalette {
                 press(&mut state, Key::Ctrl('p'));
+            }
+            if surface == Surface::DecisionPane {
+                rustain::adapters::tui::decision_pane::raise(
+                    &mut state,
+                    rustain::adapters::tui::decision_pane::DecisionDraft::new(
+                        rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                        "pane owns ingress",
+                    ),
+                    rustain::adapters::tui::decision_pane::Arrival::Requested,
+                );
             }
             if surface == Surface::QuitConfirm {
                 quit_confirm::request(

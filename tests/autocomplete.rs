@@ -9,11 +9,12 @@ use rustain::domain::models::autocomplete::{AutocompleteKind, AutocompleteSugges
 
 // === AutocompleteState unit tests (Story 3.2, Task 1) ===
 
-// Covers: AC1, AC3 — open populates suggestions and sets active
+// Covers: AC1, AC3 — open populates suggestions and sets the routed identity
 #[test]
 fn test_autocomplete_open() {
     let mut ac = AutocompleteState::new();
-    assert!(!ac.active);
+    assert!(!ac.is_open());
+    assert_eq!(ac.kind, None);
 
     let suggestions = vec![
         AutocompleteSuggestion::SlashCommand {
@@ -27,8 +28,8 @@ fn test_autocomplete_open() {
     ];
     ac.open(AutocompleteKind::SlashCommand, 0, suggestions);
 
-    assert!(ac.active);
-    assert_eq!(ac.kind, AutocompleteKind::SlashCommand);
+    assert!(ac.is_open());
+    assert_eq!(ac.kind, Some(AutocompleteKind::SlashCommand));
     assert_eq!(ac.trigger_position, 0);
     assert_eq!(ac.suggestions.len(), 2);
     assert_eq!(ac.selected_index, 0);
@@ -163,14 +164,18 @@ fn test_autocomplete_dismiss() {
     ac.open(AutocompleteKind::SlashCommand, 0, suggestions);
     ac.selected_index = 0;
     ac.filter_text = "ne".to_string();
+    ac.scroll_offset = 2;
+    ac.own_slash_edit("", 0, 3);
 
     ac.dismiss();
 
-    assert!(!ac.active);
+    assert!(!ac.is_open());
+    assert_eq!(ac.kind, None);
     assert!(ac.filter_text.is_empty());
     assert!(ac.suggestions.is_empty());
     assert_eq!(ac.selected_index, 0);
     assert_eq!(ac.scroll_offset, 0);
+    assert!(!ac.owns_slash_edit());
 }
 
 // Covers: AC5 — empty state after filtering to no matches
@@ -185,6 +190,8 @@ fn test_autocomplete_no_matches_state() {
 
     // Filter to something with no matches
     ac.update_filter("xyz".to_string(), vec![]);
+    assert!(ac.is_open(), "no matches is still an open popup");
+    assert_eq!(ac.kind, Some(AutocompleteKind::SlashCommand));
     assert!(ac.suggestions.is_empty());
     assert!(ac.selected().is_none());
 }
@@ -205,8 +212,8 @@ fn test_autocomplete_file_mention() {
     ];
     ac.open(AutocompleteKind::FileMention, 5, suggestions);
 
-    assert!(ac.active);
-    assert_eq!(ac.kind, AutocompleteKind::FileMention);
+    assert!(ac.is_open());
+    assert_eq!(ac.kind, Some(AutocompleteKind::FileMention));
     assert_eq!(ac.trigger_position, 5);
     assert_eq!(ac.suggestions.len(), 2);
 }
@@ -300,6 +307,20 @@ fn test_popup_renders_no_matches() {
         buf_str.contains("No matches"),
         "Popup should show 'No matches'"
     );
+
+    ac.dismiss();
+    terminal
+        .draw(|frame| {
+            autocomplete_popup::render(frame, Rect::new(0, 16, 60, 4), &ac, &theme);
+        })
+        .unwrap();
+    assert_eq!(ac.kind, None);
+    assert!(
+        buffer_to_string(terminal.backend().buffer())
+            .chars()
+            .all(char::is_whitespace),
+        "dismissed no-match popup paints nothing"
+    );
 }
 
 // Covers: AC3 — file mention popup renders file paths
@@ -337,11 +358,12 @@ fn test_popup_renders_file_paths() {
     assert!(buf_str.contains("src/main.rs"), "Should show file path");
 }
 
-// Covers: AC1 — popup does not render when inactive
+// Covers: AC1 — a newly closed popup does not render
 #[test]
-fn test_popup_does_not_render_when_inactive() {
+fn test_popup_does_not_render_when_closed() {
     let ac = AutocompleteState::new();
-    assert!(!ac.active);
+    assert!(!ac.is_open());
+    assert_eq!(ac.kind, None);
 
     let theme = make_theme();
     let backend = TestBackend::new(60, 20);
@@ -358,7 +380,7 @@ fn test_popup_does_not_render_when_inactive() {
     let buf = terminal.backend().buffer();
     let buf_str = buffer_to_string(buf);
     let non_space = buf_str.chars().filter(|c| !c.is_whitespace()).count();
-    assert_eq!(non_space, 0, "Inactive popup should not render anything");
+    assert_eq!(non_space, 0, "Closed popup should not render anything");
 }
 
 // Covers: AC1, AC5 — long list shows scroll indicator in title

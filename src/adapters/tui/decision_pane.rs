@@ -3,15 +3,13 @@
 //! The six response-key prompts that used to ride feedback blocks and a flash
 //! (recovery, carryover, daily budget, context warning, large image, delete
 //! conversation(s)) are items of ONE bounded presentation state, following the
-//! S-QUIT / S-LOG precedent: a FIFO of items keyed by (kind, conversation), at
-//! most one focused item, a shared key transition and a shared widget used by
-//! the local host. 21-4 migrates it onto the modal stack and 21-6 deletes it.
+//! S-QUIT / S-LOG precedent: a FIFO keyed by (kind, conversation), with at
+//! most one frame-owned item identity and one shared local handler/widget.
+//! 21-6 deletes the interim pane.
 //!
-//! Ownership rules (RU-6): an automatic arrival never takes focus from a typing
-//! composer, a recent printable key or any open surface; only the focused pane
-//! receives decision keys, so a waiting or deferred item can never be answered by
-//! a stray key; rail keys are inert for 500 ms after the pane's first paint and
-//! are dropped, never replayed. Time comes only from the injected clock.
+//! RU-6 arrivals may interrupt a non-text L2, never typing or a higher layer.
+//! Waiting/deferred items cannot receive keys. Decision rail keys are inert
+//! for 500 ms from actual first paint; Ctrl+C backs without deciding.
 
 use std::time::{Duration, Instant};
 
@@ -169,10 +167,81 @@ impl DecisionEffect {
     }
 }
 
+/// State-only effects consumed by the live pane action arms, after the pane has
+/// resolved its item and restored or promoted its caller.
+/// Surviving caller frames keep their interrupted base focus. Only an empty
+/// stack uses the pre-stack restoration (including permission/recipient handoff
+/// for images and sidebar selection for delete cancellation). The host supplies
+/// its existing image-focus policy without coupling the pane to its runtime.
+pub(crate) fn apply_resolved_action(
+    state: &mut TuiState,
+    action: InputAction,
+    restore_base_focus: fn(&mut TuiState),
+) {
+    match action {
+        InputAction::Decision(DecisionEffect::RecoveryContinue) => {
+            if state.modal_stack.is_empty() {
+                state.focus = FocusState::Input;
+            }
+        }
+        InputAction::ImageConfirmAttach => {
+            if let Some(attachment) = state.pending_large_image.take() {
+                use crate::adapters::tui::image;
+                state.pending_images.push(attachment);
+                state.image_indicator = Some(image::format_image_indicator(
+                    state.pending_images.len(),
+                    state
+                        .pending_images
+                        .iter()
+                        .fold(0usize, |acc, i| acc.saturating_add(i.data.len() / 1024)),
+                ));
+            }
+            if state.modal_stack.is_empty() {
+                restore_base_focus(state);
+            }
+        }
+        InputAction::ImageConfirmCancel => {
+            state.pending_large_image = None;
+            notifications::info(state, NoticeSource::Image, "Image attachment cancelled");
+            if state.modal_stack.is_empty() {
+                restore_base_focus(state);
+            }
+        }
+        InputAction::CancelDelete => {
+            state.pending_delete = None;
+            if state.modal_stack.is_empty() {
+                state.focus = if state.sidebar_visible {
+                    FocusState::Sidebar {
+                        panel: crate::domain::models::visual::PanelType::History,
+                        selected: state.sidebar_selected,
+                    }
+                } else {
+                    FocusState::Input
+                };
+            }
+        }
+        _ => unreachable!("only state-only resolved pane actions enter this seam"),
+    }
+    state.needs_redraw = true;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ItemKey {
+pub struct DecisionKey {
     kind: DecisionKind,
     conversation_id: Option<String>,
+}
+
+impl DecisionKey {
+    pub(crate) fn title(&self) -> &'static str {
+        match self.kind {
+            DecisionKind::Recovery => "System · Session recovery",
+            DecisionKind::Carryover => "System · Carry over context",
+            DecisionKind::Budget => "System · Daily budget",
+            DecisionKind::ContextWarning => "System · Context window",
+            DecisionKind::LargeImage => "System · Large image",
+            DecisionKind::DeleteConversations => "System · Delete conversations",
+        }
+    }
 }
 
 /// One pending decision.
@@ -187,11 +256,15 @@ pub struct DecisionItem {
 }
 
 impl DecisionItem {
-    fn key(&self) -> ItemKey {
-        ItemKey {
+    fn key(&self) -> DecisionKey {
+        DecisionKey {
             kind: self.kind,
             conversation_id: self.conversation_id.clone(),
         }
+    }
+
+    fn matches_key(&self, key: &DecisionKey) -> bool {
+        self.kind == key.kind && self.conversation_id == key.conversation_id
     }
 
     fn actionable(&self, facts: &LogFacts) -> bool {
@@ -247,9 +320,10 @@ pub enum Raised {
 #[derive(Debug, Default)]
 pub struct DecisionPane {
     items: Vec<DecisionItem>,
-    focused: Option<ItemKey>,
     painted_at: Option<Instant>,
     last_defer_at: Option<Instant>,
+    /// Surface-owned refusal; expires on its next key, never a hidden toast.
+    feedback: Option<&'static str>,
 }
 
 impl DecisionPane {
@@ -263,12 +337,6 @@ impl DecisionPane {
         self.items.is_empty()
     }
 
-    /// The pane owns user keys.
-    #[must_use]
-    pub fn is_focused(&self) -> bool {
-        self.focused.is_some()
-    }
-
     pub fn items(&self) -> impl ExactSizeIterator<Item = &DecisionItem> {
         self.items.iter()
     }
@@ -278,44 +346,56 @@ impl DecisionPane {
         self.items.iter().any(|item| item.kind == kind)
     }
 
-    /// The focused item, only while it still exists and is decidable here.
-    #[must_use]
-    pub fn current(&self, facts: &LogFacts) -> Option<&DecisionItem> {
-        let key = self.focused.as_ref()?;
-        self.items
-            .iter()
-            .find(|item| item.key() == *key && item.actionable(facts))
+    pub(crate) fn contains_key(&self, key: &DecisionKey) -> bool {
+        self.items.iter().any(|item| item.matches_key(key))
     }
 
-    fn focus_on(&mut self, key: ItemKey) {
-        if let Some(item) = self.items.iter_mut().find(|item| item.key() == key) {
+    pub(crate) fn prepare(&mut self, key: &DecisionKey) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.matches_key(key)) {
             item.deferred = false;
         }
-        self.focused = Some(key);
+        self.painted_at = None;
+        self.feedback = None;
+    }
+
+    pub(crate) fn clear_paint(&mut self) {
         self.painted_at = None;
     }
 
-    fn unfocus(&mut self) {
-        self.focused = None;
-        self.painted_at = None;
+    pub(crate) fn last_defer_at(&self) -> Option<Instant> {
+        self.last_defer_at
     }
 
     /// The oldest decidable item, optionally skipping deferred ones.
-    fn oldest(&self, facts: &LogFacts, skip_deferred: bool) -> Option<ItemKey> {
+    fn oldest(&self, facts: &LogFacts, skip_deferred: bool) -> Option<DecisionKey> {
         self.items
             .iter()
             .find(|item| item.actionable(facts) && !(skip_deferred && item.deferred))
             .map(DecisionItem::key)
     }
 
-    fn remove(&mut self, key: &ItemKey) -> bool {
+    fn remove(&mut self, key: &DecisionKey) -> bool {
         let before = self.items.len();
-        self.items.retain(|item| item.key() != *key);
-        if self.focused.as_ref() == Some(key) {
-            self.unfocus();
-        }
+        self.items.retain(|item| !item.matches_key(key));
         self.items.len() != before
     }
+}
+
+/// The selected queue item is derived from the frame, including a suspended
+/// continuation. Only the top frame is routed; this query never grants keys.
+#[must_use]
+pub fn current<'a>(state: &'a TuiState, facts: &LogFacts) -> Option<&'a DecisionItem> {
+    let key = state
+        .modal_stack
+        .all_frames()
+        .find(|frame| frame.surface == Surface::DecisionPane)?
+        .decision
+        .as_ref()?;
+    state
+        .decisions
+        .items
+        .iter()
+        .find(|item| item.matches_key(key) && item.actionable(facts))
 }
 
 fn clean(detail: &str) -> String {
@@ -334,33 +414,6 @@ fn clean(detail: &str) -> String {
         .collect()
 }
 
-/// A surface that owns the keyboard: an automatic arrival never competes with it.
-fn protected(state: &TuiState) -> bool {
-    !state.modal_stack.is_empty()
-        || state.model_selector.active
-        || state.login.active
-        || state.profile_switcher.active
-        || state.usage_panel.active
-        || state.pending_leader.is_some()
-        || state.reverse_search.active
-        || state.search_state.active
-        || state.ask_user_question.is_some()
-        || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
-        || !matches!(
-            state.focus,
-            FocusState::Chat | FocusState::Input | FocusState::Sidebar { .. }
-        )
-}
-
-/// True while the user is composing: a non-empty draft or a printable key inside
-/// the grace window.
-fn typing(state: &TuiState, now: Instant) -> bool {
-    (state.focus == FocusState::Input && !state.input_buffer.is_empty())
-        || state
-            .last_printable_at
-            .is_some_and(|at| now.saturating_duration_since(at) < TYPING_GRACE)
-}
-
 /// Hold a decision. An existing item of the same (kind, conversation) is
 /// updated in place. The first item (0→1) of an automatic arrival takes focus
 /// only when nothing protects the user's current work and no deferral happened
@@ -368,16 +421,16 @@ fn typing(state: &TuiState, now: Instant) -> bool {
 pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Raised {
     let now = state.notifications.now();
     let detail = clean(&draft.detail);
-    let key = ItemKey {
+    let key = DecisionKey {
         kind: draft.kind,
         conversation_id: draft.conversation_id.clone(),
     };
-    let was_empty = state.decisions.items.is_empty();
+    let may_preempt = presentation::arrival_may_preempt(state, now);
     let existing = state
         .decisions
         .items
         .iter_mut()
-        .find(|item| item.key() == key);
+        .find(|item| item.matches_key(&key));
     let is_new = existing.is_none();
     match existing {
         Some(item) => item.detail = detail,
@@ -391,18 +444,10 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
     state.needs_redraw = true;
     let take_focus = match arrival {
         Arrival::Requested => !presentation::is_open(state, Surface::QuitConfirm),
-        Arrival::Automatic => {
-            was_empty
-                && !protected(state)
-                && !typing(state, now)
-                && !state
-                    .decisions
-                    .last_defer_at
-                    .is_some_and(|at| now.saturating_duration_since(at) < DEFER_COOLDOWN)
-        }
+        Arrival::Automatic => may_preempt,
     };
     if take_focus {
-        state.decisions.focus_on(key);
+        presentation::reducer::focus_decision(state, key);
         return Raised::Focused;
     }
     if is_new {
@@ -443,18 +488,19 @@ pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
 }
 
 fn withdraw_where(state: &mut TuiState, matches: impl Fn(&DecisionItem) -> bool) {
-    let keys: Vec<ItemKey> = state
-        .decisions
-        .items
-        .iter()
-        .filter(|item| matches(item))
-        .map(DecisionItem::key)
-        .collect();
-    if keys.is_empty() {
+    let before = state.decisions.items.len();
+    state.decisions.items.retain(|item| !matches(item));
+    if state.decisions.items.len() == before {
         return;
     }
-    for key in &keys {
-        state.decisions.remove(key);
+    if state.modal_stack.all_frames().any(|frame| {
+        frame.surface == Surface::DecisionPane
+            && frame
+                .decision
+                .as_ref()
+                .is_some_and(|key| !state.decisions.contains_key(key))
+    }) {
+        presentation::reducer::close(state, Surface::DecisionPane);
     }
     state.needs_redraw = true;
 }
@@ -476,8 +522,7 @@ pub fn focus_oldest(state: &mut TuiState, facts: &LogFacts) -> bool {
     let Some(key) = state.decisions.oldest(facts, false) else {
         return false;
     };
-    state.decisions.focus_on(key);
-    state.needs_redraw = true;
+    presentation::reducer::focus_decision(state, key);
     true
 }
 
@@ -487,26 +532,45 @@ pub fn open_waiting(state: &mut TuiState, facts: &LogFacts) {
     if focus_oldest(state, facts) {
         return;
     }
-    let message = if state.decisions.is_empty() {
-        "No decisions waiting"
+    let message = keymap::table::decision_waiting_remedy(!state.decisions.is_empty());
+    if let Some(origin) = state.modal_stack.top().map(|frame| frame.surface.context()) {
+        crate::adapters::tui::app::refuse_leader(
+            state,
+            origin,
+            Some(CommandId::Leader(LeaderCmd::Decisions)),
+            NoticeSource::System,
+            message.into(),
+        );
+        state.current_hint = crate::adapters::tui::hints::contextual_hint(
+            &state.focus,
+            state.session_count,
+            state.theme.timing.status_hint_fade_sessions,
+            state.is_vscode,
+            &state.modal_stack,
+            state.pending_leader,
+        );
     } else {
-        "A decision is waiting in another tab — open that tab to answer it"
-    };
-    notifications::info(state, NoticeSource::System, message);
+        notifications::info(state, NoticeSource::System, message);
+    }
 }
 
 /// Hand focus to the next waiting, not-deferred decision (the user is already
 /// answering: this never steals focus from anything else).
 fn promote(state: &mut TuiState, facts: &LogFacts) {
     match state.decisions.oldest(facts, true) {
-        Some(key) => state.decisions.focus_on(key),
-        None => state.decisions.unfocus(),
+        Some(key) => presentation::reducer::focus_decision(state, key),
+        None => presentation::reducer::close(state, Surface::DecisionPane),
     }
 }
 
 /// First paint of the focused pane: starts the 500 ms inert window.
 pub fn note_painted(state: &mut TuiState) {
-    if state.decisions.is_focused() && state.decisions.painted_at.is_none() {
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::DecisionPane)
+        && state.decisions.painted_at.is_none()
+    {
         state.decisions.painted_at = Some(state.notifications.now());
     }
 }
@@ -560,7 +624,7 @@ pub fn card_focus_blocked(state: &TuiState) -> bool {
     matches!(state.focus, FocusState::Overlay(_))
         || !state.modal_stack.is_empty()
         || state.pending_leader.is_some()
-        || state.autocomplete.active
+        || state.autocomplete.is_open()
         || state.reverse_search.active
 }
 
@@ -607,7 +671,7 @@ pub enum PaneKey {
 pub enum PaneOutcome {
     /// Swallowed (inert window, unmapped key, deferral, a new item raised).
     Consumed,
-    /// `Ctrl+C`/`Ctrl+Q`: run the host's S-QUIT guard.
+    /// `Ctrl+Q`: run the host's S-QUIT guard.
     Quit,
     /// Run this existing effect exactly once.
     Effect(DecisionEffect),
@@ -640,6 +704,12 @@ pub fn handle_key(state: &mut TuiState, key: PaneKey, facts: &LogFacts) -> PaneO
     execute(state, key.key(), facts)
 }
 
+pub(crate) fn clear_feedback(state: &mut TuiState) {
+    if state.decisions.feedback.take().is_some() {
+        state.needs_redraw = true;
+    }
+}
+
 /// Resolve the key in `DecisionPane` (letters fold case) and run its command
 /// against the focused item's kind; a command the kind does not offer is swallowed.
 fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
@@ -654,10 +724,15 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
     if command == Some(OverlayCmd::PaneQuit) {
         return PaneOutcome::Quit;
     }
-    let Some(item) = state.decisions.current(facts) else {
-        state.decisions.unfocus();
+    let Some(item) = current(state, facts) else {
+        presentation::reducer::close(state, Surface::DecisionPane);
         return PaneOutcome::Consumed;
     };
+    if command == Some(OverlayCmd::PaneBack) {
+        let key = item.key();
+        defer_current(state, &key);
+        return PaneOutcome::Consumed;
+    }
     if inert(state) {
         // Dropped, never replayed once the window passes.
         return PaneOutcome::Consumed;
@@ -668,22 +743,22 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
     let (kind, conversation_id) = (item.kind, item.conversation_id.clone());
     let item_key = item.key();
     let resolve = |state: &mut TuiState, effect: DecisionEffect| {
+        let has_caller = state
+            .modal_stack
+            .all_frames()
+            .any(|frame| frame.surface != Surface::DecisionPane);
+        if let keymap::Availability::Unavailable(remedy) =
+            keymap::table::pane_effect_availability(effect, has_caller)
+        {
+            state.decisions.feedback = Some(remedy);
+            return PaneOutcome::Consumed;
+        }
         state.decisions.remove(&item_key);
         promote(state, facts);
         PaneOutcome::Effect(effect)
     };
     let defer = |state: &mut TuiState| {
-        let now = state.notifications.now();
-        if let Some(item) = state
-            .decisions
-            .items
-            .iter_mut()
-            .find(|item| item.key() == item_key)
-        {
-            item.deferred = true;
-        }
-        state.decisions.last_defer_at = Some(now);
-        state.decisions.unfocus();
+        defer_current(state, &item_key);
         PaneOutcome::Consumed
     };
     match (kind, command) {
@@ -734,6 +809,19 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
     }
 }
 
+fn defer_current(state: &mut TuiState, key: &DecisionKey) {
+    if let Some(item) = state
+        .decisions
+        .items
+        .iter_mut()
+        .find(|item| item.matches_key(key))
+    {
+        item.deferred = true;
+    }
+    state.decisions.last_defer_at = Some(state.notifications.now());
+    presentation::reducer::close(state, Surface::DecisionPane);
+}
+
 /// Apply a local domain event. User keys, paste and mouse are consumed;
 /// resize/focus events (and an unfocused pane) return `None` so the caller
 /// handles them normally.
@@ -742,13 +830,17 @@ pub fn handle_domain_event(
     event: &DomainInputEvent,
     facts: &LogFacts,
 ) -> Option<PaneOutcome> {
-    if !state.decisions.is_focused() {
+    if state
+        .modal_stack
+        .top()
+        .is_none_or(|frame| frame.surface != Surface::DecisionPane)
+    {
         return None;
     }
-    if state.decisions.current(facts).is_none() {
+    if current(state, facts).is_none() {
         // The focused item left (tab switch, condition cleared): heal and let
         // the key reach whoever owns it now.
-        state.decisions.unfocus();
+        presentation::reducer::close(state, Surface::DecisionPane);
         return None;
     }
     if matches!(
@@ -763,20 +855,19 @@ pub fn handle_domain_event(
 
 /// Paint the focused item bottom-anchored over `area` (the chat pane): `Clear`,
 /// no layout change. Items that wait unfocused paint nothing here (the status
-/// row carries the cue). Returns true only when the frame was actually painted:
-/// the host starts the 500 ms inert clock from that, never from a no-op.
+/// row carries the cue). Returns its actual painted rectangle; compose reports
+/// whether it is visible on top before the host starts the 500 ms inert clock.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
-    pane: &DecisionPane,
+    state: &TuiState,
     facts: &LogFacts,
     theme: &Theme,
-) -> bool {
-    let Some(item) = pane.current(facts) else {
-        return false;
-    };
+) -> Option<Rect> {
+    let pane = &state.decisions;
+    let item = current(state, facts)?;
     if area.width < 12 || area.height < 5 {
-        return false;
+        return None;
     }
     let width = area.width.min(100);
     let inner_width = usize::from(width.saturating_sub(2));
@@ -790,13 +881,13 @@ pub fn render(
         rail.push(Span::styled(format!(" {label}  "), normal));
     }
     let rail_lines = footer_lines(rail, inner_width);
-    let detail = wrapped(&item.detail, normal, inner_width);
+    let detail = wrapped(pane.feedback.unwrap_or(&item.detail), normal, inner_width);
     let others = pane.len().saturating_sub(1);
     let mut parts: Vec<ModalPart> = Vec::new();
     if others > 0 {
         let passive = pane
             .items()
-            .filter(|other| other.key() != item.key() && !other.actionable(facts))
+            .filter(|other| !std::ptr::eq(*other, item) && !other.actionable(facts))
             .count();
         let text = if passive > 0 {
             format!("{others} more waiting — {passive} in another tab: open it to decide")
@@ -841,7 +932,7 @@ pub fn render(
         ),
         inner,
     );
-    true
+    Some(rect)
 }
 
 #[cfg(test)]
@@ -889,7 +980,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = Rect::new(0, 0, width, height.saturating_sub(4));
-                render(frame, area, &state.decisions, f, &theme);
+                render(frame, area, state, f, &theme);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -936,7 +1027,7 @@ mod tests {
                 let kinds_after: Vec<DecisionKind> =
                     state.decisions.items().map(|i| i.kind).collect();
                 let resolved = kinds_after != kinds_before
-                    || !state.decisions.is_focused()
+                    || !presentation::is_open(&state, Surface::DecisionPane)
                     || matches!(outcome, PaneOutcome::Effect(_));
                 assert!(
                     resolved,
@@ -974,7 +1065,7 @@ mod tests {
                     "{kind:?}: unpainted {stray:?}"
                 );
                 assert!(
-                    state.decisions.is_focused(),
+                    presentation::is_open(&state, Surface::DecisionPane),
                     "{kind:?}: {stray:?} resolved it"
                 );
             }
@@ -996,13 +1087,8 @@ mod tests {
             let mut painted = true;
             terminal
                 .draw(|frame| {
-                    painted = render(
-                        frame,
-                        Rect::new(0, 0, width, height),
-                        &state.decisions,
-                        &f,
-                        &theme,
-                    );
+                    painted =
+                        render(frame, Rect::new(0, 0, width, height), &state, &f, &theme).is_some();
                 })
                 .unwrap();
             assert!(!painted, "{width}x{height} is below 12x5: nothing painted");
@@ -1022,7 +1108,7 @@ mod tests {
         let mut painted = false;
         terminal
             .draw(|frame| {
-                painted = render(frame, Rect::new(0, 0, 60, 12), &state.decisions, &f, &theme);
+                painted = render(frame, Rect::new(0, 0, 60, 12), &state, &f, &theme).is_some();
             })
             .unwrap();
         assert!(painted);
@@ -1078,7 +1164,7 @@ mod tests {
             Arrival::Requested,
         );
         assert_eq!(
-            state.decisions.current(&f).map(|i| i.kind),
+            current(&state, &f).map(|i| i.kind),
             Some(DecisionKind::DeleteConversations)
         );
         assert_eq!(
@@ -1114,7 +1200,7 @@ mod tests {
         ready(&mut state, &clock);
         assert!(focus_oldest(&mut state, &f));
         assert_eq!(
-            state.decisions.current(&f).map(|i| i.kind),
+            current(&state, &f).map(|i| i.kind),
             Some(DecisionKind::LargeImage)
         );
         assert_eq!(
@@ -1353,7 +1439,7 @@ mod tests {
             handle_domain_event(&mut state, &event, &facts("active")),
             None
         );
-        assert!(!state.decisions.is_focused());
+        assert!(!presentation::is_open(&state, Surface::DecisionPane));
         assert!(
             state.decisions.holds(DecisionKind::Carryover),
             "the item still waits"
@@ -1362,10 +1448,10 @@ mod tests {
         open_waiting(&mut state, &facts("active"));
         let last = state.notifications.records().next_back().unwrap();
         assert!(last.message.contains("another tab"), "{}", last.message);
-        assert!(!state.decisions.is_focused());
+        assert!(!presentation::is_open(&state, Surface::DecisionPane));
         // Back on its own tab the same chord focuses it.
         open_waiting(&mut state, &facts("other"));
-        assert!(state.decisions.is_focused());
+        assert!(presentation::is_open(&state, Surface::DecisionPane));
     }
 
     #[test]
@@ -1393,12 +1479,9 @@ mod tests {
             handle_key(&mut state, PaneKey::Char('y'), &LogFacts::default()),
             PaneOutcome::Effect(DecisionEffect::BudgetContinue)
         );
-        let current = state
-            .decisions
-            .current(&LogFacts::default())
-            .map(|i| i.kind);
+        let selected = current(&state, &LogFacts::default()).map(|i| i.kind);
         assert_eq!(
-            current,
+            selected,
             Some(DecisionKind::LargeImage),
             "FIFO: the image is oldest"
         );
@@ -1408,20 +1491,17 @@ mod tests {
             PaneOutcome::Consumed,
             "Esc defers the image"
         );
-        assert!(!state.decisions.is_focused());
+        assert!(!presentation::is_open(&state, Surface::DecisionPane));
         assert!(focus_oldest(&mut state, &LogFacts::default()));
         assert_eq!(
-            state
-                .decisions
-                .current(&LogFacts::default())
-                .map(|i| i.kind),
+            current(&state, &LogFacts::default()).map(|i| i.kind),
             Some(DecisionKind::LargeImage),
             "Ctrl+X q focuses the oldest, deferred or not"
         );
     }
 
     #[test]
-    fn story21_1_ctrl_c_and_ctrl_q_reach_the_quit_guard_even_inside_the_inert_window() {
+    fn story21_4_ctrl_c_backs_without_deciding_and_ctrl_q_still_guards() {
         let (mut state, _clock) = clocked();
         raise(
             &mut state,
@@ -1435,8 +1515,11 @@ mod tests {
         );
         assert_eq!(
             handle_key(&mut state, PaneKey::CtrlC, &LogFacts::default()),
-            PaneOutcome::Quit
+            PaneOutcome::Consumed
         );
+        assert!(!presentation::is_open(&state, Surface::DecisionPane));
+        assert!(state.decisions.holds(DecisionKind::Recovery));
+        assert!(focus_oldest(&mut state, &LogFacts::default()));
         assert_eq!(
             handle_key(&mut state, PaneKey::CtrlQ, &LogFacts::default()),
             PaneOutcome::Quit
@@ -1467,7 +1550,7 @@ mod tests {
             "n raises, never acts"
         );
         assert_eq!(
-            state.decisions.current(&f).map(|i| i.kind),
+            current(&state, &f).map(|i| i.kind),
             Some(DecisionKind::Carryover)
         );
         // RU-21: `c` is never Compact.
@@ -1523,5 +1606,56 @@ mod tests {
         typing.needs_redraw = false;
         take_chat_focus_for_local_card(&mut typing);
         assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
+    }
+
+    #[test]
+    fn story21_4_pane_legacy_effect_refusal_preserves_owner() {
+        use crate::adapters::tui::app::handle_input;
+        use crate::domain::events::DomainKey;
+        // By-value audit of every currently legacy-opening pane action.
+        for (kind, key, effect) in [(
+            DecisionKind::Budget,
+            's',
+            DecisionEffect::BudgetSwitchCheaper,
+        )] {
+            for nested in [false, true] {
+                let (mut state, clock) = clocked();
+                state.focus = FocusState::Chat;
+                state.input_buffer = "untouched draft".into();
+                if nested {
+                    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
+                    handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
+                }
+                raise(
+                    &mut state,
+                    DecisionDraft::new(kind, "pending"),
+                    Arrival::Requested,
+                );
+                ready(&mut state, &clock);
+                let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+                let items: Vec<_> = state.decisions.items().cloned().collect();
+                let notices = state.notifications.records().len();
+                let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
+                if nested {
+                    assert_eq!(action, InputAction::Consumed);
+                    assert_eq!(
+                        state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                        frames
+                    );
+                    assert_eq!(state.decisions.items().cloned().collect::<Vec<_>>(), items);
+                    assert_eq!(
+                        state.notifications.records().len(),
+                        notices,
+                        "no hidden toast"
+                    );
+                } else {
+                    assert_eq!(action, effect.into_action(), "base-origin control");
+                    assert!(state.modal_stack.is_empty());
+                    assert!(state.decisions.is_empty());
+                }
+                assert_eq!(state.input_buffer, "untouched draft");
+                assert_eq!(state.focus, FocusState::Chat);
+            }
+        }
     }
 }

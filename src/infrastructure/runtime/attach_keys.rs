@@ -183,7 +183,7 @@ impl AttachedChrome {
     /// command files only when the popup opens (empty filter), like the local
     /// host; filtering as you type uses the cached registry.
     fn sync_slash(&mut self, state: &mut TuiState, workspace: &Path) {
-        if !state.autocomplete.active || state.autocomplete.kind != AutocompleteKind::SlashCommand {
+        if state.autocomplete.kind != Some(AutocompleteKind::SlashCommand) {
             self.last_slash_filter = None;
             return;
         }
@@ -382,20 +382,6 @@ pub(super) fn log_facts(conversation_id: &str) -> LogFacts {
     }
 }
 
-/// Paint only the attached legacy autocomplete popup; compose owns all frames,
-/// toasts, the pending leader and status order.
-pub(super) fn paint_overlays(
-    frame: &mut ratatui::Frame<'_>,
-    _area: Rect,
-    input_area: Rect,
-    _status_bar: Rect,
-    state: &TuiState,
-) {
-    if state.autocomplete.active {
-        autocomplete_popup::render(frame, input_area, &state.autocomplete, &state.theme);
-    }
-}
-
 /// Key and wheel ingress share the same owner boundary; paste stays borrowed.
 pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEffect> {
     match convert_crossterm_event(event, &MouseConfig::default()) {
@@ -482,7 +468,7 @@ fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
 async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crossterm::event::KeyEventKind;
 
-    if ctx.state.autocomplete.active
+    if ctx.state.autocomplete.is_open()
         && ctx.state.focus == FocusState::Input
         && let Some(flow) = popup_key(ctx, key).await
     {
@@ -2356,7 +2342,7 @@ mod tests {
     async fn story21_2_attached_slash_popup_lists_attached_commands_and_esc_restores() {
         let mut rig = Rig::new(false);
         rig.ch('/').await;
-        assert!(rig.state.autocomplete.active);
+        assert!(rig.state.autocomplete.is_open());
         assert_eq!(rig.input, "/");
         let names: Vec<String> = rig
             .state
@@ -2376,7 +2362,7 @@ mod tests {
         assert_eq!(rig.state.autocomplete.suggestions.len(), 1);
         // Esc closes the popup and restores the exact pre-trigger composer.
         assert_eq!(rig.esc().await, KeyFlow::Continue);
-        assert!(!rig.state.autocomplete.active);
+        assert!(!rig.state.autocomplete.is_open());
         assert_eq!(rig.input, "");
         assert_eq!(
             rig.state.focus,
@@ -2388,7 +2374,7 @@ mod tests {
         rig.type_text("/cl").await;
         rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
         assert_eq!(rig.input, "/clear");
-        assert!(!rig.state.autocomplete.active);
+        assert!(!rig.state.autocomplete.is_open());
         rig.enter().await;
         let frames = rig.frames();
         assert_eq!(frames.len(), 1);
@@ -2396,7 +2382,7 @@ mod tests {
 
         // A slash after other text is plain text — no popup.
         rig.type_text("a/").await;
-        assert!(!rig.state.autocomplete.active);
+        assert!(!rig.state.autocomplete.is_open());
         assert_eq!(rig.input, "a/");
     }
 
@@ -3109,7 +3095,7 @@ mod tests {
                     &shell,
                     Host::Attached,
                     &log_facts("conversation-1"),
-                    |f| paint_overlays(f, area, layout.input_area, layout.status_bar, state),
+                    |_| {},
                     |_| {},
                 );
             })
@@ -3405,7 +3391,7 @@ mod tests {
                 presentation::is_open(state, Surface::CommandPalette),
                 presentation::is_open(state, Surface::NotificationLog),
                 presentation::is_open(state, Surface::QuitConfirm),
-                state.autocomplete.active,
+                state.autocomplete.is_open(),
                 state.recipient_surface.is_some(),
             ],
             scroll: (rig.scroll_offset, rig.auto_scroll),
@@ -3739,8 +3725,11 @@ mod tests {
                 InputCmd::OpenSlashPopup => {
                     no_frames("/");
                     assert_eq!(rig.input, "/");
-                    assert!(rig.state.autocomplete.active);
-                    assert_eq!(rig.state.autocomplete.kind, AutocompleteKind::SlashCommand);
+                    assert!(rig.state.autocomplete.is_open());
+                    assert_eq!(
+                        rig.state.autocomplete.kind,
+                        Some(AutocompleteKind::SlashCommand)
+                    );
                 }
                 InputCmd::TranscriptPageUp => {
                     no_frames("PgUp");
@@ -3911,7 +3900,7 @@ mod tests {
         assert!(warnings(&rig).is_empty(), "nothing before discovery");
 
         rig.ch('/').await;
-        assert!(rig.state.autocomplete.active);
+        assert!(rig.state.autocomplete.is_open());
         let first = warnings(&rig);
         assert_eq!(
             first.len(),
@@ -3923,9 +3912,9 @@ mod tests {
 
         // Same discovery generation: closing and reopening the popup is silent.
         assert_eq!(rig.esc().await, KeyFlow::Continue);
-        assert!(!rig.state.autocomplete.active);
+        assert!(!rig.state.autocomplete.is_open());
         rig.ch('/').await;
-        assert!(rig.state.autocomplete.active);
+        assert!(rig.state.autocomplete.is_open());
         assert_eq!(warnings(&rig), first, "no repeat in the same generation");
     }
 
@@ -4035,9 +4024,9 @@ mod tests {
         let mut rig = live_rig().await;
         rig.input.clear();
         rig.ch('/').await;
-        assert!(rig.state.autocomplete.active);
+        assert!(rig.state.autocomplete.is_open());
         rig.ctrl('c').await;
-        assert!(!rig.state.autocomplete.active, "popup closed");
+        assert!(!rig.state.autocomplete.is_open(), "popup closed");
         assert!(rig.input.is_empty(), "the composer is restored");
         assert!(rig.frames().is_empty(), "popup: no interrupt");
 
@@ -4258,7 +4247,7 @@ mod tests {
     #[rustfmt::skip]
     fn slash_digest(rig: &Rig) -> String {
         let a = &rig.state.autocomplete;
-        format!("popup={} sel={} filter={} {}", a.active, a.selected_index, a.filter_text, open_surface(rig))
+        format!("popup={} sel={} filter={} {}", a.is_open(), a.selected_index, a.filter_text, open_surface(rig))
     }
 
     /// Catches a popup row that accepts the wrong suggestion, fails to restore the composer or leaks to it.
@@ -4295,7 +4284,7 @@ mod tests {
                 Key::Char(_) => false, // typed into the filter (or the composer once a space closes it)
                 // Ctrl+Q is the universal quit request, answered before the popup is consulted.
                 Key::Ctrl('q') => rig.state.quit_confirm.is_none(),
-                _ => rig.state.autocomplete.active,
+                _ => rig.state.autocomplete.is_open(),
             };
             // Ctrl+Enter submits the dismissed popup's composer like Ctrl+Enter anywhere.
             let sent = key != Key::CtrlEnter && !rig.frames().is_empty();
@@ -4511,16 +4500,16 @@ mod tests {
             rig.key(key).await;
         }
         assert_eq!(rig.input, "hI?@");
-        assert!(!rig.state.autocomplete.active);
+        assert!(!rig.state.autocomplete.is_open());
 
         let mut rig = Rig::at(FocusState::Input, "");
         rig.key(Key::Char('/')).await;
-        assert!(rig.state.autocomplete.active);
+        assert!(rig.state.autocomplete.is_open());
         assert_eq!(rig.input, "/");
         let mut rig = Rig::at(FocusState::Input, "a");
         rig.key(Key::Char('/')).await;
         assert!(
-            !rig.state.autocomplete.active,
+            !rig.state.autocomplete.is_open(),
             "only an empty composer triggers"
         );
         assert_eq!(rig.input, "a/");
@@ -4681,6 +4670,7 @@ mod tests {
                             rig.ctrl('q').await;
                         }
                     }
+                    Surface::DecisionPane => unreachable!("attached has no decision pane"),
                 }
                 let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
                 let flow = rig.key(key).await;
@@ -4767,7 +4757,7 @@ mod tests {
             let snapshot = |rig: &Rig| {
                 let popup = &rig.state.autocomplete;
                 (
-                    popup.active,
+                    popup.is_open(),
                     popup.kind,
                     popup.trigger_position,
                     popup.filter_text.clone(),
@@ -4793,7 +4783,7 @@ mod tests {
             assert_eq!(rig.input, "/te");
             assert!(rig.frames().is_empty());
             rig.esc().await;
-            assert!(!rig.state.autocomplete.active);
+            assert!(!rig.state.autocomplete.is_open());
             assert!(
                 rig.input.is_empty(),
                 "the original slash rollback still works"
@@ -4985,15 +4975,7 @@ mod tests {
                                     &shell,
                                     Host::Attached,
                                     &log_facts(&rig.conversation.id),
-                                    |frame| {
-                                        paint_overlays(
-                                            frame,
-                                            area,
-                                            layout.input_area,
-                                            layout.status_bar,
-                                            state,
-                                        )
-                                    },
+                                    |_| {},
                                     |frame| {
                                         let buffer = frame.buffer_mut();
                                         assert!(
@@ -5118,7 +5100,7 @@ mod tests {
                     assert!(
                         !presentation::is_open(&rig.state, Surface::CommandPalette)
                             && rig.state.pending_leader.is_none()
-                            && !rig.state.autocomplete.active
+                            && !rig.state.autocomplete.is_open()
                     );
                     assert_eq!(rig.input, draft);
                     assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
@@ -5198,7 +5180,7 @@ mod tests {
         }
     }
 
-    /// K2: legacy-target refusal is a registry result and never closes the caller.
+    /// K2: attached pane absence is registry feedback and never closes the caller.
     #[tokio::test]
     async fn story21_4_attached_a2a_frame_leader_gate_and_quit_retention() {
         let mut rig = Rig::at(FocusState::Input, "draft");
@@ -5215,9 +5197,10 @@ mod tests {
         let LeaderStep::Unavailable(_, remedy) =
             leader_step(Host::Attached, Key::Char('q'), &avail, Context::Help.name())
         else {
-            panic!("frame-origin legacy target must be registry-gated");
+            panic!("attached frame-origin pane absence must be registry-gated");
         };
-        assert!(remedy.contains("close the window first"));
+        assert_eq!(remedy, "No decisions waiting in this client");
+        assert!(!presentation::is_open(&rig.state, Surface::DecisionPane));
         rig.ch('q').await;
         assert_eq!(rig.notice(NoticeSource::Chord), Some(remedy));
         assert_eq!(rig.state.notifications.records().len(), records + 1);
@@ -5402,15 +5385,7 @@ mod tests {
                                 &shell,
                                 Host::Attached,
                                 &log_facts(&rig.conversation.id),
-                                |frame| {
-                                    paint_overlays(
-                                        frame,
-                                        area,
-                                        layout.input_area,
-                                        layout.status_bar,
-                                        state,
-                                    )
-                                },
+                                |_| {},
                                 |frame| {
                                     let buffer = frame.buffer_mut();
                                     let row = |y| {
@@ -5529,7 +5504,6 @@ mod tests {
 
     #[tokio::test]
     async fn story21_4_attached_a2a_frame_origin_leader_feedback_is_visible_and_retains_the_menu() {
-        use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
         for width in [60, 80, 130] {
             for key in ['q', 'z'] {
                 let mut rig = Rig::at(FocusState::Input, "leader draft");
@@ -5544,7 +5518,7 @@ mod tests {
                 let records = rig.state.notifications.records().len();
                 rig.ch(key).await;
                 let expected = if key == 'q' {
-                    CLOSE_WINDOW_FIRST.to_owned()
+                    "No decisions waiting in this client".to_owned()
                 } else {
                     crate::adapters::tui::keymap::resolve::no_binding_text(
                         Key::Char(key),

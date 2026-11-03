@@ -14,6 +14,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::decision_pane::{
@@ -21,10 +22,12 @@ use rustain::adapters::tui::decision_pane::{
     Raised, waiting_toast,
 };
 use rustain::adapters::tui::handlers::context_warning::handle_upsert_context_warning;
+use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::notification_log::{self, LogFacts, LogOutcome};
 use rustain::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
 };
+use rustain::adapters::tui::presentation::{self, Shell, Surface, is_open};
 use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::clock::MockClock;
@@ -54,7 +57,9 @@ fn facts(active: &str) -> LogFacts {
 }
 
 fn press(state: &mut TuiState, event: DomainInputEvent, f: &LogFacts) -> Option<PaneOutcome> {
-    decision_pane::handle_domain_event(state, &event, f)
+    let outcome = decision_pane::handle_domain_event(state, &event, f);
+    assert!(presentation::consistent(state));
+    outcome
 }
 
 /// First paint, then the inert window passes.
@@ -64,11 +69,13 @@ fn ready(state: &mut TuiState, clock: &MockClock) {
 }
 
 fn automatic(state: &mut TuiState, kind: DecisionKind) -> Raised {
-    decision_pane::raise(
+    let raised = decision_pane::raise(
         state,
         DecisionDraft::new(kind, "the question"),
         Arrival::Automatic,
-    )
+    );
+    assert!(presentation::consistent(state));
+    raised
 }
 
 fn waiting_toasts(state: &TuiState) -> usize {
@@ -84,7 +91,6 @@ fn waiting_toasts(state: &TuiState) -> usize {
 fn draw_pane(state: &TuiState, f: &LogFacts, width: u16, height: u16, with_pane: bool) -> Buffer {
     let layout = layout_of(state, width, height);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    let theme = state.theme.clone();
     terminal
         .draw(|frame| {
             let pane = layout.chat_pane;
@@ -95,10 +101,25 @@ fn draw_pane(state: &TuiState, f: &LogFacts, width: u16, height: u16, with_pane:
                 })
                 .collect();
             frame.render_widget(Paragraph::new(rows.join("\n")), pane);
-            frame.render_widget(Paragraph::new("status-row-sentinel"), layout.status_bar);
             frame.render_widget(Paragraph::new("composer-sentinel"), layout.input_area);
             if with_pane {
-                decision_pane::render(frame, pane, &state.decisions, f, &theme);
+                let shell = Shell::new(frame.area(), &layout);
+                assert!(presentation::compose(
+                    frame,
+                    state,
+                    &shell,
+                    Host::Local,
+                    f,
+                    |_| {},
+                    |frame| {
+                        frame.render_widget(
+                            Paragraph::new("status-row-sentinel"),
+                            layout.status_bar,
+                        );
+                    },
+                ));
+            } else {
+                frame.render_widget(Paragraph::new("status-row-sentinel"), layout.status_bar);
             }
         })
         .unwrap();
@@ -131,7 +152,12 @@ fn k10_an_idle_empty_input_chat_or_sidebar_takes_the_first_arrival() {
             Raised::Focused,
             "{focus:?}"
         );
-        assert!(state.decisions.is_focused());
+        assert!(is_open(&state, Surface::DecisionPane));
+        assert_eq!(state.modal_stack.len(), 1);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::DecisionPane
+        );
         assert_eq!(
             waiting_toasts(&state),
             0,
@@ -147,7 +173,8 @@ fn k10_a_typing_composer_is_never_interrupted() {
     state.focus = FocusState::Input;
     state.input_buffer = "half a sentence".into();
     assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Waiting);
-    assert!(!state.decisions.is_focused());
+    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(state.modal_stack.is_empty());
     assert_eq!(state.input_buffer, "half a sentence");
     assert_eq!(
         waiting_toasts(&state),
@@ -187,22 +214,18 @@ fn k10_a_typing_composer_is_never_interrupted() {
 
 #[test]
 fn k10_open_surfaces_are_never_taken_from() {
-    // One entry per disjunct of the pane's protection test, each setting ONLY its
-    // own flag, so dropping any single disjunct leaves exactly one entry failing.
+    // Keep every legacy protection branch. Non-text Help/S-LOG now have
+    // separate eligible-preemption controls below (21.4 AC7).
     type Setup = fn(&mut TuiState);
     use rustain::adapters::tui::keymap::Context;
-    use rustain::adapters::tui::presentation::{Surface, reducer};
+    use rustain::adapters::tui::presentation::reducer;
     use rustain::domain::models::autocomplete::AutocompleteKind;
     use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-    let surfaces: [(&str, Setup); 16] = [
-        ("S-LOG", |s| notification_log::open(s)),
+    let surfaces: [(&str, Setup); 14] = [
         ("S-QUIT", |s| {
             let mut f = QuitFacts::idle(QuitHost::Local);
             f.composer_draft = true;
             quit_confirm::request(s, f);
-        }),
-        ("help overlay", |s| {
-            reducer::open(s, Surface::Help);
         }),
         ("model selector", |s| s.model_selector.active = true),
         ("sign-in", |s| s.login.active = true),
@@ -234,9 +257,11 @@ fn k10_open_surfaces_are_never_taken_from() {
         ("a plan-cancel confirmation", |s| {
             s.task_panel_state.cancel_plan_confirm = Some("plan-1".into());
         }),
-        ("autocomplete overlay", |s| {
-            s.focus =
-                FocusState::Overlay(OverlayType::Autocomplete(AutocompleteKind::SlashCommand));
+        ("autocomplete popup", |s| {
+            handle_input(s, &key('/'));
+            assert_eq!(s.autocomplete.kind, Some(AutocompleteKind::SlashCommand));
+            assert_eq!(s.focus, FocusState::Input);
+            assert!(s.modal_stack.is_empty());
         }),
         ("permission confirmation overlay", |s| {
             s.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
@@ -245,16 +270,80 @@ fn k10_open_surfaces_are_never_taken_from() {
     for (name, setup) in surfaces {
         let (mut state, _c) = clocked(80, 24);
         setup(&mut state);
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
         assert_eq!(
             automatic(&mut state, DecisionKind::Budget),
             Raised::Waiting,
             "{name}"
         );
-        assert!(!state.decisions.is_focused(), "{name}");
+        assert!(!is_open(&state, Surface::DecisionPane), "{name}");
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames,
+            "{name}: protected frames are untouched"
+        );
         assert!(
             state.decisions.holds(DecisionKind::Budget),
             "{name}: it waits"
         );
+    }
+}
+
+#[test]
+fn k10_non_text_help_and_log_allow_arrival_and_restore_the_interrupted_frame() {
+    for surface in [Surface::Help, Surface::NotificationLog] {
+        let (mut state, clock) = clocked(80, 24);
+        state.focus = FocusState::Chat;
+        match surface {
+            Surface::Help => {
+                handle_input(&mut state, &key('?'));
+                state.help_overlay.scroll_offset = 3;
+            }
+            Surface::NotificationLog => {
+                notifications::info(&mut state, NoticeSource::System, "older record");
+                notifications::info(&mut state, NoticeSource::System, "newer record");
+                notification_log::open(&mut state);
+                notification_log::handle_domain_event(
+                    &mut state,
+                    &special(DomainKey::Down),
+                    &LogFacts::default(),
+                );
+            }
+            _ => unreachable!(),
+        }
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+        let log = state.notification_log.clone();
+        advance(&clock, Duration::from_secs(1));
+        assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Focused);
+        assert_eq!(state.modal_stack.len(), frames.len() + 1);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::DecisionPane
+        );
+        assert!(is_open(&state, surface));
+        assert_eq!(waiting_toasts(&state), 0);
+        ready(&mut state, &clock);
+        assert_eq!(
+            press(&mut state, special(DomainKey::Esc), &LogFacts::default()),
+            Some(PaneOutcome::Consumed)
+        );
+        assert!(
+            state.decisions.holds(DecisionKind::Budget),
+            "Later keeps the item"
+        );
+        assert!(!is_open(&state, Surface::DecisionPane));
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames
+        );
+        assert_eq!(state.focus, FocusState::Chat);
+        assert_eq!(
+            state.notification_log, log,
+            "Log payload and selected id restored"
+        );
+        if surface == Surface::Help {
+            assert_eq!(state.help_overlay.scroll_offset, 3);
+        }
     }
 }
 
@@ -376,9 +465,13 @@ fn k10_esc_follows_the_table_for_every_kind() {
                 // item stays pending and the pane lets go of the keyboard.
                 assert_eq!(outcome, Some(PaneOutcome::Consumed), "{kind:?}");
                 assert!(state.decisions.holds(kind), "{kind:?}: still pending");
-                assert!(!state.decisions.is_focused(), "{kind:?}: pane released");
+                assert!(
+                    !is_open(&state, Surface::DecisionPane),
+                    "{kind:?}: pane released"
+                );
             }
         }
+        assert!(state.modal_stack.is_empty(), "{kind:?}: pane frame closed");
     }
 }
 
@@ -398,7 +491,8 @@ fn k10_a_waiting_or_deferred_item_cannot_be_answered_by_a_stray_key() {
     );
     ready(&mut state, &clock);
     press(&mut state, special(DomainKey::Esc), &LogFacts::default());
-    assert!(!state.decisions.is_focused());
+    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(state.modal_stack.is_empty());
     for c in ['y', 'n'] {
         let action = handle_input(&mut state, &key(c));
         assert!(
@@ -442,11 +536,17 @@ fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
     state.focus = FocusState::Input;
     automatic(&mut state, DecisionKind::Carryover);
     automatic(&mut state, DecisionKind::Budget);
-    assert!(!state.decisions.is_focused());
+    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(state.modal_stack.is_empty());
     decision_pane::open_waiting(&mut state, &facts("c1"));
     assert_eq!(
-        state.decisions.current(&facts("c1")).map(|i| i.kind),
+        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::Carryover)
+    );
+    assert!(presentation::consistent(&state));
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::DecisionPane
     );
     assert_eq!(state.input_buffer, "typing", "the draft is untouched");
 }
@@ -604,7 +704,8 @@ fn k10_enter_never_resolves_a_delete_through_the_front_door() {
         Some(PaneOutcome::Consumed)
     );
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));
-    assert!(state.decisions.is_focused());
+    assert!(is_open(&state, Surface::DecisionPane));
+    assert_eq!(state.modal_stack.len(), 1);
     assert!(state.pending_delete.is_some(), "the target is untouched");
     // Positive control: the painted `y` resolves it.
     assert_eq!(
@@ -658,7 +759,7 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
         rustain::domain::models::visual::DeleteConfirmTarget::Bulk { count: 3 },
     );
     assert_eq!(
-        state.decisions.current(&f).map(|i| i.kind),
+        decision_pane::current(&state, &f).map(|i| i.kind),
         Some(DecisionKind::DeleteConversations)
     );
     for k in [key('y'), special(DomainKey::Enter)] {
@@ -682,7 +783,11 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
     automatic(&mut state, DecisionKind::LargeImage);
     ready(&mut state, &clock);
     press(&mut state, special(DomainKey::Esc), &f);
-    assert!(!state.decisions.is_focused(), "Later released the pane");
+    assert!(
+        !is_open(&state, Surface::DecisionPane),
+        "Later released the pane"
+    );
+    assert!(state.modal_stack.is_empty());
     decision_pane::raise(
         &mut state,
         DecisionDraft::new(DecisionKind::Budget, "b"),
@@ -691,7 +796,7 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
     ready(&mut state, &clock);
     decision_pane::open_waiting(&mut state, &f);
     assert_eq!(
-        state.decisions.current(&f).map(|i| i.kind),
+        decision_pane::current(&state, &f).map(|i| i.kind),
         Some(DecisionKind::LargeImage)
     );
     assert_eq!(
@@ -766,6 +871,15 @@ fn k10_the_pane_paints_inside_the_chat_pane_and_changes_no_other_cell() {
                         with.cell((x, y)).map(|c| c.symbol().to_owned()),
                         "{width}x{height}: ({x},{y}) outside the chat pane changed"
                     );
+                    if layout.input_area.contains((x, y).into()) {
+                        assert!(
+                            with[(x, y)].modifier.contains(Modifier::DIM),
+                            "{width}x{height}: composer ({x},{y}) must dim without changing text"
+                        );
+                    }
+                    if layout.status_bar.contains((x, y).into()) {
+                        assert_eq!(without[(x, y)], with[(x, y)], "status is unchanged");
+                    }
                 }
             }
         }
@@ -789,7 +903,7 @@ fn k10_the_context_warning_producer_raises_a_decision_and_a_log_record() {
     let (mut state, _c) = clocked(80, 24);
     handle_upsert_context_warning(&mut state, "c1", 92);
     assert_eq!(
-        state.decisions.current(&facts("c1")).map(|i| i.kind),
+        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::ContextWarning)
     );
     let record = state.notifications.records().last().expect("a log record");
@@ -811,7 +925,8 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     ready(&mut state, &clock);
     // Later: the item waits, unfocused.
     press(&mut state, special(DomainKey::Esc), &facts("c1"));
-    assert!(!state.decisions.is_focused());
+    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(state.modal_stack.is_empty());
 
     // `K` on the ctxwarn record raises/focuses the Compact decision.
     notification_log::open(&mut state);
@@ -823,7 +938,7 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     );
     assert!(state.notification_log.is_none(), "S-LOG closed");
     assert_eq!(
-        state.decisions.current(&facts("c1")).map(|i| i.kind),
+        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::ContextWarning)
     );
 
@@ -833,7 +948,7 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     assert_eq!(outcome, Some(LogOutcome::Closed));
     assert!(state.decisions.holds(DecisionKind::Carryover));
     assert_eq!(
-        state.decisions.current(&facts("c1")).map(|i| i.kind),
+        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::Carryover)
     );
 }
@@ -939,7 +1054,9 @@ fn k10_the_delete_producer_takes_the_pane_even_over_a_typing_composer() {
         &mut state,
         rustain::domain::models::visual::DeleteConfirmTarget::Bulk { count: 3 },
     );
-    assert!(state.decisions.is_focused());
+    assert!(is_open(&state, Surface::DecisionPane));
+    assert!(presentation::consistent(&state));
+    assert_eq!(state.modal_stack.len(), 1);
     assert_eq!(state.input_buffer, "draft");
     ready(&mut state, &clock);
     assert_eq!(
@@ -951,24 +1068,47 @@ fn k10_the_delete_producer_takes_the_pane_even_over_a_typing_composer() {
 // ── S-QUIT stays above the pane ───────────────────────────────────────────────
 
 #[test]
-fn k10_ctrl_c_and_ctrl_q_inside_the_pane_request_the_guard() {
+fn k10_ctrl_c_backs_out_and_ctrl_q_inside_the_pane_requests_the_guard() {
     let (mut state, clock) = clocked(80, 24);
     automatic(&mut state, DecisionKind::Carryover);
     ready(&mut state, &clock);
-    for k in [DomainKey::CtrlC, DomainKey::CtrlQ] {
-        assert_eq!(
-            press(&mut state, special(k), &LogFacts::default()),
-            Some(PaneOutcome::Quit),
-            "{k:?}"
-        );
-    }
+    assert_eq!(
+        press(&mut state, special(DomainKey::CtrlC), &LogFacts::default()),
+        Some(PaneOutcome::Consumed),
+        "RU-20: Ctrl+C backs out rather than requesting quit"
+    );
+    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(state.modal_stack.is_empty());
+    assert!(state.decisions.holds(DecisionKind::Carryover));
+    assert!(state.decisions.items().next().unwrap().deferred);
+
+    decision_pane::open_waiting(&mut state, &LogFacts::default());
+    ready(&mut state, &clock);
+    assert_eq!(
+        press(&mut state, special(DomainKey::CtrlQ), &LogFacts::default()),
+        Some(PaneOutcome::Quit)
+    );
+    assert!(is_open(&state, Surface::DecisionPane));
     assert!(
         state.decisions.holds(DecisionKind::Carryover),
         "the guard decides"
     );
-    // And the guard's frame is protected: a later arrival waits behind S-QUIT.
+    let pane = state.modal_stack.top().unwrap().clone();
     let mut f = QuitFacts::idle(QuitHost::Local);
     f.composer_draft = true;
     quit_confirm::request(&mut state, f);
+    assert!(presentation::consistent(&state));
+    assert_eq!(
+        state.modal_stack.top().unwrap().surface,
+        Surface::QuitConfirm
+    );
+    assert!(is_open(&state, Surface::DecisionPane));
     assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Waiting);
+    assert_eq!(handle_input(&mut state, &key('n')), InputAction::Consumed);
+    assert_eq!(
+        state.modal_stack.top(),
+        Some(&pane),
+        "Cancel returns to the pane"
+    );
+    assert!(presentation::consistent(&state));
 }

@@ -541,7 +541,9 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Ctrl+C` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
+| `Ctrl+C` | Back one frame without deciding; leave the item waiting | local | portable |  |
 | `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
 | `Enter` | Continue (a recovery decision) | local | portable |  |
 | `Esc` | Decide the safe default, or defer a deferrable decision | local | portable |  |

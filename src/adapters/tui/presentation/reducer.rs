@@ -1,12 +1,43 @@
 //! The sole owner of migrated frame/payload lifetimes and focus restoration.
 
+use super::stack::Continuation;
 use super::{Frame, Opened, Surface, is_open};
+use crate::adapters::tui::decision_pane::DecisionKey;
 use crate::adapters::tui::notification_log::NotificationLogState;
 use crate::adapters::tui::quit_confirm::{QuitConfirmState, QuitFacts, QuitRequest};
 use crate::adapters::tui::state::TuiState;
 
 /// Reopen truncates to the existing frame and retains its untouched payload.
 pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
+    assert!(
+        surface != Surface::DecisionPane,
+        "pane opens with its queue identity"
+    );
+    open_frame(state, surface, None)
+}
+
+/// The queue requests focus; this reducer alone writes the selected identity.
+pub(crate) fn focus_decision(state: &mut TuiState, key: DecisionKey) {
+    state.decisions.prepare(&key);
+    open_frame(state, Surface::DecisionPane, Some(key));
+    debug_assert!(super::consistent(state));
+}
+
+fn open_frame(state: &mut TuiState, surface: Surface, decision: Option<DecisionKey>) -> Opened {
+    // A surface displaced into a continuation is still owned. Restore it before
+    // truncating, rather than creating a second payload/identity for that surface.
+    while !state
+        .modal_stack
+        .iter()
+        .any(|frame| frame.surface == surface)
+        && state
+            .modal_stack
+            .continuations
+            .iter()
+            .any(|c| c.frame.surface == surface)
+    {
+        back(state);
+    }
     if let Some(index) = state
         .modal_stack
         .iter()
@@ -15,6 +46,13 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
         let truncated = index + 1 < state.modal_stack.len();
         while index + 1 < state.modal_stack.len() {
             back(state);
+        }
+        let retargeted = decision.is_some();
+        if let Some(key) = decision {
+            state.modal_stack.frames[index].decision = Some(key);
+        }
+        if truncated || retargeted {
+            transition(state);
         }
         debug_assert!(super::consistent(state));
         return if truncated {
@@ -46,7 +84,30 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
                 "Quit must open through request_quit"
             );
         }
+        Surface::DecisionPane => {}
     }
+    let opened = if state.modal_stack.len() == 4 {
+        let displaced = state.modal_stack.frames.pop().unwrap();
+        if surface.keeps_continuation() {
+            debug_assert!(
+                !state
+                    .modal_stack
+                    .continuations
+                    .iter()
+                    .any(|c| c.owner == surface)
+            );
+            state.modal_stack.continuations.push(Continuation {
+                owner: surface,
+                frame: displaced,
+            });
+            Opened::Continued
+        } else {
+            discard(state, displaced.surface);
+            Opened::Replaced
+        }
+    } else {
+        Opened::Pushed
+    };
     let stack = &mut state.modal_stack;
     stack.last_id = stack
         .last_id
@@ -56,11 +117,11 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
         id: stack.last_id,
         surface,
         conversation_id: None,
+        decision,
     });
-    state.needs_redraw = true;
-    state.current_hint = None;
+    transition(state);
     debug_assert!(super::consistent(state));
-    Opened::Pushed
+    opened
 }
 
 /// Preserve the existing guard facts and direct idle exit; repeated requests
@@ -97,23 +158,66 @@ pub fn back(state: &mut TuiState) -> Option<Surface> {
 /// Remove one surface and its payload. Closing a covered surface does not
 /// change the focus of the still-open top frame.
 pub fn close(state: &mut TuiState, surface: Surface) {
-    let Some(index) = state
+    let live = state
         .modal_stack
         .frames
         .iter()
-        .position(|frame| frame.surface == surface)
-    else {
+        .position(|frame| frame.surface == surface);
+    let suspended = state
+        .modal_stack
+        .continuations
+        .iter()
+        .position(|c| c.frame.surface == surface);
+    let was_top = live.is_some_and(|i| i + 1 == state.modal_stack.len());
+    if let Some(index) = live {
+        state.modal_stack.frames.remove(index);
+        if let Some(restored) = take_continuation(state, surface) {
+            state.modal_stack.frames.insert(index, restored);
+        }
+    } else if let Some(index) = suspended {
+        let outer = state.modal_stack.continuations.remove(index).owner;
+        if let Some(restored) = take_continuation(state, surface) {
+            state.modal_stack.continuations.push(Continuation {
+                owner: outer,
+                frame: restored,
+            });
+        }
+    } else {
         debug_assert!(super::consistent(state));
         return;
-    };
-    let was_top = index + 1 == state.modal_stack.len();
-    state.modal_stack.frames.remove(index);
+    }
+    release_payload(state, surface, was_top);
+    transition(state);
+    debug_assert!(super::consistent(state));
+}
+
+fn take_continuation(state: &mut TuiState, owner: Surface) -> Option<Frame> {
+    let index = state
+        .modal_stack
+        .continuations
+        .iter()
+        .position(|c| c.owner == owner)?;
+    Some(state.modal_stack.continuations.remove(index).frame)
+}
+
+fn discard(state: &mut TuiState, surface: Surface) {
+    if let Some(frame) = take_continuation(state, surface) {
+        discard(state, frame.surface);
+    }
+    release_payload(state, surface, false);
+}
+
+fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
     let caller_focus = match surface {
         Surface::CommandPalette => {
             state.command_palette.clear();
             None
         }
         Surface::Help => None,
+        Surface::DecisionPane => {
+            state.decisions.clear_paint();
+            None
+        }
         Surface::NotificationLog => {
             let caller = state.notification_log.take().map(|log| log.caller_focus);
             state.notifications.log_closed();
@@ -124,8 +228,18 @@ pub fn close(state: &mut TuiState, surface: Surface) {
     if was_top && let Some(focus) = caller_focus {
         state.focus = focus;
     }
+}
+
+fn transition(state: &mut TuiState) {
     state.needs_redraw = true;
-    debug_assert!(super::consistent(state));
+    state.current_hint = crate::adapters::tui::hints::contextual_hint(
+        &state.focus,
+        state.session_count,
+        state.theme.timing.status_hint_fade_sessions,
+        state.is_vscode,
+        &state.modal_stack,
+        state.pending_leader,
+    );
 }
 
 #[cfg(test)]
@@ -137,6 +251,21 @@ mod tests {
     use crate::adapters::tui::presentation::consistent;
     use crate::adapters::tui::quit_confirm::{self, QuitHost, QuitKeyOutcome};
     use crate::domain::models::{FocusState, OverlayType};
+
+    #[test]
+    fn story21_4_pane_opener_enters_the_stack() {
+        let mut state = TuiState::new(80, 24);
+        crate::adapters::tui::decision_pane::raise(
+            &mut state,
+            crate::adapters::tui::decision_pane::DecisionDraft::new(
+                crate::adapters::tui::decision_pane::DecisionKind::Budget,
+                "automatic first arrival",
+            ),
+            crate::adapters::tui::decision_pane::Arrival::Automatic,
+        );
+        assert_eq!(state.modal_stack.len(), 1);
+        assert!(super::super::consistent(&state));
+    }
 
     #[test]
     fn story21_4_front_doors_preserve_identity_payload_and_legacy_base() {

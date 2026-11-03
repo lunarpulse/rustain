@@ -8,7 +8,10 @@
 //! - No matches handling
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::presentation::Surface;
 use rustain::domain::events::DomainKey;
+use rustain::domain::models::FocusState;
+use rustain::domain::models::autocomplete::AutocompleteKind;
 
 use crate::e2e_harness;
 use e2e_harness::TestHarness;
@@ -26,7 +29,7 @@ fn test_e2e_slash_command_opens_dropdown() {
     // Type `/` at start
     let action = h.type_char('/');
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
 }
 
 /// Covers: AC1 — `/` not at start does NOT open autocomplete
@@ -40,7 +43,7 @@ fn test_e2e_slash_mid_text_no_autocomplete() {
 
     // Then `/` should not trigger autocomplete
     h.type_char('/');
-    assert!(!h.state.autocomplete.active);
+    assert!(!h.state.autocomplete.is_open());
 }
 
 /// Covers: AC1 — Dropdown shows commands
@@ -53,7 +56,7 @@ fn test_e2e_slash_command_shows_entries() {
     h.type_char('/');
 
     // Autocomplete should be active
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
 
     h.render();
 
@@ -130,12 +133,25 @@ fn test_e2e_slash_command_esc_dismisses() {
 
     // Open autocomplete
     h.type_char('/');
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
+    assert_eq!(
+        h.state.autocomplete.kind,
+        Some(AutocompleteKind::SlashCommand)
+    );
+    assert_eq!(h.state.focus, FocusState::Input);
+    assert!(
+        h.state.modal_stack.is_empty(),
+        "a routed popup adds no frame"
+    );
 
     // Esc dismisses
     let action = h.press_key(DomainKey::Esc);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(!h.state.autocomplete.active);
+    assert!(!h.state.autocomplete.is_open());
+    assert_eq!(h.state.autocomplete.kind, None);
+    assert_eq!(h.state.input_buffer, "", "slash rollback remains exact");
+    assert_eq!(h.state.focus, FocusState::Input);
+    assert!(h.state.modal_stack.is_empty(), "Esc closes only the popup");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -153,7 +169,7 @@ fn test_e2e_file_mention_opens_dropdown() {
     let action = h.type_char('@');
 
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
 }
 
 /// Covers: AC2 — File paths autocomplete from workspace scan
@@ -168,7 +184,7 @@ fn test_e2e_file_mention_shows_files() {
     h.render();
 
     // Should show autocomplete
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
 }
 
 /// Covers: AC2 — File mention filters as user types
@@ -217,6 +233,10 @@ fn test_e2e_autocomplete_no_matches() {
 
     // Should have filter text
     assert_eq!(h.state.autocomplete.filter_text, "xyz123nonexistent");
+    assert!(h.state.autocomplete.is_open());
+    assert!(h.state.modal_stack.is_empty());
+    h.render();
+    h.assert_screen_contains("No matches", "an empty result is still an open popup");
 }
 
 /// Covers: AC3 — Backspace past trigger dismisses autocomplete
@@ -228,7 +248,7 @@ fn test_e2e_autocomplete_backspace_past_trigger_dismisses() {
     // Open autocomplete
     h.type_char('/');
     h.type_text("ne");
-    assert!(h.state.autocomplete.active);
+    assert!(h.state.autocomplete.is_open());
 
     // Backspace to before trigger
     h.press_key(DomainKey::Backspace);
@@ -236,7 +256,7 @@ fn test_e2e_autocomplete_backspace_past_trigger_dismisses() {
     h.press_key(DomainKey::Backspace);
 
     // Autocomplete should be dismissed
-    assert!(!h.state.autocomplete.active);
+    assert!(!h.state.autocomplete.is_open());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -307,10 +327,18 @@ fn test_e2e_autocomplete_blocked_during_help() {
     // Open help overlay
     h.press_key(DomainKey::Esc);
     h.type_char('?');
+    let help = h.state.modal_stack.top().unwrap().clone();
+    assert_eq!(help.surface, Surface::Help);
+    let draft = h.state.input_buffer.clone();
 
     // `/` should not open autocomplete when overlay active
     h.type_char('/');
-    assert!(!h.state.autocomplete.active);
+    assert!(!h.state.autocomplete.is_open());
+    assert_eq!(h.state.modal_stack.top(), Some(&help));
+    assert_eq!(
+        h.state.input_buffer, draft,
+        "Help keeps the composer untouched"
+    );
 }
 
 /// Covers: Multiple @ mentions in single message

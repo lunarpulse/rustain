@@ -7,6 +7,7 @@ use crate::adapters::tui::keymap::{
 };
 use crate::adapters::tui::{
     app::{self, InputAction},
+    decision_pane::{self, PaneOutcome},
     keymap::{self, CommandId, Context, Host, Key, Resolved},
     notification_log::{self, LogFacts, LogOutcome},
     quit_confirm::{self, QuitKeyOutcome},
@@ -73,6 +74,19 @@ pub fn route(
         return Some(RouteEffect::Consumed);
     }
     let key = Key::from_domain(event).unwrap_or(Key::Other);
+    if Key::from_domain(event).is_some()
+        && state
+            .modal_stack
+            .top()
+            .is_some_and(|frame| frame.surface == Surface::DecisionPane)
+    {
+        decision_pane::clear_feedback(state);
+    }
+    if (!state.modal_stack.is_empty() || state.pending_leader.is_some())
+        && matches!(key, Key::Char(c) if !c.is_control())
+    {
+        state.last_printable_at = Some(state.notifications.now());
+    }
     // Quit owns every key even while a leader remains pending underneath it.
     if state
         .modal_stack
@@ -115,6 +129,10 @@ pub fn route(
         });
     }
     let surface = state.modal_stack.top()?.surface;
+    if surface == Surface::DecisionPane && decision_pane::current(state, facts).is_none() {
+        super::reducer::close(state, Surface::DecisionPane);
+        return route(state, event, host, facts);
+    }
     if Key::from_domain(event).is_none() {
         return Some(RouteEffect::Consumed);
     }
@@ -139,6 +157,11 @@ pub fn route(
         }
     }
     Some(match surface {
+        Surface::DecisionPane => match decision_pane::handle_domain_event(state, event, facts) {
+            Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),
+            Some(PaneOutcome::Quit) => RouteEffect::QuitRequest,
+            Some(PaneOutcome::Consumed) | None => RouteEffect::Consumed,
+        },
         Surface::NotificationLog => match notification_log::handle_key(state, host, key, facts) {
             LogOutcome::Consumed | LogOutcome::Closed => RouteEffect::Consumed,
             LogOutcome::Quit => RouteEffect::QuitRequest,

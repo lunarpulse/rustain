@@ -47,7 +47,7 @@ pub enum OverlayCmd {
     // Quit confirmation.
     QuitYes, QuitNo,
     // Decision pane.
-    PaneQuit, PaneEnter, PaneEsc, PaneYes, PaneNo, PaneSwitch, PanePause, PaneCompact,
+    PaneQuit, PaneBack, PaneEnter, PaneEsc, PaneYes, PaneNo, PaneSwitch, PanePause, PaneCompact,
     // Recipient surface.
     RecipientPrev, RecipientNext, RecipientClose, RecipientPageUp, RecipientPageDown,
     RecipientToggle,
@@ -103,6 +103,8 @@ pub const ROWS: &[Binding] = &[
     bind(Context::CommandPalette, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Return to this command palette"),
     bind(Context::NotificationLog, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
     bind(Context::NotificationLog, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
+    bind(Context::DecisionPane, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::DecisionPane, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     // Legacy windows stay intact beneath S-QUIT until their stack cutover.
     bind(Context::ModelSelector, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the model selector"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the profile switcher"),
@@ -213,7 +215,7 @@ pub const ROWS: &[Binding] = &[
     q(&[Key::Ctrl('c')], OverlayCmd::QuitNo).does("Stay (back one frame)"),
     q(&[Key::Enter], OverlayCmd::QuitNo).does("Stay"),
     // ── Decision pane (the key letters depend on the waiting decision's kind) ──
-    d(&[Key::Ctrl('c')], OverlayCmd::PaneQuit).does("Ask to quit (guarded by the quit confirmation)"),
+    d(&[Key::Ctrl('c')], OverlayCmd::PaneBack).does("Back one frame without deciding; leave the item waiting"),
     d(&[Key::Ctrl('q')], OverlayCmd::PaneQuit).does("Ask to quit (guarded by the quit confirmation)"),
     d(&[Key::Enter], OverlayCmd::PaneEnter).does("Continue (a recovery decision)"),
     d(&[Key::Esc], OverlayCmd::PaneEsc).does("Decide the safe default, or defer a deferrable decision"),

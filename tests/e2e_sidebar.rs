@@ -460,7 +460,10 @@ fn test_delete_confirmation_y_confirms() {
     let (mut state, clock) = pane_state();
     begin_delete_confirmation(&mut state, single());
     assert!(
-        state.decisions.is_focused(),
+        rustain::adapters::tui::presentation::is_open(
+            &state,
+            rustain::adapters::tui::presentation::Surface::DecisionPane
+        ),
         "the user's own delete takes the pane"
     );
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));

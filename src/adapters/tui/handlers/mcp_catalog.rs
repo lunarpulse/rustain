@@ -30,7 +30,7 @@ pub async fn handle_mcp_catalog_changed(
     }
 
     // P-17, P-27: Refresh autocomplete if dropdown is open with McpMention
-    if state.autocomplete.active && state.autocomplete.kind == AutocompleteKind::McpMention {
+    if state.autocomplete.kind == Some(AutocompleteKind::McpMention) {
         populate_autocomplete_suggestions(state, command_registry, workspace_path, tools).await;
     }
     state.needs_redraw = true;

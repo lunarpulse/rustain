@@ -202,9 +202,6 @@ pub enum OverlayType {
     BookmarkList,
     /// Usage / cost panel (Ctrl+X, U). Story 7.5 AC3 (UX-DR111).
     UsagePanel,
-    /// Inline autocomplete popup (/ or @).
-    // Covers: UX-DR75
-    Autocomplete(super::autocomplete::AutocompleteKind),
     /// Wave overlay for fan-out result rows (Story 14.3a AC5). Opened by
     /// expanding the wave strip; intercepts j/k/↵/r/d/s/Esc before the
     /// chat/drill-down handlers.

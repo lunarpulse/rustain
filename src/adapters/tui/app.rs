@@ -1127,7 +1127,7 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
     if let Some(frame) = state.modal_stack.top() {
         return Some(frame.surface.context());
     }
-    if state.autocomplete.active {
+    if state.autocomplete.is_open() {
         return Some(Context::Autocomplete);
     }
     if state.reverse_search.active {
@@ -1376,21 +1376,15 @@ pub(crate) fn open_leader(state: &mut TuiState) -> InputAction {
         .top()
         .map(|frame| frame.surface.context())
         .unwrap_or(match state.focus {
-            FocusState::Input
-            | FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_)) => {
-                Context::Input
-            }
+            FocusState::Input | FocusState::Overlay(OverlayType::ReverseSearch) => Context::Input,
             FocusState::Sidebar { .. } => Context::Sidebar,
             _ => Context::Chat,
         });
-    if state.autocomplete.active {
+    if state.autocomplete.is_open() {
         state.autocomplete.dismiss();
     }
     state.reverse_search.active = false;
-    if matches!(
-        state.focus,
-        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))
-    ) {
+    if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {
         state.focus = FocusState::Input;
     }
     state.pending_leader = Some(origin);
@@ -1401,14 +1395,11 @@ pub(crate) fn open_leader(state: &mut TuiState) -> InputAction {
 
 /// Open the palette, retaining any frame caller and closing only routed popups.
 pub(crate) fn open_palette(state: &mut TuiState) -> InputAction {
-    if state.autocomplete.active {
+    if state.autocomplete.is_open() {
         state.autocomplete.dismiss();
     }
     state.reverse_search.active = false;
-    if matches!(
-        state.focus,
-        FocusState::Overlay(OverlayType::ReverseSearch | OverlayType::Autocomplete(_))
-    ) {
+    if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {
         state.focus = FocusState::Input;
     }
     presentation::reducer::open(state, Surface::CommandPalette);
@@ -1417,9 +1408,6 @@ pub(crate) fn open_palette(state: &mut TuiState) -> InputAction {
 
 /// Shared frame commands; callers have already established top ownership.
 pub(crate) fn dispatch_frame_key(state: &mut TuiState, context: Context, key: Key) -> InputAction {
-    if matches!(key, Key::Char(c) if !c.is_control()) {
-        state.last_printable_at = Some(state.notifications.now());
-    }
     dispatch(state, context, key)
 }
 
@@ -1646,7 +1634,7 @@ fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
         InputCmd::PasteClipboard => InputAction::RequestClipboardPaste,
         InputCmd::OpenPalette => open_palette(state),
         InputCmd::ReverseSearch => {
-            if state.autocomplete.active {
+            if state.autocomplete.is_open() {
                 state.autocomplete.dismiss();
             }
             state.reverse_search.active = true;
@@ -2932,15 +2920,15 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputAction {
     match state.focus {
         FocusState::Input => {
-            // When autocomplete is active, intercept characters to update filter.
+            // While autocomplete is open, intercept characters to update filter.
             // Exception: a space in SlashCommand mode terminates the command name
             // and begins arguments (e.g. `/export file.md`). Slash-command names
             // end at the first whitespace — matching the submission parser —
             // so dismissing here lets ENTER submit `/cmd args` as a whole.
             // Without this, the ENTER handler below (DomainKey::Enter arm) consumes
             // the submit and the command never dispatches.
-            if state.autocomplete.active {
-                if matches!(state.autocomplete.kind, AutocompleteKind::SlashCommand) && c == ' ' {
+            if let Some(kind) = state.autocomplete.kind {
+                if kind == AutocompleteKind::SlashCommand && c == ' ' {
                     state.autocomplete.dismiss();
                     // Fall through to normal character insertion below.
                 } else {
@@ -2957,31 +2945,28 @@ fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputA
                         .collect();
                     // Signal that autocomplete filter needs updating
                     // The actual filtering is done by the event loop which has access to registries
-                    state.autocomplete.filter_text = if state.autocomplete.kind
-                        == AutocompleteKind::FileMention
+                    state.autocomplete.filter_text = if kind == AutocompleteKind::FileMention
                         && filter.to_lowercase() == "mcp/"
                     {
-                        state.autocomplete.kind = AutocompleteKind::McpMention;
+                        state.autocomplete.kind = Some(AutocompleteKind::McpMention);
                         String::new()
-                    } else if state.autocomplete.kind == AutocompleteKind::FileMention
+                    } else if kind == AutocompleteKind::FileMention
                         && filter.eq_ignore_ascii_case("a2a/")
                     {
-                        state.autocomplete.kind = AutocompleteKind::A2aMention;
+                        state.autocomplete.kind = Some(AutocompleteKind::A2aMention);
                         String::new()
-                    } else if state.autocomplete.kind == AutocompleteKind::FileMention
-                        && filter == "Agents/"
-                    {
-                        state.autocomplete.kind = AutocompleteKind::AgentMention;
+                    } else if kind == AutocompleteKind::FileMention && filter == "Agents/" {
+                        state.autocomplete.kind = Some(AutocompleteKind::AgentMention);
                         String::new()
-                    } else if state.autocomplete.kind == AutocompleteKind::AgentMention {
+                    } else if kind == AutocompleteKind::AgentMention {
                         let after_slash = filter.strip_prefix("Agents/").unwrap_or(&filter);
                         after_slash.to_string()
-                    } else if state.autocomplete.kind == AutocompleteKind::McpMention {
+                    } else if kind == AutocompleteKind::McpMention {
                         let filter_lower = filter.to_lowercase();
                         let after_slash =
                             filter_lower.strip_prefix("mcp/").unwrap_or(&filter_lower);
                         after_slash.to_string()
-                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                    } else if kind == AutocompleteKind::A2aMention {
                         // Namespace token is case-insensitive; the suffix keeps
                         // the user's casing (peer/skill IDs are case-sensitive).
                         let after_slash = strip_a2a_namespace(&filter);
@@ -3001,6 +2986,9 @@ fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputA
                 && state.cursor_position == 0
                 && state.input_buffer.is_empty()
             {
+                state
+                    .autocomplete
+                    .open(AutocompleteKind::SlashCommand, 0, Vec::new());
                 state.autocomplete.own_slash_edit(
                     &state.input_buffer,
                     state.cursor_position,
@@ -3009,12 +2997,6 @@ fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputA
                 let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
                 state.input_buffer.insert(byte_pos, c);
                 state.cursor_position += 1;
-                state.autocomplete.active = true;
-                state.autocomplete.kind = AutocompleteKind::SlashCommand;
-                state.autocomplete.trigger_position = 0;
-                state.autocomplete.filter_text.clear();
-                state.autocomplete.selected_index = 0;
-                state.autocomplete.scroll_offset = 0;
                 // Suggestions will be populated by the event loop (lazy loading)
                 state.needs_redraw = true;
                 return InputAction::Consumed;
@@ -3026,13 +3008,9 @@ fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputA
                 state.input_buffer.insert(byte_pos, c);
                 let trigger_pos = state.cursor_position;
                 state.cursor_position += 1;
-                state.autocomplete.active = true;
-                state.autocomplete.slash_rollback = None;
-                state.autocomplete.kind = AutocompleteKind::FileMention;
-                state.autocomplete.trigger_position = trigger_pos;
-                state.autocomplete.filter_text.clear();
-                state.autocomplete.selected_index = 0;
-                state.autocomplete.scroll_offset = 0;
+                state
+                    .autocomplete
+                    .open(AutocompleteKind::FileMention, trigger_pos, Vec::new());
                 // Suggestions will be populated by the event loop
                 state.needs_redraw = true;
                 return InputAction::Consumed;
@@ -3131,7 +3109,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         Some(Context::ProfileSwitcher | Context::SearchTyping | Context::SearchNavigating)
     ) {
         overlay
-    } else if state.autocomplete.active && state.focus == FocusState::Input {
+    } else if state.autocomplete.is_open() && state.focus == FocusState::Input {
         Some(Context::Autocomplete)
     } else if state.reverse_search.active {
         Some(Context::ReverseSearch)
@@ -3378,33 +3356,34 @@ fn exec_autocomplete(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
                         .skip(trigger + 1)
                         .take(state.cursor_position.saturating_sub(trigger + 1))
                         .collect();
-                    if state.autocomplete.kind == AutocompleteKind::AgentMention
+                    if state.autocomplete.kind == Some(AutocompleteKind::AgentMention)
                         && !filter.starts_with("Agents/")
                     {
-                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                        state.autocomplete.kind = Some(AutocompleteKind::FileMention);
                     }
-                    if state.autocomplete.kind == AutocompleteKind::McpMention
+                    if state.autocomplete.kind == Some(AutocompleteKind::McpMention)
                         && !filter.to_lowercase().starts_with("mcp/")
                     {
-                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                        state.autocomplete.kind = Some(AutocompleteKind::FileMention);
                     }
-                    if state.autocomplete.kind == AutocompleteKind::A2aMention
+                    if state.autocomplete.kind == Some(AutocompleteKind::A2aMention)
                         && !filter.to_lowercase().starts_with("a2a/")
                     {
-                        state.autocomplete.kind = AutocompleteKind::FileMention;
+                        state.autocomplete.kind = Some(AutocompleteKind::FileMention);
                     }
-                    let filter_text = if state.autocomplete.kind == AutocompleteKind::AgentMention {
+                    let kind = state.autocomplete.kind;
+                    let filter_text = if kind == Some(AutocompleteKind::AgentMention) {
                         filter
                             .strip_prefix("Agents/")
                             .unwrap_or(&filter)
                             .to_string()
-                    } else if state.autocomplete.kind == AutocompleteKind::McpMention {
+                    } else if kind == Some(AutocompleteKind::McpMention) {
                         filter
                             .strip_prefix("MCP/")
                             .or_else(|| filter.strip_prefix("mcp/"))
                             .unwrap_or(&filter)
                             .to_string()
-                    } else if state.autocomplete.kind == AutocompleteKind::A2aMention {
+                    } else if kind == Some(AutocompleteKind::A2aMention) {
                         strip_a2a_namespace(&filter).to_string()
                     } else {
                         filter
@@ -4479,12 +4458,9 @@ mod tests {
 
     /// AC2 — for every FocusState reachable in a headless test, Ctrl+Q either
     /// yields Quit or the row is an explicit Skip("reason") documented in the
-    /// story's Completion Notes. Rows are production-shaped: guards that gate
-    /// on a flag (palette, which-key, reverse search, autocomplete) get the
-    /// flag set exactly as the opening path sets it, because focus-only is
-    /// not the state production enters. `Overlay(Autocomplete(_))` is not a
-    /// row at all: no production site ever sets that focus value (the popup
-    /// lives at focus==Input, covered by the autocomplete row below).
+    /// story's Completion Notes. Rows use the actual surface lifecycle:
+    /// frames, pending leader and routed popups retain their production
+    /// ownership. Autocomplete lives at Input, never in a focus overlay.
     #[test]
     fn ctrl_q_from_every_focus_state_either_quits_or_is_documented() {
         struct Row {
@@ -4570,7 +4546,7 @@ mod tests {
                 label: "Input with autocomplete popup active (production shape)",
                 setup: Box::new(|s| {
                     s.focus = FocusState::Input;
-                    s.autocomplete.active = true;
+                    handle_input(s, &DomainInputEvent::KeyPress('/'));
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },
@@ -5338,12 +5314,15 @@ mod tests {
         let mut state = make_state();
         // Type '@'
         let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
         // Type 'Agents/'
         for c in "Agents/".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::AgentMention);
+        assert_eq!(
+            state.autocomplete.kind,
+            Some(AutocompleteKind::AgentMention)
+        );
         assert_eq!(state.autocomplete.filter_text, "");
     }
 
@@ -5355,13 +5334,16 @@ mod tests {
         for c in "Agents/".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::AgentMention);
+        assert_eq!(
+            state.autocomplete.kind,
+            Some(AutocompleteKind::AgentMention)
+        );
         // Backspace once to delete '/'
         let _ = handle_input(
             &mut state,
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
     }
 
     // Story 19.13: `@a2a/` namespace entry is case-insensitive — any casing of
@@ -5373,7 +5355,7 @@ mod tests {
         for c in "@a2A/".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::A2aMention));
         assert_eq!(state.autocomplete.filter_text, "");
         for c in "MyPeer".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
@@ -5396,12 +5378,12 @@ mod tests {
         for c in "A2a/".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::A2aMention));
         let _ = handle_input(
             &mut state,
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
         assert_eq!(state.input_buffer, "@A2a");
         assert_eq!(state.autocomplete.filter_text, "A2a");
     }
@@ -5421,11 +5403,11 @@ mod tests {
             let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left));
         }
         let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
         for c in "a2a/".chars() {
             let _ = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.autocomplete.kind, AutocompleteKind::A2aMention);
+        assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::A2aMention));
         state.autocomplete.suggestions.push(
             crate::domain::models::autocomplete::AutocompleteSuggestion::A2aAgent {
                 peer: "evil-peer".to_string(),
@@ -5435,7 +5417,7 @@ mod tests {
         );
         let _ = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
         assert!(
-            !state.autocomplete.active,
+            !state.autocomplete.is_open(),
             "popup dismissed after selection"
         );
         assert_eq!(

@@ -26,7 +26,7 @@ fn type_text(state: &mut TuiState, text: &str) {
     for ch in text.chars() {
         handle_input(state, &DomainInputEvent::KeyPress(ch));
     }
-    if state.autocomplete.active {
+    if state.autocomplete.is_open() {
         state.autocomplete.dismiss();
     }
 }

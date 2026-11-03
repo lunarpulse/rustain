@@ -72,6 +72,51 @@ fn base_target(c: &AvailCtx) -> Availability {
     }
 }
 
+fn decisions(c: &AvailCtx) -> Availability {
+    if c.host == Host::Attached && c.frame_origin {
+        Availability::Unavailable("No decisions waiting in this client")
+    } else {
+        Availability::Available
+    }
+}
+
+/// Every resolved pane effect declares its presentation target. No wildcard:
+/// a new effect cannot silently inherit permission to open an unmigrated surface.
+pub fn pane_effect_availability(
+    effect: crate::adapters::tui::decision_pane::DecisionEffect,
+    has_caller: bool,
+) -> Availability {
+    use crate::adapters::tui::decision_pane::DecisionEffect;
+    let legacy_target = match effect {
+        DecisionEffect::BudgetSwitchCheaper => true,
+        DecisionEffect::RecoveryContinue
+        | DecisionEffect::RecoveryNewSession
+        | DecisionEffect::CarryoverAccept
+        | DecisionEffect::CarryoverDecline
+        | DecisionEffect::BudgetContinue
+        | DecisionEffect::BudgetPause
+        | DecisionEffect::ContextCompact
+        | DecisionEffect::AttachLargeImage
+        | DecisionEffect::CancelLargeImage
+        | DecisionEffect::ConfirmDelete
+        | DecisionEffect::CancelDelete => false,
+    };
+    if has_caller && legacy_target {
+        Availability::Unavailable(CLOSE_WINDOW_FIRST)
+    } else {
+        Availability::Available
+    }
+}
+
+/// The local decision request's honest refusal, shared with its owning menu.
+pub fn decision_waiting_remedy(has_pending: bool) -> &'static str {
+    if has_pending {
+        "A decision is waiting in another tab — open that tab to answer it"
+    } else {
+        "No decisions waiting"
+    }
+}
+
 use crate::domain::models::palette::PaletteAction;
 
 /// Every action variant and command argument shape declares its presentation
@@ -218,7 +263,7 @@ const LEADER: &[Binding] = &[
     l(&[Key::Char('?')], LeaderCmd::Help, "Help").help(C, "Ctrl+X, ?", "This help overlay").witness("Keybindings"),
     l(&[Key::Char('n')], LeaderCmd::Notifications, "Notifications").slash("/notifications").help(C, "Ctrl+X, N", "Notification Log (also /notifications); Log !N counts unseen warnings and errors").witness("Notifications"),
     l(&[Key::Char('x')], LeaderCmd::ClearToasts, "Clear toasts").help(C, "Ctrl+X, X", "Clear toasts (hides every visible toast; the log keeps them)"),
-    l(&[Key::Char('q')], LeaderCmd::Decisions, "Decisions").avail(base_target).help(C, "Ctrl+X, Q", "Decisions: focus the oldest waiting decision (status cue: Needs you)").witness("No decisions waiting"),
+    l(&[Key::Char('q')], LeaderCmd::Decisions, "Decisions").avail(decisions).help(C, "Ctrl+X, Q", "Decisions: focus the oldest waiting decision (status cue: Needs you)").witness("No decisions waiting"),
     l(&[Key::Enter], LeaderCmd::Send, "Send").help(C, "Ctrl+X, Enter", "Send the composer from any terminal (multi-line safe send)"),
     l(&[Key::Esc], LeaderCmd::Cancel, "Cancel").does("Close the menu without doing anything"),
     l(&[Key::Ctrl('c')], LeaderCmd::Cancel, "").does("Close the menu without doing anything"),

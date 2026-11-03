@@ -27,7 +27,7 @@ fn open_surfaces(s: &TuiState) -> String {
         s.profile_switcher.active,
         s.usage_panel.active,
         s.reverse_search.active,
-        s.autocomplete.active,
+        s.autocomplete.is_open(),
         s.notification_log.is_some(),
         s.recipient_surface.is_some(),
     )

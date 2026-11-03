@@ -32,7 +32,7 @@ fn story21_2_lone_slash_then_esc_leaves_no_residue_and_only_closes_popup() {
     let mut state = TuiState::new(80, 24);
     state.input_scroll_offset = 3;
     key(&mut state, '/');
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
     assert!(state.autocomplete.owns_slash_edit());
     assert_eq!(state.input_buffer, "/");
 
@@ -41,7 +41,7 @@ fn story21_2_lone_slash_then_esc_leaves_no_residue_and_only_closes_popup() {
     // Esc closes only the popup: no submit/quit/cancel, focus unchanged.
     assert_eq!(action, InputAction::Consumed);
     assert_eq!(state.focus, FocusState::Input);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!state.autocomplete.owns_slash_edit());
     assert_eq!(state.input_buffer, "");
     assert_eq!(state.cursor_position, 0);
@@ -64,7 +64,7 @@ fn story21_2_slash_with_typed_filter_then_esc_restores_saved_composer() {
     assert_eq!(special(&mut state, DomainKey::Esc), InputAction::Consumed);
     assert_eq!(state.input_buffer, "");
     assert_eq!(state.cursor_position, 0);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
 }
 
 #[test]
@@ -73,10 +73,10 @@ fn story21_2_esc_restores_mid_buffer_unicode_prefix_and_suffix_exactly() {
     // snapshot is exercised with a hand-built popup-owned provisional edit:
     // saved "é日本" (cursor 1, scroll 2) -> live "é/he日本" (cursor 4).
     let mut state = TuiState::new(80, 24);
+    state
+        .autocomplete
+        .open(AutocompleteKind::SlashCommand, 1, Vec::new());
     state.autocomplete.own_slash_edit("é日本", 1, 2);
-    state.autocomplete.active = true;
-    state.autocomplete.kind = AutocompleteKind::SlashCommand;
-    state.autocomplete.trigger_position = 1;
     state.autocomplete.filter_text = "he".to_owned();
     state.input_buffer = "é/he日本".to_owned();
     state.cursor_position = 4;
@@ -87,7 +87,7 @@ fn story21_2_esc_restores_mid_buffer_unicode_prefix_and_suffix_exactly() {
     assert_eq!(state.input_buffer, "é日本");
     assert_eq!(state.cursor_position, 1);
     assert_eq!(state.input_scroll_offset, 2);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
 }
 
 #[test]
@@ -109,14 +109,14 @@ fn story21_2_stale_snapshot_is_never_restored_after_unrelated_edit() {
     state.cursor_position = 6;
     special(&mut state, DomainKey::Esc);
     assert_eq!(state.input_buffer, "/hexyz");
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
 
     // Cursor moved with a navigation key: popup dismissed, text is authored.
     let mut state = TuiState::new(80, 24);
     key(&mut state, '/');
     type_text(&mut state, "h");
     special(&mut state, DomainKey::Left);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!state.autocomplete.owns_slash_edit());
     special(&mut state, DomainKey::Esc);
     assert_eq!(state.input_buffer, "/h");
@@ -143,7 +143,7 @@ fn story21_2_accepted_completion_is_intentional_text_esc_does_not_erase_it() {
         // Positive control: completion replaced trigger..cursor with /name.
         assert_eq!(state.input_buffer, "/help");
         assert_eq!(state.cursor_position, 5);
-        assert!(!state.autocomplete.active);
+        assert!(!state.autocomplete.is_open());
         assert!(!state.autocomplete.owns_slash_edit());
 
         special(&mut state, DomainKey::Esc);
@@ -159,14 +159,14 @@ fn story21_2_accepted_completion_is_intentional_text_esc_does_not_erase_it() {
 fn story21_2_mention_popup_never_acquires_rollback_ownership() {
     let mut state = TuiState::new(80, 24);
     type_text(&mut state, "see @");
-    assert!(state.autocomplete.active);
-    assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+    assert!(state.autocomplete.is_open());
+    assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
     assert!(!state.autocomplete.owns_slash_edit());
     type_text(&mut state, "sr");
     assert!(!state.autocomplete.owns_slash_edit());
 
     assert_eq!(special(&mut state, DomainKey::Esc), InputAction::Consumed);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "see @sr", "mention text stays authored");
     assert_eq!(state.cursor_position, 7);
 
@@ -184,7 +184,7 @@ fn story21_2_mention_popup_never_acquires_rollback_ownership() {
 fn story21_2_pasted_or_literal_slash_text_has_no_rollback_ownership() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::Paste("/help me".to_owned()));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!state.autocomplete.owns_slash_edit());
     special(&mut state, DomainKey::Esc);
     assert_eq!(state.input_buffer, "/help me");
@@ -192,7 +192,7 @@ fn story21_2_pasted_or_literal_slash_text_has_no_rollback_ownership() {
     // A slash typed into existing text is literal: no popup, no ownership.
     let mut state = TuiState::new(80, 24);
     type_text(&mut state, "a/b");
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!state.autocomplete.owns_slash_edit());
     assert_eq!(state.input_buffer, "a/b");
 }
@@ -207,7 +207,7 @@ fn story21_2_backspace_of_trigger_keeps_explicit_removal_behaviour() {
     );
     assert_eq!(state.input_buffer, "");
     assert_eq!(state.cursor_position, 0);
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!state.autocomplete.owns_slash_edit());
 }
 

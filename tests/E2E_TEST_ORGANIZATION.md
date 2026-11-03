@@ -110,6 +110,8 @@ fn test_e2e_[feature]_[behavior]() {
 - `test_e2e_autocomplete_blocked_during_help`
 - `test_e2e_multiple_file_mentions`
 
+Autocomplete is an Input-routed popup, not a modal frame: `kind: Some(..)` owns it and `None` closes it. The real-key Esc regression checks an empty stack before/after exact slash rollback; the Help regression retains the same frame and draft, and the no-match regression renders through the shared compositor.
+
 ### Story 3.3: Command Palette & Which-Key Chords
 
 **File:** `e2e_command_palette.rs`
@@ -208,7 +210,8 @@ h.assert_status_bar_contains("model-name");
 
 // State assertions
 assert!(matches!(h.state.focus, FocusState::Input));
-assert!(h.state.autocomplete.active);
+assert!(h.state.autocomplete.is_open());
+assert!(h.state.modal_stack.is_empty()); // routed popup, not a frame
 ```
 
 ## Key Design Decisions
@@ -225,7 +228,7 @@ The E2E tests are designed to work with the existing rustain codebase. Some test
 
 - `pending_images`, `pending_large_image`: For image attachment tracking
 - `reverse_search`: For Ctrl+R search functionality
-- `autocomplete`: For `/` and `@` autocomplete
+- `autocomplete`: Optional kind identifies the Input-routed `/` and `@` popup; `open`/`dismiss` own its payload lifecycle
 - `command_palette`: For Ctrl+P palette
 - `which_key`: For Ctrl+X chord hints
 

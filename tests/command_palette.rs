@@ -586,7 +586,7 @@ fn test_command_palette_renders_caller_geometry() {
                     &LogFacts::default(),
                     |_| {},
                     |_| {},
-                )
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -689,14 +689,13 @@ fn test_adding_palette_state_doesnt_break_autocomplete() {
     let mut state = TuiState::new(80, 24);
 
     // Autocomplete should still work normally
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(!presentation::is_open(&state, Surface::CommandPalette));
     assert!(state.pending_leader.is_none());
 
     // Type '/' to trigger autocomplete (simulating what event_loop does)
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    // The autocomplete activation happens in event_loop, not app.rs
-    // But the state machine should be intact
+    assert!(state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "/");
 }
 
@@ -708,22 +707,22 @@ fn test_adding_palette_state_doesnt_break_autocomplete() {
 fn test_ctrl_p_dismisses_autocomplete_before_opening() {
     let mut state = TuiState::new(80, 24);
 
-    // Simulate autocomplete being active
-    state.autocomplete.active = true;
+    // Open through the real typing path before switching surfaces.
+    handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
 
     // Ctrl+P should dismiss autocomplete and open palette
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(presentation::is_open(&state, Surface::CommandPalette));
 }
 
 #[test]
 fn test_ctrl_x_dismisses_autocomplete_before_opening() {
     let mut state = TuiState::new(80, 24);
-    state.autocomplete.active = true;
+    handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert!(state.pending_leader.is_some());
 }
 

@@ -560,9 +560,11 @@ mod tests {
     async fn story21_1_owner_screenshot_storm_leaves_an_empty_notice_area_and_every_fact_in_the_log()
      {
         use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
+        use crate::adapters::tui::keymap::Host;
         use crate::adapters::tui::layout::compute_layout;
         use crate::adapters::tui::notification_log::LogFacts;
         use crate::adapters::tui::notifications::{self, NotificationStore, begin_draw};
+        use crate::adapters::tui::presentation::{self, Shell, Surface, is_open};
         use crate::adapters::tui::widgets::toast_layer;
         use crate::domain::clock::MockClock;
         use crate::domain::models::NotificationsConfig;
@@ -595,11 +597,13 @@ mod tests {
             ..LogFacts::default()
         };
 
-        // One draw the way the local host does it: sweep, stage, toasts, pane.
+        // Full pane draws use the host's shared compositor; toast-only and bare
+        // stage controls still isolate expiry without covering the notice area.
         let paint = |f: &mut Fixture, toasts: bool, pane: bool| -> String {
             begin_draw(&mut f.state);
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             let theme = f.state.theme.clone();
+            let mut pane_painted = false;
             terminal
                 .draw(|frame| {
                     let chat = layout.chat_pane;
@@ -607,14 +611,25 @@ mod tests {
                         .map(|row| format!("stage row {row:02} ").repeat(8))
                         .collect();
                     frame.render_widget(Paragraph::new(rows.join("\n")), chat);
-                    if toasts {
-                        toast_layer::render(frame, chat, &f.state.notifications, &theme, &facts);
-                    }
                     if pane {
-                        decision_pane::render(frame, chat, &f.state.decisions, &facts, &theme);
+                        let shell = Shell::new(frame.area(), &layout);
+                        pane_painted = presentation::compose(
+                            frame,
+                            &f.state,
+                            &shell,
+                            Host::Local,
+                            &facts,
+                            |_| {},
+                            |_| {},
+                        );
+                    } else if toasts {
+                        toast_layer::render(frame, chat, &f.state.notifications, &theme, &facts);
                     }
                 })
                 .unwrap();
+            if pane_painted {
+                decision_pane::note_painted(&mut f.state);
+            }
             let buffer = terminal.backend().buffer().clone();
             (0..buffer.area.height)
                 .map(|y| {
@@ -723,7 +738,13 @@ mod tests {
 
         // The recovery decision is still pending, focused, and painted with its own rail.
         assert_eq!(f.state.decisions.len(), 1);
-        assert!(f.state.decisions.is_focused());
+        assert!(is_open(&f.state, Surface::DecisionPane));
+        assert!(presentation::consistent(&f.state));
+        assert_eq!(f.state.modal_stack.len(), 1);
+        assert_eq!(
+            f.state.modal_stack.top().unwrap().surface,
+            Surface::DecisionPane
+        );
         assert!(
             last.contains("[Enter/Esc] Continue") && last.contains("[n] New session"),
             "{last}"

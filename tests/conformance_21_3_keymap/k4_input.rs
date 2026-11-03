@@ -49,7 +49,7 @@ fn salient(state: &TuiState) -> Salient {
         buffer: state.input_buffer.clone(),
         cursor: state.cursor_position,
         multiline: state.multiline_mode,
-        autocomplete: state.autocomplete.active,
+        autocomplete: state.autocomplete.is_open(),
         reverse_search: state.reverse_search.active,
         palette: is_open(state, Surface::CommandPalette),
         which_key: state.pending_leader.is_some(),
@@ -261,8 +261,11 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
             assert_eq!(state.input_buffer, "/");
             assert_eq!(state.cursor_position, 1);
-            assert!(state.autocomplete.active);
-            assert_eq!(state.autocomplete.kind, AutocompleteKind::SlashCommand);
+            assert!(state.autocomplete.is_open());
+            assert_eq!(
+                state.autocomplete.kind,
+                Some(AutocompleteKind::SlashCommand)
+            );
             assert_eq!(state.autocomplete.trigger_position, 0);
         }
         InputCmd::OpenMentionPopup => {
@@ -270,8 +273,8 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
             assert_eq!(state.input_buffer, "hi @");
             assert_eq!(state.cursor_position, 4);
-            assert!(state.autocomplete.active);
-            assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+            assert!(state.autocomplete.is_open());
+            assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
             assert_eq!(state.autocomplete.trigger_position, 3);
         }
         InputCmd::TranscriptPageUp | InputCmd::TranscriptPageDown => panic!(

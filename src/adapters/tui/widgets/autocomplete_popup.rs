@@ -11,11 +11,11 @@ const MAX_VISIBLE_ITEMS: usize = 8;
 /// Render the autocomplete popup above the input box.
 // Covers: UX-DR75 (inline autocomplete)
 pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, theme: &Theme) {
-    if !state.active {
+    let Some(kind) = state.kind else {
         return;
-    }
+    };
 
-    let title = match state.kind {
+    let title = match kind {
         AutocompleteKind::SlashCommand => " Commands ",
         AutocompleteKind::FileMention => " Files ",
         AutocompleteKind::AgentMention => " Agents @ ",

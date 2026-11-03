@@ -161,13 +161,17 @@ fn submission_resets_composer_but_keeps_original_history() {
         state.input_buffer = input.into();
         state.cursor_position = input.chars().count();
         state.input_scroll_offset = 2;
-        state.autocomplete.active = true;
+        state.autocomplete.open(
+            rustain::domain::models::autocomplete::AutocompleteKind::SlashCommand,
+            0,
+            vec![],
+        );
         state.needs_redraw = false;
         submit_message_for_test(&mut state);
         assert!(state.input_buffer.is_empty(), "input: {input:?}");
         assert_eq!(state.cursor_position, 0, "input: {input:?}");
         assert_eq!(state.input_scroll_offset, 0, "input: {input:?}");
-        assert!(!state.autocomplete.active, "input: {input:?}");
+        assert!(!state.autocomplete.is_open(), "input: {input:?}");
         assert!(!state.input_history.is_navigating(), "input: {input:?}");
         assert!(state.needs_redraw, "input: {input:?}");
         assert_eq!(

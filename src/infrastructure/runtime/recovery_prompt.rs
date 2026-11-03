@@ -19,6 +19,7 @@ mod tests {
         note_painted, raise,
     };
     use crate::adapters::tui::notification_log::LogFacts;
+    use crate::adapters::tui::presentation::{self, Surface, is_open};
     use crate::adapters::tui::state::TuiState;
     use crate::domain::clock::MockClock;
     use std::sync::Arc;
@@ -60,7 +61,14 @@ mod tests {
                 DecisionDraft::new(DecisionKind::Recovery, recovery_detail("t", 1)),
                 Arrival::Automatic,
             );
-            assert!(state.decisions.is_focused(), "startup recovery takes focus");
+            assert!(
+                is_open(&state, Surface::DecisionPane),
+                "startup recovery takes focus"
+            );
+            assert!(presentation::consistent(&state));
+            assert_eq!(state.modal_stack.len(), 1);
+            let frame = state.modal_stack.top().unwrap().clone();
+            assert_eq!(frame.surface, Surface::DecisionPane);
             note_painted(&mut state);
             clock.advance(Duration::from_millis(500));
             let outcome = handle_key(&mut state, key, &facts);
@@ -68,6 +76,10 @@ mod tests {
                 Some(effect) => {
                     assert_eq!(outcome, PaneOutcome::Effect(effect), "{key:?}");
                     assert!(state.decisions.is_empty(), "resolved exactly once");
+                    assert!(
+                        state.modal_stack.is_empty(),
+                        "resolved frame closes exactly once"
+                    );
                 }
                 None => {
                     assert_eq!(outcome, PaneOutcome::Consumed, "{key:?}");
@@ -76,10 +88,13 @@ mod tests {
                         1,
                         "an unrelated key never resolves it"
                     );
+                    assert_eq!(state.modal_stack.top(), Some(&frame));
                     let again = handle_key(&mut state, PaneKey::Esc, &facts);
                     assert_eq!(again, PaneOutcome::Effect(DecisionEffect::RecoveryContinue));
+                    assert!(state.modal_stack.is_empty());
                 }
             }
+            assert!(presentation::consistent(&state));
         }
     }
 }

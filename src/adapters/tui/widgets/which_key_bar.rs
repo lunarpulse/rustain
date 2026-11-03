@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::adapters::tui::keymap::AvailCtx;
 use crate::adapters::tui::keymap::render::{self, MenuItem};
 use crate::adapters::tui::state::LeaderFeedback;
+use crate::adapters::tui::text_geometry;
 use crate::adapters::tui::theme::Theme;
 
 /// Rows (borders included) the menu needs inside `width` columns.
@@ -19,7 +20,8 @@ pub fn bar_height(avail: &AvailCtx, width: u16) -> u16 {
 /// 21.3 AC3): `avail` carries the host and the terminal facts that qualify a row
 /// `(n/a)`. The menu paints over feedback/ambient rows; the caller passes an
 /// `area` that ends above the status row so the status row is never covered, and
-/// nothing reserves Stage rows for it.
+/// nothing reserves Stage rows for it. When full labels cannot fit vertically,
+/// a denser grid shortens labels, never the registry keys or entry inventory.
 // Covers: UX-DR19, UX-DR60
 pub fn render(
     frame: &mut Frame,
@@ -34,7 +36,7 @@ pub fn render(
 
     let items = render::leader_menu(avail);
     let inner_width = usize::from(area.width.saturating_sub(2));
-    let rows = render::wrap_rows(&items, inner_width);
+    let mut rows = render::wrap_rows(&items, inner_width);
     let height = u16::try_from(rows.len())
         .unwrap_or(u16::MAX)
         .saturating_add(2)
@@ -63,9 +65,31 @@ pub fn render(
     }
 
     let visible_rows = usize::from(height.saturating_sub(2));
+    let column_widths = if rows.len() > visible_rows {
+        let columns = items.len().div_ceil(visible_rows);
+        let mut widths = vec![0; columns];
+        for (index, item) in items.iter().enumerate() {
+            let width = &mut widths[index % columns];
+            *width = (*width).max(text_geometry::cells(&item.key) + 2);
+        }
+        let spare = inner_width.saturating_sub(widths.iter().sum::<usize>() + 2 * (columns - 1));
+        for (index, width) in widths.iter_mut().enumerate() {
+            *width += spare / columns + usize::from(index < spare % columns);
+        }
+        // Reuse the already allocated wrapped rows for the row-major grid.
+        rows.truncate(items.len().div_ceil(columns));
+        for row in &mut rows {
+            row.clear();
+        }
+        for index in 0..items.len() {
+            rows[index / columns].push(index);
+        }
+        Some(widths)
+    } else {
+        None
+    };
     let lines: Vec<Line> = rows
         .iter()
-        .take(visible_rows)
         .map(|row| {
             let mut spans: Vec<Span> = Vec::new();
             for (position, &index) in row.iter().enumerate() {
@@ -74,7 +98,15 @@ pub fn render(
                 }
                 let pressed =
                     feedback.is_some_and(|feedback| feedback.command == Some(items[index].command));
-                spans.extend(item_spans(&items[index], theme, pressed));
+                let width = column_widths.as_ref().map(|widths| widths[position]);
+                let entry = item_spans(&items[index], theme, pressed, width);
+                let padding = width.map_or(0, |width| {
+                    width.saturating_sub(entry.iter().map(Span::width).sum::<usize>())
+                });
+                spans.extend(entry);
+                if padding > 0 && position + 1 < row.len() {
+                    spans.push(Span::raw(text_geometry::spaces(padding)));
+                }
             }
             Line::from(spans)
         })
@@ -92,7 +124,12 @@ pub fn render(
     frame.render_widget(content, bar_area);
 }
 
-fn item_spans<'a>(item: &MenuItem, theme: &Theme, pressed: bool) -> Vec<Span<'a>> {
+fn item_spans<'a>(
+    item: &MenuItem,
+    theme: &Theme,
+    pressed: bool,
+    width: Option<usize>,
+) -> [Span<'a>; 2] {
     let (mut key_style, mut label_style) = if item.available {
         (
             Style::default()
@@ -114,9 +151,22 @@ fn item_spans<'a>(item: &MenuItem, theme: &Theme, pressed: bool) -> Vec<Span<'a>
         label_style = label_style.patch(emphasis);
     }
     let suffix = if item.available { "" } else { " (n/a)" };
-    vec![
+    let label_width = width.map(|width| width.saturating_sub(text_geometry::cells(&item.key) + 2));
+    let label = if label_width.is_some_and(|width| width <= 1) {
+        String::new()
+    } else {
+        let label = format!(" {}{}", item.name, suffix);
+        match label_width {
+            Some(width) => match text_geometry::ellipsize(&label, width, "…") {
+                std::borrow::Cow::Borrowed(_) => label,
+                std::borrow::Cow::Owned(shortened) => shortened,
+            },
+            None => label,
+        }
+    };
+    [
         Span::styled(format!("[{}]", item.key), key_style),
-        Span::styled(format!(" {}{}", item.name, suffix), label_style),
+        Span::styled(label, label_style),
     ]
 }
 

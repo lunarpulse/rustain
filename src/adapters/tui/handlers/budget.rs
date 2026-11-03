@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use crate::adapters::tui::decision_pane::DecisionKind;
     use crate::adapters::tui::notifications::NotificationStore;
+    use crate::adapters::tui::presentation::{self, Surface, is_open};
     use crate::domain::clock::MockClock;
     use crate::domain::models::NotificationsConfig;
     use crate::domain::models::provider::{ModelDescriptor, ProviderDescriptor};
@@ -148,8 +149,13 @@ mod tests {
         assert_eq!(item.kind, DecisionKind::Budget);
         assert!(item.detail.contains("$10.00"), "{}", item.detail);
         assert!(
-            state.decisions.is_focused(),
+            is_open(&state, Surface::DecisionPane),
             "0→1 on an idle composer takes the pane"
+        );
+        assert!(presentation::consistent(&state));
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::DecisionPane
         );
 
         // The next turn's recompute updates the text in place: still one item.
@@ -159,9 +165,16 @@ mod tests {
         // Paused until after now → cleared; under the limit → cleared.
         handle_upsert_daily_budget_warning(&mut state, &budget(12.0, 2_000), &info);
         assert!(state.decisions.is_empty(), "paused");
+        assert!(state.modal_stack.is_empty(), "paused clears the pane frame");
+        assert!(presentation::consistent(&state));
         handle_upsert_daily_budget_warning(&mut state, &budget(11.0, 0), &info);
         handle_upsert_daily_budget_warning(&mut state, &budget(1.0, 0), &info);
         assert!(state.decisions.is_empty(), "under the limit");
+        assert!(
+            state.modal_stack.is_empty(),
+            "under the limit clears the pane frame"
+        );
+        assert!(presentation::consistent(&state));
     }
 
     #[test]
@@ -173,9 +186,11 @@ mod tests {
         state.input_buffer = "half a sentence".into();
         handle_upsert_daily_budget_warning(&mut state, &budget(11.0, 0), &info);
         assert!(
-            !state.decisions.is_focused(),
+            !is_open(&state, Surface::DecisionPane),
             "a non-empty composer is protected"
         );
+        assert!(state.modal_stack.is_empty());
+        assert!(presentation::consistent(&state));
         assert!(
             state.decisions.holds(DecisionKind::Budget),
             "the item waits"
@@ -194,7 +209,9 @@ mod tests {
         // Recomputing every turn never re-announces or re-focuses it.
         clock.advance(Duration::from_secs(30));
         handle_upsert_daily_budget_warning(&mut state, &budget(11.5, 0), &info);
-        assert!(!state.decisions.is_focused());
+        assert!(!is_open(&state, Surface::DecisionPane));
+        assert!(state.modal_stack.is_empty());
+        assert!(presentation::consistent(&state));
         assert_eq!(
             state
                 .notifications

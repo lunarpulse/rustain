@@ -16,7 +16,6 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Style;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::layout;
 use rustain::adapters::tui::presentation::{self, Shell};
 use rustain::adapters::tui::state::{TabRenderState, TuiState};
@@ -242,6 +241,11 @@ impl TestHarness {
 
     /// Render the current state to the TestBackend.
     pub fn render(&mut self) {
+        self.render_with_host(rustain::adapters::tui::keymap::Host::Local);
+    }
+
+    /// Shared compositor fixture for host-qualified popup/menu geometry.
+    pub fn render_with_host(&mut self, host: rustain::adapters::tui::keymap::Host) {
         let conv = &self.conversation;
         let streaming = &self.streaming;
         let theme = &self.theme;
@@ -307,18 +311,9 @@ impl TestHarness {
                         frame,
                         state,
                         &shell,
-                        Host::Local,
+                        host,
                         &pane_facts,
-                        |frame| {
-                            // Keep the existing legacy pane painter beneath Log/Quit.
-                            rustain::adapters::tui::decision_pane::render(
-                                frame,
-                                app_layout.chat_pane,
-                                decisions,
-                                &pane_facts,
-                                theme,
-                            );
-                        },
+                        |_| {},
                         |frame| {
                             status_bar::render(
                                 frame,

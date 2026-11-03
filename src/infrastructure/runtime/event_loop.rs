@@ -1013,7 +1013,8 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
-                            let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog) {
+                            let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog)
+                                || presentation::is_open(&state, presentation::Surface::DecisionPane) {
                                 notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
                             } else { notification_log::LogFacts::default() };
                             let mut pane_action: Option<InputAction> = None;
@@ -1033,24 +1034,6 @@ pub async fn run(
                                         unreachable!("attached-only route effect in the local host"),
                                 }
                                 if pane_action.is_none() { continue; }
-                            }
-                            // Story 21.1 S2 AC9: the interim decision pane owns every user key
-                            // while it is focused (after S-QUIT and S-LOG). A waiting or deferred
-                            // item never sees a key, so no stray `y`/`n` can answer it.
-                            if pane_action.is_none() && state.decisions.is_focused() {
-                                let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
-                                match crate::adapters::tui::decision_pane::handle_domain_event(&mut state, &domain_event, &facts) {
-                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Consumed) => continue,
-                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Quit) => {
-                                        // Ctrl+C / Ctrl+Q go through the same S-QUIT guard as every route.
-                                        quit_guard::quit_from_banner(&mut state, &mut conversation, &mut tab_manager, &mut streaming, &mut turn_lifecycle, &turn_queue);
-                                        continue;
-                                    }
-                                    Some(crate::adapters::tui::decision_pane::PaneOutcome::Effect(effect)) => {
-                                        pane_action = Some(effect.into_action());
-                                    }
-                                    None => {}
-                                }
                             }
 
                             if pane_action.is_none() {
@@ -1152,7 +1135,7 @@ pub async fn run(
 
                             // P4: Only re-populate autocomplete when filter text actually changed,
                             // or when suggestions are empty (first open after skill discovery).
-                            if state.autocomplete.active
+                            if state.autocomplete.is_open()
                                 && (state.autocomplete.filter_text != last_autocomplete_filter
                                     || state.autocomplete.suggestions.is_empty())
                             {
@@ -1164,7 +1147,7 @@ pub async fn run(
                                     &tools,
                                 )
                                 .await;
-                            } else if !state.autocomplete.active {
+                            } else if !state.autocomplete.is_open() {
                                 last_autocomplete_filter.clear();
                             }
 
@@ -1680,7 +1663,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     match effect {
                                         DecisionEffect::RecoveryContinue => {
-                                            state.focus = FocusState::Input;
+                                            crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, InputAction::Decision(effect), restore_focus_after_modal);
                                         }
                                         DecisionEffect::RecoveryNewSession => {
                                             conversation.messages.clear();
@@ -1691,7 +1674,9 @@ pub async fn run(
                                             conversation.updated_at = crate::domain::models::session_meta::now_unix();
                                             conversation.last_response_at = None;
                                             conversation.usage = None;
-                                            state.focus = FocusState::Input;
+                                            if state.modal_stack.is_empty() {
+                                                state.focus = FocusState::Input;
+                                            }
                                             // Persist the fresh conversation with clean_exit = true
                                             // (avoids phantom crash detection on next startup)
                                             let fs_ref = fs_storage.clone();
@@ -1723,7 +1708,9 @@ pub async fn run(
                                             load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                             state.input_buffer.clear();
                                             state.cursor_position = 0;
-                                            state.focus = FocusState::Input;
+                                            if state.modal_stack.is_empty() {
+                                                state.focus = FocusState::Input;
+                                            }
                                             state.status = StatusState::Idle;
                                             state.active_agent_name = None;
                                             session_index.set_open(&conversation.id, true);
@@ -2848,25 +2835,8 @@ pub async fn run(
                                     );
                                     state.needs_redraw = true;
                                 }
-                                InputAction::ImageConfirmAttach => {
-                                    // AC4: User confirmed attaching the large image
-                                    if let Some(attachment) = state.pending_large_image.take() {
-                                        use crate::adapters::tui::image;
-                                        state.pending_images.push(attachment);
-                                        state.image_indicator = Some(image::format_image_indicator(
-                                            state.pending_images.len(),
-                                            state.pending_images.iter().fold(0usize, |acc, i| acc.saturating_add(i.data.len() / 1024)),
-                                        ));
-                                    }
-                                    restore_focus_after_modal(&mut state);
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::ImageConfirmCancel => {
-                                    // AC4: User cancelled the large image attachment
-                                    state.pending_large_image = None;
-                                    notifications::info(&mut state, NoticeSource::Image, "Image attachment cancelled");
-                                    restore_focus_after_modal(&mut state);
-                                    state.needs_redraw = true;
+                                action @ (InputAction::ImageConfirmAttach | InputAction::ImageConfirmCancel) => {
+                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, restore_focus_after_modal);
                                 }
                                 InputAction::RequestClipboardPaste => {
                                     // Async: read image (or text) from the OS clipboard via
@@ -3366,21 +3336,13 @@ pub async fn run(
                                             }
                                         }
                                     }
-                                    state.focus = FocusState::Input;
+                                    if state.modal_stack.is_empty() {
+                                        state.focus = FocusState::Input;
+                                    }
                                     state.needs_redraw = true;
                                 }
-                                InputAction::CancelDelete => {
-                                    // Cancel the pending delete - U1: Clear status bar immediately
-                                    state.pending_delete = None;
-                                    state.focus = if state.sidebar_visible {
-                                        FocusState::Sidebar {
-                                            panel: crate::domain::models::visual::PanelType::History,
-                                            selected: state.sidebar_selected,
-                                        }
-                                    } else {
-                                        FocusState::Input
-                                    };
-                                    state.needs_redraw = true;
+                                action @ InputAction::CancelDelete => {
+                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, restore_focus_after_modal);
                                 }
                                 // ── Fork Conversation (Story 4-3a) ──────────────
                                 InputAction::ForkAtMessage => {
@@ -6254,7 +6216,7 @@ pub async fn run(
                         // AC6: if the user already has `/` autocomplete open when
                         // discovery finishes, refresh suggestions so newly
                         // discovered skills appear immediately.
-                        if state.autocomplete.active {
+                        if state.autocomplete.is_open() {
                             last_autocomplete_filter.clear();
                             populate_autocomplete_suggestions(
                                 &mut state,
@@ -6291,7 +6253,7 @@ pub async fn run(
                         }
                         state.refresh_agent_suggestions();
                         state.needs_redraw = true;
-                        if state.autocomplete.active {
+                        if state.autocomplete.is_open() {
                             last_autocomplete_filter.clear();
                             populate_autocomplete_suggestions(
                                 &mut state,
@@ -6789,8 +6751,7 @@ pub async fn run(
                             skill_count,
                         )
                         .await;
-                        if state.autocomplete.active
-                            && state.autocomplete.kind == crate::domain::models::autocomplete::AutocompleteKind::A2aMention
+                        if state.autocomplete.kind == Some(crate::domain::models::autocomplete::AutocompleteKind::A2aMention)
                         {
                             populate_autocomplete_suggestions(
                                 &mut state,
@@ -7809,7 +7770,6 @@ fn render(
         input_scroll_offset,
         ref reverse_search,
         ref search_state,
-        ref autocomplete,
         ref model_selector,
         ref login,
         ref profile_switcher,
@@ -8846,7 +8806,7 @@ fn render(
                 );
 
                 shell.chat_pane = app_layout.chat_pane;
-                presentation::compose(
+                decision_painted = presentation::compose(
                     frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
                     |frame| {
 
@@ -8858,10 +8818,6 @@ fn render(
                     );
                 }
 
-                // Render autocomplete popup above input box
-                if autocomplete.active {
-                    autocomplete_popup::render(frame, app_layout.input_area, autocomplete, theme);
-                }
 
 
                 // Render model selector overlay (centered modal, Tier-1)
@@ -8887,10 +8843,6 @@ fn render(
                     profile_switcher::render(frame, area, profile_switcher, theme);
                 }
 
-                // Interim decision pane (Story 21.1 S2 AC9): bottom-anchored over the chat
-                // pane, below S-LOG and S-QUIT, reserving no layout rows. Only the focused
-                // item paints; waiting items are carried by the status-row cue.
-                decision_painted = crate::adapters::tui::decision_pane::render(frame, app_layout.chat_pane, &state.decisions, &log_facts, theme);
                     }, paint_status,
                 );
 
@@ -9035,7 +8987,10 @@ pub(crate) async fn populate_autocomplete_suggestions(
 ) {
     use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 
-    match state.autocomplete.kind {
+    let Some(kind) = state.autocomplete.kind else {
+        return;
+    };
+    match kind {
         AutocompleteKind::SlashCommand => {
             // AC5: re-scan on popup open only (when filter_text is empty, meaning
             // the popup just transitioned from closed to open on the `/` keystroke).
@@ -9519,6 +9474,156 @@ fn arrive_consolidation_card(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story21_4_pane_effects_preserve_the_interrupted_base_focus() {
+        use crate::adapters::tui::{
+            decision_pane::{self, Arrival, DecisionDraft, DecisionEffect, DecisionKind},
+            notification_log::LogFacts,
+            notifications::NotificationStore,
+            presentation::{self, Surface},
+            theme::Theme,
+        };
+        use crate::domain::clock::MockClock;
+        use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
+        use crate::domain::models::NotificationsConfig;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        for (kind, key, expected) in [
+            (
+                DecisionKind::Recovery,
+                E::SpecialKey(K::Enter),
+                InputAction::Decision(DecisionEffect::RecoveryContinue),
+            ),
+            (
+                DecisionKind::LargeImage,
+                E::KeyPress('y'),
+                InputAction::ImageConfirmAttach,
+            ),
+            (
+                DecisionKind::LargeImage,
+                E::KeyPress('n'),
+                InputAction::ImageConfirmCancel,
+            ),
+            (
+                DecisionKind::DeleteConversations,
+                E::SpecialKey(K::Esc),
+                InputAction::CancelDelete,
+            ),
+        ] {
+            for with_help in [false, true] {
+                for sidebar in [false, true] {
+                    let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+                    let mut state = TuiState::new(80, 24);
+                    state.notifications = NotificationStore::from_config(
+                        &NotificationsConfig::default(),
+                        clock.clone(),
+                    );
+                    state.sidebar_visible = sidebar;
+                    state.sidebar_selected = 3;
+                    if kind == DecisionKind::LargeImage {
+                        state.pending_large_image = Some(ImageAttachment {
+                            media_type: "image/png".into(),
+                            data: "retained image bytes".into(),
+                        });
+                    }
+                    if kind == DecisionKind::DeleteConversations {
+                        begin_delete_confirmation(
+                            &mut state,
+                            DeleteConfirmTarget::Single {
+                                id: "keep-session".into(),
+                                title: "Keep this session".into(),
+                            },
+                        );
+                    } else {
+                        decision_pane::raise(
+                            &mut state,
+                            DecisionDraft::new(kind, "pending decision"),
+                            Arrival::Requested,
+                        );
+                    }
+                    // Startup recovery can be deferred without deciding, then
+                    // reopened above Help from the original Chat focus.
+                    handle_input(&mut state, &E::SpecialKey(K::CtrlC));
+                    handle_input(&mut state, &E::SpecialKey(K::Esc));
+                    assert_eq!(state.focus, FocusState::Chat);
+                    state.input_buffer = "exact interrupted draft λ".into();
+                    if with_help {
+                        handle_input(&mut state, &E::SpecialKey(K::CtrlX));
+                        handle_input(&mut state, &E::KeyPress('?'));
+                        assert!(presentation::is_open(&state, Surface::Help));
+                        state.help_overlay.scroll_offset = 7;
+                    }
+                    let caller: Vec<_> = state.modal_stack.iter().cloned().collect();
+                    handle_input(&mut state, &E::SpecialKey(K::CtrlX));
+                    assert_eq!(
+                        handle_input(&mut state, &E::KeyPress('q')),
+                        InputAction::FocusDecisions
+                    );
+                    decision_pane::open_waiting(&mut state, &LogFacts::default());
+                    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            assert!(
+                                decision_pane::render(
+                                    frame,
+                                    Rect::new(0, 0, 80, 20),
+                                    &state,
+                                    &LogFacts::default(),
+                                    &Theme::dark(),
+                                )
+                                .is_some()
+                            );
+                        })
+                        .unwrap();
+                    decision_pane::note_painted(&mut state);
+                    clock.advance(decision_pane::INERT_AFTER_PAINT);
+                    let action = handle_input(&mut state, &key);
+                    assert_eq!(action, expected);
+                    // The same effect consumer called by run(), not a replica
+                    // of the focus assignment under test.
+                    decision_pane::apply_resolved_action(
+                        &mut state,
+                        action,
+                        restore_focus_after_modal,
+                    );
+                    assert!(!state.decisions.holds(kind));
+                    assert!(state.pending_large_image.is_none());
+                    assert!(state.pending_delete.is_none());
+                    assert_eq!(
+                        state.pending_images.len(),
+                        usize::from(expected == InputAction::ImageConfirmAttach)
+                    );
+                    assert_eq!(state.input_buffer, "exact interrupted draft λ");
+                    assert_eq!(
+                        state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                        caller
+                    );
+                    if with_help {
+                        assert_eq!(state.help_overlay.scroll_offset, 7);
+                        handle_input(&mut state, &E::SpecialKey(K::Esc));
+                        assert!(state.modal_stack.is_empty());
+                        assert_eq!(
+                            state.focus,
+                            FocusState::Chat,
+                            "{expected:?}, sidebar={sidebar}: Help returns to its original base focus"
+                        );
+                    } else {
+                        let baseline = if expected == InputAction::CancelDelete && sidebar {
+                            FocusState::Sidebar {
+                                panel: PanelType::History,
+                                selected: 3,
+                            }
+                        } else {
+                            FocusState::Input
+                        };
+                        assert_eq!(state.focus, baseline, "{expected:?}: base-origin behavior");
+                    }
+                }
+            }
+        }
+    }
 
     fn retained_card_arrival(mut arrive: impl FnMut(&mut TuiState), recovers_input: bool) {
         use crate::domain::events::{DomainInputEvent as E, DomainKey as K};

@@ -100,7 +100,10 @@ fn test_e2e_recovery_prompt_renders() {
     // RecoveryPrompt event); the harness state carries the pane.
     raise_recovery(&mut h.state, &h.conversation.title.clone());
     assert!(
-        h.state.decisions.is_focused(),
+        rustain::adapters::tui::presentation::is_open(
+            &h.state,
+            rustain::adapters::tui::presentation::Surface::DecisionPane
+        ),
         "startup recovery takes the pane"
     );
 
@@ -161,7 +164,10 @@ fn test_e2e_recovery_enter_continues() {
         DomainInputEvent::SpecialKey(DomainKey::Enter),
     ] {
         raise_recovery(&mut pane.0, "Recovered chat");
-        assert!(pane.0.decisions.is_focused());
+        assert!(rustain::adapters::tui::presentation::is_open(
+            &pane.0,
+            rustain::adapters::tui::presentation::Surface::DecisionPane
+        ));
         ready(&mut pane.0, &pane.1);
         let outcome = decision_pane::handle_domain_event(&mut pane.0, &key, &LogFacts::default());
         assert_eq!(

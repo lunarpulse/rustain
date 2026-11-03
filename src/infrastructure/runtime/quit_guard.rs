@@ -487,21 +487,57 @@ mod tests {
         );
     }
 
-    /// The pane's Ctrl+C / Ctrl+Q arm must call the shared helper — never set
-    /// `should_quit` on its own. Story 21.1 deleted the recovery and carryover
-    /// interceptors (and the override-status one in S1) in favour of that one arm.
+    /// The shared pane boundary requests guarded quit; Ctrl+C backs without
+    /// deciding. Keep the runtime-arm wiring check as well as real-key effects.
     #[test]
     fn story21_2_the_pane_ctrl_q_arm_uses_the_quit_guard() {
+        use crate::adapters::tui::{
+            app,
+            presentation::{self, Surface},
+        };
+        use crate::domain::events::{DomainInputEvent, DomainKey};
         let source = include_str!("event_loop.rs");
-        assert!(
-            source.matches("quit_guard::quit_from_banner(").count() >= 1,
-            "the pane routes Ctrl+C/Ctrl+Q through the guard"
-        );
         let arm = source
-            .split("go through the same S-QUIT guard as every route")
-            .nth(1)
-            .and_then(|rest| rest.split("continue;").next())
+            .split_once("RouteEffect::QuitRequest =>")
+            .unwrap()
+            .1
+            .split("RouteEffect::QuitConfirmed")
+            .next()
             .unwrap();
+        assert!(arm.contains("quit_guard::quit_from_banner("), "{arm}");
         assert!(!arm.contains("should_quit = true"), "{arm}");
+        let mut h = host();
+        decision_pane::raise(
+            &mut h.state,
+            DecisionDraft::new(DecisionKind::Budget, "waiting"),
+            Arrival::Requested,
+        );
+        let pane = h.state.modal_stack.top().unwrap().clone();
+        assert_eq!(
+            app::handle_input(
+                &mut h.state,
+                &DomainInputEvent::SpecialKey(DomainKey::CtrlQ)
+            ),
+            app::InputAction::Quit
+        );
+        assert_eq!(h.state.modal_stack.top(), Some(&pane));
+        assert!(!banner_quit(&mut h));
+        assert!(presentation::is_open(&h.state, Surface::QuitConfirm));
+        assert!(!h.state.should_quit);
+        assert_eq!(
+            handle_key(&mut h.state, QuitKey::Esc),
+            QuitKeyOutcome::Cancelled
+        );
+        assert_eq!(h.state.modal_stack.top(), Some(&pane));
+        assert_eq!(
+            app::handle_input(
+                &mut h.state,
+                &DomainInputEvent::SpecialKey(DomainKey::CtrlC)
+            ),
+            app::InputAction::Consumed
+        );
+        assert!(!presentation::is_open(&h.state, Surface::DecisionPane));
+        assert!(h.state.decisions.holds(DecisionKind::Budget));
+        assert!(!h.state.should_quit);
     }
 }

@@ -45,6 +45,25 @@ pub(super) fn open_quit(state: &mut TuiState) {
     assert!(presentation::consistent(state));
 }
 
+fn top_rect(state: &TuiState, layout: &AppLayout, buffer: &Buffer) -> Rect {
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|f| f.surface == Surface::DecisionPane)
+    {
+        let width = layout.chat_pane.width.min(100);
+        let x = layout.chat_pane.x + (layout.chat_pane.width - width) / 2;
+        let bottom = layout.chat_pane.bottom();
+        let y = (layout.chat_pane.y..bottom)
+            .rev()
+            .find(|y| buffer[(x, *y)].symbol() == "┌")
+            .expect("pane top border");
+        Rect::new(x, y, width, bottom - y)
+    } else {
+        geometry::frame_rect(geometry::modal_region(layout, buffer.area))
+    }
+}
+
 pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(
         state.terminal_width,
@@ -86,8 +105,8 @@ pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) ->
                     // M4: observe BEFORE painting status, not just its final unoccluded row.
                     // Correct geometry alone must not let status-before-frames survive.
                     if let Some(title) = title {
-                        let rect = geometry::frame_rect(shell.region);
                         let buffer = frame.buffer_mut();
+                        let rect = top_rect(state, layout, buffer);
                         assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
                         assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
                         let header = row(buffer, rect, rect.y);
@@ -127,6 +146,8 @@ fn status_row_is_painted_last_and_never_covered() {
                 "help-quit",
                 "palette-help-log",
                 "palette-help-log-quit",
+                "pane",
+                "help-pane",
             ] {
                 let mut state = TuiState::new(width, height);
                 if full {
@@ -177,6 +198,24 @@ fn status_row_is_painted_last_and_never_covered() {
                             "Command Palette › Help — Rustain Keybindings › System · Notifications"
                         }
                     }
+                    "pane" | "help-pane" => {
+                        if route == "help-pane" {
+                            press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+                        }
+                        rustain::adapters::tui::decision_pane::raise(
+                            &mut state,
+                            rustain::adapters::tui::decision_pane::DecisionDraft::new(
+                                rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                                "budget detail",
+                            ),
+                            rustain::adapters::tui::decision_pane::Arrival::Requested,
+                        );
+                        if route == "pane" {
+                            "System · Daily budget"
+                        } else {
+                            "Help — Rustain Keybindings › System · Daily budget"
+                        }
+                    }
                     _ => {
                         open_quit(&mut state);
                         "System · Quit"
@@ -198,7 +237,7 @@ fn status_row_is_painted_last_and_never_covered() {
                     );
                 }
                 let region = geometry::modal_region(&after, painted.area);
-                let top = geometry::frame_rect(region);
+                let top = top_rect(&state, &after, &painted);
                 for y in region.y..region.bottom() {
                     for x in region.x..region.right() {
                         if !top.contains((x, y).into()) {
@@ -711,5 +750,338 @@ fn nested_palette_refusal_is_visible_without_dispatch() {
             count + 1,
             "next key only clears footer feedback"
         );
+    }
+}
+
+#[test]
+fn a2b_smoke_predicates_have_real_rust_frames() {
+    use rustain::adapters::tui::{
+        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        keymap::{CommandId, Context, table::LeaderCmd},
+        notifications::NotificationStore,
+        state::LeaderFeedback,
+    };
+    use rustain::domain::{
+        clock::MockClock,
+        models::{
+            NotificationsConfig,
+            autocomplete::{AutocompleteKind, AutocompleteSuggestion},
+        },
+    };
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    fn emit(h: &mut crate::e2e_harness::TestHarness, host: Host, stage: &str) -> String {
+        h.render_with_host(host);
+        let buffer = h.terminal.backend().buffer();
+        let screen = (0..h.state.terminal_height)
+            .map(|y| row(buffer, buffer.area, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!(
+            "A2B_DESKCHECK_FRAME={}",
+            serde_json::json!([
+                h.state.terminal_width,
+                h.state.terminal_height,
+                stage,
+                screen,
+            ])
+        );
+        screen
+    }
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut h = crate::e2e_harness::TestHarness::with_size(width, height);
+        h.state.notifications =
+            NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+        press_all(
+            &mut h.state,
+            &[
+                Key::Ctrl('x'),
+                Key::Char('?'),
+                Key::Char('j'),
+                Key::Char('j'),
+                Key::Char('j'),
+            ],
+        );
+        clock.advance(Duration::from_secs(2));
+        let frame = h.state.modal_stack.top().unwrap().clone();
+        let scroll = h.state.help_overlay.scroll_offset;
+        emit(&mut h, Host::Local, "help-before-arrival");
+        assert_eq!(
+            decision_pane::raise(
+                &mut h.state,
+                DecisionDraft::new(DecisionKind::Budget, "Daily budget ($0.00) reached."),
+                Arrival::Automatic,
+            ),
+            decision_pane::Raised::Focused
+        );
+        emit(&mut h, Host::Local, "help-budget");
+        decision_pane::note_painted(&mut h.state);
+        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        press(&mut h.state, Key::Esc);
+        assert_eq!(h.state.modal_stack.top(), Some(&frame));
+        assert_eq!(h.state.help_overlay.scroll_offset, scroll);
+        emit(&mut h, Host::Local, "help-deferred");
+        press_all(&mut h.state, &[Key::Ctrl('x'), Key::Char('q')]);
+        decision_pane::open_waiting(&mut h.state, &LogFacts::default());
+        emit(&mut h, Host::Local, "help-reopened-budget");
+        decision_pane::note_painted(&mut h.state);
+        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        assert_eq!(
+            press(&mut h.state, Key::Char('y')),
+            InputAction::Decision(decision_pane::DecisionEffect::BudgetContinue,)
+        );
+        assert_eq!(h.state.modal_stack.top(), Some(&frame));
+        assert_eq!(h.state.help_overlay.scroll_offset, scroll);
+        emit(&mut h, Host::Local, "help-resolved");
+
+        // These are real shared Rust paints with attached availability; socket
+        // ownership/rollback is separately covered by the attached front door.
+        let mut attached = crate::e2e_harness::TestHarness::with_size(width, height);
+        press_all(
+            &mut attached.state,
+            &[
+                Key::Char('/'),
+                Key::Char('d'),
+                Key::Char('e'),
+                Key::Char('t'),
+            ],
+        );
+        assert_eq!(
+            attached.state.autocomplete.kind,
+            Some(AutocompleteKind::SlashCommand)
+        );
+        attached.state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+            name: "detach".into(),
+            description: "Detach this client".into(),
+        }];
+        emit(&mut attached, Host::Attached, "attached-popup");
+        press(&mut attached.state, Key::Esc);
+        assert!(attached.state.input_buffer.is_empty());
+        emit(&mut attached, Host::Attached, "attached-popup-rollback");
+        press_all(
+            &mut attached.state,
+            &[
+                Key::Ctrl('x'),
+                Key::Char('?'),
+                Key::Char('j'),
+                Key::Char('j'),
+                Key::Char('j'),
+                Key::Ctrl('x'),
+            ],
+        );
+        attached.state.leader_feedback = Some(LeaderFeedback {
+            command: Some(CommandId::Leader(LeaderCmd::Decisions)),
+            message: "No decisions waiting in this client".into(),
+        });
+        assert_eq!(attached.state.pending_leader, Some(Context::Help));
+        emit(&mut attached, Host::Attached, "attached-help-no-decisions");
+    }
+}
+
+#[test]
+fn a_covered_pane_does_not_start_its_inert_window() {
+    use rustain::adapters::tui::{
+        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        notifications::NotificationStore,
+    };
+    use rustain::domain::{clock::MockClock, models::NotificationsConfig};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = TuiState::new(80, 24);
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    decision_pane::raise(
+        &mut state,
+        DecisionDraft::new(DecisionKind::Budget, "covered"),
+        Arrival::Requested,
+    );
+    press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut paint = |state: &TuiState| {
+        let layout = layout(state);
+        let mut painted = false;
+        terminal
+            .draw(|frame| {
+                painted = presentation::compose(
+                    frame,
+                    state,
+                    &Shell::new(frame.area(), &layout),
+                    Host::Local,
+                    &LogFacts::default(),
+                    |_| {},
+                    |_| {},
+                );
+            })
+            .unwrap();
+        painted
+    };
+    assert!(!paint(&state));
+    clock.advance(Duration::from_secs(2));
+    press(&mut state, Key::Esc);
+    assert_eq!(press(&mut state, Key::Char('y')), InputAction::Consumed);
+    assert!(state.decisions.holds(DecisionKind::Budget));
+    assert!(paint(&state));
+    decision_pane::note_painted(&mut state);
+    clock.advance(decision_pane::INERT_AFTER_PAINT);
+    assert_eq!(
+        press(&mut state, Key::Char('y')),
+        InputAction::Decision(decision_pane::DecisionEffect::BudgetContinue)
+    );
+}
+
+#[test]
+fn autocomplete_is_painted_only_without_a_frame_and_returns_after_quit() {
+    use rustain::domain::models::autocomplete::AutocompleteSuggestion;
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut state = TuiState::new(width, height);
+        press(&mut state, Key::Char('/'));
+        state.autocomplete.suggestions = vec![AutocompleteSuggestion::SlashCommand {
+            name: "detach".into(),
+            description: "routed-popup-canary".into(),
+        }];
+        let before = layout(&state);
+        let popup = draw(&state, &before, None);
+        let text = |buffer: &Buffer| {
+            buffer
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        };
+        assert!(text(&popup).contains("routed-popup-canary"));
+        assert!(state.modal_stack.is_empty());
+        open_quit(&mut state);
+        let covered = draw(&state, &before, Some("System · Quit"));
+        assert!(!text(&covered).contains("routed-popup-canary"));
+        press(&mut state, Key::Char('n'));
+        assert!(state.modal_stack.is_empty() && state.autocomplete.is_open());
+        assert_eq!(draw(&state, &before, None), popup);
+        press(&mut state, Key::Esc);
+        assert!(state.input_buffer.is_empty() && !state.autocomplete.is_open());
+    }
+}
+
+#[test]
+fn pane_legacy_effect_refusal_is_visible() {
+    use rustain::adapters::tui::{
+        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        notifications::NotificationStore,
+    };
+    use rustain::domain::{clock::MockClock, models::NotificationsConfig};
+    use std::{sync::Arc, time::Instant};
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut state = TuiState::new(width, height);
+        state.notifications =
+            NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+        press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+        decision_pane::raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "budget detail"),
+            Arrival::Requested,
+        );
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+        let layout = layout(&state);
+        draw(&state, &layout, None);
+        decision_pane::note_painted(&mut state);
+        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        assert_eq!(press(&mut state, Key::Char('s')), InputAction::Consumed);
+        let painted = draw(&state, &layout, None);
+        let rect = top_rect(&state, &layout, &painted);
+        assert!(
+            (rect.y + 1..rect.bottom() - 1)
+                .any(|y| row(&painted, rect, y).contains("Please close the window first")),
+            "remedy must paint inside the owning pane at {width} columns"
+        );
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames
+        );
+        assert!(state.decisions.holds(DecisionKind::Budget));
+        assert_eq!(press(&mut state, Key::Char('z')), InputAction::Consumed);
+        let cleared = draw(&state, &layout, None);
+        assert!(
+            !(rect.y + 1..rect.bottom() - 1)
+                .any(|y| row(&cleared, rect, y).contains("Please close the window first"))
+        );
+        assert!(
+            (rect.y + 1..rect.bottom() - 1)
+                .any(|y| row(&cleared, rect, y).contains("budget detail"))
+        );
+    }
+}
+
+#[test]
+fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
+    use rustain::adapters::tui::{
+        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        keymap::Context,
+    };
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for waiting in ["empty", "other", "actionable"] {
+            let mut state = TuiState::new(width, height);
+            state.input_buffer = "kept draft".into();
+            state.cursor_position = 4;
+            if waiting != "empty" {
+                let mut draft = DecisionDraft::new(DecisionKind::Budget, "waiting");
+                if waiting == "other" {
+                    draft = draft.conversation("other");
+                }
+                decision_pane::raise(&mut state, draft, Arrival::Automatic);
+            }
+            press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
+            let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+            press(&mut state, Key::Ctrl('x'));
+            assert_eq!(
+                press(&mut state, Key::Char('q')),
+                InputAction::FocusDecisions
+            );
+            decision_pane::open_waiting(&mut state, &LogFacts::default());
+            if waiting == "actionable" {
+                assert!(state.pending_leader.is_none());
+                assert_eq!(
+                    state.modal_stack.top().unwrap().surface,
+                    Surface::DecisionPane
+                );
+                assert_eq!(state.modal_stack.iter().next(), frames.first());
+            } else {
+                let expected = if waiting == "empty" {
+                    "No decisions waiting"
+                } else {
+                    "A decision is waiting in another tab — open that tab to answer it"
+                };
+                assert_eq!(state.pending_leader, Some(Context::Help));
+                assert_eq!(state.leader_feedback.as_ref().unwrap().message, expected);
+                assert_eq!(
+                    state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    frames
+                );
+                let layout = layout(&state);
+                let painted = draw(&state, &layout, None);
+                let region = geometry::modal_region(&layout, painted.area);
+                let top = (region.y..region.bottom())
+                    .find(|&y| row(&painted, region, y).contains("┌ Ctrl+X "))
+                    .expect("owning menu retained");
+                let prefix = if waiting == "empty" {
+                    expected
+                } else {
+                    "A decision is waiting in another tab"
+                };
+                assert!(
+                    (top + 1..region.bottom()).any(|y| row(&painted, region, y).contains(prefix))
+                );
+            }
+            assert_eq!(
+                (&state.input_buffer, state.cursor_position),
+                (&"kept draft".to_owned(), 4)
+            );
+        }
     }
 }

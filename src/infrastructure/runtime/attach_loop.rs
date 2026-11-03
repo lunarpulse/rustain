@@ -3682,7 +3682,7 @@ pub async fn run_attached(
             crate::adapters::tui::presentation::compose(
                 f, &state, &shell, crate::adapters::tui::keymap::Host::Attached,
                 &attach_keys::log_facts(&conversation.id),
-                |f| attach_keys::paint_overlays(f, area, layout.input_area, layout.status_bar, &state),
+                |_| {},
                 paint_status,
             );
         });
@@ -9788,7 +9788,7 @@ mod tests {
     /// K9 — the attached tick and draw expire toasts on the injected clock:
     /// the tick asks for a redraw only once a deadline has passed, and the
     /// first frame drawn at or after a deadline no longer paints that toast
-    /// (the frame loop's `begin_draw` + `paint_overlays`, without a socket).
+    /// (the frame loop's `begin_draw` + shared compose, without a socket).
     #[test]
     fn story21_1_attached_tick_and_draw_expire_toasts_on_the_injected_clock() {
         use crate::adapters::tui::notification_log::LogFacts;
@@ -9825,15 +9825,7 @@ mod tests {
                         &shell,
                         crate::adapters::tui::keymap::Host::Attached,
                         &LogFacts::default(),
-                        |f| {
-                            attach_keys::paint_overlays(
-                                f,
-                                shell.area,
-                                shell.input_area,
-                                shell.status_bar,
-                                state,
-                            )
-                        },
+                        |_| {},
                         |_| {},
                     );
                 })

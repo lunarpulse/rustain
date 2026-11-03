@@ -149,13 +149,13 @@ fn printables_in_the_composer_type_and_only_the_documented_triggers_open_popups(
             "{c}"
         );
         assert_eq!(state.input_buffer, c.to_string(), "{c} types itself");
-        assert!(!state.autocomplete.active, "{c} opens no popup");
+        assert!(!state.autocomplete.is_open(), "{c} opens no popup");
     }
     for trigger in ['/', '@'] {
         let mut state = fresh();
         press(&mut state, Key::Char(trigger));
         assert_eq!(state.input_buffer, trigger.to_string());
-        assert!(state.autocomplete.active, "{trigger} opens its popup");
+        assert!(state.autocomplete.is_open(), "{trigger} opens its popup");
     }
 }
 

@@ -488,8 +488,11 @@ use rustain::domain::models::autocomplete::{AutocompleteKind, AutocompleteSugges
 fn test_slash_at_position_zero_triggers_autocomplete() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
-    assert_eq!(state.autocomplete.kind, AutocompleteKind::SlashCommand);
+    assert!(state.autocomplete.is_open());
+    assert_eq!(
+        state.autocomplete.kind,
+        Some(AutocompleteKind::SlashCommand)
+    );
     assert_eq!(state.autocomplete.trigger_position, 0);
     assert_eq!(state.input_buffer, "/");
 }
@@ -500,7 +503,7 @@ fn test_slash_not_at_position_zero_no_autocomplete() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('a'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "a/");
 }
 
@@ -512,8 +515,8 @@ fn test_at_triggers_file_mention_autocomplete() {
     handle_input(&mut state, &DomainInputEvent::KeyPress('i'));
     handle_input(&mut state, &DomainInputEvent::KeyPress(' '));
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    assert!(state.autocomplete.active);
-    assert_eq!(state.autocomplete.kind, AutocompleteKind::FileMention);
+    assert!(state.autocomplete.is_open());
+    assert_eq!(state.autocomplete.kind, Some(AutocompleteKind::FileMention));
     assert_eq!(state.autocomplete.trigger_position, 3); // '@' is at position 3
     assert_eq!(state.input_buffer, "hi @");
 }
@@ -523,7 +526,7 @@ fn test_at_triggers_file_mention_autocomplete() {
 fn test_typing_after_trigger_updates_filter() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
 
     handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     assert_eq!(state.autocomplete.filter_text, "n");
@@ -571,7 +574,7 @@ fn test_tab_selects_autocomplete() {
     }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "/new");
 }
 
@@ -586,7 +589,7 @@ fn test_enter_selects_autocomplete() {
     }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "/new");
 }
 
@@ -596,10 +599,10 @@ fn test_enter_selects_autocomplete() {
 fn test_esc_dismisses_autocomplete() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, ""); // exact pre-trigger composer restored
 }
 
@@ -609,7 +612,7 @@ fn test_backspace_past_trigger_dismisses() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "/n");
 
     // Backspace removes 'n', filter becomes empty
@@ -626,7 +629,7 @@ fn test_backspace_past_trigger_dismisses() {
         &mut state,
         &DomainInputEvent::SpecialKey(DomainKey::Backspace),
     );
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "");
 }
 
@@ -641,7 +644,7 @@ fn test_file_mention_selection() {
     }];
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
     assert_eq!(state.input_buffer, "@src/main.rs");
     assert_eq!(state.resolved_mentions.len(), 1);
     assert_eq!(state.resolved_mentions[0].path, "src/main.rs");
@@ -750,7 +753,7 @@ fn test_user_command_submits_with_context() {
 fn test_at_with_no_results() {
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &DomainInputEvent::KeyPress('@'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
     // Suggestions empty — the "No matches" state is rendered by the widget
     assert!(state.autocomplete.suggestions.is_empty());
 }
@@ -764,7 +767,7 @@ fn test_autocomplete_during_streaming_focus() {
     // Simulate streaming being active (focus is still Input)
     assert_eq!(state.focus, FocusState::Input);
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
 }
 
 // === /new command tests (Story 3.2, Task 7) ===
@@ -782,7 +785,7 @@ fn test_slash_new_command_flow() {
     // Tab to select
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Tab));
     assert_eq!(state.input_buffer, "/new");
-    assert!(!state.autocomplete.active);
+    assert!(!state.autocomplete.is_open());
 
     // Submit
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
@@ -1172,7 +1175,10 @@ fn answer_large_image(key: char) -> (Option<InputAction>, Option<InputAction>) {
     use rustain::adapters::tui::notification_log::LogFacts;
     let (mut state, clock) = large_image_pane();
     assert!(
-        state.decisions.is_focused(),
+        rustain::adapters::tui::presentation::is_open(
+            &state,
+            rustain::adapters::tui::presentation::Surface::DecisionPane
+        ),
         "a requested decision is focused"
     );
     let facts = LogFacts::default();
@@ -1486,7 +1492,7 @@ fn test_alt_enter_dismisses_autocomplete_and_inserts_newline() {
     let mut state = TuiState::new(80, 24);
     // Activate autocomplete via '/'
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
 
     // Alt+Enter: autocomplete dismissed, newline inserted
     handle_input(
@@ -1494,7 +1500,7 @@ fn test_alt_enter_dismisses_autocomplete_and_inserts_newline() {
         &DomainInputEvent::SpecialKey(DomainKey::AltEnter),
     );
     assert!(
-        !state.autocomplete.active,
+        !state.autocomplete.is_open(),
         "Alt+Enter should dismiss autocomplete"
     );
     assert!(
@@ -1511,12 +1517,12 @@ fn test_alt_m_dismisses_autocomplete_and_toggles_multiline() {
     let initial_mode = state.multiline_mode;
     // Activate autocomplete via '/'
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert!(state.autocomplete.active);
+    assert!(state.autocomplete.is_open());
 
     // Alt+M: autocomplete dismissed, multiline toggled
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::AltM));
     assert!(
-        !state.autocomplete.active,
+        !state.autocomplete.is_open(),
         "Alt+M should dismiss autocomplete"
     );
     assert_ne!(
