@@ -1,12 +1,8 @@
-//! Within-conversation search bar widget (Ctrl+F).
+//! Within-conversation Stage-top search renderer (Ctrl+F).
 //!
-//! Renders a single-row bar at the top of the chat pane region when
-//! `SearchState::active` is true. Visually distinguishes the `Typing` vs
-//! `Navigating` sub-states (Story 4-4 AC3) — the counter gains a bold frame
-//! in `Navigating` and the cursor is hidden to signal that `n` / `N` are now
-//! live for match navigation.
-//!
-//! Pure render — no state mutation.
+//! The compositor owns presence and placement; this pure renderer distinguishes
+//! Typing from Navigating through the counter style. Hardware cursor placement
+//! is optional for renderer-level width tests; frames suppress it under A7.
 // Covers: Story 4-4 AC1, AC2, AC3, AC7 (UX-DR86)
 
 use ratatui::prelude::*;
@@ -16,25 +12,18 @@ use crate::adapters::tui::state::{SearchState, SearchSubstate};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
-/// Left-side label rendered before the query in the search bar.
-const LABEL: &str = "Search: ";
-
-/// Render the search bar at the top of a 1-row `area`.
+/// Render a search line into the supplied Stage-top row.
 ///
-/// The layout caller must reserve the row via `compute_layout` (Task 2.3).
-/// This function is a no-op when `state.active == false`.
+/// `label` includes any ancestor breadcrumb and the trailing query separator.
 /// `show_cursor` controls only hardware cursor placement, not painted cells.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &SearchState,
     theme: &Theme,
+    label: &str,
     show_cursor: bool,
 ) {
-    if !state.active {
-        return;
-    }
-
     frame.render_widget(Clear, area);
 
     // Build the visible line: "Search: <query>                  <counter>"
@@ -43,7 +32,7 @@ pub fn render(
     // query gets whatever display cells remain; when it is longer it scrolls
     // so its tail (where the caret sits) stays visible, cut on a whole
     // grapheme boundary. All widths are display cells, not scalars.
-    let label_cells = geom::cells(LABEL);
+    let label_cells = geom::cells(label);
 
     let counter_text = counter_text(state);
     let counter_cells = geom::cells(&counter_text);
@@ -57,12 +46,21 @@ pub fn render(
     let padding_cols = (area.width as usize).saturating_sub(total_content).max(1);
 
     let (query_style, counter_style) = styles_for_substate(state, theme);
+    let (ancestors, current_label) = label
+        .strip_suffix("Search: ")
+        .filter(|ancestors| !ancestors.is_empty())
+        .map_or(("", label), |ancestors| (ancestors, "Search: "));
 
-    let spans: Vec<Span<'static>> = vec![
+    let spans = vec![
+        Span::styled(ancestors, Style::default().fg(theme.colors.fg_secondary)),
         Span::styled(
-            LABEL.to_string(),
+            current_label,
             Style::default()
-                .fg(theme.colors.fg_muted)
+                .fg(if ancestors.is_empty() {
+                    theme.colors.fg_muted
+                } else {
+                    theme.colors.fg_primary
+                })
                 .add_modifier(Modifier::ITALIC),
         ),
         Span::styled(shown_query.to_string(), query_style),
@@ -127,15 +125,14 @@ mod tests {
 
     fn state_with(query: &str, matches: Vec<SearchMatch>, substate: SearchSubstate) -> SearchState {
         SearchState {
-            active: true,
             query: query.to_string(),
             matches,
             focused_match_index: 0,
             substate,
             last_search_instant: None,
             last_query_len: 0,
-            prior_focus: None,
             peek_highlight: None,
+            ..SearchState::default()
         }
     }
 
@@ -211,12 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn inactive_search_is_noop() {
-        // We can't easily drive `render` without a full Frame, but we can
-        // verify that counter_text handles an empty/default state without panicking.
+    fn default_search_counter_is_safe() {
         let s = SearchState::default();
-        // Must not panic on default state
-        let _ = counter_text(&s);
+        assert_eq!(counter_text(&s), "0/0");
     }
 
     // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
@@ -242,7 +236,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         let theme = Theme::dark();
         terminal
-            .draw(|frame| render(frame, frame.area(), state, &theme, true))
+            .draw(|frame| render(frame, frame.area(), state, &theme, "Search: ", true))
             .unwrap();
         let cursor = terminal.get_cursor_position().unwrap();
         let buffer = terminal.backend().buffer().clone();

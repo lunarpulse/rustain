@@ -8,6 +8,7 @@ pub mod geometry;
 pub mod reducer;
 pub mod route;
 mod stack;
+pub mod stage_search;
 
 pub use compose::{Shell, compose, paint_too_small};
 pub use route::{RouteEffect, route, too_small};
@@ -21,6 +22,18 @@ pub fn is_open(state: &TuiState, surface: Surface) -> bool {
         .modal_stack
         .all_frames()
         .any(|frame| frame.surface == surface)
+}
+
+/// Search changes key context without changing frame identity or base focus.
+pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Context {
+    use super::{keymap::Context, state::SearchSubstate};
+    match surface {
+        Surface::Search => match state.search_state.substate {
+            SearchSubstate::Typing => Context::SearchTyping,
+            SearchSubstate::Navigating => Context::SearchNavigating,
+        },
+        _ => surface.context(),
+    }
 }
 
 /// The frame inventory and payload slots must describe the same open surfaces.
@@ -76,8 +89,7 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
         || state.pending_leader.is_some()
         || state.ask_user_question.is_some()
         || app::proposal_higher_confirmation_active(state)
-        || state.reverse_search.active
-        || state.search_state.active
+        || state.reverse_search.is_open()
         || !matches!(
             state.focus,
             FocusState::Input | FocusState::Chat | FocusState::Sidebar { .. }
@@ -89,7 +101,7 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
         !matches!(
             frame.surface,
             Surface::DecisionPane | Surface::QuitConfirm | Surface::Login
-        ) && !typing_context(frame.surface.context())
+        ) && !typing_context(frame_context(state, frame.surface))
     })
 }
 

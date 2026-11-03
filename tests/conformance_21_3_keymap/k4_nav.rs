@@ -44,7 +44,8 @@ fn history_state() -> TuiState {
 fn search_state(navigating: bool) -> TuiState {
     let mut state = fresh();
     assert_eq!(press(&mut state, Key::Ctrl('f')), InputAction::OpenSearch);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
+    assert!(is_open(&state, Surface::Search));
+    assert_eq!(state.focus, FocusState::Input);
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
     for c in "foo".chars() {
         assert_eq!(
@@ -265,7 +266,7 @@ fn search_salient(state: &TuiState) -> SearchSalient {
         focus: state.focus.clone(),
         query: state.search_state.query.clone(),
         substate: state.search_state.substate,
-        active: state.search_state.active,
+        active: is_open(state, Surface::Search),
         input: state.input_buffer.clone(),
     }
 }
@@ -284,11 +285,10 @@ fn search_witness(context: Context, cmd: SearchCmd, keys: &[Key]) {
             assert_eq!(press(&mut state, key), InputAction::CloseSearch);
             assert_eq!(
                 state.search_state.query, "foo",
-                "the loop closes it, keeping the query"
+                "the production effect seam applies close/restore after dispatch"
             );
         }
         SearchCmd::Commit => {
-            assert!(!navigating, "Enter only commits while typing");
             assert_eq!(press(&mut state, key), InputAction::SearchCommit);
             assert_eq!(state.search_state.query, "foo");
         }
@@ -351,6 +351,31 @@ fn every_search_row_resolves_to_its_command_by_value() {
                         before,
                         "S-QUIT keeps the exact search"
                     );
+                }
+                CommandId::Global(keymap::table::GlobalCmd::OpenLeader) => {
+                    let mut state = search_state(context == Context::SearchNavigating);
+                    let before = search_salient(&state);
+                    let frame = state.modal_stack.top().unwrap().clone();
+                    assert_eq!(press(&mut state, row.keys[0]), InputAction::Consumed);
+                    assert_eq!(state.pending_leader, Some(context));
+                    assert_eq!(state.modal_stack.top(), Some(&frame));
+                    press(&mut state, Key::Esc);
+                    assert_eq!(search_salient(&state), before);
+                    assert_eq!(state.modal_stack.top(), Some(&frame));
+                }
+                CommandId::Input(keymap::table_input::InputCmd::OpenPalette) => {
+                    let mut state = search_state(context == Context::SearchNavigating);
+                    let before = search_salient(&state);
+                    let frame = state.modal_stack.top().unwrap().clone();
+                    assert_eq!(press(&mut state, row.keys[0]), InputAction::Consumed);
+                    assert_eq!(
+                        state.modal_stack.top().unwrap().surface,
+                        Surface::CommandPalette
+                    );
+                    assert!(state.modal_stack.iter().any(|owned| owned == &frame));
+                    press(&mut state, Key::Esc);
+                    assert_eq!(search_salient(&state), before);
+                    assert_eq!(state.modal_stack.top(), Some(&frame));
                 }
                 _ => panic!("unexpected Search row {row:?}"),
             }

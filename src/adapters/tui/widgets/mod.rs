@@ -46,7 +46,6 @@ pub mod plan_card;
 pub mod plan_deviation_card;
 pub mod profile_switcher;
 pub mod reverse_search;
-pub mod search_bar;
 pub mod skill_trust_prompt;
 pub mod status_bar;
 pub mod tab_bar;

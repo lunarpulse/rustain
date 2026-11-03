@@ -246,8 +246,13 @@ fn k10_open_surfaces_are_never_taken_from() {
             reducer::open(s, Surface::CommandPalette);
         }),
         ("which-key", |s| s.pending_leader = Some(Context::Chat)),
-        ("reverse search", |s| s.reverse_search.active = true),
-        ("in-conversation search", |s| s.search_state.active = true),
+        ("reverse search", |s| {
+            s.focus = FocusState::Input;
+            s.reverse_search.reset();
+        }),
+        ("in-conversation search", |s| {
+            reducer::open(s, Surface::Search);
+        }),
         ("ask_user_question", |s| {
             s.ask_user_question = Some(
                 rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState {

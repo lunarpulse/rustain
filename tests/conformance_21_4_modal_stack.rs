@@ -7,6 +7,10 @@ mod k3_compose;
 mod k4_geometry;
 #[path = "conformance_21_4_modal_stack/k6_gate.rs"]
 mod k6_gate;
+#[path = "conformance_21_4_modal_stack/k7_smoke_frames.rs"]
+mod k7_smoke_frames;
+#[path = "conformance_21_4_modal_stack/k9_reconcile.rs"]
+mod k9_reconcile;
 use crate::conformance_21_3_keymap::support as keymap_support;
 
 mod k1_stack {
@@ -1270,6 +1274,229 @@ mod k8_stage {
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
+    fn search_key(h: &mut crate::e2e_harness::TestHarness, tabs: &mut TabManager, key: Key) {
+        let action = press(&mut h.state, key);
+        let conversation = tabs.active_tab().conversation.clone();
+        rustain::adapters::tui::handlers::search::handle_search_action(
+            tabs,
+            &mut h.state,
+            &conversation,
+            &action,
+        );
+    }
+
+    fn searchable_tab() -> (crate::e2e_harness::TestHarness, TabManager) {
+        let mut h = crate::e2e_harness::TestHarness::new();
+        h.send_message(
+            &(0..60)
+                .map(|row| format!("search-row-{row:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        let mut tabs = TabManager::new(CancellationToken::new());
+        tabs.active_tab_mut().conversation = std::mem::take(&mut h.conversation);
+        h.state.active_tab_id = tabs.active_tab().id;
+        h.render_active_tab(&tabs);
+        (h, tabs)
+    }
+
+    #[test]
+    fn search_esc_restores_the_pre_search_view_exactly() {
+        use rustain::domain::models::AnchorRef;
+        for (mode, key) in [
+            (AnchorMode::Following, Key::Esc),
+            (AnchorMode::Reading, Key::Ctrl('c')),
+            (
+                AnchorMode::Pinned(AnchorRef {
+                    turn_id: TurnId("focused-before-search".into()),
+                    line_in_turn: 2,
+                }),
+                Key::Esc,
+            ),
+        ] {
+            let (mut h, mut tabs) = searchable_tab();
+            let view = &mut tabs.active_tab_mut().view_state;
+            view.mode = mode;
+            let offset = if matches!(view.mode, AnchorMode::Following) {
+                0
+            } else {
+                3
+            };
+            view.scroll_offset = offset;
+            view.focused_turn = Some(TurnId("focused-before-search".into()));
+            view.summary_tier = SummaryTier::Tier2;
+            h.state.set_scroll_offset(offset);
+            h.state.set_auto_scroll(matches!(
+                tabs.active_tab().view_state.mode,
+                AnchorMode::Following
+            ));
+            h.render_active_tab(&tabs);
+            let before = format!("{:?}", tabs.active_tab().view_state);
+            let pixels = h.screen_text();
+            let layout = k3_compose::layout(&h.state);
+            let composer = (
+                h.state.input_buffer.clone(),
+                h.state.cursor_position,
+                h.state.input_scroll_offset,
+            );
+            let cache = &h.state.tab_render_states[&tabs.active_tab().id];
+            let version = cache.tool_block_states_version;
+            let mut cache_keys = cache
+                .height_cache
+                .entries
+                .keys()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>();
+            cache_keys.sort();
+            let mut message_keys = cache
+                .height_cache
+                .message_entries
+                .keys()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>();
+            message_keys.sort();
+            assert!(
+                !cache_keys.is_empty() || !message_keys.is_empty(),
+                "cache invariance has a populated production control"
+            );
+            search_key(&mut h, &mut tabs, Key::Ctrl('f'));
+            assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Search);
+            assert_eq!(
+                format!("{:?}", tabs.active_tab().view_state),
+                before,
+                "opening itself never navigates"
+            );
+            for c in "search-row-00".chars() {
+                search_key(&mut h, &mut tabs, Key::Char(c));
+            }
+            assert!(
+                h.state.scroll_offset() > 3,
+                "fixture navigates away from the initial rows"
+            );
+            assert_eq!(
+                tabs.active_tab().view_state.scroll_offset,
+                h.state.scroll_offset()
+            );
+            assert_ne!(format!("{:?}", tabs.active_tab().view_state), before);
+            h.render_active_tab(&tabs);
+            assert_ne!(
+                h.screen_text(),
+                pixels,
+                "the actual owning view reaches production painting"
+            );
+            assert_eq!(k3_compose::layout(&h.state).chat_pane, layout.chat_pane);
+            assert_eq!(k3_compose::layout(&h.state).input_area, layout.input_area);
+            search_key(&mut h, &mut tabs, key);
+            assert!(!rustain::adapters::tui::presentation::is_open(
+                &h.state,
+                Surface::Search
+            ));
+            assert_eq!(format!("{:?}", tabs.active_tab().view_state), before);
+            h.render_active_tab(&tabs);
+            assert_eq!(
+                h.screen_text(),
+                pixels,
+                "Back restores exact pre-search rows"
+            );
+            assert_eq!(
+                (
+                    h.state.input_buffer.clone(),
+                    h.state.cursor_position,
+                    h.state.input_scroll_offset
+                ),
+                composer
+            );
+            let cache = &h.state.tab_render_states[&tabs.active_tab().id];
+            let mut after_keys = cache
+                .height_cache
+                .entries
+                .keys()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>();
+            after_keys.sort();
+            assert_eq!(after_keys, cache_keys);
+            let mut after_messages = cache
+                .height_cache
+                .message_entries
+                .keys()
+                .map(|key| format!("{key:?}"))
+                .collect::<Vec<_>>();
+            after_messages.sort();
+            assert_eq!(after_messages, message_keys);
+            assert_eq!(cache.tool_block_states_version, version);
+        }
+    }
+
+    #[test]
+    fn navigating_enter_keeps_the_actual_match_view_and_back_disposal_is_exact() {
+        let (mut h, mut tabs) = searchable_tab();
+        let pixels = h.screen_text();
+        search_key(&mut h, &mut tabs, Key::Ctrl('f'));
+        for c in "search-row-00".chars() {
+            search_key(&mut h, &mut tabs, Key::Char(c));
+        }
+        search_key(&mut h, &mut tabs, Key::Enter);
+        let matched = format!("{:?}", tabs.active_tab().view_state);
+        assert!(h.state.scroll_offset() > 0);
+        search_key(&mut h, &mut tabs, Key::Enter);
+        assert!(h.state.modal_stack.is_empty());
+        assert_eq!(format!("{:?}", tabs.active_tab().view_state), matched);
+        h.render_active_tab(&tabs);
+        assert_ne!(
+            h.screen_text(),
+            pixels,
+            "Keep position is observably different from Back"
+        );
+        search_key(&mut h, &mut tabs, Key::Ctrl('f'));
+        search_key(&mut h, &mut tabs, Key::Esc);
+        assert_eq!(
+            format!("{:?}", tabs.active_tab().view_state),
+            matched,
+            "a new opening snapshots the kept position, not retired state"
+        );
+    }
+
+    #[test]
+    fn search_stage_wheel_navigates_but_a_covering_frame_consumes_it() {
+        use rustain::adapters::tui::{app, handlers::scroll};
+        use rustain::domain::{events::DomainInputEvent, models::view_state::ScrollDelta};
+        let (mut h, mut tabs) = searchable_tab();
+        let before = format!("{:?}", tabs.active_tab().view_state);
+        search_key(&mut h, &mut tabs, Key::Ctrl('f'));
+        let wheel = DomainInputEvent::MouseScroll(ScrollDelta::WheelUp(5));
+        let app::InputAction::MouseScroll(delta) = app::handle_input(&mut h.state, &wheel) else {
+            panic!("Search uses its Stage body for explicit navigation");
+        };
+        let conversation = tabs.active_tab().conversation.clone();
+        scroll::handle_apply_scroll_intent(&mut tabs, &mut h.state, &conversation, delta);
+        assert_ne!(format!("{:?}", tabs.active_tab().view_state), before);
+        search_key(&mut h, &mut tabs, Key::Ctrl('x'));
+        search_key(&mut h, &mut tabs, Key::Char('?'));
+        assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Help);
+        let covered = format!("{:?}", tabs.active_tab().view_state);
+        assert_eq!(
+            app::handle_input(&mut h.state, &wheel),
+            app::InputAction::Consumed
+        );
+        assert_eq!(format!("{:?}", tabs.active_tab().view_state), covered);
+        search_key(&mut h, &mut tabs, Key::Esc);
+        assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Search);
+        search_key(&mut h, &mut tabs, Key::Esc);
+        assert_eq!(format!("{:?}", tabs.active_tab().view_state), before);
+    }
+
+    #[test]
+    fn navigating_enter_requests_keep_position() {
+        use rustain::adapters::tui::{app, state::SearchSubstate};
+        let mut state = rustain::adapters::tui::state::TuiState::new(80, 24);
+        press(&mut state, Key::Ctrl('f'));
+        state.search_state.substate = SearchSubstate::Navigating;
+        assert_eq!(
+            press(&mut state, Key::Enter),
+            app::InputAction::SearchCommit
+        );
+    }
+
     #[test]
     fn active_tab_scroll_control_changes_the_rendered_view() {
         use rustain::adapters::tui::{app, handlers::scroll};
@@ -1477,5 +1704,67 @@ mod k8_stage {
         })
         .await
         .expect("bounded streaming invariance");
+    }
+}
+
+mod k7_reverse {
+    use super::keymap_support::press;
+    use rustain::adapters::tui::{app, keymap::Key, presentation::Surface, state::TuiState};
+    use rustain::domain::models::FocusState;
+
+    #[test]
+    fn reverse_search_is_an_input_popup_and_never_a_frame() {
+        let mut state = TuiState::new(80, 24);
+        state.input_history.push("alpha one".into());
+        state.input_history.push("beta".into());
+        state.input_history.push("alpha two".into());
+        state.input_buffer = "untouched draft".into();
+        state.cursor_position = 3;
+        press(&mut state, Key::Ctrl('r'));
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(state.modal_stack.is_empty());
+        assert!(state.reverse_search.is_open());
+        app::handle_input(
+            &mut state,
+            &rustain::domain::events::DomainInputEvent::Paste("must not leak".into()),
+        );
+        assert_eq!(state.input_buffer, "untouched draft");
+        assert_eq!(state.cursor_position, 3);
+        for c in "alpha".chars() {
+            assert_eq!(press(&mut state, Key::Char(c)), app::InputAction::Consumed);
+        }
+        assert_eq!(state.input_buffer, "untouched draft");
+        press(&mut state, Key::Ctrl('r'));
+        press(&mut state, Key::Enter);
+        assert!(state.input_buffer.starts_with("alpha "));
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(state.modal_stack.is_empty());
+        let selected = state.input_buffer.clone();
+        press(&mut state, Key::Ctrl('r'));
+        press(&mut state, Key::Char('z'));
+        press(&mut state, Key::Esc);
+        assert_eq!(state.input_buffer, selected);
+        assert_eq!(state.focus, FocusState::Input);
+        press(&mut state, Key::Ctrl('r'));
+        press(&mut state, Key::Ctrl('p'));
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        press(&mut state, Key::Esc);
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(state.modal_stack.is_empty());
+    }
+
+    #[test]
+    fn closed_popup_control_accepts_composer_paste() {
+        let mut state = TuiState::new(80, 24);
+        app::handle_input(
+            &mut state,
+            &rustain::domain::events::DomainInputEvent::Paste("visible draft".into()),
+        );
+        assert_eq!(state.input_buffer, "visible draft");
+        assert!(!state.reverse_search.is_open());
+        assert!(state.modal_stack.is_empty());
     }
 }

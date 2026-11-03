@@ -2,7 +2,7 @@
 //!
 //! Every test drives a real public renderer (`status_bar::render`,
 //! `tab_bar::render_tab_bar`, `sidebar::render_history_panel`,
-//! `search_bar::render`, `reverse_search::render`, `cross_search::render`,
+//! `stage_search::render`, `reverse_search::render`, `cross_search::render`,
 //! `bookmark_list::render`, `command_palette::render`) into a `TestBackend`
 //! buffer and reads the painted cells back. Expected values come from the
 //! C/G/A fixtures and from independent observations of the painted row (for
@@ -22,14 +22,14 @@
 use super::support::*;
 
 use ratatui::style::Modifier;
+use rustain::adapters::tui::presentation::stage_search;
 use rustain::adapters::tui::state::{
     CommandPaletteState, CrossSearchState, LogAwareness, ReverseSearchState, SearchState,
     SearchSubstate,
 };
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::{
-    bookmark_list, command_palette, cross_search, reverse_search, search_bar, sidebar, status_bar,
-    tab_bar,
+    bookmark_list, command_palette, cross_search, reverse_search, sidebar, status_bar, tab_bar,
 };
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use rustain::domain::models::tab::TabManager;
@@ -386,7 +386,6 @@ fn k4_sidebar_title_fits_its_budget_and_cuts_on_whole_graphemes() {
 
 fn search(width: u16, query: &str) -> Painted {
     let mut state = SearchState::new();
-    state.active = true;
     state.query = query.to_string();
     state.matches = vec![SearchMatch {
         message_index: 0,
@@ -396,7 +395,7 @@ fn search(width: u16, query: &str) -> Painted {
     state.substate = SearchSubstate::Typing;
     let theme = Theme::dark();
     paint(width, 1, |frame| {
-        search_bar::render(frame, frame.area(), &state, &theme, true);
+        stage_search::render(frame, frame.area(), &state, &theme, "Search: ", true);
     })
 }
 
@@ -446,10 +445,9 @@ fn k4_search_bar_reserves_the_counter_and_maps_the_caret() {
 
 fn reverse(width: u16, query: &str, entry: &str) -> Painted {
     let state = ReverseSearchState {
-        active: true,
         query: query.to_string(),
         matches: vec![(0, entry.to_string())],
-        selected_match: 0,
+        selected_match: Some(0),
     };
     let theme = Theme::dark();
     paint(width, 4, |frame| {

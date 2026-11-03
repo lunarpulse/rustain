@@ -74,7 +74,7 @@ const SITES: &[Site] = &[
         "widgets/tab_bar.rs",
         ["truncate_to_cells", "render_tab_bar"]
     ),
-    site!("widgets/search_bar.rs", ["render"]),
+    site!("presentation/stage_search.rs", ["render"]),
     site!("widgets/reverse_search.rs", ["render"]),
     site!(
         "widgets/cross_search.rs",

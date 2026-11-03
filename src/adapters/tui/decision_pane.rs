@@ -533,7 +533,11 @@ pub fn open_waiting(state: &mut TuiState, facts: &LogFacts) {
         return;
     }
     let message = keymap::table::decision_waiting_remedy(!state.decisions.is_empty());
-    if let Some(origin) = state.modal_stack.top().map(|frame| frame.surface.context()) {
+    if let Some(origin) = state
+        .modal_stack
+        .top()
+        .map(|frame| presentation::frame_context(state, frame.surface))
+    {
         crate::adapters::tui::app::refuse_leader(
             state,
             origin,
@@ -625,7 +629,7 @@ pub fn card_focus_blocked(state: &TuiState) -> bool {
         || !state.modal_stack.is_empty()
         || state.pending_leader.is_some()
         || state.autocomplete.is_open()
-        || state.reverse_search.active
+        || state.reverse_search.is_open()
 }
 
 /// [`take_chat_focus_for_card`] in the local host: the composer is `state.input_buffer`.
@@ -1568,15 +1572,12 @@ mod tests {
     /// FR-21-3-c: a card arriving in an empty Input hands it Chat focus; nothing else moves.
     #[test]
     fn story21_3_card_arrival_takes_chat_focus_only_from_an_empty_input() {
-        use crate::domain::models::visual::OverlayType;
-        let overlay = FocusState::Overlay(OverlayType::Search);
         // (focus, can answer, user mid-sentence) -> (focus after, moved)
         let cases = [
             (FocusState::Input, true, false, FocusState::Chat, true),
             (FocusState::Input, true, true, FocusState::Input, false),
             (FocusState::Chat, true, false, FocusState::Chat, false),
             (FocusState::Input, false, false, FocusState::Input, false),
-            (overlay.clone(), true, false, overlay, false),
         ];
         for (mut focus, can_answer, typing, want, moved) in cases {
             let before = focus.clone();
@@ -1602,12 +1603,14 @@ mod tests {
         typing.needs_redraw = false;
         take_chat_focus_for_local_card(&mut typing);
         assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
-        let mut selector = TuiState::new(80, 24);
-        presentation::reducer::open(&mut selector, Surface::ModelSelector);
-        let frame = selector.modal_stack.top().cloned();
-        take_chat_focus_for_local_card(&mut selector);
-        assert_eq!(selector.focus, FocusState::Input);
-        assert_eq!(selector.modal_stack.top(), frame.as_ref());
+        for surface in [Surface::ModelSelector, Surface::Search] {
+            let mut framed = TuiState::new(80, 24);
+            presentation::reducer::open(&mut framed, surface);
+            let frame = framed.modal_stack.top().cloned();
+            take_chat_focus_for_local_card(&mut framed);
+            assert_eq!(framed.focus, FocusState::Input);
+            assert_eq!(framed.modal_stack.top(), frame.as_ref());
+        }
     }
 
     #[test]

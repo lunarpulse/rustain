@@ -26,7 +26,7 @@ fn open_surfaces(s: &TuiState) -> String {
         is_open(s, Surface::ModelSelector),
         is_open(s, Surface::ProfileSwitcher),
         is_open(s, Surface::UsagePanel),
-        s.reverse_search.active,
+        s.reverse_search.is_open(),
         s.autocomplete.is_open(),
         s.notification_log.is_some(),
         s.recipient_surface.is_some(),

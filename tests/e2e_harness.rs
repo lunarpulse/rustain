@@ -261,6 +261,7 @@ impl TestHarness {
                     DensityMode::Focus,
                 )
                 .expect("active-tab fixture fits");
+                let searching = presentation::is_open(state, presentation::Surface::Search);
                 let result = chat_pane::render_with_search(
                     frame,
                     app_layout.chat_pane,
@@ -278,9 +279,16 @@ impl TestHarness {
                     state.tab_render_states.entry(tab.id).or_default(),
                     &state.tool_block_states,
                     &tab.feedback_blocks,
-                    None,
-                    None,
-                    &[],
+                    searching.then_some(state.search_state.query.as_str()),
+                    searching
+                        .then(|| {
+                            state
+                                .search_state
+                                .matches
+                                .get(state.search_state.focused_match_index)
+                        })
+                        .flatten(),
+                    &state.search_state.matches,
                     &tab.session_meta.bookmarks,
                     state.pending_plan_card.as_ref(),
                     None,
@@ -289,12 +297,19 @@ impl TestHarness {
                 );
                 state.total_content_height = result.total_content_height;
                 state.viewport_height = app_layout.chat_pane.height;
+                state.message_boundaries = result.message_boundaries;
+                state.block_boundaries = result.block_boundaries;
+                state.user_message_boundaries = result.user_message_boundaries;
                 input_box::render(
                     frame,
                     app_layout.input_area,
                     &state.input_buffer,
                     state.cursor_position,
-                    state.focus.clone(),
+                    if state.modal_stack.is_empty() && state.pending_leader.is_none() {
+                        state.focus.clone()
+                    } else {
+                        FocusState::Chat
+                    },
                     theme,
                     state.multiline_mode,
                     state.input_scroll_offset,
@@ -311,7 +326,45 @@ impl TestHarness {
                         ..Default::default()
                     },
                     |_| {},
-                    |_| {},
+                    |frame| {
+                        status_bar::render(
+                            frame,
+                            app_layout.status_bar,
+                            "mock-model",
+                            None,
+                            &state.status,
+                            theme,
+                            tab.view_state.scroll_offset,
+                            &state.message_boundaries,
+                            state.total_content_height,
+                            app_layout.chat_pane.height,
+                            PermissionMode::Normal,
+                            None,
+                            0,
+                            state.has_project_context,
+                            None,
+                            state.multiline_mode,
+                            true,
+                            0,
+                            None,
+                            0,
+                            None,
+                            None,
+                            None,
+                            false,
+                            None,
+                            None,
+                            DensityMode::Focus,
+                            false,
+                            None,
+                            rustain::adapters::tui::state::LogAwareness::Hidden,
+                            status_bar::NoticeBadges {
+                                unseen: state.notifications.unseen(),
+                                decisions: state.decisions.len(),
+                                ..Default::default()
+                            },
+                        );
+                    },
                 );
             })
             .unwrap();

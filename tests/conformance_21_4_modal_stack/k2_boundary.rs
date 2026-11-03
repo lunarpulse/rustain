@@ -1,14 +1,14 @@
-//! Front-door witnesses: a Log/Quit key must never reach the composer or cards below.
+//! Front-door witnesses: only the top owner receives ingress; Search owns Stage navigation.
 use super::keymap_support::press;
 use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::keymap::Key;
 use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
-use rustain::adapters::tui::state::TuiState;
+use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::adapters::tui::{notification_log, quit_confirm};
 use rustain::domain::events::{DomainInputEvent, DomainKey};
-use rustain::domain::models::ScrollDelta;
 use rustain::domain::models::{RequestId, ToolRisk, tool_call::ApprovalSource};
+use rustain::domain::models::{ScrollDelta, TabManager};
 use rustain::domain::services::approval_runtime::ApprovalRuntimeEvent;
 use rustain::infrastructure::runtime::approval_bridge;
 
@@ -594,5 +594,395 @@ fn every_nested_palette_legacy_target_is_unavailable_and_base_routes_are_unchang
                 .records()
                 .all(|record| record.message != CLOSE_WINDOW_FIRST)
         );
+    }
+}
+
+fn search_press(state: &mut TuiState, tabs: &mut TabManager, key: Key) -> InputAction {
+    let action = press(state, key);
+    let conversation = tabs.active_tab().conversation.clone();
+    rustain::adapters::tui::handlers::search::handle_search_action(
+        tabs,
+        state,
+        &conversation,
+        &action,
+    );
+    action
+}
+
+fn search_top(navigating: bool) -> (crate::e2e_harness::TestHarness, TabManager) {
+    let mut h = crate::e2e_harness::TestHarness::new();
+    h.send_message("needle first\nneedle second");
+    let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+    tabs.active_tab_mut().conversation = std::mem::take(&mut h.conversation);
+    h.state.active_tab_id = tabs.active_tab().id;
+    h.render_active_tab(&tabs);
+    assert_eq!(
+        search_press(&mut h.state, &mut tabs, Key::Ctrl('f')),
+        InputAction::OpenSearch
+    );
+    for c in "needle".chars() {
+        assert_eq!(
+            search_press(&mut h.state, &mut tabs, Key::Char(c)),
+            InputAction::SearchQueryChanged
+        );
+    }
+    assert_eq!(h.state.search_state.matches.len(), 2);
+    if navigating {
+        assert_eq!(
+            search_press(&mut h.state, &mut tabs, Key::Enter),
+            InputAction::SearchCommit
+        );
+    }
+    assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Search);
+    assert_eq!(
+        h.state.search_state.substate,
+        if navigating {
+            SearchSubstate::Navigating
+        } else {
+            SearchSubstate::Typing
+        }
+    );
+    h.state.input_buffer = "untouched Search draft".into();
+    h.state.cursor_position = 5;
+    h.state.help_overlay.scroll_offset = 7;
+    (h, tabs)
+}
+
+fn assert_permission_deferred(state: &TuiState, id: &RequestId) {
+    assert!(
+        state.pending_permission.is_none(),
+        "{id:?} must stay queued"
+    );
+    assert_eq!(state.permission_queue.len(), 1);
+}
+
+fn assert_permission_painted(
+    h: &mut crate::e2e_harness::TestHarness,
+    tabs: &TabManager,
+    id: &RequestId,
+) {
+    // Assert promotion BEFORE painting: neither a render nor another key may repair it.
+    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
+    assert!(h.state.permission_queue.is_empty());
+    h.render_active_tab(tabs);
+    let state = &mut h.state;
+    h.terminal
+        .draw(|frame| {
+            let layout = rustain::adapters::tui::layout::compute_layout(
+                frame.area(),
+                &state.theme,
+                &state.input_buffer,
+                1,
+                false,
+                rustain::domain::models::visual::DensityMode::Focus,
+            )
+            .unwrap();
+            // The active-tab fixture omits legacy cards; use the runtime's real
+            // permission painter with the SAME state, reader and chat viewport.
+            rustain::adapters::tui::widgets::permission_prompt::render_permission_surface(
+                frame,
+                layout.chat_pane,
+                state.pending_permission.as_ref(),
+                state.pending_feedback_input.as_ref(),
+                state.permission_queue.len(),
+                &mut state.permission_reader,
+                &state.theme,
+            );
+        })
+        .unwrap();
+    h.assert_screen_contains(
+        "real permission admission",
+        "the queued request paints on release",
+    );
+    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
+    assert_eq!(
+        press(&mut h.state, Key::Char('y')),
+        InputAction::PermissionAllow
+    );
+}
+
+fn search_release_promotes_permission(key: Key, navigating: bool) {
+    let (mut h, mut tabs) = search_top(navigating);
+    let saved_view = format!(
+        "{:?}",
+        h.state.search_state.pre_search_view.as_ref().unwrap()
+    );
+    if navigating {
+        assert_eq!(
+            search_press(&mut h.state, &mut tabs, Key::Char('n')),
+            InputAction::SearchNext
+        );
+        assert_eq!(h.state.search_state.focused_match_index, 1);
+        assert_eq!(
+            h.state.search_state.query, "needle",
+            "n navigates, not types"
+        );
+    }
+    let current_view = format!("{:?}", tabs.active_tab().view_state);
+    let id = request_permission(&mut h.state);
+    assert_permission_deferred(&h.state, &id);
+    let action = press(&mut h.state, key);
+    assert_eq!(
+        action,
+        if key == Key::Enter {
+            InputAction::SearchCommit
+        } else {
+            InputAction::CloseSearch
+        }
+    );
+    assert_permission_deferred(&h.state, &id);
+    assert!(presentation::is_open(&h.state, Surface::Search));
+    let conversation = tabs.active_tab().conversation.clone();
+    rustain::adapters::tui::handlers::search::handle_search_action(
+        &mut tabs,
+        &mut h.state,
+        &conversation,
+        &action,
+    );
+    assert!(h.state.modal_stack.is_empty());
+    assert!(h.state.search_state.pre_search_view.is_none());
+    assert_eq!(
+        format!("{:?}", tabs.active_tab().view_state),
+        if key == Key::Enter {
+            current_view
+        } else {
+            saved_view
+        }
+    );
+    assert_permission_painted(&mut h, &tabs, &id);
+}
+
+#[test]
+fn search_escape_release_promotes_and_paints_the_queued_request() {
+    for navigating in [false, true] {
+        search_release_promotes_permission(Key::Esc, navigating);
+    }
+}
+
+#[test]
+fn search_ctrl_c_release_promotes_and_paints_the_queued_request() {
+    for navigating in [false, true] {
+        search_release_promotes_permission(Key::Ctrl('c'), navigating);
+    }
+}
+
+#[test]
+fn search_navigating_enter_release_promotes_and_paints_the_queued_request() {
+    search_release_promotes_permission(Key::Enter, true);
+}
+
+#[test]
+fn search_top_routes_every_key_without_falling_through_to_the_composer_or_cards() {
+    for navigating in [false, true] {
+        for key in Key::universe() {
+            let (mut h, mut tabs) = search_top(navigating);
+            let draft = (h.state.input_buffer.clone(), h.state.cursor_position);
+            let action = search_press(&mut h.state, &mut tabs, key);
+            assert!(
+                matches!(
+                    action,
+                    InputAction::Consumed
+                        | InputAction::Ignored
+                        | InputAction::Quit
+                        | InputAction::CloseSearch
+                        | InputAction::SearchCommit
+                        | InputAction::SearchQueryChanged
+                        | InputAction::SearchClear
+                        | InputAction::SearchReturnToTyping
+                        | InputAction::SearchNext
+                        | InputAction::SearchPrev
+                ),
+                "navigating={navigating} key={key:?}: {action:?}"
+            );
+            assert_eq!(
+                (h.state.input_buffer.clone(), h.state.cursor_position),
+                draft,
+                "navigating={navigating} key={key:?}: {action:?}"
+            );
+            assert_eq!(h.state.help_overlay.scroll_offset, 7);
+            assert!(h.state.pending_images.is_empty());
+        }
+        for event in [
+            DomainInputEvent::Paste("not the query or composer".into()),
+            DomainInputEvent::ImagePaste(vec![1, 2, 3]),
+        ] {
+            let (mut h, mut tabs) = search_top(navigating);
+            let frame = h.state.modal_stack.top().cloned();
+            let before = (
+                h.state.input_buffer.clone(),
+                h.state.cursor_position,
+                h.state.search_state.query.clone(),
+                h.state.search_state.focused_match_index,
+                format!("{:?}", tabs.active_tab().view_state),
+            );
+            let action = handle_input(&mut h.state, &event);
+            let conversation = tabs.active_tab().conversation.clone();
+            rustain::adapters::tui::handlers::search::handle_search_action(
+                &mut tabs,
+                &mut h.state,
+                &conversation,
+                &action,
+            );
+            assert_eq!(action, InputAction::Consumed);
+            assert_eq!(h.state.modal_stack.top(), frame.as_ref());
+            assert_eq!(
+                (
+                    h.state.input_buffer.clone(),
+                    h.state.cursor_position,
+                    h.state.search_state.query.clone(),
+                    h.state.search_state.focused_match_index,
+                    format!("{:?}", tabs.active_tab().view_state),
+                ),
+                before
+            );
+            assert!(h.state.pending_images.is_empty());
+        }
+    }
+    let mut state = TuiState::new(80, 24);
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::Paste("base paste".into())),
+        InputAction::Consumed
+    );
+    assert_eq!(
+        state.input_buffer, "base paste",
+        "base paste remains available"
+    );
+}
+
+#[test]
+fn search_context_switch_and_permission_controls_use_actual_dispatch() {
+    let (mut h, mut tabs) = search_top(false);
+    let id = request_permission(&mut h.state);
+    assert!(h.state.pending_permission.is_none());
+    assert_eq!(h.state.permission_queue.len(), 1);
+    assert_eq!(
+        search_press(&mut h.state, &mut tabs, Key::Char('y')),
+        InputAction::SearchQueryChanged
+    );
+    assert_eq!(h.state.search_state.query, "needley");
+    assert!(
+        h.state.pending_permission.is_none(),
+        "{id:?} must stay queued"
+    );
+    assert_eq!(h.state.permission_queue.len(), 1);
+    assert_eq!(h.state.input_buffer, "untouched Search draft");
+
+    // Close this exact fixture, not a fresh Search without the queued request.
+    assert_eq!(
+        search_press(&mut h.state, &mut tabs, Key::Ctrl('c')),
+        InputAction::CloseSearch
+    );
+    assert!(h.state.modal_stack.is_empty());
+    assert_permission_painted(&mut h, &tabs, &id);
+    approval_bridge::apply(
+        &mut h.state,
+        ApprovalRuntimeEvent::Cancelled {
+            id,
+            reason: rustain::domain::services::approval_runtime::CancelReason::SourceAborted,
+        },
+        None,
+    );
+    assert_eq!(
+        press(&mut h.state, Key::Ctrl('c')),
+        InputAction::CancelOrQuit
+    );
+}
+
+#[test]
+fn quit_cancel_restores_the_identical_search_frame_and_query_in_both_contexts() {
+    for navigating in [false, true] {
+        for cancel in [Key::Char('n'), Key::Esc, Key::Ctrl('c')] {
+            let (mut h, mut tabs) = search_top(navigating);
+            let frame = h.state.modal_stack.top().cloned();
+            let before = (
+                h.state.search_state.query.clone(),
+                h.state.search_state.matches.clone(),
+                h.state.search_state.focused_match_index,
+                h.state.search_state.substate,
+                h.state.search_state.owning_tab,
+                format!("{:?}", h.state.search_state.pre_search_view),
+                format!("{:?}", tabs.active_tab().view_state),
+                h.state.input_buffer.clone(),
+                h.state.cursor_position,
+            );
+            let id = request_permission(&mut h.state);
+            assert_permission_deferred(&h.state, &id);
+            assert_eq!(
+                search_press(&mut h.state, &mut tabs, Key::Ctrl('q')),
+                InputAction::Quit
+            );
+            quit_confirm::request(
+                &mut h.state,
+                QuitFacts {
+                    streams: 1,
+                    ..QuitFacts::idle(QuitHost::Local)
+                },
+            );
+            assert_eq!(
+                h.state.modal_stack.top().unwrap().surface,
+                Surface::QuitConfirm
+            );
+            assert_eq!(
+                search_press(&mut h.state, &mut tabs, cancel),
+                InputAction::Consumed
+            );
+            assert_eq!(h.state.modal_stack.top(), frame.as_ref());
+            assert_eq!(
+                (
+                    h.state.search_state.query.clone(),
+                    h.state.search_state.matches.clone(),
+                    h.state.search_state.focused_match_index,
+                    h.state.search_state.substate,
+                    h.state.search_state.owning_tab,
+                    format!("{:?}", h.state.search_state.pre_search_view),
+                    format!("{:?}", tabs.active_tab().view_state),
+                    h.state.input_buffer.clone(),
+                    h.state.cursor_position,
+                ),
+                before
+            );
+            assert_permission_deferred(&h.state, &id);
+            search_press(&mut h.state, &mut tabs, Key::Esc);
+            assert!(h.state.modal_stack.is_empty());
+            assert_permission_painted(&mut h, &tabs, &id);
+        }
+    }
+}
+
+#[test]
+fn reverse_search_accept_and_cancel_promote_and_paint_the_exact_queued_request() {
+    for key in [Key::Enter, Key::Esc, Key::Ctrl('c')] {
+        let mut h = crate::e2e_harness::TestHarness::new();
+        let tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+        h.state.active_tab_id = tabs.active_tab_id();
+        h.state.input_history.push("selected history entry".into());
+        h.state.input_buffer = "retained draft".into();
+        h.state.cursor_position = 4;
+        assert_eq!(press(&mut h.state, Key::Ctrl('r')), InputAction::Consumed);
+        assert_eq!(press(&mut h.state, Key::Char('s')), InputAction::Consumed);
+        assert!(h.state.reverse_search.is_open());
+        assert_eq!(h.state.reverse_search.matches.len(), 1);
+        let id = request_permission(&mut h.state);
+        assert_permission_deferred(&h.state, &id);
+        assert_eq!(press(&mut h.state, key), InputAction::Consumed);
+        assert!(!h.state.reverse_search.is_open());
+        assert!(h.state.modal_stack.is_empty());
+        assert_eq!(
+            h.state.input_buffer,
+            if key == Key::Enter {
+                "selected history entry"
+            } else {
+                "retained draft"
+            }
+        );
+        assert_eq!(
+            h.state.cursor_position,
+            if key == Key::Enter {
+                "selected history entry".len()
+            } else {
+                4
+            }
+        );
+        assert_permission_painted(&mut h, &tabs, &id);
     }
 }

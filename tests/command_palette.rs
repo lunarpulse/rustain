@@ -11,7 +11,7 @@ use rustain::adapters::tui::widgets::{command_palette, which_key_bar};
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-use rustain::domain::models::visual::{DensityMode, OverlayType};
+use rustain::domain::models::visual::DensityMode;
 
 // ============================================================
 // Unit: PaletteRegistry (Task 9.1)
@@ -729,29 +729,33 @@ fn test_ctrl_x_dismisses_autocomplete_before_opening() {
 #[test]
 fn test_ctrl_p_dismisses_reverse_search() {
     let mut state = TuiState::new(80, 24);
-    state.reverse_search.active = true;
-    state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
+    assert!(state.reverse_search.is_open());
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
 
-    // P16: Ctrl+P from ReverseSearch (Tier-2 overlay) should dismiss reverse_search
-    // and open command palette.
+    // P16: Ctrl+P dismisses the ReverseSearch Input popup and opens the palette.
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
     assert_eq!(action, InputAction::Consumed);
     assert!(presentation::is_open(&state, Surface::CommandPalette));
-    assert!(!state.reverse_search.active);
+    assert!(!state.reverse_search.is_open());
 }
 
 #[test]
 fn test_ctrl_x_while_reverse_search_opens_which_key() {
     let mut state = TuiState::new(80, 24);
-    state.reverse_search.active = true;
-    state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
+    assert!(state.reverse_search.is_open());
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
 
-    // P16: Ctrl+X from ReverseSearch (Tier-2 overlay) should dismiss reverse_search
-    // and open which-key.
+    // P16: Ctrl+X dismisses the ReverseSearch Input popup and opens which-key.
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX));
     assert_eq!(action, InputAction::Consumed);
     assert!(state.pending_leader.is_some());
-    assert!(!state.reverse_search.active);
+    assert!(!state.reverse_search.is_open());
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
 }
 
 // ============================================================

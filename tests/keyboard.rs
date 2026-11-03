@@ -431,11 +431,10 @@ fn test_ctrl_r_activates_reverse_search() {
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
     assert_eq!(action, InputAction::Consumed);
-    assert!(state.reverse_search.active);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(rustain::domain::models::visual::OverlayType::ReverseSearch)
-    );
+    assert!(state.reverse_search.is_open());
+    assert_eq!(state.reverse_search.selected_match, Some(0));
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
 }
 
 // Covers: UX-DR74 — Reverse search: typing filters, Enter selects, Esc cancels
@@ -448,7 +447,7 @@ fn test_reverse_search_flow() {
 
     // Activate reverse search
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
-    assert!(state.reverse_search.active);
+    assert!(state.reverse_search.is_open());
 
     // Type "auth" to filter
     handle_input(&mut state, &DomainInputEvent::KeyPress('a'));
@@ -461,8 +460,11 @@ fn test_reverse_search_flow() {
 
     // Enter selects the match
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-    assert!(!state.reverse_search.active);
+    assert!(!state.reverse_search.is_open());
     assert!(state.input_buffer.contains("auth"));
+    assert_eq!(state.cursor_position, state.input_buffer.len());
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(state.modal_stack.is_empty());
 }
 
 // Covers: UX-DR74 — Reverse search: Esc cancels
@@ -470,13 +472,18 @@ fn test_reverse_search_flow() {
 fn test_reverse_search_cancel() {
     let mut state = TuiState::new(80, 24);
     state.input_history.push("hello".to_string());
+    state.input_buffer = "draft".into();
+    state.cursor_position = 2;
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlR));
-    assert!(state.reverse_search.active);
+    assert!(state.reverse_search.is_open());
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
-    assert!(!state.reverse_search.active);
+    assert!(!state.reverse_search.is_open());
     assert_eq!(state.focus, FocusState::Input);
+    assert_eq!(state.input_buffer, "draft");
+    assert_eq!(state.cursor_position, 2);
+    assert!(state.modal_stack.is_empty());
 }
 
 // === Autocomplete keyboard tests (Story 3.2, Task 6) ===

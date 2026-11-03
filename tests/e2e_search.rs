@@ -2,10 +2,8 @@
 //!
 //! These tests exercise the input-dispatch layer (`handle_input` → `InputAction`)
 //! and the render-layer integration (`render_with_search` applies highlights).
-//! They do NOT cover the event-loop handler layer (find_matches + calm-jump
-//! rule) — those run in `event_loop.rs` inside an async runtime. Lib-level
-//! dispatch tests in `src/adapters/tui/app.rs::tests` cover the state
-//! transitions directly.
+//! Production Search effects use `handlers::search::handle_search_action`;
+//! frame-only routing fixtures open through the real presentation reducer.
 
 use std::collections::HashMap;
 
@@ -14,16 +12,21 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::state::{SearchState, SearchSubstate, TabRenderState, TuiState};
+use rustain::adapters::tui::handlers::search;
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::layout::compute_layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::{self, Shell, Surface, reducer};
+use rustain::adapters::tui::state::{SearchSubstate, TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::chat_pane::RenderResult;
+use rustain::adapters::tui::widgets::chat_pane::render_with_search;
 use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
-use rustain::adapters::tui::widgets::{chat_pane::render_with_search, search_bar};
 use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
+use rustain::domain::models::tab::TabManager;
 use rustain::domain::models::view_state::ViewState;
-use rustain::domain::models::visual::OverlayType;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FocusState, MessageRole, StreamingState,
 };
@@ -82,6 +85,34 @@ fn make_state_with_focus(focus: FocusState) -> TuiState {
     let mut s = TuiState::new(80, 24);
     s.focus = focus;
     s
+}
+
+fn render_search_frame(state: &TuiState) -> Terminal<TestBackend> {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            let layout = compute_layout(
+                frame.area(),
+                &state.theme,
+                &state.input_buffer,
+                1,
+                state.sidebar_visible,
+                state.density_mode,
+            )
+            .unwrap();
+            let shell = Shell::new(frame.area(), &layout);
+            presentation::compose(
+                frame,
+                state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                |_| {},
+                |_| {},
+            );
+        })
+        .unwrap();
+    terminal
 }
 
 fn render_once(
@@ -144,8 +175,11 @@ fn test_e2e_ctrl_f_opens_search_bar() {
     state.input_buffer.clear();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlF));
     assert_eq!(action, InputAction::OpenSearch);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
-    assert!(state.search_state.active);
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Search);
+    assert!(rustain::adapters::tui::presentation::is_open(
+        &state,
+        Surface::Search
+    ));
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
 }
 
@@ -156,8 +190,11 @@ fn test_e2e_ctrl_f_from_input_with_pending_text_is_ignored() {
     let mut state = make_state_with_focus(FocusState::Input);
     state.input_buffer = "hello ".to_string();
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlF));
-    assert_ne!(state.focus, FocusState::Overlay(OverlayType::Search));
-    assert!(!state.search_state.active);
+    assert!(!rustain::adapters::tui::presentation::is_open(
+        &state,
+        Surface::Search
+    ));
+    assert_eq!(state.focus, FocusState::Input);
 }
 
 #[test]
@@ -166,9 +203,13 @@ fn test_e2e_ctrl_f_from_input_with_empty_buffer_opens_search() {
     // when the input buffer is empty.
     let mut state = make_state_with_focus(FocusState::Input);
     state.input_buffer.clear();
-    handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlF));
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
-    assert!(state.search_state.active);
+    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlF));
+    assert_eq!(action, InputAction::OpenSearch);
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Search);
+    assert!(rustain::adapters::tui::presentation::is_open(
+        &state,
+        Surface::Search
+    ));
 }
 
 // ── AC2: Live incremental highlighting ─────────────────────────────────────
@@ -205,12 +246,18 @@ fn test_e2e_search_no_matches_renders_plain() {
 #[test]
 fn test_e2e_search_enter_commits_query_transitions_substate() {
     // AC3: Enter in Typing sub-state → transition to Navigating (when matches exist).
-    // handle_input returns SearchCommit; the event loop then mutates the
-    // substate. We simulate the event loop dispatch here via a minimal
-    // post-action handler so the test verifies both halves of the contract.
+    // Route through a real frame and apply the production Search effect.
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    let conversation = make_conversation(vec!["fox"]);
+    let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+    tabs.active_tab_mut().conversation = conversation.clone();
+    reducer::open(&mut state, Surface::Search);
+    search::handle_search_action(
+        &mut tabs,
+        &mut state,
+        &conversation,
+        &InputAction::OpenSearch,
+    );
     state.search_state.matches = vec![rustain::domain::services::search::SearchMatch {
         message_index: 0,
         byte_start: 0,
@@ -225,11 +272,7 @@ fn test_e2e_search_enter_commits_query_transitions_substate() {
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::SearchCommit);
-    // Simulate the event loop's SearchCommit handler: transition to
-    // Navigating when matches.len() > 0 (mirror of event_loop.rs dispatch).
-    if !state.search_state.matches.is_empty() {
-        state.search_state.substate = SearchSubstate::Navigating;
-    }
+    search::handle_search_action(&mut tabs, &mut state, &conversation, &action);
     assert_eq!(
         state.search_state.substate,
         SearchSubstate::Navigating,
@@ -241,17 +284,22 @@ fn test_e2e_search_enter_commits_query_transitions_substate() {
 fn test_e2e_search_enter_on_zero_matches_stays_in_typing() {
     // AC3: Enter with zero matches is a no-op — stay in Typing.
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    let conversation = make_conversation(vec!["nothing matches"]);
+    let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+    tabs.active_tab_mut().conversation = conversation.clone();
+    reducer::open(&mut state, Surface::Search);
+    search::handle_search_action(
+        &mut tabs,
+        &mut state,
+        &conversation,
+        &InputAction::OpenSearch,
+    );
     state.search_state.query = "xyzzy".to_string();
     state.search_state.matches = vec![]; // no matches
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::SearchCommit);
-    // Simulate event-loop guard: no transition when matches is empty.
-    if !state.search_state.matches.is_empty() {
-        state.search_state.substate = SearchSubstate::Navigating;
-    }
+    search::handle_search_action(&mut tabs, &mut state, &conversation, &action);
     assert_eq!(
         state.search_state.substate,
         SearchSubstate::Typing,
@@ -264,8 +312,7 @@ fn test_e2e_search_n_in_query_stays_in_typing_critical_regression() {
     // CRITICAL regression guard for the spec bug: typing `nginx` must NOT
     // trigger navigation. Every `n` / `N` in Typing sub-state is a literal.
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    reducer::open(&mut state, Surface::Search);
     for c in "nginx".chars() {
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         assert_eq!(action, InputAction::SearchQueryChanged);
@@ -277,8 +324,7 @@ fn test_e2e_search_n_in_query_stays_in_typing_critical_regression() {
 #[test]
 fn test_e2e_search_n_key_in_navigating_navigates() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    reducer::open(&mut state, Surface::Search);
     state.search_state.substate = SearchSubstate::Navigating;
     let action_n = handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
     assert_eq!(action_n, InputAction::SearchNext);
@@ -289,8 +335,7 @@ fn test_e2e_search_n_key_in_navigating_navigates() {
 #[test]
 fn test_e2e_search_return_to_typing_from_navigating() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    reducer::open(&mut state, Surface::Search);
     state.search_state.query = "foo".to_string();
     state.search_state.substate = SearchSubstate::Navigating;
     // Typing 'x' in Navigating returns to Typing AND appends the char.
@@ -305,8 +350,7 @@ fn test_e2e_search_return_to_typing_from_navigating() {
 #[test]
 fn test_e2e_search_esc_closes_overlay() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    reducer::open(&mut state, Surface::Search);
     state.search_state.query = "test".to_string();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(action, InputAction::CloseSearch);
@@ -317,8 +361,7 @@ fn test_e2e_search_esc_closes_overlay() {
 #[test]
 fn test_e2e_search_ctrl_u_clears_query() {
     let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Search);
-    state.search_state.active = true;
+    reducer::open(&mut state, Surface::Search);
     state.search_state.query = "something long".to_string();
     state.search_state.substate = SearchSubstate::Navigating;
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlU));
@@ -348,14 +391,10 @@ fn test_e2e_find_matches_against_live_conversation() {
 
 #[test]
 fn test_e2e_search_bar_renders_counter_when_matches_exist() {
-    // Render the search_bar widget directly with a populated state.
-    let backend = TestBackend::new(80, 1);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = Theme::dark();
-    let mut state = SearchState::new();
-    state.active = true;
-    state.query = "test".to_string();
-    state.matches = vec![
+    let mut state = TuiState::new(80, 24);
+    reducer::open(&mut state, Surface::Search);
+    state.search_state.query = "test".to_string();
+    state.search_state.matches = vec![
         SearchMatch {
             message_index: 0,
             byte_start: 0,
@@ -367,12 +406,8 @@ fn test_e2e_search_bar_renders_counter_when_matches_exist() {
             byte_end: 4,
         },
     ];
-    state.focused_match_index = 0;
-    terminal
-        .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme, true);
-        })
-        .unwrap();
+    state.search_state.focused_match_index = 0;
+    let terminal = render_search_frame(&state);
     let text = common::buffer_text(&terminal);
     assert!(text.contains("Search:"));
     assert!(text.contains("test"));
@@ -381,35 +416,21 @@ fn test_e2e_search_bar_renders_counter_when_matches_exist() {
 
 #[test]
 fn test_e2e_search_bar_shows_no_matches_found_when_query_has_zero_matches() {
-    let backend = TestBackend::new(80, 1);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = Theme::dark();
-    let mut state = SearchState::new();
-    state.active = true;
-    state.query = "xyzzy".to_string();
+    let mut state = TuiState::new(80, 24);
+    reducer::open(&mut state, Surface::Search);
+    state.search_state.query = "xyzzy".to_string();
     // matches intentionally empty
-    terminal
-        .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme, true);
-        })
-        .unwrap();
+    let terminal = render_search_frame(&state);
     let text = common::buffer_text(&terminal);
     assert!(text.contains("No matches found"));
 }
 
 #[test]
 fn test_e2e_search_bar_shows_zero_zero_when_query_empty() {
-    let backend = TestBackend::new(80, 1);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let theme = Theme::dark();
-    let mut state = SearchState::new();
-    state.active = true;
+    let mut state = TuiState::new(80, 24);
+    reducer::open(&mut state, Surface::Search);
     // query empty, matches empty
-    terminal
-        .draw(|frame| {
-            search_bar::render(frame, frame.area(), &state, &theme, true);
-        })
-        .unwrap();
+    let terminal = render_search_frame(&state);
     let text = common::buffer_text(&terminal);
     assert!(text.contains("0/0"));
 }

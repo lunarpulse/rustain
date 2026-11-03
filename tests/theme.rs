@@ -331,7 +331,7 @@ fn test_density_mode_variants() {
 #[test]
 fn test_focus_state_variants() {
     use rustain::domain::models::FocusState;
-    use rustain::domain::models::visual::{OverlayType, PanelType};
+    use rustain::domain::models::visual::{ConfirmationType, OverlayType, PanelType};
 
     // 4 variants: Input, Chat, Sidebar, Overlay
     let input = FocusState::Input;
@@ -340,7 +340,7 @@ fn test_focus_state_variants() {
         panel: PanelType::History,
         selected: 0,
     };
-    let overlay = FocusState::Overlay(OverlayType::Search);
+    let overlay = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
 
     // Chat is a unit variant (scroll state owned by TuiState)
     assert_eq!(chat, FocusState::Chat);
@@ -356,8 +356,8 @@ fn test_focus_state_variants() {
 fn test_overlay_type_variants() {
     use rustain::domain::models::visual::OverlayType;
 
-    // Ba selectors and Login are frames, not legacy focus variants.
-    let variants = [OverlayType::Search, OverlayType::CrossSearch];
+    // Migrated Search/selectors/Login are frames; these two still-legacy variants remain.
+    let variants = [OverlayType::CrossSearch, OverlayType::BookmarkList];
     assert_eq!(variants.len(), 2);
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::Surface;
@@ -367,6 +367,7 @@ fn test_overlay_type_variants() {
         (Surface::ProfileSwitcher, Context::ProfileSwitcher),
         (Surface::UsagePanel, Context::UsagePanel),
         (Surface::Login, Context::Login),
+        (Surface::Search, Context::SearchTyping),
     ] {
         assert_eq!(surface.context(), context);
     }

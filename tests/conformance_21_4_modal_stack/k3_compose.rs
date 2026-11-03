@@ -379,17 +379,28 @@ fn wide_sidebar_cells_below_the_frame_are_dimmed_without_reflow() {
 }
 
 #[test]
-fn quit_hides_legacy_search_cursors_and_cancel_restores_them() {
-    use rustain::adapters::tui::widgets::{cross_search, reverse_search, search_bar};
+fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
+    use rustain::adapters::tui::widgets::{cross_search, input_box};
     use rustain::domain::models::{FocusState, visual::PanelType};
     for surface in ["search", "reverse", "cross"] {
         let mut state = TuiState::new(130, 30);
         match surface {
             "search" => {
                 press(&mut state, Key::Ctrl('f'));
+                press_all(
+                    &mut state,
+                    &[Key::Char('f'), Key::Char('o'), Key::Char('x')],
+                );
             }
             "reverse" => {
-                press(&mut state, Key::Ctrl('r'));
+                state.input_buffer = "kept draft".into();
+                state.cursor_position = 4;
+                state.input_history.push("界 first".into());
+                state.input_history.push("界 second".into());
+                press_all(&mut state, &[Key::Ctrl('r'), Key::Char('界'), Key::Down]);
+                assert_eq!(state.focus, FocusState::Input);
+                assert!(state.modal_stack.is_empty());
+                assert_eq!(state.reverse_search.selected_match, Some(1));
             }
             _ => {
                 state.sidebar_visible = true;
@@ -418,6 +429,23 @@ fn quit_hides_legacy_search_cursors_and_cancel_restores_them() {
                     )
                     .unwrap();
                     let shell = Shell::new(frame.area(), &layout);
+                    if surface == "reverse" {
+                        input_box::render(
+                            frame,
+                            shell.input_area,
+                            &state.input_buffer,
+                            state.cursor_position,
+                            if show_cursor {
+                                state.focus.clone()
+                            } else {
+                                FocusState::Chat
+                            },
+                            &state.theme,
+                            state.multiline_mode,
+                            state.input_scroll_offset,
+                            None,
+                        );
+                    }
                     presentation::compose(
                         frame,
                         state,
@@ -425,25 +453,7 @@ fn quit_hides_legacy_search_cursors_and_cancel_restores_them() {
                         Host::Local,
                         &LogFacts::default(),
                         |frame| match surface {
-                            "search" => search_bar::render(
-                                frame,
-                                Rect::new(
-                                    shell.chat_pane.x,
-                                    shell.chat_pane.y,
-                                    shell.chat_pane.width,
-                                    1,
-                                ),
-                                &state.search_state,
-                                &state.theme,
-                                show_cursor,
-                            ),
-                            "reverse" => reverse_search::render(
-                                frame,
-                                shell.input_area,
-                                &state.reverse_search,
-                                &state.theme,
-                                show_cursor,
-                            ),
+                            "search" | "reverse" => {}
                             _ => cross_search::render(
                                 frame,
                                 layout.sidebar.unwrap(),
@@ -456,20 +466,123 @@ fn quit_hides_legacy_search_cursors_and_cancel_restores_them() {
                     );
                 })
                 .unwrap();
-            terminal.backend().cursor_visible()
+            let cursor = terminal.get_cursor_position().unwrap();
+            (
+                terminal.backend().buffer().clone(),
+                terminal.backend().cursor_visible(),
+                cursor,
+            )
         };
-        assert!(
-            paint(&state),
-            "{surface}: the real legacy cursor is the positive control"
+        let before = paint(&state);
+        assert_eq!(
+            before.1,
+            surface != "search",
+            "{surface}: Search frames hide the hardware cursor under A7; legacy controls show it"
         );
+        if surface == "search" {
+            let stage = layout(&state).chat_pane;
+            assert!(
+                row(&before.0, stage, stage.y).starts_with("Search: fox"),
+                "the real Search frame must paint despite its hidden cursor"
+            );
+        }
+        let reverse_payload = (
+            state.reverse_search.query.clone(),
+            state.reverse_search.matches.clone(),
+            state.reverse_search.selected_match,
+        );
+        if surface == "reverse" {
+            let chat = layout(&state).chat_pane;
+            let title = |buffer: &Buffer| {
+                (chat.y..chat.bottom()).any(|y| row(buffer, chat, y).contains("Reverse Search"))
+            };
+            assert!(title(&before.0), "compose owns the reverse popup paint");
+            assert!(row(&before.0, chat, chat.bottom() - 5).contains("Reverse Search"));
+            assert_eq!(
+                (before.2.x, before.2.y),
+                (
+                    chat.x
+                        + 1
+                        + rustain::adapters::tui::text_geometry::cells("(reverse-search): 界")
+                            as u16,
+                    chat.bottom() - 4,
+                ),
+                "popup cursor must win over the already-painted composer cursor"
+            );
+            state.focus = FocusState::Chat;
+            let other_focus = paint(&state);
+            assert!(
+                !title(&other_focus.0),
+                "non-Input base suppresses popup cells"
+            );
+            assert!(!other_focus.1, "non-Input base suppresses popup cursor");
+            state.focus = focus.clone();
+            state.reverse_search.dismiss();
+            let closed = paint(&state);
+            assert!(!title(&closed.0), "closed payload must not paint");
+            assert!(closed.1, "closed popup returns the composer cursor");
+            assert_ne!(closed.2, before.2);
+            state.reverse_search.selected_match = Some(0);
+            state.reverse_search.matches.clear();
+            let empty = paint(&state);
+            assert!(title(&empty.0), "Some(0) keeps empty results open");
+            assert!(empty.1, "empty results retain the popup cursor");
+            assert_eq!(empty.2.x, before.2.x);
+            assert_eq!(
+                empty.2.y,
+                chat.bottom() - 3,
+                "empty-results popup has four fitted rows"
+            );
+            state.reverse_search.matches = reverse_payload.1.clone();
+            state.reverse_search.selected_match = reverse_payload.2;
+        }
         open_quit(&mut state);
+        let covered = paint(&state);
         assert!(
-            !paint(&state),
+            !covered.1,
             "{surface}: no hidden text field owns the terminal cursor"
         );
+        if surface == "reverse" {
+            let chat = layout(&state).chat_pane;
+            assert!(
+                !(chat.y..chat.bottom())
+                    .any(|y| row(&covered.0, chat, y).contains("Reverse Search")),
+                "a frame suppresses the routed popup cells, not just its cursor"
+            );
+        }
         press(&mut state, Key::Char('n'));
         assert_eq!(state.focus, focus);
-        assert!(paint(&state), "{surface}: cancel returns the legacy cursor");
+        let restored = paint(&state);
+        assert_eq!(
+            restored.1,
+            surface != "search",
+            "{surface}: cancel restores the original A7 cursor policy"
+        );
+        assert_eq!(restored.2, before.2, "{surface}: exact cursor is restored");
+        if surface == "search" {
+            let stage = layout(&state).chat_pane;
+            assert_eq!(
+                row(&restored.0, stage, stage.y),
+                row(&before.0, stage, stage.y),
+                "cancel restores exact Search query and counter cells"
+            );
+        }
+        assert_eq!(
+            (
+                state.reverse_search.query,
+                state.reverse_search.matches,
+                state.reverse_search.selected_match,
+            ),
+            reverse_payload,
+            "{surface}: Quit preserves the exact reverse payload"
+        );
+        if surface == "reverse" {
+            assert_eq!(restored.0, before.0, "cancel restores exact popup cells");
+            assert_eq!(
+                (state.input_buffer.as_str(), state.cursor_position),
+                ("kept draft", 4)
+            );
+        }
     }
 }
 
@@ -1089,4 +1202,26 @@ fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
             );
         }
     }
+}
+
+#[test]
+fn reverse_search_matches_paint_above_the_unchanged_composer() {
+    let mut h = crate::e2e_harness::TestHarness::new();
+    h.state.input_buffer = "retained-composer".into();
+    h.state.cursor_position = 4;
+    h.state.input_history.push("history-first".into());
+    h.state.input_history.push("history-second".into());
+    press(&mut h.state, Key::Ctrl('r'));
+    press(&mut h.state, Key::Char('h'));
+    h.render();
+    let screen = h.screen_text();
+    assert!(
+        screen.contains("history-first"),
+        "history results must not be clipped to composer height"
+    );
+    assert!(screen.contains("history-second"));
+    assert!(
+        screen.contains("retained-composer"),
+        "popup never paints over the composer"
+    );
 }

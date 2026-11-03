@@ -5,12 +5,12 @@ use crate::adapters::tui::state::ReverseSearchState;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
-/// Maximum visible matches in the reverse search overlay.
+/// Maximum visible matches in the reverse search popup.
 const MAX_VISIBLE_MATCHES: usize = 5;
 
-/// Render the reverse search overlay above the input box.
+/// Render the reverse search popup above the input box.
 /// `show_cursor` controls only hardware cursor placement, not painted cells.
-// Covers: UX-DR74 (reverse search overlay)
+// Covers: UX-DR74 (reverse search popup)
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -18,9 +18,12 @@ pub fn render(
     theme: &Theme,
     show_cursor: bool,
 ) {
-    if !state.active {
+    if !state.is_open() {
         return;
     }
+    let selected_match = state
+        .selected_match
+        .expect("open reverse search has a selection");
 
     let mut lines: Vec<Line> = Vec::new();
 
@@ -55,7 +58,7 @@ pub fn render(
             Style::default().fg(theme.colors.fg_muted),
         )));
     } else {
-        let scroll = state.selected_match.saturating_sub(MAX_VISIBLE_MATCHES - 1);
+        let scroll = selected_match.saturating_sub(MAX_VISIBLE_MATCHES - 1);
         for (i, (_idx, entry)) in state
             .matches
             .iter()
@@ -64,12 +67,12 @@ pub fn render(
             .enumerate()
         {
             let display_idx = i + scroll;
-            let prefix = if display_idx == state.selected_match {
+            let prefix = if display_idx == selected_match {
                 " ▸ "
             } else {
                 "   "
             };
-            let style = if display_idx == state.selected_match {
+            let style = if display_idx == selected_match {
                 Style::default().fg(theme.colors.accent)
             } else {
                 Style::default().fg(theme.colors.fg_secondary)
@@ -137,18 +140,17 @@ mod tests {
 
     fn state(query: &str, matches: &[&str]) -> ReverseSearchState {
         ReverseSearchState {
-            active: true,
             query: query.to_string(),
             matches: matches
                 .iter()
                 .enumerate()
                 .map(|(i, m)| (i, (*m).to_string()))
                 .collect(),
-            selected_match: 0,
+            selected_match: Some(0),
         }
     }
 
-    /// Paint the real overlay in a terminal exactly as tall as the overlay
+    /// Paint the real popup in a terminal exactly as tall as the popup
     /// (1 query row, `matches` rows, 2 borders). Returns glyph rows (wide
     /// glyph continuations dropped), the buffer and the backend caret.
     fn draw(

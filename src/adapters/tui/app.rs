@@ -266,10 +266,10 @@ pub enum InputAction {
     /// Rewind confirmation: user pressed n or Esc.
     // Covers: Story 4-3b, AC1
     RewindCancel,
-    /// Open the within-conversation search overlay (Ctrl+F in Chat focus).
+    /// Initialize a fresh Search frame (Ctrl+F from empty Input).
     // Covers: Story 4-4, AC1 (UX-DR86)
     OpenSearch,
-    /// Close the search overlay (Esc from Search overlay).
+    /// Back from Search: restore the owning Stage's exact pre-search view.
     // Covers: Story 4-4, AC4
     CloseSearch,
     /// Query string changed — event loop should re-run `find_matches`
@@ -277,8 +277,7 @@ pub enum InputAction {
     /// in the Typing sub-state.
     // Covers: Story 4-4, AC2
     SearchQueryChanged,
-    /// Enter pressed in Typing sub-state — if matches exist, transition
-    /// to Navigating.
+    /// Enter commits Typing with matches, or closes Navigating at its position.
     // Covers: Story 4-4, AC3
     SearchCommit,
     /// `n` in Navigating — advance focused match (wraps at end).
@@ -587,6 +586,7 @@ pub fn handle_operator_input(
 pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
     !state.modal_stack.is_empty()
         || state.pending_leader.is_some()
+        || state.reverse_search.is_open()
         || state.pending_plan_card.is_some()
         || state.pending_delegation_card.is_some()
         || state.pending_consolidation_card.is_some()
@@ -728,6 +728,7 @@ fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAc
     // they are consumed no-ops, never the plain letter (Story 21.3 AC12, PC-13).
     let action = dispatch_input(state, event);
     if state.focus == FocusState::Input
+        && !state.reverse_search.is_open()
         && matches!(
             event,
             DomainInputEvent::KeyPress(_)
@@ -754,8 +755,7 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
                     && !matches!(
                         state.focus,
                         FocusState::Overlay(
-                            OverlayType::Search
-                                | OverlayType::CrossSearch
+                            OverlayType::CrossSearch
                                 | OverlayType::BookmarkList
                                 | OverlayType::Confirmation(_)
                                 | OverlayType::WaveOverlay
@@ -1047,7 +1047,7 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
         }
         DomainInputEvent::Paste(text) => {
             // Insert text at cursor position (bracketed paste mode)
-            if matches!(state.focus, FocusState::Input) {
+            if matches!(state.focus, FocusState::Input) && !state.reverse_search.is_open() {
                 let byte_pos = char_to_byte(&state.input_buffer, state.cursor_position);
                 state.input_buffer.insert_str(byte_pos, text);
                 // A paste is authored text, not part of the popup's provisional edit.
@@ -1065,31 +1065,26 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
 // through one `execute`. The inline cards (FR-21-3-b / A9) and the login overlay keep
 // their own arms.
 
-/// A frame or the still-routed legacy reverse search owns character keys.
+/// A frame or routed reverse-search popup owns character keys.
 fn char_overlay_context(state: &TuiState) -> Option<Context> {
     state
         .modal_stack
         .top()
-        .map(|frame| frame.surface.context())
+        .map(|frame| presentation::frame_context(state, frame.surface))
         .or_else(|| {
             state
                 .reverse_search
-                .active
+                .is_open()
                 .then_some(Context::ReverseSearch)
         })
 }
 
 /// The overlay context the focus names, if any.
 pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
-    use crate::adapters::tui::state::SearchSubstate;
     let FocusState::Overlay(overlay) = &state.focus else {
         return None;
     };
     Some(match overlay {
-        OverlayType::Search => match state.search_state.substate {
-            SearchSubstate::Typing => Context::SearchTyping,
-            SearchSubstate::Navigating => Context::SearchNavigating,
-        },
         OverlayType::CrossSearch => Context::CrossSearch,
         OverlayType::BookmarkList => Context::BookmarkList,
         OverlayType::WaveOverlay => Context::WaveOverlay,
@@ -1104,12 +1099,12 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
         return Some(Context::Leader);
     }
     if let Some(frame) = state.modal_stack.top() {
-        return Some(frame.surface.context());
+        return Some(presentation::frame_context(state, frame.surface));
     }
     if state.autocomplete.is_open() {
         return Some(Context::Autocomplete);
     }
-    if state.reverse_search.active {
+    if state.reverse_search.is_open() {
         return Some(Context::ReverseSearch);
     }
     let tasks = &state.task_panel_state;
@@ -1359,19 +1354,16 @@ pub(crate) fn open_leader(state: &mut TuiState) -> InputAction {
     let origin = state
         .modal_stack
         .top()
-        .map(|frame| frame.surface.context())
+        .map(|frame| presentation::frame_context(state, frame.surface))
         .unwrap_or(match state.focus {
-            FocusState::Input | FocusState::Overlay(OverlayType::ReverseSearch) => Context::Input,
+            FocusState::Input => Context::Input,
             FocusState::Sidebar { .. } => Context::Sidebar,
             _ => Context::Chat,
         });
     if state.autocomplete.is_open() {
         state.autocomplete.dismiss();
     }
-    state.reverse_search.active = false;
-    if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {
-        state.focus = FocusState::Input;
-    }
+    state.reverse_search.dismiss();
     state.pending_leader = Some(origin);
     state.leader_feedback = None;
     state.needs_redraw = true;
@@ -1383,10 +1375,7 @@ pub(crate) fn open_palette(state: &mut TuiState) -> InputAction {
     if state.autocomplete.is_open() {
         state.autocomplete.dismiss();
     }
-    state.reverse_search.active = false;
-    if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {
-        state.focus = FocusState::Input;
-    }
+    state.reverse_search.dismiss();
     presentation::reducer::open(state, Surface::CommandPalette);
     InputAction::Consumed
 }
@@ -1627,21 +1616,12 @@ fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
             if state.autocomplete.is_open() {
                 state.autocomplete.dismiss();
             }
-            state.reverse_search.active = true;
-            state.reverse_search.query.clear();
-            state.reverse_search.matches.clear();
-            state.reverse_search.selected_match = 0;
-            state.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+            state.reverse_search.reset();
             state.needs_redraw = true;
             InputAction::Consumed
         }
         InputCmd::OpenSearch if state.input_buffer.is_empty() => {
-            let prior = state.focus.clone();
-            state.search_state = crate::adapters::tui::state::SearchState::new();
-            state.search_state.active = true;
-            state.search_state.prior_focus = Some(prior);
-            state.focus = FocusState::Overlay(OverlayType::Search);
-            state.needs_redraw = true;
+            presentation::reducer::open(state, Surface::Search);
             InputAction::OpenSearch
         }
         InputCmd::OpenSearch => {
@@ -3088,7 +3068,7 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         overlay
     } else if state.autocomplete.is_open() && state.focus == FocusState::Input {
         Some(Context::Autocomplete)
-    } else if state.reverse_search.active {
+    } else if state.reverse_search.is_open() {
         Some(Context::ReverseSearch)
     } else {
         None
@@ -3653,27 +3633,27 @@ fn exec_reverse_search_keys(state: &mut TuiState, cmd: OverlayCmd) -> InputActio
             if let Some(selected) = state
                 .reverse_search
                 .matches
-                .get(state.reverse_search.selected_match)
+                .get(state.reverse_search.selected_match.unwrap_or(0))
             {
                 state.input_buffer = selected.1.clone();
                 state.cursor_position = state.input_buffer.chars().count();
             }
-            state.reverse_search.active = false;
-            state.focus = FocusState::Input;
+            state.reverse_search.dismiss();
             state.needs_redraw = true;
             InputAction::Consumed
         }
         OverlayCmd::RevClose => {
-            state.reverse_search.active = false;
-            state.focus = FocusState::Input;
+            state.reverse_search.dismiss();
             state.needs_redraw = true;
             InputAction::Consumed
         }
         OverlayCmd::RevOlder => {
             // Cycle to next match
             if !state.reverse_search.matches.is_empty() {
-                state.reverse_search.selected_match =
-                    (state.reverse_search.selected_match + 1) % state.reverse_search.matches.len();
+                state.reverse_search.selected_match = Some(
+                    (state.reverse_search.selected_match.unwrap_or(0) + 1)
+                        % state.reverse_search.matches.len(),
+                );
                 state.needs_redraw = true;
             }
             InputAction::Consumed
@@ -3681,11 +3661,12 @@ fn exec_reverse_search_keys(state: &mut TuiState, cmd: OverlayCmd) -> InputActio
         OverlayCmd::RevNewer => {
             // Cycle to previous match
             if !state.reverse_search.matches.is_empty() {
-                if state.reverse_search.selected_match == 0 {
-                    state.reverse_search.selected_match = state.reverse_search.matches.len() - 1;
+                let selected = state.reverse_search.selected_match.unwrap_or(0);
+                state.reverse_search.selected_match = Some(if selected == 0 {
+                    state.reverse_search.matches.len() - 1
                 } else {
-                    state.reverse_search.selected_match -= 1;
-                }
+                    selected - 1
+                });
                 state.needs_redraw = true;
             }
             InputAction::Consumed
@@ -3709,7 +3690,8 @@ fn update_reverse_search_matches(state: &mut TuiState) {
         .map(|(i, s)| (i, s.to_string()))
         .collect();
     let new_len = state.reverse_search.matches.len();
-    state.reverse_search.selected_match = old_selected.min(new_len.saturating_sub(1));
+    state.reverse_search.selected_match =
+        Some(old_selected.unwrap_or(0).min(new_len.saturating_sub(1)));
 }
 
 /// Convert a crossterm key event into a domain input event.
@@ -4614,16 +4596,18 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(ReverseSearch) with reverse search active",
+                label: "Input reverse search popup",
                 setup: Box::new(|s| {
-                    s.reverse_search.active = true;
-                    s.focus = FocusState::Overlay(OverlayType::ReverseSearch);
+                    s.reverse_search.reset();
+                    s.focus = FocusState::Input;
                 }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Search)",
-                setup: overlay(OverlayType::Search),
+                label: "Search frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::Search);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
@@ -4796,11 +4780,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_f_in_chat_opens_search_overlay_in_typing_substate() {
+    fn ctrl_f_in_input_opens_search_frame_in_typing_substate() {
         let mut state = make_state();
         open_search(&mut state);
-        assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
-        assert!(state.search_state.active);
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(presentation::is_open(&state, Surface::Search));
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
         assert_eq!(state.search_state.query, "");
     }
@@ -4836,8 +4820,8 @@ mod tests {
         {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
-        assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
-        assert!(state.search_state.active);
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(presentation::is_open(&state, Surface::Search));
     }
 
     #[test]
@@ -4854,8 +4838,8 @@ mod tests {
         {
             handle_input(&mut state, &DomainInputEvent::SpecialKey(key));
         }
-        assert_ne!(state.focus, FocusState::Overlay(OverlayType::Search));
-        assert!(!state.search_state.active);
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(!presentation::is_open(&state, Surface::Search));
     }
 
     #[test]
@@ -4975,6 +4959,44 @@ mod tests {
         open_search(&mut state);
         let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
         assert_eq!(action, InputAction::SearchCommit);
+    }
+
+    #[test]
+    fn search_navigating_enter_requests_keep_position_without_popping_before_effect() {
+        let mut state = make_state();
+        open_search(&mut state);
+        state.search_state.substate = SearchSubstate::Navigating;
+        let frame = state.modal_stack.top().cloned();
+        assert_eq!(focus_context(&state), Some(Context::SearchNavigating));
+        assert_eq!(
+            char_overlay_context(&state),
+            Some(Context::SearchNavigating)
+        );
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
+            InputAction::SearchCommit
+        );
+        assert_eq!(state.modal_stack.top(), frame.as_ref());
+        assert_eq!(state.focus, FocusState::Input);
+    }
+
+    #[test]
+    fn search_back_is_an_effect_and_leader_captures_the_dynamic_frame_context() {
+        let mut state = make_state();
+        open_search(&mut state);
+        let frame = state.modal_stack.top().cloned();
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlC)),
+            InputAction::CloseSearch
+        );
+        assert_eq!(state.modal_stack.top(), frame.as_ref());
+        state.search_state.substate = SearchSubstate::Navigating;
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlX)),
+            InputAction::Consumed
+        );
+        assert_eq!(state.pending_leader, Some(Context::SearchNavigating));
+        assert_eq!(state.modal_stack.top(), frame.as_ref());
     }
 
     // ── Story 4-4: Bookmark dispatch ─────────────────────────────────────────

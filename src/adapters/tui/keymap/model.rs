@@ -528,8 +528,8 @@ impl Context {
     /// Declared parents, nearest first.
     pub const fn parents(self) -> &'static [Context] {
         match self {
-            // Search and Bookmark consume Ctrl+X: no Global parent. Their own
-            // Ctrl+Q rows ask to quit without discarding their legacy state.
+            // Legacy Bookmark/Wave have no Global parent. Migrated frames declare
+            // their menu/quit rows explicitly; fields keep their edit inheritance.
             Context::Global
             | Context::Leader
             | Context::Permission

@@ -113,6 +113,10 @@ pub const ROWS: &[Binding] = &[
     bind(Context::UsagePanel, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     bind(Context::Login, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
     bind(Context::Login, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::SearchTyping, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::SearchTyping, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::SearchNavigating, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::SearchNavigating, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     // Quit preserves both migrated frames and the remaining legacy windows.
     bind(Context::ModelSelector, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the model selector"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").local().does("Ask to quit without closing the profile switcher"),

@@ -175,9 +175,11 @@ Also inherits: Append-only text field.
 |---|---|---|---|---|
 | `Enter` | Commit query → enable n/N navigation | local | portable |  |
 | `Ctrl+U` | Clear search query | local | portable |  |
-| `Esc` | Close search, preserve scroll | local | portable |  |
-| `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
+| `Esc` | Close search, restore pre-search view | local | portable |  |
+| `Ctrl+C` | Close search and restore the pre-search view (back one frame) | local | portable |  |
 | `Backspace` | Delete the last query character and search again | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
 
 ## Search (navigating)
@@ -186,12 +188,15 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Enter` | Keep position and close search | local | portable |  |
 | `n` | Next / previous match (Navigating mode) | local | portable |  |
 | `N` | Jump to the previous match | local | portable |  |
-| `Esc` | Close search and keep the scroll position | local | portable |  |
-| `Ctrl+C` | Close search and keep the scroll position (back one frame) | local | portable |  |
+| `Esc` | Close search and restore the pre-search view | local | portable |  |
+| `Ctrl+C` | Close search and restore the pre-search view (back one frame) | local | portable |  |
 | `Backspace` | Return to typing and delete the last query character | local | portable |  |
 | `Ctrl+U` | Clear the query and return to typing | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
 
 ## Bookmarks

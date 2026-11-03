@@ -48,8 +48,7 @@ use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
 use crate::adapters::tui::widgets::{
-    autocomplete_popup, chat_pane, input_box, reverse_search, sidebar, status_bar,
-    team_proposal_card, toast_layer,
+    autocomplete_popup, chat_pane, input_box, sidebar, status_bar, team_proposal_card, toast_layer,
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
@@ -818,7 +817,7 @@ pub async fn run(
         security.as_ref(),
         tab_manager.tab_count(),
         tab_manager.active_tab_index(),
-        Some(&tab_manager),
+        Some(&mut tab_manager),
         &session_index,
         _ctx_window,
         &app_state.agent_core,
@@ -1214,7 +1213,7 @@ pub async fn run(
                                         // Force immediate render for typing indicator
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -1234,10 +1233,8 @@ pub async fn run(
                                 InputAction::CancelOrQuit => {
                                     // AC-10-4-10: Esc from a read-only tab returns to the previous tab
                                     if tab_manager.active_tab().read_only {
-                                        let prev_idx = tab_manager.active_tab_index().saturating_sub(1);
-                                        tab_manager.switch_to_index(prev_idx);
+                                        return_from_read_only_tab(&mut tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                         state.focus = FocusState::Chat;
-                                        state.needs_redraw = true;
                                         continue;
                                     }
                                     // Story 21.2 AC7 / RU-14: with nothing to stop, Ctrl+C is a quit
@@ -1708,9 +1705,7 @@ pub async fn run(
                                             load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                             state.input_buffer.clear();
                                             state.cursor_position = 0;
-                                            if state.modal_stack.is_empty() {
-                                                state.focus = FocusState::Input;
-                                            }
+                                            presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                             state.status = StatusState::Idle;
                                             state.active_agent_name = None;
                                             session_index.set_open(&conversation.id, true);
@@ -1885,7 +1880,7 @@ pub async fn run(
                                         }
                                         // Fresh conversation: the old id scopes the decisions it withdraws.
                                         let previous_conversation_id = conversation.id.clone();
-                                        conversation = Conversation {
+                                        let replacement = Conversation {
                                             id: generate_conversation_id(),
                                             title: String::new(),
                                             messages: Vec::new(),
@@ -1901,6 +1896,7 @@ pub async fn run(
                                             peer_row_controls: Default::default(),
                                             peer_row_revision: 0,
                                         };
+                                        reset_stage_conversation(&mut tab_manager, &mut conversation, &mut state, replacement);
                                         skill_activator.on_new_conversation(&conversation.id).await;
                                         agent_activator.on_new_conversation(&conversation.id).await;
                                         state.active_agent_name = None;
@@ -1909,14 +1905,6 @@ pub async fn run(
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
-                                        state.scroll_snapshot = 0;
-                                        state.auto_snapshot = true;
-                                        state.total_content_height = 0;
-                                        state.block_boundaries.clear();
-                                        state.message_boundaries.clear();
-                                        state.user_message_boundaries.clear();
-                                        state.tab_render_state(state.active_tab_id).height_cache.invalidate_all();
-                                        state.tab_render_state(state.active_tab_id).tool_block_states_version = 0;
                                         state.tool_block_states.clear();
                                         state.clear_tool_selection();
                                         state.feedback_blocks.clear();
@@ -1925,7 +1913,7 @@ pub async fn run(
                                         state.autocomplete.dismiss();
                                         state.resolved_mentions.clear();
                                         state.token_usage = None;
-                                        state.focus = FocusState::Input;
+                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                         state.status = StatusState::Idle;
                                         state.needs_redraw = true;
                                         // Reset session manager
@@ -2094,7 +2082,7 @@ pub async fn run(
                                         submit_turn!(full_text, all_images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -2940,7 +2928,7 @@ pub async fn run(
                                     state.input_scroll_offset = 0;
                                     state.autocomplete.dismiss();
                                     state.resolved_mentions.clear();
-                                    state.focus = FocusState::Input;
+                                    presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                     state.status = StatusState::Idle;
                                     state.needs_redraw = true;
                                 }
@@ -2996,7 +2984,7 @@ pub async fn run(
                                         state.input_scroll_offset = 0;
                                         state.autocomplete.dismiss();
                                         state.resolved_mentions.clear();
-                                        state.focus = FocusState::Input;
+                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -3447,7 +3435,7 @@ pub async fn run(
                                                             )
                                                         };
                                                         notifications::success(&mut state, NoticeSource::Session, hint_msg);
-                                                        state.focus = FocusState::Chat;
+                                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
@@ -3629,7 +3617,7 @@ pub async fn run(
                                                 let severity = if conflicts > 0 { NoticeSeverity::Warning } else { NoticeSeverity::Success };
                                                 notifications::notify(&mut state, NoticeSource::Session, severity, status_msg);
                                             }
-                                        state.focus = FocusState::Chat;
+                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -3669,7 +3657,7 @@ pub async fn run(
                                                             )
                                                         };
                                                         notifications::success(&mut state, NoticeSource::Session, hint_msg);
-                                                        state.focus = FocusState::Chat;
+                                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
@@ -3694,43 +3682,20 @@ pub async fn run(
                                     }
                                 }
                                 // ── Story 4-4: Within-Conversation Search ──────────────
-                                InputAction::OpenSearch => {
-                                    // app.rs::handle_special_key already set focus
-                                    // and activated search_state. Event loop just
-                                    // needs to trigger the initial (empty) find_matches
-                                    // so the counter renders 0/0 correctly and mark redraw.
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::CloseSearch => {
-                                    let prior = state
-                                        .search_state
-                                        .prior_focus
-                                        .take()
-                                        .unwrap_or(FocusState::Chat);
-                                    state.search_state =
-                                        crate::adapters::tui::state::SearchState::new();
-                                    state.focus = prior;
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::SearchQueryChanged
+                                search_action @ (InputAction::OpenSearch
+                                | InputAction::CloseSearch
+                                | InputAction::SearchQueryChanged
                                 | InputAction::SearchClear
-                                | InputAction::SearchReturnToTyping => {
-                                    handlers::search::handle_apply_search_rescan(&conversation, &mut state);
-                                }
-                                InputAction::SearchCommit => {
-                                    if !state.search_state.matches.is_empty() {
-                                        state.search_state.substate =
-                                            crate::adapters::tui::state::SearchSubstate::Navigating;
-                                    } else {
-                                        notifications::info(&mut state, NoticeSource::Search, "No matches found");
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::SearchNext => {
-                                    handlers::search::handle_apply_search_navigate(&mut state, 1);
-                                }
-                                InputAction::SearchPrev => {
-                                    handlers::search::handle_apply_search_navigate(&mut state, -1);
+                                | InputAction::SearchReturnToTyping
+                                | InputAction::SearchCommit
+                                | InputAction::SearchNext
+                                | InputAction::SearchPrev) => {
+                                    handlers::search::handle_search_action(
+                                        &mut tab_manager,
+                                        &mut state,
+                                        &conversation,
+                                        &search_action,
+                                    );
                                 }
                                 // ── Story 4-4: Bookmarks ──────────────────────────────
                                 InputAction::ToggleBookmark => {
@@ -5039,7 +5004,7 @@ pub async fn run(
                                         submit_turn!(queued_msg.content, queued_msg.images, false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -5837,7 +5802,7 @@ pub async fn run(
                         submit_turn!(text, vec![], false, _skill_snap, _agent_snap, tab_manager.reset_and_clone_turn_cancel()).await;
                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                         state.active_context_window = _ctx_window;
-                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                             Ok(()) => state.needs_redraw = false,
                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                         }
@@ -5994,7 +5959,7 @@ pub async fn run(
                                         // Reset input buffer / focus / status
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
-                                        state.focus = FocusState::Input;
+                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                         state.status = StatusState::Idle;
                                         state.active_agent_name = None;
                                         session_index.set_open(&conversation.id, true);
@@ -6025,7 +5990,7 @@ pub async fn run(
                                     load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
                                     state.input_buffer.clear();
                                     state.cursor_position = 0;
-                                    state.focus = FocusState::Input;
+                                    presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
                                     state.status = StatusState::Idle;
                                     state.active_agent_name = None;
                                     session_index.set_open(&conversation.id, true);
@@ -6963,7 +6928,7 @@ pub async fn run(
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
                                         state.active_context_window = _ctx_window;
-                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
+                                        match render(terminal, &mut state, &conversation, &streaming, &config.model, &router.active_delegate_id(), security.as_ref(), tab_manager.tab_count(), tab_manager.active_tab_index(), Some(&mut tab_manager), &session_index, _ctx_window, &app_state.agent_core) {
                                             Ok(()) => state.needs_redraw = false,
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
@@ -7212,7 +7177,7 @@ async fn apply_open_cross_search_result(
                 {
                     tab_manager.active_tab_mut().session_meta = meta;
                 }
-                *conversation = loaded;
+                replace_stage_conversation(conversation, state, loaded);
                 session_index.set_open(&result.conversation_id, true);
                 session_index.set_active(Some(&result.conversation_id));
             }
@@ -7253,14 +7218,7 @@ async fn apply_open_cross_search_result(
     // Scroll to the target message. `message_boundaries` for the newly
     // activated tab will be computed on the next render tick, so this scroll
     // may be briefly off until the first repaint — acceptable for v1.
-    use crate::adapters::tui::widgets::chat_pane;
-    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
-        result.first_match_message_index,
-        &state.message_boundaries,
-        state.total_content_height,
-        state.viewport_height as usize,
-    );
-    state.auto_snapshot = state.scroll_snapshot == 0;
+    position_cross_search_result(tab_manager, state, result.first_match_message_index);
     state.focus = FocusState::Chat;
 
     // Preserve the query on state.search_state.query (inactive) so Ctrl+F
@@ -7307,6 +7265,63 @@ async fn apply_open_cross_search_result(
     state.needs_redraw = true;
 }
 
+/// Return from a read-only Stage using the runtime's tab transition.
+#[doc(hidden)]
+pub fn return_from_read_only_tab(
+    tab_manager: &mut TabManager,
+    conversation: &mut Conversation,
+    streaming: &mut StreamingState,
+    session_manager: &mut SessionManager,
+    state: &mut TuiState,
+    turn_queue: &mut TurnQueue,
+) {
+    // The active index is zero-based; switch_to_index takes one-based indices.
+    let previous = tab_manager.active_tab_index();
+    if previous > 0 {
+        save_active_tab(
+            tab_manager,
+            conversation,
+            streaming,
+            session_manager,
+            state,
+            turn_queue,
+        );
+        tab_manager.switch_to_index(previous);
+        load_active_tab(
+            tab_manager,
+            conversation,
+            streaming,
+            session_manager,
+            state,
+            turn_queue,
+        );
+    }
+    state.needs_redraw = true;
+}
+
+/// Position the active CrossSearch result without changing overlay ownership.
+#[doc(hidden)]
+pub fn position_cross_search_result(
+    tab_manager: &mut TabManager,
+    state: &mut TuiState,
+    message_index: usize,
+) {
+    state.scroll_snapshot = chat_pane::find_scroll_offset_for_message(
+        message_index,
+        &state.message_boundaries,
+        state.total_content_height,
+        state.viewport_height as usize,
+    );
+    state.auto_snapshot = state.scroll_snapshot == 0;
+    let view = &mut tab_manager.active_tab_mut().view_state;
+    view.scroll_offset = state.scroll_snapshot;
+    view.mode = if state.auto_snapshot {
+        crate::domain::models::AnchorMode::Following
+    } else {
+        crate::domain::models::AnchorMode::Reading
+    };
+}
+
 fn save_active_tab(
     tab_manager: &mut TabManager,
     conversation: &Conversation,
@@ -7343,7 +7358,8 @@ fn save_active_tab(
 /// Load the new active tab's state from TabManager into the proxy variables.
 /// Returns `true` if the tab is idle and has queued messages ready to send
 /// (e.g. a turn completed in the background while the tab was inactive).
-fn load_active_tab(
+#[doc(hidden)]
+pub fn load_active_tab(
     tab_manager: &TabManager,
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
@@ -7352,7 +7368,7 @@ fn load_active_tab(
     turn_queue: &mut TurnQueue,
 ) -> bool {
     let tab = tab_manager.active_tab();
-    *conversation = tab.conversation.clone();
+    replace_stage_conversation(conversation, state, tab.conversation.clone());
     *streaming = tab.streaming.clone();
     *session_manager = tab.session.clone();
     *turn_queue = tab.turn_queue.clone();
@@ -7403,6 +7419,46 @@ fn load_active_tab(
     // Signal caller if queued messages should be drained: the tab's turn completed
     // in the background but auto-send (line 948) only runs in the active-tab path.
     !tab.streaming.is_streaming && !tab.turn_queue.is_empty()
+}
+
+/// Shared production replacement seam for tab loading, context resets and
+/// CrossSearch's direct new-tab branch. Replacement discards, rather than backs
+/// out of, the previous Stage's navigation frame.
+#[doc(hidden)]
+pub fn replace_stage_conversation(
+    conversation: &mut Conversation,
+    state: &mut TuiState,
+    replacement: Conversation,
+) {
+    presentation::reducer::reconcile_stage(state);
+    *conversation = replacement;
+}
+
+/// Reset the owning tab's view and the replacement Stage's render metrics.
+#[doc(hidden)]
+pub fn reset_stage_conversation(
+    tab_manager: &mut TabManager,
+    conversation: &mut Conversation,
+    state: &mut TuiState,
+    replacement: Conversation,
+) {
+    replace_stage_conversation(conversation, state, replacement);
+    tab_manager.active_tab_mut().view_state = Default::default();
+    tab_manager.active_tab_mut().pending_anchor = None;
+    state.pending_anchor = None;
+    state.scroll_snapshot = 0;
+    state.auto_snapshot = true;
+    state.total_content_height = 0;
+    state.block_boundaries.clear();
+    state.message_boundaries.clear();
+    state.user_message_boundaries.clear();
+    state
+        .tab_render_state(state.active_tab_id)
+        .height_cache
+        .invalidate_all();
+    state
+        .tab_render_state(state.active_tab_id)
+        .tool_block_states_version = 0;
 }
 
 /// Decode, hash, and persist the `pending_images` drained on message submit.
@@ -7660,11 +7716,12 @@ fn render(
     security: &dyn SecurityPort,
     tab_count: usize,
     active_tab_index: usize,
-    tab_manager_for_bar: Option<&crate::domain::models::tab::TabManager>,
+    tab_manager: Option<&mut crate::domain::models::tab::TabManager>,
     session_index: &SessionIndex,
     context_window: u32,
     agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
+    let tab_manager_for_bar = tab_manager.as_deref();
     notifications::begin_draw(state);
     let log_facts = notice_actions::log_facts(
         conversation,
@@ -7716,7 +7773,6 @@ fn render(
         has_project_context,
         multiline_mode,
         input_scroll_offset,
-        ref reverse_search,
         ref search_state,
         active_profile: ref _active_profile,
         ref selected_model,
@@ -7745,8 +7801,6 @@ fn render(
                 let mut shell = presentation::Shell::new(area, &app_layout);
                 let _is_compact = area.width < 80 || area.height < 24;
 
-                // Story 4-4 AC1: reserve the top row for the search bar when active.
-                app_layout.reserve_search_bar(search_state.active);
                 // Story 4-4 AC10: reserve the bottom panel when the bookmark
                 // list overlay is focused. Panel height scales with the
                 // bookmark count (1 header + N entries + 1 footer, capped at 6).
@@ -8007,13 +8061,17 @@ fn render(
 
                 // Story 4-4 AC2: thread search query + focused match into chat pane
                 // rendering so substring matches render with highlight styling.
+                let search_open = state
+                    .modal_stack
+                    .all_frames()
+                    .any(|frame| frame.surface == presentation::Surface::Search);
                 let search_query_opt: Option<&str> =
-                    if search_state.active && !search_state.query.is_empty() {
+                    if search_open && !search_state.query.is_empty() {
                         Some(search_state.query.as_str())
                     } else {
                         None
                     };
-                let focused_match_opt = if search_state.active {
+                let focused_match_opt = if search_open {
                     search_state.matches.get(search_state.focused_match_index)
                 } else {
                     None
@@ -8422,17 +8480,6 @@ fn render(
                     );
                 }
 
-                // Story 4-4 AC1: render the search bar widget into its reserved slot.
-                if let Some(search_bar_area) = app_layout.search_bar {
-                    crate::adapters::tui::widgets::search_bar::render(
-                        frame,
-                        search_bar_area,
-                        search_state,
-                        theme,
-                        state.modal_stack.is_empty(),
-                    );
-                }
-
                 // Story 4-4 AC5: render cross-search overlay inside the sidebar column.
                 if state.cross_search.active {
                     if let Some(sidebar_area) = app_layout.sidebar {
@@ -8752,20 +8799,7 @@ fn render(
                 shell.chat_pane = app_layout.chat_pane;
                 decision_painted = presentation::compose(
                     frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
-                    |frame| {
-
-                // Render reverse search overlay above input box
-                if reverse_search.active {
-                    reverse_search::render(
-                        frame, app_layout.input_area, reverse_search, theme,
-                        state.modal_stack.is_empty(),
-                    );
-                }
-
-
-
-
-                    }, paint_status,
+                    |_| {}, paint_status,
                 );
 
             }
@@ -8788,12 +8822,19 @@ fn render(
     state.viewport_height = vp_height;
     state.log_visits_presented(&visible_feedback_ids); // Story 19.16g: the draw completed
 
+    resolve_resize_anchor(tab_manager, state);
+    Ok(())
+}
+
+/// Resolve a resize anchor using the completed paint's reflowed block heights.
+#[doc(hidden)]
+pub fn resolve_resize_anchor(tab_manager: Option<&mut TabManager>, state: &mut TuiState) {
     // Resolve pending anchor from resize: use new heights to find correct scroll_offset.
     if let Some(anchor_idx) = state.pending_anchor.take() {
         if anchor_idx < state.block_boundaries.len() {
             let anchor_line = state.block_boundaries[anchor_idx];
             let vp = state.viewport_height as usize;
-            let max_offset = content_height.saturating_sub(vp);
+            let max_offset = state.total_content_height.saturating_sub(vp);
             state.scroll_snapshot = max_offset.saturating_sub(anchor_line);
             state.auto_snapshot = state.scroll_snapshot == 0;
         } else {
@@ -8801,9 +8842,16 @@ fn render(
             state.scroll_snapshot = 0;
             state.auto_snapshot = true;
         }
+        if let Some(tabs) = tab_manager {
+            let view = &mut tabs.active_tab_mut().view_state;
+            view.scroll_offset = state.scroll_snapshot;
+            if state.auto_snapshot {
+                view.mode = crate::domain::models::AnchorMode::Following;
+            } else if matches!(view.mode, crate::domain::models::AnchorMode::Following) {
+                view.mode = crate::domain::models::AnchorMode::Reading;
+            }
+        }
     }
-
-    Ok(())
 }
 
 /// Truncate a string to `max_len` characters, appending "…" if truncated.

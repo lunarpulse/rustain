@@ -18,9 +18,6 @@ pub struct AppLayout {
     pub tab_bar: Option<Rect>,
     /// Sidebar column (shown when sidebar_visible AND terminal_width >= 120).
     pub sidebar: Option<Rect>,
-    /// Search bar row, reserved at the top of `chat_pane` when the search
-    /// overlay is active (Story 4-4 AC1). `None` when inactive.
-    pub search_bar: Option<Rect>,
     /// Bookmark list panel, reserved at the bottom of `chat_pane` when the
     /// bookmark list overlay is active (Story 4-4 AC10). `None` when inactive.
     /// Populated by `reserve_bookmark_panel`, which is wired up in Task 5
@@ -35,33 +32,6 @@ pub struct AppLayout {
 }
 
 impl AppLayout {
-    /// Reserve a 1-row slot at the top of `chat_pane` for the search bar.
-    ///
-    /// Shrinks `chat_pane` downward by 1 row and populates `search_bar` with
-    /// the reserved row. Idempotent-ish: safe to call multiple times but the
-    /// caller should only call once per frame with the current `active` flag.
-    ///
-    /// No-op when `active == false` or `chat_pane.height < 2`.
-    // Covers: Story 4-4 AC1 layout reservation
-    pub fn reserve_search_bar(&mut self, active: bool) {
-        if !active || self.chat_pane.height < 2 {
-            return;
-        }
-        let bar = Rect {
-            x: self.chat_pane.x,
-            y: self.chat_pane.y,
-            width: self.chat_pane.width,
-            height: 1,
-        };
-        self.chat_pane = Rect {
-            x: self.chat_pane.x,
-            y: self.chat_pane.y + 1,
-            width: self.chat_pane.width,
-            height: self.chat_pane.height - 1,
-        };
-        self.search_bar = Some(bar);
-    }
-
     /// Reserve a bottom panel slot of up to `requested_height` rows in
     /// `chat_pane` for the bookmark list.
     ///
@@ -183,7 +153,6 @@ pub fn compute_layout(
             status_bar,
             input_area,
             sidebar: None,
-            search_bar: None,
             bookmark_panel: None,
             dashboard_panel,
         });
@@ -233,7 +202,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[2],
                 input_area: vertical_chunks[3],
                 sidebar: Some(sidebar_rect),
-                search_bar: None,
                 bookmark_panel: None,
                 dashboard_panel: None,
             })
@@ -251,7 +219,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[1],
                 input_area: vertical_chunks[2],
                 sidebar: Some(sidebar_rect),
-                search_bar: None,
                 bookmark_panel: None,
                 dashboard_panel: None,
             })
@@ -271,7 +238,6 @@ pub fn compute_layout(
             status_bar: chunks[2],
             input_area: chunks[3],
             sidebar: None,
-            search_bar: None,
             bookmark_panel: None,
             dashboard_panel: None,
         })
@@ -289,7 +255,6 @@ pub fn compute_layout(
             status_bar: chunks[1],
             input_area: chunks[2],
             sidebar: None,
-            search_bar: None,
             bookmark_panel: None,
             dashboard_panel: None,
         })
@@ -322,41 +287,14 @@ mod tests {
             },
             tab_bar: None,
             sidebar: None,
-            search_bar: None,
             bookmark_panel: None,
             dashboard_panel: None,
         }
     }
 
-    #[test]
-    fn reserve_search_bar_shrinks_chat_pane_by_one_row() {
-        let mut l = test_layout();
-        let original_height = l.chat_pane.height;
-        l.reserve_search_bar(true);
-        assert_eq!(l.chat_pane.height, original_height - 1);
-        assert_eq!(l.chat_pane.y, 1);
-        assert!(l.search_bar.is_some());
-        let bar = l.search_bar.unwrap();
-        assert_eq!(bar.y, 0);
-        assert_eq!(bar.height, 1);
-    }
-
-    #[test]
-    fn reserve_search_bar_noop_when_inactive() {
-        let mut l = test_layout();
-        let before = l.chat_pane;
-        l.reserve_search_bar(false);
-        assert_eq!(l.chat_pane, before);
-        assert!(l.search_bar.is_none());
-    }
-
-    #[test]
-    fn reserve_search_bar_noop_when_chat_pane_too_small() {
-        let mut l = test_layout();
-        l.chat_pane.height = 1;
-        l.reserve_search_bar(true);
-        assert!(l.search_bar.is_none());
-    }
+    // The former Search reservation cases (one-row shrink, inactive no-op,
+    // undersized no-op) are obsolete: Search now overlays the unmodified Stage.
+    // Stage-top geometry and unchanged shell rectangles are covered by K8.
 
     #[test]
     fn reserve_bookmark_panel_shrinks_chat_pane_upward() {
@@ -388,15 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn both_reservations_combine() {
+    fn bookmark_reservation_keeps_the_unreserved_stage_origin() {
         let mut l = test_layout();
-        l.reserve_search_bar(true);
         l.reserve_bookmark_panel(4);
-        assert!(l.search_bar.is_some());
         assert!(l.bookmark_panel.is_some());
-        // Top row = search bar, bottom 4 rows = bookmark panel, middle = chat
-        assert_eq!(l.chat_pane.y, 1);
-        assert_eq!(l.chat_pane.height, 20 - 1 - 4);
+        // Search no longer reserves a top row (21.4 AC10); Bookmark remains legacy.
+        assert_eq!(l.chat_pane.y, 0);
+        assert_eq!(l.chat_pane.height, 20 - 4);
     }
 
     // Story 8.4b layout tests

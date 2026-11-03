@@ -186,12 +186,6 @@ pub enum ConfirmationType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
     Confirmation(ConfirmationType),
-    /// Reverse search overlay for input history (Ctrl+R).
-    // Covers: UX-DR74
-    ReverseSearch,
-    /// Within-conversation search overlay (Ctrl+F).
-    // Covers: UX-DR86, Story 4-4 AC1-AC4
-    Search,
     /// Cross-conversation search overlay (/ in sidebar).
     // Covers: UX-DR87, Story 4-4 AC5-AC7
     CrossSearch,

@@ -12,6 +12,7 @@ pub enum Surface {
     ProfileSwitcher,
     UsagePanel,
     Login,
+    Search,
 }
 
 impl Surface {
@@ -27,6 +28,7 @@ impl Surface {
             Self::ProfileSwitcher => "Profile Switcher",
             Self::UsagePanel => "Usage & Cost",
             Self::Login => "Sign in",
+            Self::Search => "Search",
         }
     }
 
@@ -42,6 +44,7 @@ impl Surface {
             Self::ProfileSwitcher => Context::ProfileSwitcher,
             Self::UsagePanel => Context::UsagePanel,
             Self::Login => Context::Login,
+            Self::Search => Context::SearchTyping,
         }
     }
 
@@ -49,7 +52,11 @@ impl Surface {
     pub(super) const fn keeps_continuation(self) -> bool {
         !matches!(
             self,
-            Self::CommandPalette | Self::ModelSelector | Self::ProfileSwitcher | Self::UsagePanel
+            Self::CommandPalette
+                | Self::ModelSelector
+                | Self::ProfileSwitcher
+                | Self::UsagePanel
+                | Self::Search
         )
     }
 }

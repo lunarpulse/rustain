@@ -9,6 +9,7 @@
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::domain::events::DomainKey;
+use rustain::domain::models::FocusState;
 
 use crate::e2e_harness;
 use e2e_harness::TestHarness;
@@ -160,7 +161,7 @@ fn test_e2e_history_adds_on_submit() {
 // AC3: Reverse-Search (Ctrl+R)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// Covers: AC3 — Ctrl+R opens reverse-search overlay
+/// Covers: AC3 — Ctrl+R opens the reverse-search Input popup
 #[test]
 fn test_e2e_reverse_search_opens() {
     let mut h = TestHarness::new();
@@ -172,7 +173,9 @@ fn test_e2e_reverse_search_opens() {
     // Ctrl+R opens search
     let action = h.press_key(DomainKey::CtrlR);
     assert!(matches!(action, InputAction::Consumed));
-    assert!(h.state.reverse_search.active);
+    assert!(h.state.reverse_search.is_open());
+    assert_eq!(h.state.focus, FocusState::Input);
+    assert!(h.state.modal_stack.is_empty());
 }
 
 /// Covers: AC3 — Reverse-search filters history
@@ -187,7 +190,7 @@ fn test_e2e_reverse_search_filters() {
 
     // Open search
     h.press_key(DomainKey::CtrlR);
-    assert!(h.state.reverse_search.active);
+    assert!(h.state.reverse_search.is_open());
 
     // Set query (filters history matches)
     h.state.reverse_search.query = "Apple".to_string();
@@ -206,11 +209,14 @@ fn test_e2e_reverse_search_esc_cancels() {
 
     // Open search
     h.press_key(DomainKey::CtrlR);
-    assert!(h.state.reverse_search.active);
+    assert!(h.state.reverse_search.is_open());
 
     // Esc closes search
     let action = h.press_key(DomainKey::Esc);
     assert!(matches!(action, InputAction::Consumed));
+    assert!(!h.state.reverse_search.is_open());
+    assert_eq!(h.state.focus, FocusState::Input);
+    assert!(h.state.modal_stack.is_empty());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

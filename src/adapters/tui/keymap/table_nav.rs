@@ -45,9 +45,9 @@ pub enum SidebarCmd {
 /// Commands of the SearchTyping and SearchNavigating contexts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SearchCmd {
-    /// `Esc` (both sub-states): close the overlay, keep the scroll.
+    /// `Esc` (both sub-states): close the frame and restore the pre-search view.
     Close,
-    /// Typing `Enter`: commit the query and start match navigation.
+    /// `Enter`: commit a typed query, or keep the position and close navigation.
     Commit,
     /// Typing `Backspace`: pop the last query character and re-scan.
     DeleteBack,
@@ -124,14 +124,15 @@ const SB: HelpCat = HelpCat::Search;
 pub const ROWS: &[Binding] = &[
     // ── Search ──
     t(&[Key::Enter], SearchCmd::Commit, "").local().help(SB, "Enter", "Commit query → enable n/N navigation"),
+    n(&[Key::Enter], SearchCmd::Commit, "").local().help(SB, "Enter (navigating)", "Keep position and close search"),
     n(&[Key::Char('n')], SearchCmd::NextMatch, "").local().help(SB, "n / N", "Next / previous match (Navigating mode)"),
     n(&[Key::Char('N')], SearchCmd::PrevMatch, "").local().does("Jump to the previous match"),
     t(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().help(SB, "Ctrl+U", "Clear search query"),
-    t(&[Key::Esc], SearchCmd::Close, "").local().help(SB, "Esc (search)", "Close search, preserve scroll"),
-    t(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and keep the scroll position (back one frame)"),
+    t(&[Key::Esc], SearchCmd::Close, "").local().help(SB, "Esc (search)", "Close search, restore pre-search view"),
+    t(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and restore the pre-search view (back one frame)"),
     t(&[Key::Backspace], SearchCmd::DeleteBack, "").local().does("Delete the last query character and search again"),
-    n(&[Key::Esc], SearchCmd::Close, "").local().does("Close search and keep the scroll position"),
-    n(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and keep the scroll position (back one frame)"),
+    n(&[Key::Esc], SearchCmd::Close, "").local().does("Close search and restore the pre-search view"),
+    n(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and restore the pre-search view (back one frame)"),
     n(&[Key::Backspace], SearchCmd::DeleteBackToTyping, "").local().does("Return to typing and delete the last query character"),
     n(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().does("Clear the query and return to typing"),
     // ── BookmarkList ──

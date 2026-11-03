@@ -133,6 +133,12 @@ pub fn route(
         super::reducer::close(state, Surface::DecisionPane);
         return route(state, event, host, facts);
     }
+    // Search's Stage is its body: only this top owner permits wheel navigation.
+    if surface == Surface::Search
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        return Some(RouteEffect::Action(InputAction::MouseScroll(*delta)));
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -144,7 +150,7 @@ pub fn route(
     if surface == Surface::CommandPalette && state.command_palette.refusal.take().is_some() {
         state.needs_redraw = true;
     }
-    let context = surface.context();
+    let context = super::frame_context(state, surface);
     if let Resolved::Hit(row) = keymap::resolve(context, host, &[key]) {
         match row.command {
             CommandId::Global(GlobalCmd::OpenLeader) => {
@@ -180,6 +186,7 @@ pub fn route(
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
+        | Surface::Search
             if host == Host::Local =>
         {
             RouteEffect::Action(app::dispatch_frame_key(state, context, key, host))
@@ -188,7 +195,8 @@ pub fn route(
         | Surface::CommandPalette
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
-        | Surface::UsagePanel => RouteEffect::Frame(context),
+        | Surface::UsagePanel
+        | Surface::Search => RouteEffect::Frame(context),
         Surface::QuitConfirm => unreachable!("Quit handled before the pending leader"),
     })
 }

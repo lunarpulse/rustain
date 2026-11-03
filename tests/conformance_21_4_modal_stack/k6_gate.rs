@@ -1,4 +1,4 @@
-//! K6 / A19: 4-A2b ratchet. Behaviour belongs to K1–K5, not this scanner.
+//! K6 / A19: 4-Bb1a ratchet. Behaviour belongs to K1–K5/K7–K9, not this scanner.
 //! Every retained occurrence has an exact named-site pin and a migration owner.
 //! Removed/changed pins fail stale; new hits never inherit a file exemption.
 use regex::Regex;
@@ -199,20 +199,17 @@ const PINS: &[Pin<'_>] = &[
     ]),
     ("src/adapters/tui/app.rs", "4-C", &[
         r###"focus-write|advance_deferred_permission|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));"###, r###"focus-write|advance_deferred_permission|state.focus = if state.recipient_surface.is_some() {"###, r###"focus-write|dispatch_input|state.focus = FocusState::Chat;"###,
-        r###"focus-write|open_leader|state.focus = FocusState::Input;"###, r###"focus-write|open_palette|state.focus = FocusState::Input;"###, r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###, r###"focus-write|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###,
+        r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###,
         r###"focus-write|exec_chat|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Chat;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"focus-write|sidebar_move|state.focus = FocusState::Sidebar {"###,
         r###"focus-write|exec_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|exec_panel|state.focus = FocusState::Chat;"###, r###"focus-write|exec_recipient|state.focus = surface.prior_focus;"###,
         r###"focus-write|handle_char|state.focus = FocusState::Input;"###,
-        r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###, r###"focus-write|exec_reverse_search_keys|state.focus = FocusState::Input;"###,
+        r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###,
     ]),
     ("src/adapters/tui/app.rs", "4-B", &[
-        r###"overlay|open_leader|FocusState::Input | FocusState::Overlay(OverlayType::ReverseSearch) => Context::Input,"###,
-        r###"overlay|open_leader|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {"###,
-        r###"overlay|open_palette|if matches!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch)) {"###,
-        r###"prior|exec_input|state.search_state.prior_focus = Some(prior);"###, r###"overlay|ctrl_x_opens_leader|OverlayType::Search"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::CrossSearch"###,
+        r###"overlay|ctrl_x_opens_leader|OverlayType::CrossSearch"###,
         r###"overlay|ctrl_x_opens_leader|| OverlayType::BookmarkList"###, r###"overlay|ctrl_x_opens_leader|| OverlayType::WaveOverlay"###,
-        r###"overlay|overlay_focus_context|OverlayType::Search => match state.search_state.substate {"###, r###"overlay|overlay_focus_context|OverlayType::CrossSearch => Context::CrossSearch,"###, r###"overlay|overlay_focus_context|OverlayType::BookmarkList => Context::BookmarkList,"###, r###"overlay|overlay_focus_context|OverlayType::WaveOverlay => Context::WaveOverlay,"###, r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::ReverseSearch);"###,
-        r###"overlay|exec_input|state.focus = FocusState::Overlay(OverlayType::Search);"###, r###"overlay|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"overlay|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###,
+        r###"overlay|overlay_focus_context|OverlayType::CrossSearch => Context::CrossSearch,"###, r###"overlay|overlay_focus_context|OverlayType::BookmarkList => Context::BookmarkList,"###, r###"overlay|overlay_focus_context|OverlayType::WaveOverlay => Context::WaveOverlay,"###,
+        r###"overlay|exec_sidebar|state.focus = FocusState::Overlay(OverlayType::CrossSearch);"###, r###"overlay|exec_panel|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###,
     ]),
     ("src/adapters/tui/app.rs", "21-8", &[
         r###"prior|exec_recipient|state.focus = surface.prior_focus;"###,
@@ -255,12 +252,12 @@ const PINS: &[Pin<'_>] = &[
         r###"focus-borrow|synchronize_sidebar_selection|} = &mut state.focus"###,
     ]),
     ("src/adapters/tui/layout.rs", "4-B", &[
-        r###"reservation|AppLayout|pub search_bar: Option<Rect>,"###, r###"reservation|AppLayout|pub bookmark_panel: Option<Rect>,"###, r###"reservation|AppLayout|pub fn reserve_search_bar(&mut self, active: bool) {"###, r###"reservation|impl AppLayout::reserve_search_bar|self.search_bar = Some(bar);"###, r###"reservation|impl AppLayout::reserve_search_bar|pub fn reserve_bookmark_panel(&mut self, requested_height: u16) {"###, r###"reservation|impl AppLayout::reserve_bookmark_panel|self.bookmark_panel = Some(panel);"###,
-        r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
-        r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|search_bar: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
+        r###"reservation|AppLayout|pub bookmark_panel: Option<Rect>,"###, r###"reservation|AppLayout|pub fn reserve_bookmark_panel(&mut self, requested_height: u16) {"###, r###"reservation|impl AppLayout::reserve_bookmark_panel|self.bookmark_panel = Some(panel);"###,
+        r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
+        r###"reservation|compute_layout|bookmark_panel: None,"###, r###"reservation|compute_layout|bookmark_panel: None,"###,
     ]),
     ("src/adapters/tui/state.rs", "4-B", &[
-        r###"prior|SearchState|pub prior_focus: Option<FocusState>,"###, r###"prior|impl SearchState::new|prior_focus: None,"###, r###"active|ReverseSearchState|pub active: bool,"###, r###"active|SearchState|pub active: bool,"###, r###"active|CrossSearchState|pub active: bool,"###,
+        r###"active|CrossSearchState|pub active: bool,"###,
     ]),
     ("src/adapters/tui/state.rs", "21-6", &[
         r###"prior|PendingArtifactCard|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingPeerAdd|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingTeamRetract|pub prior_focus: crate::domain::models::FocusState,"###,
@@ -268,11 +265,8 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/state.rs", "21-8", &[
         r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
     ]),
-    ("src/adapters/tui/widgets/mod.rs", "4-B", &[
-        r###"reservation|<module>|pub mod search_bar;"###,
-    ]),
     ("src/domain/models/visual.rs", "4-B", &[
-        r###"variant|OverlayType|ReverseSearch,"###, r###"variant|OverlayType|Search,"###, r###"variant|OverlayType|CrossSearch,"###, r###"variant|OverlayType|BookmarkList,"###,
+        r###"variant|OverlayType|CrossSearch,"###, r###"variant|OverlayType|BookmarkList,"###,
         r###"variant|OverlayType|WaveOverlay,"###,
     ]),
     ("src/infrastructure/runtime/approval_bridge.rs", "4-C", &[
@@ -299,22 +293,20 @@ const PINS: &[Pin<'_>] = &[
         r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"prior|attached_proposal_key|state.focus = surface.prior_focus;"###,
     ]),
     ("src/infrastructure/runtime/event_loop.rs", "4-C", &[
-        r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
-        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
-        r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
+        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
+        r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
         r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = prior;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###,
+        r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###, r###"focus-write|run|state.focus = FocusState::Sidebar {"###,
         r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
         r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
         r###"focus-write|apply_open_cross_search_result|state.focus = FocusState::Chat;"###, r###"focus-write|restore_focus_after_modal|state.focus = if state.pending_feedback_input.is_some() {"###, r###"focus-write|surface_deferred_modal|state.focus ="###, r###"focus-write|advance_skill_trust_queue|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));"###,
     ]),
     ("src/infrastructure/runtime/event_loop.rs", "4-B", &[
-        r###"prior|run|.prior_focus"###, r###"reservation|render|app_layout.reserve_search_bar(search_state.active);"###, r###"reservation|render|app_layout.reserve_bookmark_panel(requested_height);"###, r###"reservation|render|if let Some(search_bar_area) = app_layout.search_bar {"###, r###"reservation|render|crate::adapters::tui::widgets::search_bar::render("###, r###"reservation|render|if let Some(bookmark_panel_area) = app_layout.bookmark_panel {"###,
+        r###"reservation|render|app_layout.reserve_bookmark_panel(requested_height);"###, r###"reservation|render|if let Some(bookmark_panel_area) = app_layout.bookmark_panel {"###,
         r###"overlay|run|state.focus = FocusState::Overlay(OverlayType::WaveOverlay);"###, r###"overlay|render|crate::domain::models::visual::OverlayType::BookmarkList,"###,
-        r###"overlay|render|} else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {"###, r###"render|render|let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay("###, r###"render|render|crate::adapters::tui::widgets::search_bar::render(frame, search_bar_area, search_state, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::cross_search::render(frame, sidebar_area, &state.cross_search, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::bookmark_list::render("###,
-        r###"render|render|reverse_search::render(frame, app_layout.input_area, reverse_search, theme, state.modal_stack.is_empty());"###,
+        r###"overlay|render|} else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {"###, r###"render|render|let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay("###, r###"render|render|crate::adapters::tui::widgets::cross_search::render(frame, sidebar_area, &state.cross_search, theme, state.modal_stack.is_empty());"###, r###"render|render|crate::adapters::tui::widgets::bookmark_list::render("###,
     ]),
     ("src/infrastructure/runtime/panel_bridge.rs", "4-C", &[
         r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###,
@@ -370,7 +362,7 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "render",
-        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|search_bar|cross_search|bookmark_list|reverse_search)\s*::\s*render\w*\s*\("###,
+        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search)\s*::\s*render\w*\s*\("###,
     ),
     // Payload presence cannot become a second open authority, regardless of read syntax.
     ("option", r"\.\s*(?:notification_log|quit_confirm)\b"),
@@ -381,11 +373,15 @@ const RULES: &[(&str, &str)] = &[
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
-        r"\b(?:WhichKeyState|which_key)\b|OverlayType\s*::\s*(?:Help|CommandPalette|WhichKey|ModelSelector|ProfileSwitcher|UsagePanel|Login)\b|\.\s*(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login)\s*\.\s*(?:active|previous_focus|prior_focus|open|close|dismiss|is_open)\b|\b(?:HelpOverlayState|CommandPaletteState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState)\s*\{[^{}]*\b(?:active|previous_focus|prior_focus)\b|\b(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login)\s*:\s*(?:bool|Option\s*<)",
+        r"\b(?:WhichKeyState|which_key)\b|OverlayType\s*::\s*(?:Help|CommandPalette|WhichKey|ModelSelector|ProfileSwitcher|UsagePanel|Login|Search|ReverseSearch)\b|\.\s*(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login|search_state)\s*\.\s*(?:active|previous_focus|prior_focus|open|close|dismiss|is_open)\b|\.\s*reverse_search\s*\.\s*(?:active|previous_focus|prior_focus|open|close)\b|\b(?:HelpOverlayState|CommandPaletteState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState|SearchState|ReverseSearchState)\s*\{[^{}]*\b(?:active|previous_focus|prior_focus)\b|\b(?:help_overlay|command_palette|model_selector|profile_switcher|usage_panel|login|search_state|reverse_search)\s*:\s*(?:bool|Option\s*<)",
     ),
     (
         "migrated-payload-owner",
         r"\b(?:active|previous_focus|prior_focus)\b|\bfn\s+(?:open|close|dismiss|is_open)\s*\(",
+    ),
+    (
+        "reverse-payload-owner",
+        r"\b(?:active|previous_focus|prior_focus)\b|\bfn\s+(?:open|close)\s*\(",
     ),
     (
         "a2b-owner",
@@ -433,17 +429,17 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
     });
     static MIGRATED: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"\b(?:Help|CommandPalette|WhichKey|Autocomplete|ModelSelector|ProfileSwitcher|UsagePanel|Login)\b",
+            r"\b(?:Help|CommandPalette|WhichKey|Autocomplete|ModelSelector|ProfileSwitcher|UsagePanel|Login|Search|ReverseSearch)\b",
         )
     });
     static PAYLOAD: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"\b(?:HelpOverlayState|CommandPaletteState|WhichKeyState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState)\b",
+            r"\b(?:HelpOverlayState|CommandPaletteState|WhichKeyState|ModelSelectorState|ProfileSwitcherState|UsagePanelState|LoginOverlayState|SearchState)\b",
         )
     });
     static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog)\b",
+            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search)\b",
         )
     });
     let mut errors = Vec::new();
@@ -497,6 +493,11 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 if *rule == "migrated-payload-owner" && !PAYLOAD.is_match(&scope(&code, m.end())) {
                     continue;
                 }
+                if *rule == "reverse-payload-owner"
+                    && !scope(&code, m.end()).contains("ReverseSearchState")
+                {
+                    continue;
+                }
                 if *rule == "active" && !ACTIVE_TYPES.is_match(&scope(&code, m.start())) {
                     continue;
                 }
@@ -521,6 +522,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "close-surfaces",
                     "migrated-owner",
                     "migrated-payload-owner",
+                    "reverse-payload-owner",
                     "a2b-owner",
                     "a2b-payload-owner",
                 ]
@@ -623,7 +625,15 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
     for (host, _) in HOSTS {
         assert_eq!(files.iter().filter(|(p, _)| p.as_str() == *host).count(), 1);
     }
-    for module in ["mod", "stack", "reducer", "route", "compose", "geometry"] {
+    for module in [
+        "mod",
+        "stack",
+        "reducer",
+        "route",
+        "compose",
+        "geometry",
+        "stage_search",
+    ] {
         assert_eq!(
             files
                 .iter()
@@ -637,9 +647,26 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
             .filter(|(_, owner, _)| *owner == "4-B")
             .map(|(_, _, sites)| sites.len())
             .sum::<usize>(),
-        58,
-        "exactly the 49 Ba pins are gone"
+        29,
+        "exactly the 29 Bb1a pins are gone; the 29 Bb1b sites remain named"
     );
+    for (path, count) in [
+        ("src/adapters/tui/app.rs", 8),
+        ("src/adapters/tui/layout.rs", 8),
+        ("src/adapters/tui/state.rs", 1),
+        ("src/adapters/tui/handlers/bookmark.rs", 1),
+        ("src/domain/models/visual.rs", 3),
+        ("src/infrastructure/runtime/event_loop.rs", 8),
+    ] {
+        assert_eq!(
+            PINS.iter()
+                .filter(|(p, owner, _)| *p == path && *owner == "4-B")
+                .map(|(_, _, sites)| sites.len())
+                .sum::<usize>(),
+            count,
+            "Bb1b allocation for {path}"
+        );
+    }
     let errors = scan(&files, PINS);
     assert!(errors.is_empty(), "{errors:#?}");
 }
@@ -852,12 +879,16 @@ fn k6_named_pins_survive_formatting_not_scope_tokens_or_multiplicity_changes() {
         )
         .is_empty()
     );
-    const ARG: &[Pin<'_>] = &[("src/x.rs", "4-B", &["overlay|real|OverlayType::Search,"])];
+    const ARG: &[Pin<'_>] = &[(
+        "src/x.rs",
+        "4-B",
+        &["overlay|real|OverlayType::CrossSearch,"],
+    )];
     assert!(
         scan(
             &[(
                 "src/x.rs".into(),
-                "fn real() { open(OverlayType::Search,); }".into()
+                "fn real() { open(OverlayType::CrossSearch,); }".into()
             )],
             ARG
         )
@@ -1036,4 +1067,149 @@ fn k6_a2a_ownership_reads_patterns_and_painters_are_unpinnable() {
         );
         assert!(errors.iter().any(|s| s.starts_with("stale pin")));
     }
+}
+
+#[test]
+fn k6_bb1a_legacy_owners_and_relocated_painters_cannot_be_pinned() {
+    for (rule, text) in [
+        ("migrated-owner", "s.search_state.active = true;"),
+        ("migrated-owner", "matches!(&s.search_state.active, true);"),
+        (
+            "migrated-owner",
+            "match &mut s.search_state.prior_focus { Some(_) => (), None => () }",
+        ),
+        ("migrated-owner", "s.search_state.is_open();"),
+        ("migrated-owner", "s.search_state.close();"),
+        (
+            "migrated-owner",
+            "let SearchState { active, .. } = payload;",
+        ),
+        (
+            "migrated-owner",
+            "struct TuiState { search_state: Option<SearchState> }",
+        ),
+        (
+            "migrated-payload-owner",
+            "impl SearchState { fn open(&mut self) {} }",
+        ),
+        ("migrated-owner", "s.reverse_search.active;"),
+        (
+            "migrated-owner",
+            "matches!(&mut s.reverse_search.active, true);",
+        ),
+        (
+            "migrated-owner",
+            "match &s.reverse_search.previous_focus { Some(_) => (), None => () }",
+        ),
+        (
+            "migrated-owner",
+            "let ReverseSearchState { active, .. } = payload;",
+        ),
+        ("migrated-owner", "struct TuiState { reverse_search: bool }"),
+        (
+            "reverse-payload-owner",
+            "impl ReverseSearchState { fn open(&mut self) {} }",
+        ),
+        (
+            "reverse-payload-owner",
+            "impl ReverseSearchState { fn close(&mut self) {} }",
+        ),
+        ("overlay", "let o = OverlayType::Search;"),
+        ("overlay", "let o = OverlayType::ReverseSearch;"),
+        ("render", "stage_search::render(f);"),
+        ("render", "reverse_search::render(f);"),
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first
+                .iter()
+                .any(|error| error.contains(&format!("{rule}|"))),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|error| error.split_once(": ").unwrap().1)
+            .collect();
+        let pins = [("src/x.rs", "4-B", sites.as_slice())];
+        let errors = scan(&files, &pins);
+        assert!(
+            errors.iter().any(|error| error.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|error| !error.starts_with("stale pin") && error.contains(&format!("{rule}|"))),
+            "{text}: {errors:?}"
+        );
+    }
+    for variant in ["Search", "ReverseSearch"] {
+        let path = "src/domain/models/visual.rs";
+        let source = format!("enum OverlayType {{\n {variant},\n}}");
+        let site = format!("variant|OverlayType|{variant},");
+        let sites = [site.as_str()];
+        let pins = [(path, "4-B", sites.as_slice())];
+        let errors = scan(&[(path.into(), source)], &pins);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("variant|") && !error.starts_with("stale pin"))
+        );
+        assert!(errors.iter().any(|error| error.starts_with("stale pin")));
+    }
+    // Presentation is the painter boundary, never an escape for banned reservations.
+    let path = "src/adapters/tui/presentation/stage_search.rs";
+    assert!(
+        scan(
+            &[(
+                path.into(),
+                "fn real() { stage_search::render(f); reverse_search::render(f); }".into()
+            )],
+            &[]
+        )
+        .is_empty()
+    );
+    for token in [
+        "reserve_search_bar",
+        "reserve_bookmark_panel",
+        "search_bar",
+        "bookmark_panel",
+    ] {
+        let errors = scan(&[(path.into(), format!("fn real() {{ {token}; }}"))], &[]);
+        assert!(
+            errors.iter().any(|error| error.contains("reservation|")),
+            "{token}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn k6_bb1a_payload_edits_and_routed_popup_api_remain_allowed() {
+    for path in ["src/x.rs", "src/adapters/tui/presentation/route.rs"] {
+        let source = "fn real() { s.search_state.query.push(c); s.reverse_search.query.clear(); s.reverse_search.is_open(); s.reverse_search.reset(); s.reverse_search.dismiss(); s.reverse_search.selected_match = Some(0); }";
+        assert!(
+            scan(&[(path.into(), source.into())], &[]).is_empty(),
+            "{path}"
+        );
+        for field in ["search_state", "reverse_search"] {
+            let source = format!("fn real() {{ matches!(&s.{field}.active, true); }}");
+            assert!(
+                !scan(&[(path.into(), source)], &[]).is_empty(),
+                "{path}: {field}"
+            );
+        }
+    }
+    let path = "src/adapters/tui/state.rs";
+    let source = "struct SearchState { query: String } impl SearchState { fn reset(&mut self) { self.query.clear(); } } struct ReverseSearchState { selected_match: Option<usize> } impl ReverseSearchState { fn is_open(&self) -> bool { self.selected_match.is_some() } fn reset(&mut self) { self.selected_match = Some(0); } fn dismiss(&mut self) { self.selected_match = None; } }";
+    assert!(scan(&[(path.into(), source.into())], &[]).is_empty());
+    // Bb1b still owns these complete legacy families; their exact pins remain usable.
+    let source = "fn real() { s.focus = FocusState::Overlay(OverlayType::CrossSearch); }";
+    let pins = [(
+        "src/x.rs",
+        "4-B",
+        &[
+            "focus-write|real|s.focus = FocusState::Overlay(OverlayType::CrossSearch);",
+            "overlay|real|s.focus = FocusState::Overlay(OverlayType::CrossSearch);",
+        ][..],
+    )];
+    assert!(scan(&[("src/x.rs".into(), source.into())], &pins).is_empty());
 }

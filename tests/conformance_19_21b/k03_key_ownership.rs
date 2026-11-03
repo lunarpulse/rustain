@@ -196,7 +196,9 @@ async fn k03_ctrl_r_keeps_reverse_search_but_modified_and_repeat_decisions_do_no
             .await,
         Some(InputAction::Consumed)
     ));
-    assert!(fixture.state.reverse_search.active);
+    assert!(fixture.state.reverse_search.is_open());
+    assert_eq!(fixture.state.focus, FocusState::Input);
+    assert!(fixture.state.modal_stack.is_empty());
     assert_not_sent(&fixture, &host).await;
     assert!(matches!(
         fixture
@@ -204,8 +206,9 @@ async fn k03_ctrl_r_keeps_reverse_search_but_modified_and_repeat_decisions_do_no
             .await,
         Some(InputAction::Consumed)
     ));
-    assert!(!fixture.state.reverse_search.active);
+    assert!(!fixture.state.reverse_search.is_open());
     assert_eq!(fixture.state.focus, FocusState::Input);
+    assert!(fixture.state.modal_stack.is_empty());
     fixture.paint(60, 16);
 
     for key in ['y', 'r', 'n'] {
@@ -249,7 +252,7 @@ async fn k03_ctrl_r_keeps_reverse_search_but_modified_and_repeat_decisions_do_no
             .await
             .is_none()
     );
-    assert!(!fixture.state.reverse_search.active);
+    assert!(!fixture.state.reverse_search.is_open());
     assert_not_sent(&fixture, &host).await;
     send_once(&mut fixture, &host).await;
     host.stop().await;

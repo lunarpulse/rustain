@@ -701,20 +701,33 @@ impl Default for InputHistory {
 /// State for reverse search overlay (Ctrl+R).
 // Covers: UX-DR74 (reverse search)
 pub struct ReverseSearchState {
-    pub active: bool,
     pub query: String,
     pub matches: Vec<(usize, String)>,
-    pub selected_match: usize,
+    /// None closes the routed Input popup; Some owns its selected row.
+    pub selected_match: Option<usize>,
 }
 
 impl ReverseSearchState {
     pub fn new() -> Self {
         Self {
-            active: false,
             query: String::new(),
             matches: Vec::new(),
-            selected_match: 0,
+            selected_match: None,
         }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.selected_match.is_some()
+    }
+
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.matches.clear();
+        self.selected_match = Some(0);
+    }
+
+    pub fn dismiss(&mut self) {
+        self.selected_match = None;
     }
 }
 
@@ -756,7 +769,6 @@ pub struct PeekHighlight {
 /// content string, not a lowercased copy — see `domain::services::search`.
 // Covers: UX-DR86, Story 4-4 AC1-AC7
 pub struct SearchState {
-    pub active: bool,
     pub query: String,
     pub matches: Vec<SearchMatch>,
     /// Index into `matches` of the currently focused match.
@@ -771,8 +783,9 @@ pub struct SearchState {
     /// length changes, bypass the 30 ms debounce; when it doesn't (held-key
     /// repeat), honor the debounce and skip the scan.
     pub last_query_len: usize,
-    /// Focus to restore on Esc (typically `FocusState::Chat`).
-    pub prior_focus: Option<FocusState>,
+    /// Exact authoritative view before this opening, owned by one tab.
+    pub pre_search_view: Option<crate::domain::models::ViewState>,
+    pub owning_tab: Option<crate::domain::models::tab::TabId>,
     /// Transient peek highlight for cross-search result jumps (AC6).
     /// Populated by Task 8 (open cross-search result in new tab).
     #[allow(dead_code)]
@@ -782,14 +795,14 @@ pub struct SearchState {
 impl SearchState {
     pub fn new() -> Self {
         Self {
-            active: false,
             query: String::new(),
             matches: Vec::new(),
             focused_match_index: 0,
             substate: SearchSubstate::Typing,
             last_search_instant: None,
             last_query_len: 0,
-            prior_focus: None,
+            pre_search_view: None,
+            owning_tab: None,
             peek_highlight: None,
         }
     }

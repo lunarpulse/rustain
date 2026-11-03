@@ -176,7 +176,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("CommandPalette", FocusState::Input),
         ("ModelSelector", FocusState::Input),
         ("ProfileSwitcher", FocusState::Input),
-        ("Search", overlay(OverlayType::Search)),
+        ("ReverseSearch", FocusState::Input),
+        ("Search", FocusState::Input),
         ("CrossSearch", overlay(OverlayType::CrossSearch)),
         ("BookmarkList", overlay(OverlayType::BookmarkList)),
         ("UsagePanel", FocusState::Input),
@@ -195,11 +196,17 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
             press(&mut state, Key::Char('?'));
         } else if name == "CommandPalette" {
             press(&mut state, Key::Ctrl('p'));
+        } else if name == "ReverseSearch" {
+            press(&mut state, Key::Ctrl('r'));
+            assert!(state.reverse_search.is_open());
+            assert_eq!(state.focus, FocusState::Input);
+            assert!(state.modal_stack.is_empty());
         } else if let Some(surface) = match name {
             "ModelSelector" => Some(Surface::ModelSelector),
             "ProfileSwitcher" => Some(Surface::ProfileSwitcher),
             "UsagePanel" => Some(Surface::UsagePanel),
             "Login" => Some(Surface::Login),
+            "Search" => Some(Surface::Search),
             _ => None,
         } {
             reducer::open(&mut state, surface);
@@ -215,8 +222,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     }
     assert_eq!(
         (opened, blocked),
-        (8, 5),
-        "Input, Chat and migrated frames open; remaining legacy overlays block"
+        (10, 4),
+        "Input, Chat, ReverseSearch popup and migrated frames open; remaining legacy overlays block"
     );
 }
 

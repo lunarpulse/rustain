@@ -452,16 +452,16 @@ fn cross_search_rows_by_value_and_every_other_non_text_key_is_inert() {
 
 #[rustfmt::skip]
 const REVERSE: &[W] = &[
-    w(&[Key::Enter], "Consumed | rev=false q=al sel=0 m=3 buf=alfa pal=false leader=false focus=Input"),
-    w(&[Key::Esc], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=false focus=Input"),
-    w(&[Key::Ctrl('c')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=false focus=Input"),
-    w(&[Key::Up], "Consumed | rev=true q=al sel=1 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
-    w(&[Key::Ctrl('r')], "Consumed | rev=true q=al sel=1 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
-    w(&[Key::Down], "Consumed | rev=true q=al sel=2 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
-    w(&[Key::Backspace], "Consumed | rev=true q=a sel=0 m=4 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
-    w(&[Key::Ctrl('p')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=true leader=false focus=Input"),
-    w(&[Key::Ctrl('x')], "Consumed | rev=false q=al sel=0 m=3 buf= pal=false leader=true focus=Input"),
-    w(&[Key::Ctrl('q')], "Quit | rev=true q=al sel=0 m=3 buf= pal=false leader=false focus=Overlay(ReverseSearch)"),
+    w(&[Key::Enter], "Consumed | rev=false q=al sel=None m=3 buf=alfa pal=false leader=false focus=Input"),
+    w(&[Key::Esc], "Consumed | rev=false q=al sel=None m=3 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Ctrl('c')], "Consumed | rev=false q=al sel=None m=3 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Up], "Consumed | rev=true q=al sel=Some(1) m=3 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Ctrl('r')], "Consumed | rev=true q=al sel=Some(1) m=3 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Down], "Consumed | rev=true q=al sel=Some(2) m=3 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Backspace], "Consumed | rev=true q=a sel=Some(0) m=4 buf= pal=false leader=false focus=Input"),
+    w(&[Key::Ctrl('p')], "Consumed | rev=false q=al sel=None m=3 buf= pal=true leader=false focus=Input"),
+    w(&[Key::Ctrl('x')], "Consumed | rev=false q=al sel=None m=3 buf= pal=false leader=true focus=Input"),
+    w(&[Key::Ctrl('q')], "Quit | rev=true q=al sel=Some(0) m=3 buf= pal=false leader=false focus=Input"),
 ];
 
 /// Catches an older/newer swap, an accept that picks the wrong entry, and Ctrl+P/Ctrl+X that stay in the search.
@@ -469,21 +469,28 @@ const REVERSE: &[W] = &[
 fn reverse_search_rows_by_value_and_every_other_non_text_key_is_inert() {
     // History `alpha one, beta, alpha two, alfa`; the query `al` has three matches, newest first.
     let setup = || {
-        let mut s = focused(OverlayType::ReverseSearch);
+        let mut s = fresh();
         for entry in ["alpha one", "beta", "alpha two", "alfa"] {
             s.input_history.push(entry.into());
         }
-        s.reverse_search.active = true;
+        s.reverse_search.reset();
         s.reverse_search.query = "al".into();
         let found = s.input_history.search("al");
         s.reverse_search.matches = found.into_iter().map(|(i, e)| (i, e.to_owned())).collect();
         s
     };
     let salient = |s: &TuiState| {
+        assert_eq!(s.focus, FocusState::Input);
+        assert_eq!(s.cursor_position, s.input_buffer.len());
+        assert_eq!(
+            s.modal_stack.len(),
+            usize::from(is_open(s, Surface::CommandPalette)),
+            "ReverseSearch never consumes a frame; only Ctrl+P opens one"
+        );
         let r = &s.reverse_search;
         format!(
-            "rev={} q={} sel={} m={} buf={} pal={} leader={} focus={:?}",
-            r.active,
+            "rev={} q={} sel={:?} m={} buf={} pal={} leader={} focus={:?}",
+            r.is_open(),
             r.query,
             r.selected_match,
             r.matches.len(),

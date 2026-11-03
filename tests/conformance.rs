@@ -1119,7 +1119,9 @@ fn test_handler_naming_reflection() {
     // Story 8.0a Phase 4 close: 18 extracted (1 deferred — apply_open_cross_search_result).
     // Story 20.9a adds six extracted handlers: three plan_card lifecycle handlers
     // and three transcript_target fork/rewind handlers; naming/spawn rules still apply.
-    const EXPECTED_HANDLE_COUNT: usize = 34; // 21 prior + 2 for Story 8.5 (adapter override) + 2 for D-4 extraction (compact_slash, config_slash) + 1 for Story 9.2 (mcp_catalog) + 1 for Story 11.4 (context_command — /context show|off|on extracted from event_loop) + 1 for Story 11.4a (forget_command — /memory forget extracted from event_loop) + 6 for Story 20.9a
+    // Story 21.4 Bb1a consolidates the two Search handlers into one actual-tab
+    // action handler: 34 - 2 + 1 = 33. Keep the inventory exact, not a floor.
+    const EXPECTED_HANDLE_COUNT: usize = 33;
     let handle_re =
         regex::Regex::new(r"(?m)^\s*pub(\(crate\))?\s+(async\s+)?fn\s+handle_[a-z_]+\(").unwrap();
     let mut total_handles = 0usize;

@@ -1,4 +1,4 @@
-"""21.4 smoke legs A1/A2a/A2b/Ba: debug binary, both hosts, one 80x24 viewport.
+"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a: debug binary, both hosts, one 80x24 viewport.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 held loopback model turn crosses a tiny budget over scrolled Help. Unknown local
@@ -45,6 +45,9 @@ BUDGET_RAIL = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "
 NO_DECISIONS = "No decisions waiting in this client"
 TURN = "A2b-held-budget"
 REPLY = "A2b budget completion"
+# Markdown hard breaks keep sixty real rows at every width; the inherited A2b
+# completion marker remains last and fits in its bottom-of-Stage predicate.
+SEARCH_REPLY = "".join(f"Bb1a-row-{row:02}  \n" for row in range(60))+REPLY
 DEFAULT_EVIDENCE = Path(tempfile.gettempdir()) / "rustain-21-4-smoke"
 SCRATCH = Path(tempfile.gettempdir())
 # A long TMPDIR is fine for evidence, but not for an AF_UNIX workspace socket.
@@ -94,6 +97,139 @@ def _composer(screen, state="Ready"):
     rows = screen.split("\n")
     return (rows[-2][1:-1].strip() if _status(screen, state)
             and rows[-2].startswith("│") and rows[-2].endswith("│") else None)
+
+
+def _bb1a_shell(screen, draft):
+    """Complete shell, including a full eight-line composer, not a title hit."""
+    rows = screen.split("\n")
+    if (len(rows) not in (16, 24, 30) or len(rows[0]) not in (60, 80, 130)
+            or any(len(row) != len(rows[0]) for row in rows)):
+        return None
+    top = harness.composer_top(rows)
+    if (top is None or top < 2 or not rows[top].endswith("┐")
+            or not re.search(r"\bReady\b", rows[top-1])
+            or rows[-1] != "└"+"─"*(len(rows[0])-2)+"┘"
+            or any(not (r.startswith("│") and r.endswith("│")) for r in rows[top+1:-1])
+            or [r[1:-1].strip() for r in rows[top+1:-1]] != ([line.strip() for line in draft.split("\n")] if draft else [""])):
+        return None
+    return rows, top-1
+
+
+def _bb1a_search(screen, query, count, hidden, draft=""):
+    shell = _bb1a_shell(screen, draft)
+    if not shell or not hidden:
+        return None
+    rows, status = shell
+    prefix = "Search: "+query
+    expected = prefix+" "*(len(rows[0])-len(prefix)-len(count))+count
+    owners = [y for y, row in enumerate(rows[:status]) if row.startswith("Search: ")]
+    return tuple(rows[:status]) if owners == [0] and rows[0] == expected else None
+
+
+def _bb1a_match(screen, hidden, draft=""):
+    stage = _bb1a_search(screen, "A2b", "2/2", hidden, draft)
+    # Row zero can share the overpainted Stage-top line when no metadata leads it.
+    return stage if stage and "Bb1a-row-01" in "\n".join(stage[1:]) and REPLY not in screen else None
+
+
+def _bb1a_base(screen, draft):
+    shell = _bb1a_shell(screen, draft)
+    if not shell or any(token in screen for token in ("Search: ", "┌ Reverse Search ")):
+        return None
+    return tuple(shell[0][:shell[1]])
+
+
+def _bb1a_reverse(screen, query, selected, cursor, hidden, draft=DRAFT):
+    shell = _bb1a_shell(screen, draft)
+    if not shell or hidden:
+        return None
+    rows, status = shell
+    box = _bottom_box(screen, "Reverse Search", len(rows[0]), status)
+    # strip() removes the query prefix's trailing space in the unfiltered state.
+    if not box or box[1][1:-1].strip() != ("(reverse-search): "+query).rstrip():
+        return None
+    top = status-len(box)
+    if tuple(cursor) != (19+len(query), top+1):
+        return None
+    selected_rows = [row[1:-1].strip() for row in box[2:-1] if "▸ " in row]
+    if selected is None:
+        return box if not selected_rows else None
+    # Prefix and closing quote survive ellipsis; never require a long entry tail.
+    return box if (len(selected_rows) == 1 and selected_rows[0].startswith('▸ "'+selected)
+                   and selected_rows[0].endswith('"')) else None
+
+
+def _deskcheck_bb1a_frames(directory):
+    """Offline only: runpy/import entry point; consumes complete Rust exports."""
+    stages = {"before", "search-unfiltered", "search-empty", "search-filtered",
+              "search-navigating-1", "search-navigating-2", "search-restored", "search-kept",
+              "reverse-open", "reverse-filtered", "reverse-cycled", "reverse-accepted", "reverse-restored"}
+    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb1a-*.json")]
+    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
+    assert len(records) == len(frames) == 6*len(stages), frames.keys()
+    for width, height in [(60, 16), (80, 24), (130, 30)]:
+        for full in (False, True):
+            def record(stage):
+                r = frames[width, height, full, stage]
+                assert _bb1a_shell(r["screen"], r["draft"]), (stage, r)
+                assert len(r["screen"].split("\n")) == height
+                assert len(r["screen"].split("\n")[0]) == width
+                return r
+            def search(stage, query, count):
+                r = record(stage)
+                assert _bb1a_search(r["screen"], query, count, r["cursor_hidden"], r["draft"]), r
+                return r
+            before = record("before")
+            assert _bb1a_base(before["screen"], before["draft"])
+            for stage, query, count in [("search-unfiltered", "", "0/0"), ("search-empty", "zzzz", "No matches found"),
+                                        ("search-filtered", "A2b", "1/2"), ("search-navigating-1", "A2b", "1/2"),
+                                        ("search-navigating-2", "A2b", "2/2")]:
+                r = search(stage, query, count)
+                predicate = lambda s: _bb1a_search(s, query, count, r["cursor_hidden"], r["draft"])
+                assert not predicate(before["screen"]), "independent no-owner control"
+                rows = r["screen"].split("\n")
+                for y in (0, harness.composer_top(rows)-1, len(rows)-1):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn)), (stage, y)
+                assert not _bb1a_search(r["screen"], query, count, False, r["draft"])
+                assert not _bb1a_base(r["screen"], r["draft"]), "live owner cannot be a restored base"
+            matched = record("search-navigating-2")
+            assert _bb1a_match(matched["screen"], matched["cursor_hidden"], matched["draft"])
+            assert not _bb1a_match(before["screen"], True, before["draft"])
+            assert not _bb1a_match(matched["screen"].replace("Bb1a-row-01", " "*len("Bb1a-row-01")),
+                                  True, matched["draft"]), "torn changed-view anchor"
+            restored, kept = record("search-restored"), record("search-kept")
+            assert _bb1a_base(restored["screen"], restored["draft"]) == _bb1a_base(before["screen"], before["draft"])
+            assert _bb1a_base(kept["screen"], kept["draft"]) != _bb1a_base(before["screen"], before["draft"])
+            assert _bb1a_base(kept["screen"], kept["draft"])[1:] == _bb1a_match(
+                matched["screen"], matched["cursor_hidden"], matched["draft"])[1:]
+            for stage, query, selected in [("reverse-open", "", None), ("reverse-filtered", "a1-", "/a1-third-invalid"),
+                                            ("reverse-cycled", "a1-", "/a1-second-invalid")]:
+                r = record(stage)
+                predicate = lambda s: _bb1a_reverse(s, query, selected, r["cursor"], r["cursor_hidden"], r["draft"])
+                box = predicate(r["screen"])
+                assert box, r
+                assert not predicate(before["screen"]), "independent no-popup control"
+                rows = r["screen"].split("\n"); bottom = harness.composer_top(rows)-1
+                for y in (bottom-len(box), bottom-len(box)+1, bottom-1, bottom, len(rows)-1):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn)), (stage, y)
+                if selected:
+                    assert not predicate(r["screen"].replace('▸ "'+selected, '  "'+selected))
+                assert not _bb1a_reverse(r["screen"], query, selected, r["cursor"], True, r["draft"])
+                assert not _bb1a_base(r["screen"], r["draft"])
+                assert not _bb1a_reverse(r["screen"], query, selected, (0, 0), False, r["draft"])
+            accepted, rollback = record("reverse-accepted"), record("reverse-restored")
+            assert _bb1a_base(accepted["screen"], "/a1-second-invalid") and not accepted["cursor_hidden"]
+            assert _bb1a_base(rollback["screen"], rollback["draft"]) and not rollback["cursor_hidden"]
+            assert accepted["cursor"] == [len("/a1-second-invalid")+2, height-2]
+            assert rollback["cursor"] == [2 if full else len(DRAFT)+1, height-2]
+            for r in (before, restored, kept, accepted, rollback):
+                rows = r["screen"].split("\n")
+                for y in (harness.composer_top(rows)-1, len(rows)-2, len(rows)-1):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not _bb1a_base("\n".join(torn), r["draft"])
+    return len(frames)
 
 
 def _help_box(screen):
@@ -556,6 +692,7 @@ def _leg(tui, held, release):
     _a2b_leg(tui, held, release)
     if not attached:
         _ba_leg(tui)
+        _bb1a_leg(tui)
     tui.exit()
 
 
@@ -707,6 +844,73 @@ def _ba_leg(tui):
     tui.capture("25-ba-final-draft", screen)
 
 
+def _bb1a_leg(tui):
+    """Local Search Back/Keep and routed history; attached availability unchanged."""
+    tui.send("Bb1a clear retained draft for Search", b"\x7f"*len(DRAFT))
+    before = tui.wait(lambda s: _bb1a_base(s, "") and REPLY in s
+                      and not tui.screen.cursor.hidden, "Bb1a bottom rows and empty Input")
+    before_stage = _bb1a_base(before, "")
+    tui.capture("26-bb1a-before-search", before)
+    for keep in (False, True):
+        tui.send("Bb1a real Ctrl+F", b"\x06")
+        tui.wait(lambda s: _bb1a_search(s, "", "0/0", tui.screen.cursor.hidden),
+                 "Bb1a complete unfiltered Search owner")
+        tui.send("Bb1a query matches user and long assistant", b"A2b")
+        tui.wait(lambda s: _bb1a_search(s, "A2b", "1/2", tui.screen.cursor.hidden),
+                 "Bb1a filtered two-message counter")
+        tui.send("Bb1a commit Typing to Navigating", b"\r")
+        tui.wait(lambda s: _bb1a_search(s, "A2b", "1/2", tui.screen.cursor.hidden),
+                 "Bb1a Navigating first match")
+        tui.send("Bb1a navigate to assistant start, not bottom", b"n")
+        navigated = tui.wait(lambda s: _bb1a_match(s, tui.screen.cursor.hidden),
+                             "Bb1a 2/2 long assistant start and absent bottom marker")
+        matched = _bb1a_match(navigated, tui.screen.cursor.hidden)
+        assert matched[1:] != before_stage[1:], "navigation must actually change Stage rows"
+        tui.capture("29-bb1a-keep-match" if keep else "27-bb1a-back-match", navigated)
+        tui.send("Bb1a Navigating Enter keeps" if keep else "Bb1a Esc restores", b"\r" if keep else b"\x1b")
+        if keep:
+            screen = tui.wait(lambda s: _bb1a_base(s, "") and not tui.screen.cursor.hidden
+                              and _bb1a_base(s, "")[1:] == matched[1:]
+                              and _bb1a_base(s, "") != before_stage,
+                              "Bb1a Enter closes owner and keeps exact observable match rows")
+        else:
+            screen = tui.wait(lambda s: _bb1a_base(s, "") == before_stage
+                              and not tui.screen.cursor.hidden, "Bb1a Esc exact pre-search rows")
+        tui.capture("30-bb1a-enter-kept" if keep else "28-bb1a-esc-restored", screen)
+    tui.send("Bb1a restore original retained draft", DRAFT.encode())
+    tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb1a draft restored")
+    cursor = lambda: (tui.screen.cursor.x, tui.screen.cursor.y)
+    tui.send("Bb1a routed Ctrl+R", b"\x12")
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "", None, cursor(), tui.screen.cursor.hidden),
+                      "Bb1a complete Input popup, unchanged composer, query cursor")
+    tui.capture("31-bb1a-reverse-open", screen)
+    tui.send("Bb1a history filter", b"a1-")
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", cursor(), tui.screen.cursor.hidden),
+                      "Bb1a filtered newest history selected")
+    tui.capture("32-bb1a-reverse-filtered", screen)
+    tui.send("Bb1a cycle real history selection", b"\x12")
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-second-invalid", cursor(), tui.screen.cursor.hidden),
+                      "Bb1a older history selection settled")
+    tui.capture("33-bb1a-reverse-cycled", screen)
+    tui.send("Bb1a accept selected history into composer only", b"\r")
+    screen = tui.wait(lambda s: _bb1a_base(s, "/a1-second-invalid") and not tui.screen.cursor.hidden
+                      and tui.screen.cursor.x == len("/a1-second-invalid")+2,
+                      "Bb1a selected history accepted, popup closed, composer caret")
+    tui.capture("34-bb1a-reverse-accepted", screen)
+    # The inherited notice commands submitted their autocomplete delimiter too.
+    tui.send("Bb1a replace accepted text with retained draft", b"\x7f"*len("/a1-second-invalid ")+DRAFT.encode())
+    tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb1a draft before popup cancel")
+    tui.send("Bb1a reopen history", b"\x12")
+    tui.wait(lambda s: _bb1a_reverse(s, "", None, cursor(), tui.screen.cursor.hidden), "Bb1a popup reopened")
+    tui.send("Bb1a refilter before Esc", b"a1-")
+    tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", cursor(), tui.screen.cursor.hidden),
+             "Bb1a popup query settled before cancel")
+    tui.send("Bb1a Esc dismisses popup only", b"\x1b")
+    screen = tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden
+                      and tui.screen.cursor.x == len(DRAFT)+1, "Bb1a Esc preserves original draft and Input caret")
+    tui.capture("35-bb1a-final-draft", screen)
+
+
 def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
     """Filesystem-only controls: no binary resolution, server, socket or TUI."""
     with tempfile.TemporaryDirectory(prefix="r214-paths-", dir="/tmp") as directory:
@@ -749,11 +953,11 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
     parent = _evidence_parent()
     parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-4-ba-", dir=parent))
+    evidence = Path(tempfile.mkdtemp(prefix="21-4-bb1a-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
-                "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba"]}
+                "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a"]}
     errors, posts = queue.Queue(), []
     held, release = threading.Event(), threading.Event()
     try:
@@ -783,7 +987,7 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
                         events = [
                             {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
                             {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-                            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": REPLY}},
+                            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": SEARCH_REPLY}},
                             {"type": "content_block_stop", "index": 0},
                             {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
                             {"type": "message_stop"},
@@ -845,4 +1049,4 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
     finally:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        print(f"NATIVE_21_4_BA_EVIDENCE={evidence}", flush=True)
+        print(f"NATIVE_21_4_BB1A_EVIDENCE={evidence}", flush=True)

@@ -12,7 +12,6 @@ use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
 use rustain::domain::models::autocomplete::AutocompleteKind;
-use rustain::domain::models::visual::OverlayType;
 
 use super::support::{assert_global_effect, fresh, global_owned, is_inert, press, press_all};
 
@@ -50,10 +49,10 @@ fn salient(state: &TuiState) -> Salient {
         cursor: state.cursor_position,
         multiline: state.multiline_mode,
         autocomplete: state.autocomplete.is_open(),
-        reverse_search: state.reverse_search.active,
+        reverse_search: state.reverse_search.is_open(),
         palette: is_open(state, Surface::CommandPalette),
         which_key: state.pending_leader.is_some(),
-        search: state.search_state.active,
+        search: is_open(state, Surface::Search),
         quit_confirm: state.quit_confirm.is_some(),
         pending_images: state.pending_images.len(),
         history_len: state.input_history.len(),
@@ -135,14 +134,16 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
         InputCmd::ReverseSearch => {
             let mut state = fresh();
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert!(state.reverse_search.active);
-            assert_eq!(state.focus, FocusState::Overlay(OverlayType::ReverseSearch));
+            assert!(state.reverse_search.is_open());
+            assert_eq!(state.reverse_search.selected_match, Some(0));
+            assert_eq!(state.focus, FocusState::Input);
+            assert!(state.modal_stack.is_empty());
         }
         InputCmd::OpenSearch => {
             let mut state = fresh();
             assert_eq!(press_all(&mut state, keys), vec![InputAction::OpenSearch]);
-            assert!(state.search_state.active);
-            assert_eq!(state.focus, FocusState::Overlay(OverlayType::Search));
+            assert!(is_open(&state, Surface::Search));
+            assert_eq!(state.focus, FocusState::Input);
         }
         InputCmd::NewTab => {
             let mut state = fresh();

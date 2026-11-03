@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use super::{Surface, geometry};
+use super::{Surface, geometry, stage_search};
 use crate::adapters::tui::{
     decision_pane,
     keymap::Host,
@@ -13,11 +13,11 @@ use crate::adapters::tui::{
     state::TuiState,
     widgets::{
         autocomplete_popup, command_palette, help_overlay, login_dialog, model_selector,
-        profile_switcher, toast_layer, usage_panel, which_key_bar,
+        profile_switcher, reverse_search, toast_layer, usage_panel, which_key_bar,
     },
 };
 
-/// Snapshot the unreserved layout before legacy search/bookmark reservations.
+/// Snapshot the unreserved layout before legacy bookmark reservations.
 /// Painting frames never changes any of the host's base rectangles.
 #[derive(Debug, Clone, Copy)]
 pub struct Shell {
@@ -64,8 +64,10 @@ pub fn compose(
     let mut pane_painted = false;
     for (depth, modal) in state.modal_stack.iter().enumerate() {
         let mut rect = standard_rect;
-        for area in [shell.region, shell.input_area]
+        for area in (modal.surface != Surface::Search)
+            .then_some(shell.region)
             .into_iter()
+            .chain([shell.input_area])
             .chain(shell.sidebar)
         {
             frame
@@ -73,6 +75,26 @@ pub fn compose(
                 .set_style(area, Style::default().add_modifier(Modifier::DIM));
         }
         match modal.surface {
+            Surface::Search => {
+                rect = Rect::new(
+                    shell.chat_pane.x,
+                    shell.chat_pane.y,
+                    shell.chat_pane.width,
+                    shell.chat_pane.height.min(1),
+                );
+                let mut breadcrumb = String::new();
+                let label = if depth == 0 {
+                    "Search: "
+                } else {
+                    for prior in state.modal_stack.iter().take(depth) {
+                        breadcrumb.push_str(prior.title());
+                        breadcrumb.push_str(" › ");
+                    }
+                    breadcrumb.push_str("Search: ");
+                    &breadcrumb
+                };
+                stage_search::render(frame, rect, &state.search_state, theme, label, false);
+            }
             Surface::DecisionPane => {
                 let Some(pane_rect) =
                     decision_pane::render(frame, shell.chat_pane, state, facts, theme)
@@ -124,7 +146,7 @@ pub fn compose(
                 theme,
             ),
         }
-        if depth > 0 {
+        if depth > 0 && modal.surface != Surface::Search {
             let ancestor = Style::default().fg(theme.colors.fg_secondary);
             let current = Style::default().fg(theme.colors.fg_primary);
             let mut title = Vec::with_capacity(depth * 2 + 3);
@@ -145,6 +167,7 @@ pub fn compose(
                 | Surface::UsagePanel
                 | Surface::Login => theme.colors.accent,
                 Surface::QuitConfirm => theme.colors.warning,
+                Surface::Search => unreachable!("Search owns its inline breadcrumb"),
             };
             // Replace only the top rail: redrawing every border would erase
             // widget-owned closing-border titles such as Help's scroll rail.
@@ -160,6 +183,7 @@ pub fn compose(
     }
     if state.modal_stack.is_empty() && state.focus == crate::domain::models::FocusState::Input {
         autocomplete_popup::render(frame, shell.input_area, &state.autocomplete, theme);
+        reverse_search::render(frame, shell.chat_pane, &state.reverse_search, theme, true);
     }
     if state.pending_leader.is_some()
         && state

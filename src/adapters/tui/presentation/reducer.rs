@@ -26,6 +26,17 @@ pub fn initialize_surface(state: &mut TuiState, surface: Surface) -> bool {
         .is_some_and(|frame| std::mem::take(&mut frame.needs_initialization))
 }
 
+/// Bind a freshly initialized stage-navigation frame to its conversation.
+pub fn bind_search_stage(state: &mut TuiState, conversation_id: &str) {
+    if let Some(frame) = state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.surface == Surface::Search)
+    {
+        frame.conversation_id = Some(conversation_id.to_owned());
+    }
+}
+
 /// Applies trusted Login requests before deferred permission focus is settled.
 pub fn settle_login(state: &mut TuiState) -> bool {
     let Some(intent) = state.login.frame_intent.take() else {
@@ -259,6 +270,7 @@ fn fresh_frame(state: &mut TuiState, surface: Surface, decision: Option<Decision
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel
                 | Surface::Login
+                | Surface::Search
         ),
     }
 }
@@ -267,6 +279,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
     match surface {
         Surface::CommandPalette => state.command_palette.reset(),
         Surface::Help => state.help_overlay.reset(),
+        Surface::Search => state.search_state = Default::default(),
         Surface::NotificationLog => {
             state.notification_log = Some(NotificationLogState {
                 selected_id: state
@@ -314,6 +327,8 @@ pub fn request_quit(state: &mut TuiState, facts: QuitFacts) -> QuitRequest {
 }
 
 /// Back removes exactly the top frame, never an interrupted frame beneath it.
+/// Search's user Back routes to `handlers::search::handle_search_action(CloseSearch)` first;
+/// state-only truncation/discard must never restore a Stage through this reducer.
 pub fn back(state: &mut TuiState) -> Option<Surface> {
     let Some(surface) = state.modal_stack.top().map(|frame| frame.surface) else {
         debug_assert!(super::consistent(state));
@@ -322,6 +337,29 @@ pub fn back(state: &mut TuiState) -> Option<Surface> {
     close(state, surface);
     debug_assert!(super::consistent(state));
     Some(surface)
+}
+
+/// Discard every replaced-Stage owner, including suspended continuations.
+/// Global frames and their identities survive; an old Search snapshot is never
+/// restored into the replacement conversation.
+pub fn reconcile_stage(state: &mut TuiState) {
+    loop {
+        let stage = state
+            .modal_stack
+            .all_frames()
+            .find(|frame| frame.conversation_id.is_some())
+            .map(|frame| frame.surface);
+        let Some(surface) = stage else { break };
+        close(state, surface);
+    }
+}
+
+/// A replacement effect's normal base target; retained global callers take priority.
+pub fn settle_stage_base(state: &mut TuiState, focus: crate::domain::models::FocusState) {
+    if state.modal_stack.is_empty() {
+        state.focus = focus;
+        transition(state);
+    }
 }
 
 /// Remove one surface and its payload. Closing a covered surface does not
@@ -401,6 +439,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::Login => {
             state.login.clear();
+            None
+        }
+        Surface::Search => {
+            state.search_state = Default::default();
             None
         }
         Surface::NotificationLog => {
