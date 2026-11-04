@@ -116,7 +116,14 @@ fn room_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
     for _ in 0..200 {
         h.terminal
             .draw(|frame| {
-                help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
+                help_overlay::render(
+                    frame,
+                    frame.area(),
+                    &h.state.help_overlay,
+                    &h.theme,
+                    false,
+                    false,
+                );
             })
             .unwrap();
         let screen = h.screen_text();
@@ -160,7 +167,14 @@ fn artifact_help_bindings_are_scroll_reachable_at_a_realistic_viewport() {
     for _ in 0..200 {
         h.terminal
             .draw(|frame| {
-                help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
+                help_overlay::render(
+                    frame,
+                    frame.area(),
+                    &h.state.help_overlay,
+                    &h.theme,
+                    false,
+                    false,
+                );
             })
             .unwrap();
         let screen = h.screen_text();
@@ -206,6 +220,7 @@ fn test_e2e_help_overlay_no_tmux_warning_without_env() {
                 &h.state.help_overlay,
                 &h.theme,
                 false, // no tmux
+                false, // no active inspector editor
             );
         })
         .unwrap();
@@ -500,7 +515,14 @@ fn test_e2e_help_overlay_minimum_terminal_size() {
     // Render help overlay directly - should not panic
     h.terminal
         .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &h.state.help_overlay, &h.theme, false);
+            help_overlay::render(
+                frame,
+                frame.area(),
+                &h.state.help_overlay,
+                &h.theme,
+                false,
+                false,
+            );
         })
         .unwrap();
 

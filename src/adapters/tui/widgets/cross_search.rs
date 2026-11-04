@@ -19,13 +19,13 @@ const QUERY_PREFIX: &str = "/ ";
 const EXCERPT_INDENT: &str = "    ";
 
 /// Render into the frame's fitted rectangle; presence belongs to the stack.
-/// `show_cursor` controls only hardware cursor placement, not painted cells.
+/// `show_caret` paints the owning query's caret; no hardware cursor is placed.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &CrossSearchState,
     theme: &Theme,
-    show_cursor: bool,
+    show_caret: bool,
 ) {
     if area.height < 4 {
         return;
@@ -37,21 +37,28 @@ pub fn render(
     let body_rows = area.height.saturating_sub(2) as usize;
     let mut lines: Vec<Line> = Vec::with_capacity(body_rows);
 
-    // Row 0: query input with cursor. The query scrolls so its tail (and the
-    // caret after it) stays inside the border: `/ ` prefix, one caret cell.
-    let query_budget = inner_width.saturating_sub(geom::cells(QUERY_PREFIX) + 1);
-    let shown_query = geom::clip_tail(&state.query, query_budget);
-    let query_display = format!("{QUERY_PREFIX}{shown_query}");
-    lines.push(Line::from(Span::styled(
-        query_display,
-        Style::default()
-            .fg(theme.colors.fg_primary)
-            .add_modifier(Modifier::BOLD),
-    )));
+    let query_budget = inner_width.saturating_sub(geom::cells(QUERY_PREFIX));
+    let view = state.query.view(query_budget);
+    let query_style = Style::default()
+        .fg(theme.colors.fg_primary)
+        .add_modifier(Modifier::BOLD);
+    lines.push(Line::from(vec![
+        Span::styled(QUERY_PREFIX, query_style),
+        Span::styled(view.before, query_style),
+        Span::styled(
+            view.caret,
+            if show_caret {
+                query_style.add_modifier(Modifier::REVERSED)
+            } else {
+                query_style
+            },
+        ),
+        Span::styled(view.after, query_style),
+    ]));
 
     let muted = Style::default().fg(theme.colors.fg_muted);
     let show_results = !state.results.is_empty()
-        && state.query.len() >= 2
+        && state.query.as_str().len() >= 2
         && (!state.running || state.load_failed);
     let selected = if show_results {
         state.selected.min(state.results.len() - 1)
@@ -68,7 +75,7 @@ pub fn render(
             "Searching…",
             muted.add_modifier(Modifier::ITALIC),
         )));
-    } else if state.query.len() < 2 {
+    } else if state.query.as_str().len() < 2 {
         lines.push(Line::from(Span::styled(
             "Type at least 2 characters",
             muted.add_modifier(Modifier::ITALIC),
@@ -122,7 +129,11 @@ pub fn render(
                         inner_width.saturating_sub(geom::cells(EXCERPT_INDENT)),
                     );
                     let mut row_spans = vec![Span::raw(EXCERPT_INDENT)];
-                    row_spans.extend(build_excerpt_spans(&excerpt_text, &state.query, theme));
+                    row_spans.extend(build_excerpt_spans(
+                        &excerpt_text,
+                        state.query.as_str(),
+                        theme,
+                    ));
                     lines.push(Line::from(row_spans));
                 }
                 if rows_per_result >= 3 {
@@ -171,14 +182,6 @@ pub fn render(
             .bg(theme.colors.bg_secondary),
     );
     frame.render_widget(widget, area);
-
-    // Cursor at end of the (possibly scrolled) query on row 0.
-    if show_cursor {
-        let query_cells = geom::cells(QUERY_PREFIX) + geom::cells(shown_query);
-        let cursor_col = area.x + 1 + query_cells as u16; // +1 for left border
-        let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(2));
-        frame.set_cursor_position((cursor_col, area.y + 1));
-    }
 }
 
 /// Split an excerpt into spans so case-insensitive matches against `query`

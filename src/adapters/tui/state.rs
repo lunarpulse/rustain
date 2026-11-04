@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::adapters::agent_registry::AgentRegistry;
 use crate::adapters::skill_registry::SkillRegistry;
+use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
 use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::refresh_tracker::RefreshTracker;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
@@ -831,8 +832,8 @@ impl Default for SearchState {
 /// and writes its results back into this struct via a stale-guarded update.
 // Covers: Story 4-4 AC5, AC6, AC7 (UX-DR87)
 pub struct CrossSearchState {
-    pub query: String,
-    /// Every query edit invalidates earlier requests, even a retype to the same text.
+    pub query: TextField,
+    /// Every content edit invalidates earlier requests, even a retype to the same text.
     pub request_revision: u64,
     pub results: Vec<CrossSearchResult>,
     pub selected: usize,
@@ -854,7 +855,7 @@ pub struct CrossSearchState {
 impl CrossSearchState {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
+            query: TextField::default(),
             request_revision: 0,
             results: Vec::new(),
             selected: 0,
@@ -2415,6 +2416,9 @@ pub struct HelpOverlayState {
     pub scroll_offset: usize,
     /// Index of the currently highlighted category (reserved for future navigation).
     pub selected_category: usize,
+    pub search: InspectorSearch,
+    /// Filtered rows have their own position; clearing restores the unfiltered view.
+    pub filtered_scroll_offset: usize,
 }
 
 impl HelpOverlayState {
@@ -2422,6 +2426,8 @@ impl HelpOverlayState {
         Self {
             scroll_offset: 0,
             selected_category: 0,
+            search: InspectorSearch::default(),
+            filtered_scroll_offset: 0,
         }
     }
 
@@ -2429,6 +2435,16 @@ impl HelpOverlayState {
     pub fn reset(&mut self) {
         self.scroll_offset = 0;
         self.selected_category = 0;
+        self.search = InspectorSearch::default();
+        self.filtered_scroll_offset = 0;
+    }
+
+    pub(crate) fn list_scroll_mut(&mut self) -> &mut usize {
+        if self.search.query.is_empty() {
+            &mut self.scroll_offset
+        } else {
+            &mut self.filtered_scroll_offset
+        }
     }
 }
 

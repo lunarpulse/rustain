@@ -1417,7 +1417,7 @@ fn populate_global_cross(state: &mut TuiState) -> presentation::Frame {
     );
     press(state, Key::Down);
     assert_eq!(state.cross_search.selected, 1);
-    assert_eq!(state.cross_search.query, "ab");
+    assert_eq!(state.cross_search.query.as_str(), "ab");
     frame
 }
 

@@ -305,6 +305,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
                 detail: false,
                 detail_scroll: 0,
                 caller_focus: state.focus.clone(),
+                search: Default::default(),
             });
             state.notifications.log_presented();
         }
@@ -436,7 +437,11 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
             state.command_palette.clear();
             None
         }
-        Surface::Help => None,
+        Surface::Help => {
+            state.help_overlay.search = Default::default();
+            state.help_overlay.filtered_scroll_offset = 0;
+            None
+        }
         Surface::DecisionPane => {
             state.decisions.clear_paint();
             None

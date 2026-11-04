@@ -359,6 +359,8 @@ pub enum Context {
     FieldEdit,
     /// Caret-editing query fields, isolated from the legacy attached composer.
     CaretField,
+    /// In-frame Log/Help filtering; Enter keeps the filter, Esc clears and leaves it.
+    InspectorSearch,
     /// The task-panel drill-down (focus Chat): its own keys plus only the
     /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
     ChatDrill,
@@ -414,7 +416,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 53] = [
+    pub const ALL: [Context; 54] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -428,6 +430,7 @@ impl Context {
         Context::Permission,
         Context::FieldEdit,
         Context::CaretField,
+        Context::InspectorSearch,
         Context::ChatDrill,
         Context::ChatWave,
         Context::ChatReorder,
@@ -486,6 +489,7 @@ impl Context {
             Context::Permission => "Permission",
             Context::FieldEdit => "Append-only text field",
             Context::CaretField => "Caret text field",
+            Context::InspectorSearch => "Inspector search",
             Context::ChatDrill => "Task drill-down",
             Context::ChatWave => "Chat (wave)",
             Context::ChatReorder => "Chat (reorder)",
@@ -582,9 +586,11 @@ impl Context {
             Context::CommandPalette
             | Context::SearchTyping
             | Context::SearchNavigating
+            | Context::CrossSearch
+            | Context::InspectorSearch
             | Context::ReverseSearch => &[Context::CaretField],
             // The remaining fields retain their append-only editor.
-            Context::ModelSelector | Context::CrossSearch => &[Context::FieldEdit],
+            Context::ModelSelector => &[Context::FieldEdit],
         }
     }
 

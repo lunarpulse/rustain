@@ -622,7 +622,8 @@ fn bb1b_ii_capture(
             "{screen}"
         );
         assert!(
-            rows[usize::from(rect.y + 1)].contains(&format!("/ {}", h.state.cross_search.query)),
+            rows[usize::from(rect.y + 1)]
+                .contains(&format!("/ {}", h.state.cross_search.query.as_str())),
             "{screen}"
         );
         let primary = match stage {
@@ -668,14 +669,22 @@ fn bb1b_ii_results(h: &mut TestHarness, query: &str, count: usize) {
         handlers::export::{self, CrossSearchResultsOutcome, CrossSearchScanAction},
     };
     use rustain::domain::services::cross_search::CrossSearchResult;
+    press(&mut h.state, Key::Ctrl('e'));
+    let changed = !h.state.cross_search.query.is_empty();
     assert_eq!(
         press(&mut h.state, Key::Ctrl('u')),
-        InputAction::CrossSearchQueryChanged
+        if changed {
+            InputAction::CrossSearchQueryChanged
+        } else {
+            InputAction::Consumed
+        }
     );
-    assert_eq!(
-        export::apply_cross_search_query_change(&mut h.state),
-        CrossSearchScanAction::Cleared
-    );
+    if changed {
+        assert_eq!(
+            export::apply_cross_search_query_change(&mut h.state),
+            CrossSearchScanAction::Cleared
+        );
+    }
     let mut pending = CrossSearchScanAction::Cleared;
     for ch in query.chars() {
         assert_eq!(
@@ -722,7 +731,7 @@ fn bb1b_ii_results(h: &mut TestHarness, query: &str, count: usize) {
         ),
         CrossSearchResultsOutcome::Applied
     );
-    assert_eq!(h.state.cross_search.query, query);
+    assert_eq!(h.state.cross_search.query.as_str(), query);
     assert_eq!(h.state.cross_search.results.len(), count);
 }
 
@@ -1025,7 +1034,7 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
             bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "cross-quit", full, &dir);
             press(&mut h.state, Key::Char('n'));
             assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
-            assert_eq!(h.state.cross_search.query, "Bb1a");
+            assert_eq!(h.state.cross_search.query.as_str(), "Bb1a");
             if width < 100 {
                 assert_eq!(
                     press(&mut h.state, Key::Enter),
@@ -1080,6 +1089,222 @@ async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
             bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "base-quit", full, &dir);
             press(&mut h.state, Key::Char('n'));
             assert!(h.state.modal_stack.is_empty());
+        }
+    }
+}
+
+fn bb2b_publish_cross(h: &mut TestHarness, count: usize) {
+    use rustain::adapters::tui::handlers::export::{
+        self, CrossSearchResultsOutcome, CrossSearchScanAction,
+    };
+    let CrossSearchScanAction::Spawn {
+        query,
+        frame_id,
+        revision,
+    } = export::apply_cross_search_query_change(&mut h.state)
+    else {
+        panic!("a settled multi-character query must claim the actual completion");
+    };
+    let results = (0..count)
+        .map(
+            |n| rustain::domain::services::cross_search::CrossSearchResult {
+                conversation_id: h.conversation.id.clone(),
+                title: if count == 1 {
+                    TURN.into()
+                } else {
+                    format!(
+                        "{TURN}-last-selected-{n} {}",
+                        "long trailing title ".repeat(16)
+                    )
+                },
+                excerpt: "Bb1a-row-00".into(),
+                timestamp: h.conversation.updated_at,
+                first_match_message_index: 1,
+            },
+        )
+        .collect();
+    assert_eq!(
+        export::apply_cross_search_results(
+            &mut h.state,
+            frame_id,
+            revision,
+            query,
+            results,
+            count == 20,
+            false,
+        ),
+        CrossSearchResultsOutcome::Applied
+    );
+    assert!(
+        !h.state.cross_search.running,
+        "save only a complete settled frame"
+    );
+}
+
+#[tokio::test]
+async fn bb2b_real_frames_for_smoke_predicates() {
+    use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
+    let dir = output_dir();
+    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for full in [false, true] {
+            let draft = if full {
+                "1\n2\n3\n4\n5\n6\n7\n8"
+            } else {
+                DRAFT
+            };
+            for (kind, needle) in [("log", "aone"), ("help", "notification")] {
+                let mut h = TestHarness::with_size(width, height);
+                h.complete_turn(
+                    TURN,
+                    vec![
+                        StreamChunk::Text {
+                            content: REPLY.into(),
+                            parent_tool_use_id: None,
+                        },
+                        StreamChunk::TurnComplete {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    ],
+                );
+                let mut tabs = TabManager::new(CancellationToken::new());
+                tabs.active_tab_mut().conversation = std::mem::take(&mut h.conversation);
+                h.state.active_tab_id = tabs.active_tab_id();
+                h.state.focus = rustain::domain::models::FocusState::Input;
+                h.state.input_buffer = draft.into();
+                h.state.cursor_position = draft.chars().count();
+                notifications::notify(
+                    &mut h.state,
+                    NoticeSource::System,
+                    NoticeSeverity::Error,
+                    "Unknown command: /aone",
+                );
+                let retained = h.state.notifications.records().next_back().unwrap().id;
+                notifications::notify(
+                    &mut h.state,
+                    NoticeSource::System,
+                    NoticeSeverity::Info,
+                    "Unknown command: /btwo",
+                );
+                key(&mut h, &mut tabs, Key::Ctrl('x'));
+                key(
+                    &mut h,
+                    &mut tabs,
+                    Key::Char(if kind == "log" { 'n' } else { '?' }),
+                );
+                if kind == "log" {
+                    key(&mut h, &mut tabs, Key::Char('j'));
+                    assert_eq!(
+                        h.state.notification_log.as_ref().unwrap().selected_id,
+                        Some(retained)
+                    );
+                } else {
+                    for _ in 0..3 {
+                        key(&mut h, &mut tabs, Key::Char('j'));
+                    }
+                    assert_eq!(h.state.help_overlay.scroll_offset, 3);
+                }
+                let owner = h.state.modal_stack.top().unwrap().clone();
+                key(&mut h, &mut tabs, Key::Char('/'));
+                capture(
+                    &mut h,
+                    &tabs,
+                    "bb2b",
+                    &format!("{kind}-unfiltered"),
+                    full,
+                    &dir,
+                );
+                paste(&mut h, &mut tabs, needle);
+                capture(
+                    &mut h,
+                    &tabs,
+                    "bb2b",
+                    &format!("{kind}-filtered"),
+                    full,
+                    &dir,
+                );
+                key(&mut h, &mut tabs, Key::Home);
+                key(&mut h, &mut tabs, Key::Right);
+                capture(&mut h, &tabs, "bb2b", &format!("{kind}-caret"), full, &dir);
+                paste(&mut h, &mut tabs, "x");
+                let empty = capture(&mut h, &tabs, "bb2b", &format!("{kind}-empty"), full, &dir);
+                assert!(empty.contains(if kind == "log" {
+                    "No matching notifications."
+                } else {
+                    "No matching keybindings."
+                }));
+                key(&mut h, &mut tabs, Key::Ctrl('h'));
+                capture(
+                    &mut h,
+                    &tabs,
+                    "bb2b",
+                    &format!("{kind}-restored"),
+                    full,
+                    &dir,
+                );
+                key(&mut h, &mut tabs, Key::Enter);
+                capture(
+                    &mut h,
+                    &tabs,
+                    "bb2b",
+                    &format!("{kind}-accepted"),
+                    full,
+                    &dir,
+                );
+                key(&mut h, &mut tabs, Key::Char('/'));
+                key(&mut h, &mut tabs, Key::Esc);
+                capture(
+                    &mut h,
+                    &tabs,
+                    "bb2b",
+                    &format!("{kind}-cleared"),
+                    full,
+                    &dir,
+                );
+                assert_eq!(
+                    h.state.modal_stack.top(),
+                    Some(&owner),
+                    "sub-context back keeps its exact owner"
+                );
+                if kind == "log" {
+                    assert_eq!(
+                        h.state.notification_log.as_ref().unwrap().selected_id,
+                        Some(retained)
+                    );
+                } else {
+                    assert_eq!(
+                        h.state.help_overlay.scroll_offset, 3,
+                        "filter never overwrites original scroll"
+                    );
+                }
+                assert_eq!(h.state.input_buffer, draft);
+            }
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
+            capture(&mut h, &tabs, "bb2b", "cross-unfiltered", full, &dir);
+            paste(&mut h, &mut tabs, "Bb1a");
+            bb2b_publish_cross(&mut h, 1);
+            capture(&mut h, &tabs, "bb2b", "cross-filtered", full, &dir);
+            key(&mut h, &mut tabs, Key::Home);
+            key(&mut h, &mut tabs, Key::Right);
+            capture(&mut h, &tabs, "bb2b", "cross-caret", full, &dir);
+            paste(&mut h, &mut tabs, "x");
+            bb2b_publish_cross(&mut h, 0);
+            capture(&mut h, &tabs, "bb2b", "cross-empty", full, &dir);
+            key(&mut h, &mut tabs, Key::Ctrl('h'));
+            bb2b_publish_cross(&mut h, 1);
+            capture(&mut h, &tabs, "bb2b", "cross-restored", full, &dir);
+            key(&mut h, &mut tabs, Key::End);
+            bb2b_publish_cross(&mut h, 20);
+            for _ in 0..19 {
+                key(&mut h, &mut tabs, Key::Down);
+            }
+            capture(&mut h, &tabs, "bb2b", "cross-counted", full, &dir);
+            assert_eq!(
+                h.state.cross_search.selected, 19,
+                "selected-window control is reachable"
+            );
+            assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
+            assert_eq!(h.state.input_buffer, draft);
         }
     }
 }

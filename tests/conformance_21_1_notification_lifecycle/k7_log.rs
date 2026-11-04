@@ -60,6 +60,7 @@ fn paint(state: &TuiState, f: &LogFacts, width: u16, height: u16) -> Vec<String>
                 &state.notifications,
                 &theme,
                 f,
+                false,
             );
         })
         .unwrap();
@@ -511,6 +512,7 @@ fn paint_buffer(state: &TuiState, f: &LogFacts, width: u16, height: u16) -> Buff
                 &state.notifications,
                 &theme,
                 f,
+                false,
             );
         })
         .unwrap();

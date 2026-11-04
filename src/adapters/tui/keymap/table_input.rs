@@ -153,7 +153,7 @@ const INPUT: &[Binding] = &[
     i(&[Key::PageDown], InputCmd::TranscriptPageDown, "").attached().does("Scroll the transcript one page down"),
 ];
 
-/// Legacy tail editors (feedback, answer, model selector and CrossSearch).
+/// Legacy tail editors (feedback, answer and model selector).
 #[rustfmt::skip]
 pub const FIELD: &[Binding] = &[
     f(&[Key::Ctrl('w')], FieldCmd::DeleteWordBack).does("Delete the last word of the field"),

@@ -1376,7 +1376,7 @@ fn cross_search_closing_paths_settle_real_queued_permissions_and_covering_does_n
                 );
                 export::close_cross_search(&mut h.state);
                 assert!(h.state.modal_stack.iter().any(|f| f.id == owner));
-                assert_eq!(h.state.cross_search.query, "ab");
+                assert_eq!(h.state.cross_search.query.as_str(), "ab");
                 assert!(h.state.cross_search.running);
                 assert_permission_deferred(&h.state, &id);
                 press(&mut h.state, Key::Esc);

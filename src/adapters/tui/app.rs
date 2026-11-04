@@ -1230,13 +1230,10 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         context @ (Context::CommandPalette
         | Context::ReverseSearch
         | Context::SearchTyping
-        | Context::SearchNavigating) => {
+        | Context::SearchNavigating
+        | Context::CrossSearch
+        | Context::InspectorSearch) => {
             edit_query(state, context, |field| field.insert_char(c)).expect("query context")
-        }
-        Context::CrossSearch => {
-            state.cross_search.query.push(c);
-            state.needs_redraw = true;
-            InputAction::CrossSearchQueryChanged
         }
         Context::ModelSelector => model_char(state, None, c).unwrap_or(InputAction::Consumed),
         Context::Input | Context::Autocomplete => type_char(state, c, None),
@@ -1748,7 +1745,6 @@ fn exec_field(state: &mut TuiState, context: Context, cmd: FieldCmd) -> InputAct
         _ => return InputAction::Consumed,
     };
     match context {
-        Context::CrossSearch => cross_search_edit(state, key),
         Context::ModelSelector => {
             if state.model_selector.search_active {
                 edit_field(&mut state.model_selector.search_query, key);
@@ -1994,6 +1990,20 @@ fn edit_query(
             state.search_state.substate = SearchSubstate::Typing;
             edit(&mut state.search_state.query)
         }
+        Context::CrossSearch => edit(&mut state.cross_search.query),
+        Context::InspectorSearch => {
+            let changed = edit(&mut presentation::inspector_search_mut(state)?.query);
+            if changed {
+                match state.modal_stack.top().map(|frame| frame.surface) {
+                    Some(Surface::Help) => state.help_overlay.filtered_scroll_offset = 0,
+                    Some(Surface::NotificationLog) => {
+                        crate::adapters::tui::notification_log::reconcile_search(state);
+                    }
+                    _ => unreachable!("only Log/Help lend the inspector field"),
+                }
+            }
+            changed
+        }
         _ => return None,
     };
     state.needs_redraw = true;
@@ -2007,6 +2017,7 @@ fn edit_query(
             }
             Context::SearchNavigating => InputAction::SearchReturnToTyping,
             Context::SearchTyping => InputAction::SearchQueryChanged,
+            Context::CrossSearch => InputAction::CrossSearchQueryChanged,
             _ => InputAction::Consumed,
         }
     })
@@ -2015,16 +2026,12 @@ fn edit_query(
 /// The borrowed paste seam edits only fields actually offered by this host.
 pub(crate) fn paste_query(state: &mut TuiState, text: &str, host: Host) -> Option<InputAction> {
     let context = focus_context(state)?;
-    if host == Host::Attached && context != Context::CommandPalette {
+    if host == Host::Attached
+        && !matches!(context, Context::CommandPalette | Context::InspectorSearch)
+    {
         return None;
     }
     edit_query(state, context, |field| field.insert(text))
-}
-
-fn cross_search_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
-    edit_field(&mut state.cross_search.query, key);
-    state.needs_redraw = true;
-    InputAction::CrossSearchQueryChanged
 }
 
 fn exec_bookmark(state: &mut TuiState, cmd: BookmarkCmd) -> InputAction {
@@ -2233,6 +2240,7 @@ fn exec_overlay(
         Context::ProfileSwitcher => exec_profile(state, cmd),
         Context::UsagePanel => exec_usage(state, cmd),
         Context::CrossSearch => exec_cross_search(state, cmd),
+        Context::InspectorSearch => exec_inspector_search(state, cmd),
         Context::ReverseSearch => exec_reverse_search(state, cmd),
         Context::Autocomplete => exec_autocomplete(state, cmd),
         // The host-neutral frames (S-QUIT, S-LOG, decisions), the recipient surface and
@@ -2286,20 +2294,85 @@ fn exec_recipient(state: &mut TuiState, command: CommandId) -> InputAction {
     InputAction::Consumed
 }
 
+fn filtered_help_scroll_limit(state: &TuiState) -> usize {
+    let area = ratatui::layout::Rect::new(0, 0, state.terminal_width, state.terminal_height);
+    // Tab count moves the Stage's top, not its bottom; only the modal region
+    // is needed here. Attached callers lend their actual composer for this call.
+    let rows = crate::adapters::tui::layout::compute_layout(
+        area,
+        &state.theme,
+        &state.input_buffer,
+        1,
+        state.sidebar_visible,
+        state.density_mode,
+    )
+    .map(|layout| {
+        presentation::geometry::frame_rect(presentation::geometry::modal_region(&layout, area))
+            .height
+            .saturating_sub(3) // Two borders and the retained query row.
+    })
+    .unwrap_or(0);
+    crate::adapters::tui::widgets::help_overlay::filtered_row_count(&state.help_overlay.search)
+        .saturating_sub(usize::from(rows))
+}
+
 fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    let filtered_limit = (!state.help_overlay.search.query.is_empty()
+        && matches!(
+            cmd,
+            OverlayCmd::HelpDown | OverlayCmd::HelpUp | OverlayCmd::HelpBottom
+        ))
+    .then(|| filtered_help_scroll_limit(state));
     match cmd {
+        OverlayCmd::InspectorSearch => return exec_inspector_search(state, cmd),
         OverlayCmd::HelpDown => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_add(1);
+            let offset = state.help_overlay.list_scroll_mut();
+            *offset = filtered_limit.map_or_else(
+                || offset.saturating_add(1),
+                |max| (*offset).min(max).saturating_add(1).min(max),
+            );
         }
         OverlayCmd::HelpUp => {
-            state.help_overlay.scroll_offset = state.help_overlay.scroll_offset.saturating_sub(1);
+            let offset = state.help_overlay.list_scroll_mut();
+            *offset = filtered_limit.map_or_else(
+                || offset.saturating_sub(1),
+                |max| (*offset).min(max).saturating_sub(1),
+            );
         }
-        // A large sentinel: the render fn clamps to the maximum.
-        OverlayCmd::HelpBottom => state.help_overlay.scroll_offset = usize::MAX / 2,
-        OverlayCmd::HelpTop => state.help_overlay.scroll_offset = 0,
+        // Preserve the legacy unfiltered sentinel; filtered positions are bounded.
+        OverlayCmd::HelpBottom => {
+            *state.help_overlay.list_scroll_mut() = filtered_limit.unwrap_or(usize::MAX / 2);
+        }
+        OverlayCmd::HelpTop => *state.help_overlay.list_scroll_mut() = 0,
         OverlayCmd::HelpClose => presentation::reducer::close(state, Surface::Help),
         OverlayCmd::QuitRequest => return InputAction::Quit,
         _ => {}
+    }
+    state.needs_redraw = true;
+    InputAction::Consumed
+}
+
+fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
+    if cmd == OverlayCmd::QuitRequest {
+        return InputAction::Quit;
+    }
+    let Some(search) = presentation::inspector_search_mut(state) else {
+        return InputAction::Consumed;
+    };
+    match cmd {
+        OverlayCmd::InspectorSearch => search.open(),
+        OverlayCmd::InspectorAccept => search.accept(),
+        OverlayCmd::InspectorBack => search.back(),
+        _ => return InputAction::Consumed,
+    }
+    if cmd == OverlayCmd::InspectorBack {
+        match state.modal_stack.top().map(|frame| frame.surface) {
+            Some(Surface::Help) => state.help_overlay.filtered_scroll_offset = 0,
+            Some(Surface::NotificationLog) => {
+                crate::adapters::tui::notification_log::reconcile_search(state);
+            }
+            _ => unreachable!("only Log/Help lend the inspector field"),
+        }
     }
     state.needs_redraw = true;
     InputAction::Consumed
@@ -2311,7 +2384,6 @@ fn exec_cross_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         OverlayCmd::CrossOpen if !state.cross_search.results.is_empty() => {
             InputAction::OpenCrossSearchResult
         }
-        OverlayCmd::CrossBackspace => cross_search_edit(state, DomainKey::Backspace),
         OverlayCmd::CrossPrev => {
             state.cross_search.selected = state.cross_search.selected.saturating_sub(1);
             state.needs_redraw = true;

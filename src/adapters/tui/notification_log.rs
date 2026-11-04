@@ -16,6 +16,7 @@ use crate::adapters::tui::notifications::{
     NoticeAction, NoticeRecord, NoticeSeverity, NotificationStore, Presentation, format_hms,
     headline,
 };
+use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
 use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry as geom;
@@ -39,6 +40,8 @@ pub struct NotificationLogState {
     pub detail_scroll: usize,
     /// Caller focus saved at open time and restored on close.
     pub caller_focus: FocusState,
+    /// Retained in-frame filter and its child editor.
+    pub search: InspectorSearch,
 }
 
 /// Host facts the key handler and the widget need (retry eligibility, A8).
@@ -150,8 +153,19 @@ pub enum LogOutcome {
     },
 }
 
-fn newest_first(store: &NotificationStore) -> Vec<&NoticeRecord> {
-    store.records().rev().collect()
+fn newest_first<'a>(
+    store: &'a NotificationStore,
+    search: &InspectorSearch,
+) -> Vec<&'a NoticeRecord> {
+    store
+        .records()
+        .rev()
+        .filter(|record| {
+            search.matches(record.severity.word())
+                || search.matches(record.source.label())
+                || search.matches(&record.message)
+        })
+        .collect()
 }
 
 /// The selected row among `rows` (newest first): the selected record's row,
@@ -168,6 +182,32 @@ fn select(log: &mut NotificationLogState, rows: &[&NoticeRecord], index: usize) 
     log.selected_id = rows.get(index).map(|r| r.id);
 }
 
+/// Reconcile a content edit without changing the identity of a retained match.
+/// An empty result set keeps a still-retained id for clearing the filter later.
+pub fn reconcile_search(state: &mut TuiState) {
+    let Some(log) = state.notification_log.as_mut() else {
+        return;
+    };
+    let rows = newest_first(&state.notifications, &log.search);
+    let selected = resolve(log, &rows);
+    sync_selection(log, &rows, selected, &state.notifications);
+}
+
+fn sync_selection(
+    log: &mut NotificationLogState,
+    rows: &[&NoticeRecord],
+    selected: usize,
+    store: &NotificationStore,
+) {
+    if rows.is_empty() {
+        log.selected_id = log
+            .selected_id
+            .filter(|id| store.records().any(|record| record.id == *id));
+    } else {
+        select(log, rows, selected);
+    }
+}
+
 /// Apply one key to the open log: resolve it in `NotificationLog` and run the
 /// command. An unbound key is swallowed. Without an open log it changes nothing.
 pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) -> LogOutcome {
@@ -178,12 +218,12 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
         return LogOutcome::Consumed;
     };
     let detail = log.detail;
-    let rows = newest_first(&state.notifications);
+    let rows = newest_first(&state.notifications, &log.search);
     let total = rows.len();
     let selected = resolve(log, &rows);
     let current = rows.get(selected).copied();
     if let Some(log) = state.notification_log.as_mut() {
-        select(log, &rows, selected);
+        sync_selection(log, &rows, selected, &state.notifications);
     }
     state.needs_redraw = true;
     let command = match keymap::resolve(Context::NotificationLog, host, &[key]) {
@@ -194,6 +234,13 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
         return LogOutcome::Consumed;
     };
     match command {
+        OverlayCmd::InspectorSearch => {
+            let log = state.notification_log.as_mut().unwrap();
+            log.search.open();
+            log.detail = false;
+            log.detail_scroll = 0;
+            LogOutcome::Consumed
+        }
         OverlayCmd::NotifClose => {
             reducer::back(state);
             LogOutcome::Closed
@@ -213,7 +260,7 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
             if let Some(log) = state.notification_log.as_mut() {
                 if detail {
                     log.detail_scroll = log.detail_scroll.saturating_sub(1);
-                } else {
+                } else if !rows.is_empty() {
                     select(log, &rows, selected.saturating_sub(1));
                 }
             }
@@ -353,6 +400,7 @@ pub fn render(
     store: &NotificationStore,
     theme: &Theme,
     facts: &LogFacts,
+    show_caret: bool,
 ) {
     if area.width < 12 || area.height < 5 {
         return;
@@ -361,27 +409,35 @@ pub fn render(
     let normal = Style::default().fg(theme.colors.fg_primary);
     let muted = Style::default().fg(theme.colors.fg_muted);
     let accent = Style::default().fg(theme.colors.accent);
-    let rows = newest_first(store);
+    let rows = newest_first(store, &log.search);
     let selected = resolve(log, &rows);
     let current = rows.get(selected).copied();
+    let query_visible = log.search.editing || !log.search.query.is_empty();
+    let compact = area.height <= 6;
 
-    let header = vec![Line::from(Span::styled(
-        format!(
-            "Notifications ({}){}",
-            rows.len(),
-            if log.detail { " · detail" } else { "" }
-        ),
-        Style::default()
-            .fg(theme.colors.fg_primary)
-            .add_modifier(Modifier::BOLD),
-    ))];
-
-    let mut parts = vec![ModalPart::Header(header)];
-    if rows.is_empty() {
-        parts.push(ModalPart::Notice(vec![Line::from(Span::styled(
-            "No notifications yet.",
-            muted,
+    let mut parts = Vec::new();
+    if !compact || !query_visible {
+        parts.push(ModalPart::Header(vec![Line::from(Span::styled(
+            format!(
+                "Notifications ({}){}",
+                rows.len(),
+                if log.detail { " · detail" } else { "" },
+            ),
+            normal.add_modifier(Modifier::BOLD),
         ))]));
+    }
+    if rows.is_empty() {
+        parts.push(ModalPart::Rows {
+            lines: vec![Line::from(Span::styled(
+                if log.search.query.is_empty() {
+                    "No notifications yet."
+                } else {
+                    "No matching notifications."
+                },
+                muted,
+            ))],
+            selected: (0, 0),
+        });
     } else if log.detail {
         let record = rows[selected];
         let mut lines = vec![Line::from(Span::styled(
@@ -420,62 +476,99 @@ pub fn render(
             .collect();
         parts.push(ModalPart::Rows {
             lines,
-            selected: (selected, selected),
+            selected: (selected, selected + 1),
         });
     }
 
-    let key = |command: OverlayCmd| keymap::render::rail(Context::NotificationLog, command);
-    let mut rail = vec![
-        Span::styled(
-            format!(
-                "[{}]",
-                keymap::render::rail_pair(
-                    Context::NotificationLog,
-                    OverlayCmd::NotifNext,
-                    OverlayCmd::NotifPrev
-                )
+    let mut bottom = None;
+    let rail = if log.search.editing {
+        vec![
+            Span::styled(
+                keymap::render::rail(Context::InspectorSearch, OverlayCmd::InspectorAccept),
+                accent,
             ),
-            accent,
-        ),
-        Span::styled(" Move ", normal),
-        Span::styled(key(OverlayCmd::NotifDetail), accent),
-        Span::styled(if log.detail { " List " } else { " Detail " }, normal),
-        Span::styled(key(OverlayCmd::NotifCopy), accent),
-        Span::styled(" Copy ", normal),
-    ];
-    if current.is_some_and(|record| retry_eligible(record, facts)) {
-        rail.push(Span::styled(key(OverlayCmd::NotifRetry), accent));
-        rail.push(Span::styled(" Retry ", normal));
-    }
-    if current.is_some_and(|record| compact_eligible(record, facts)) {
-        rail.push(Span::styled(key(OverlayCmd::NotifCompact), accent));
-        rail.push(Span::styled(" Compact… ", normal));
-    }
-    if current.is_some_and(|record| fresh_eligible(record, facts)) {
-        rail.push(Span::styled(key(OverlayCmd::NotifFresh), accent));
-        rail.push(Span::styled(" Start fresh… ", normal));
-    }
-    rail.push(Span::styled(key(OverlayCmd::NotifDismiss), accent));
-    rail.push(Span::styled(" Dismiss ", normal));
-    rail.push(Span::styled(key(OverlayCmd::NotifClose), accent));
-    rail.push(Span::styled(" Close", normal));
-    let mut footer = footer_lines(rail, inner_width);
-    // In the five-row sheet keep one body row, even when eligible actions
-    // wrap the rail. Its final row always retains the Close action.
-    let hidden = footer
-        .len()
-        .saturating_sub(usize::from(area.height.saturating_sub(4)));
-    footer.drain(..hidden);
-    parts.push(ModalPart::Footer(footer));
+            Span::styled(" Keep filter ", normal),
+            Span::styled(
+                keymap::render::rail(Context::InspectorSearch, OverlayCmd::InspectorBack),
+                accent,
+            ),
+            Span::styled(" Clear ", normal),
+        ]
+    } else {
+        let key = |command: OverlayCmd| keymap::render::rail(Context::NotificationLog, command);
+        let mut secondary = vec![
+            Span::styled(
+                format!(
+                    "[{}]",
+                    keymap::render::rail_pair(
+                        Context::NotificationLog,
+                        OverlayCmd::NotifNext,
+                        OverlayCmd::NotifPrev,
+                    )
+                ),
+                accent,
+            ),
+            Span::styled(" Move ", normal),
+        ];
+        let mut primary = vec![
+            Span::styled(key(OverlayCmd::NotifDetail), accent),
+            Span::styled(if log.detail { " List " } else { " Detail " }, normal),
+            Span::styled(key(OverlayCmd::NotifCopy), accent),
+            Span::styled(" Copy ", normal),
+        ];
+        if current.is_some_and(|record| retry_eligible(record, facts)) {
+            primary.push(Span::styled(key(OverlayCmd::NotifRetry), accent));
+            primary.push(Span::styled(" Retry ", normal));
+        }
+        if current.is_some_and(|record| compact_eligible(record, facts)) {
+            primary.push(Span::styled(key(OverlayCmd::NotifCompact), accent));
+            primary.push(Span::styled(" Compact… ", normal));
+        }
+        if current.is_some_and(|record| fresh_eligible(record, facts)) {
+            primary.push(Span::styled(key(OverlayCmd::NotifFresh), accent));
+            primary.push(Span::styled(" Start fresh… ", normal));
+        }
+        let trailing = vec![
+            Span::styled(key(OverlayCmd::NotifDismiss), accent),
+            Span::styled(" Dismiss ", normal),
+            Span::styled(key(OverlayCmd::InspectorSearch), accent),
+            Span::styled(" Search ", normal),
+            Span::styled(key(OverlayCmd::NotifClose), accent),
+            Span::styled(" Close", normal),
+        ];
+        if compact {
+            // Keep every eligible primary action and one body row. Secondary
+            // navigation/close hints use the otherwise unused closing border.
+            secondary.extend(trailing);
+            bottom = Some(Line::from(secondary));
+            primary
+        } else {
+            secondary.extend(primary);
+            secondary.extend(trailing);
+            secondary
+        }
+    };
+    parts.push(ModalPart::Footer(footer_lines(rail, inner_width)));
 
     frame.render_widget(Clear, area);
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(accent)
         .title(" System · Notifications ")
         .style(Style::default().bg(theme.colors.bg_surface));
-    let inner = block.inner(area);
+    if let Some(bottom) = bottom {
+        block = block.title_bottom(bottom);
+    }
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
+    if query_visible {
+        frame.render_widget(
+            Paragraph::new(log.search.query_line(inner_width, theme, show_caret)),
+            Rect::new(inner.x, inner.y, inner.width, 1),
+        );
+        inner.y += 1;
+        inner.height -= 1;
+    }
     let lines = fit_modal(parts, usize::from(inner.height), usize::from(inner.width));
     frame.render_widget(
         Paragraph::new(lines).style(
@@ -522,4 +615,424 @@ pub(crate) fn footer_lines(spans: Vec<Span<'static>>, width: usize) -> Vec<Line<
         lines.push(Line::from(current));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::tui::notifications::NoticeSource;
+    use crate::adapters::tui::{app::handle_input, layout::compute_layout, notifications};
+    use crate::domain::events::{DomainInputEvent, DomainKey};
+    use crate::domain::models::visual::DensityMode;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn press(state: &mut TuiState, key: DomainKey) {
+        handle_input(state, &DomainInputEvent::SpecialKey(key));
+    }
+
+    fn paint(state: &TuiState) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                let layout = compute_layout(
+                    frame.area(),
+                    &state.theme,
+                    &state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                presentation::compose(
+                    frame,
+                    state,
+                    &presentation::Shell::new(frame.area(), &layout),
+                    Host::Local,
+                    &LogFacts::default(),
+                    |_| {},
+                );
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn story21_4_log_inspector_real_keys_filter_and_back_retains_matching_id() {
+        let mut state = TuiState::new(80, 24);
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Error,
+            "retained failure",
+        );
+        let retained = state.notifications.records().next_back().unwrap().id;
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Info,
+            "ordinary arrival",
+        );
+        press(&mut state, DomainKey::CtrlX);
+        handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+        handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
+        assert_eq!(
+            state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        let unfiltered = paint(&state);
+        assert!(unfiltered.contains("ordinary arrival"));
+        assert!(unfiltered.contains("retained failure"));
+        handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+        for ch in "eRr".chars() {
+            handle_input(&mut state, &DomainInputEvent::KeyPress(ch));
+        }
+        let filtered = paint(&state);
+        assert!(filtered.contains("retained failure"));
+        assert!(!filtered.contains("ordinary arrival"));
+        assert_eq!(
+            state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        handle_input(
+            &mut state,
+            &DomainInputEvent::Paste("no-record-matches".into()),
+        );
+        assert!(paint(&state).contains("No matching notifications"));
+        assert_eq!(
+            state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        press(&mut state, DomainKey::Esc);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::NotificationLog
+        );
+        assert!(paint(&state).contains("ordinary arrival"));
+        assert_eq!(
+            state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        press(&mut state, DomainKey::Esc);
+        assert!(!presentation::is_open(&state, Surface::NotificationLog));
+    }
+
+    #[test]
+    fn story21_4_log_inspector_real_paste_empty_and_accept_reenter() {
+        let mut state = TuiState::new(80, 24);
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Info,
+            "visible baseline",
+        );
+        press(&mut state, DomainKey::CtrlX);
+        handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+        assert!(paint(&state).contains("visible baseline"));
+        handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+        handle_input(
+            &mut state,
+            &DomainInputEvent::Paste("no-record-matches".into()),
+        );
+        assert!(!paint(&state).contains("visible baseline"));
+        assert!(paint(&state).contains("No matching notifications"));
+        press(&mut state, DomainKey::Enter);
+        assert!(paint(&state).contains("No matching notifications"));
+        handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+        press(&mut state, DomainKey::Esc);
+        assert!(paint(&state).contains("visible baseline"));
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::NotificationLog
+        );
+    }
+
+    #[test]
+    fn story21_4_log_inspector_from_detail_accept_returns_to_the_filtered_list() {
+        let mut state = TuiState::new(80, 24);
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Error,
+            "first failure",
+        );
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Error,
+            "second failure",
+        );
+        press(&mut state, DomainKey::CtrlX);
+        handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+        press(&mut state, DomainKey::Enter);
+        assert!(
+            state.notification_log.as_ref().unwrap().detail,
+            "detail is really reachable"
+        );
+        assert!(
+            !paint(&state).contains("first failure"),
+            "the second record alone is detailed"
+        );
+        handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
+        handle_input(&mut state, &DomainInputEvent::Paste("eRr".into()));
+        press(&mut state, DomainKey::Enter);
+        let log = state.notification_log.as_ref().unwrap();
+        assert!(!log.search.editing);
+        assert_eq!(log.search.query.as_str(), "eRr");
+        assert!(
+            !log.detail,
+            "accept leaves the field in its filtered list, not the old detail"
+        );
+        let screen = paint(&state);
+        assert!(
+            screen.contains("first failure") && screen.contains("second failure"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn inspector_filter_matches_each_record_field_and_actions_only_target_visible_rows() {
+        use crate::adapters::tui::notifications::NoticeDraft;
+        let mut state = TuiState::new(80, 24);
+        for (source, severity, message) in [
+            (
+                NoticeSource::System,
+                NoticeSeverity::Error,
+                "failed operation",
+            ),
+            (
+                NoticeSource::Clipboard,
+                NoticeSeverity::Info,
+                "ordinary operation",
+            ),
+            (
+                NoticeSource::System,
+                NoticeSeverity::Success,
+                "target message",
+            ),
+        ] {
+            notifications::notify(&mut state, source, severity, message);
+        }
+        open(&mut state);
+        for (query, expected) in [
+            ("ERRor", "failed operation"),
+            ("CLIPboard", "ordinary operation"),
+            ("TARGET", "target message"),
+        ] {
+            state
+                .notification_log
+                .as_mut()
+                .unwrap()
+                .search
+                .query
+                .set(query);
+            reconcile_search(&mut state);
+            let log = state.notification_log.as_ref().unwrap();
+            let rows = newest_first(&state.notifications, &log.search);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(log.selected_id, Some(rows[0].id));
+            for key in [Key::Char('j'), Key::Char('k')] {
+                assert_eq!(
+                    handle_key(&mut state, Host::Local, key, &LogFacts::default()),
+                    LogOutcome::Consumed
+                );
+            }
+            assert_eq!(
+                handle_key(
+                    &mut state,
+                    Host::Local,
+                    Key::Char('c'),
+                    &LogFacts::default()
+                ),
+                LogOutcome::Copy(expected.into()),
+            );
+            handle_key(&mut state, Host::Local, Key::Enter, &LogFacts::default());
+            assert!(state.notification_log.as_ref().unwrap().detail);
+            assert!(paint(&state).contains(expected));
+            handle_key(&mut state, Host::Local, Key::Enter, &LogFacts::default());
+        }
+        notifications::notify_draft(
+            &mut state,
+            NoticeDraft::new(
+                NoticeSource::System,
+                NoticeSeverity::Error,
+                "retryable hidden record",
+            )
+            .conversation("active")
+            .action(NoticeAction::RetryTurn { messages: 2 }),
+        );
+        let action_id = state.notifications.records().next_back().unwrap().id;
+        state
+            .notification_log
+            .as_mut()
+            .unwrap()
+            .search
+            .query
+            .set("no-match");
+        reconcile_search(&mut state);
+        let facts = LogFacts {
+            active_conversation_id: Some("active".into()),
+            active_messages: 2,
+            retry_supported: true,
+            ..LogFacts::default()
+        };
+        for key in [
+            Key::Char('c'),
+            Key::Char('r'),
+            Key::Char('x'),
+            Key::Enter,
+            Key::Char('k'),
+        ] {
+            assert_eq!(
+                handle_key(&mut state, Host::Local, key, &facts),
+                LogOutcome::Consumed
+            );
+        }
+        assert!(
+            state
+                .notifications
+                .records()
+                .find(|record| record.id == action_id)
+                .unwrap()
+                .action
+                .is_some()
+        );
+        state
+            .notification_log
+            .as_mut()
+            .unwrap()
+            .search
+            .query
+            .set("retryable");
+        reconcile_search(&mut state);
+        assert!(matches!(
+            handle_key(&mut state, Host::Local, Key::Char('r'), &facts),
+            LogOutcome::Retry {
+                action: NoticeAction::RetryTurn { messages: 2 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn inspector_filtered_selection_survives_arrival_then_falls_back_after_real_eviction() {
+        use crate::adapters::tui::notifications::MAX_RECORDS;
+        let mut state = TuiState::new(80, 24);
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Error,
+            "retained error",
+        );
+        open(&mut state);
+        let retained = state
+            .notification_log
+            .as_ref()
+            .unwrap()
+            .selected_id
+            .unwrap();
+        state
+            .notification_log
+            .as_mut()
+            .unwrap()
+            .search
+            .query
+            .set("err");
+        notifications::notify(
+            &mut state,
+            NoticeSource::System,
+            NoticeSeverity::Error,
+            "later error",
+        );
+        reconcile_search(&mut state);
+        assert_eq!(
+            state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        state.notifications.clear_toasts();
+        for index in 0..MAX_RECORDS {
+            notifications::notify(
+                &mut state,
+                NoticeSource::System,
+                NoticeSeverity::Error,
+                format!("arrival error {index}"),
+            );
+        }
+        assert!(
+            !state
+                .notifications
+                .records()
+                .any(|record| record.id == retained)
+        );
+        reconcile_search(&mut state);
+        let log = state.notification_log.as_ref().unwrap();
+        let rows = newest_first(&state.notifications, &log.search);
+        assert_eq!(log.selected_id, Some(rows[log.selected].id));
+        assert_ne!(log.selected_id, Some(retained));
+    }
+
+    #[test]
+    fn inspector_five_row_sheet_keeps_query_body_and_truthful_primary_actions() {
+        use crate::adapters::tui::notifications::NoticeDraft;
+        let mut state = TuiState::new(60, 16);
+        notifications::notify_draft(
+            &mut state,
+            NoticeDraft::new(
+                NoticeSource::Context,
+                NoticeSeverity::Warning,
+                "context warning",
+            )
+            .conversation("active")
+            .action(NoticeAction::ContextDecision),
+        );
+        open(&mut state);
+        let facts = LogFacts {
+            active_conversation_id: Some("active".into()),
+            decisions_supported: true,
+            context_warning: true,
+            ..LogFacts::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 5)).unwrap();
+        for editing in [false, true] {
+            let log = state.notification_log.as_mut().unwrap();
+            log.search.query.set("warning");
+            log.search.editing = editing;
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        state.notification_log.as_ref().unwrap(),
+                        &state.notifications,
+                        &state.theme,
+                        &facts,
+                        true,
+                    )
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = |y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+            assert!(row(1).contains("/ warning"));
+            assert!(row(2).contains("Warning"));
+            assert_eq!(buffer[(0, 4)].symbol(), "└");
+            assert_eq!(buffer[(59, 4)].symbol(), "┘");
+            if editing {
+                assert!(row(3).contains("Keep filter"));
+                assert!(row(3).contains("Clear"));
+                assert!(!row(4).contains("Close"));
+                assert!(buffer[(10, 1)].modifier.contains(Modifier::REVERSED));
+            } else {
+                assert!(row(3).contains("Compact…"));
+                assert!(row(3).contains("Start fresh…"));
+                assert!(row(4).contains("[/] Search"));
+                assert!(row(4).contains("Close"));
+                assert!(!buffer[(10, 1)].modifier.contains(Modifier::REVERSED));
+            }
+        }
+    }
 }

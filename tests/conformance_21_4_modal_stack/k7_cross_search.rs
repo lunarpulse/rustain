@@ -130,7 +130,7 @@ fn retyping_back_to_equal_text_rejects_the_earlier_revision() {
     let old = query(&mut state, "ab");
     let _ = edit(&mut state, Key::Char('c'));
     let current = edit(&mut state, Key::Backspace);
-    assert_eq!(state.cross_search.query, "ab");
+    assert_eq!(state.cross_search.query.as_str(), "ab");
     assert_eq!(state.modal_stack.top().unwrap().id, id);
     assert_eq!(
         deliver(&mut state, old, "earlier revision"),
@@ -213,6 +213,7 @@ fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
                 deliver(&mut h.state, scan, "Selected result title"),
                 Outcome::Applied
             );
+            assert_eq!(press(&mut h.state, Key::Left), InputAction::Consumed);
             // The real opener ran and painted at a supported History width
             // before changing the terminal and dispatching its Resize event.
             crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
@@ -233,6 +234,17 @@ fn fitted_cross_search_keeps_query_selected_result_and_primary_keys() {
                 screen.contains("[Enter] open") && screen.contains("[Esc] close"),
                 "{screen}"
             );
+            let buffer = h.terminal.backend().buffer();
+            let caret_cells: Vec<_> = (0..height)
+                .flat_map(|y| (0..width).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    buffer[(x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+                .map(|(x, y)| buffer[(x, y)].symbol())
+                .collect();
+            assert_eq!(caret_cells, vec!["b"], "{width}x{height} full={full}");
             assert!(
                 !h.terminal.backend().cursor_visible(),
                 "only the frame owns input"
@@ -303,6 +315,8 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
             );
             h.state.cross_search.results[0].conversation_id = target.id.clone();
             h.state.cross_search.results[0].first_match_message_index = 1;
+            assert_eq!(press(&mut h.state, Key::Left), InputAction::Consumed);
+            let query_storage = h.state.cross_search.query.as_str().as_ptr() as usize;
             let permission =
                 with_permission.then(|| super::k2_boundary::request_permission(&mut h.state));
             if with_permission {
@@ -340,6 +354,16 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
                 assert_eq!(h.state.focus, FocusState::Chat);
             }
             assert_eq!(h.state.search_state.query.as_str(), "ab");
+            assert_eq!(
+                h.state.search_state.query.cursor(),
+                1,
+                "successful stored result must transfer the actual interior caret"
+            );
+            assert_eq!(
+                h.state.search_state.query.as_str().as_ptr() as usize,
+                query_storage,
+                "successful transfer moves the field without copying its buffer"
+            );
             assert!(h.state.search_state.peek_highlight.is_some());
             assert_eq!(
                 tabs.active_tab().view_state.scroll_offset,
@@ -394,6 +418,66 @@ fn deliver_event(state: &mut TuiState, event: rustain::domain::events::AppEvent)
 }
 
 #[tokio::test]
+async fn runtime_query_paste_starts_one_real_cross_scan_and_unchanged_paste_starts_none() {
+    use rustain::{
+        adapters::filesystem::FileSystemStorage,
+        domain::{ports::StoragePort, services::session_index::SessionIndex},
+        infrastructure::runtime::event_loop::apply_query_paste,
+    };
+    use std::sync::Arc;
+    let tmp = tempfile::tempdir().unwrap();
+    let storage: Arc<dyn StoragePort> =
+        Arc::new(FileSystemStorage::new(tmp.path().join("sessions")));
+    let (mut h, mut tabs) = super::stage_support::stage(130, 30);
+    h.conversation = tabs.active_tab().conversation.clone();
+    storage.save_conversation(&h.conversation).await.unwrap();
+    let mut index = SessionIndex::new();
+    index.touch(&h.conversation.id, None, Some(1));
+    h.state = history();
+    open(&mut h.state);
+    let owner = h.state.modal_stack.top().cloned();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    assert_eq!(
+        apply_query_paste(
+            &mut tabs,
+            &mut h.state,
+            &h.conversation,
+            "stage",
+            &storage,
+            &index,
+            &tx,
+        ),
+        Some(InputAction::CrossSearchQueryChanged)
+    );
+    assert_eq!(h.state.cross_search.query.as_str(), "stage");
+    let revision = h.state.cross_search.request_revision;
+    assert_eq!(press(&mut h.state, Key::Left), InputAction::Consumed);
+    assert_eq!(
+        apply_query_paste(
+            &mut tabs,
+            &mut h.state,
+            &h.conversation,
+            "",
+            &storage,
+            &index,
+            &tx,
+        ),
+        Some(InputAction::Consumed)
+    );
+    assert_eq!(h.state.cross_search.request_revision, revision);
+    drop(tx);
+    let event = rx
+        .recv()
+        .await
+        .expect("actual runtime paste must publish its real storage scan completion");
+    assert_eq!(deliver_event(&mut h.state, event), Outcome::Applied);
+    assert!(!h.state.cross_search.results.is_empty());
+    assert_eq!(h.state.modal_stack.top(), owner.as_ref());
+    assert_eq!(h.state.cross_search.request_revision, revision);
+    assert!(rx.recv().await.is_none(), "unchanged paste cannot rescan");
+}
+
+#[tokio::test]
 async fn real_scan_publication_preserves_generation_through_late_and_covered_delivery() {
     use rustain::{
         adapters::filesystem::FileSystemStorage,
@@ -418,6 +502,7 @@ async fn real_scan_publication_preserves_generation_through_late_and_covered_del
         "covered",
         "discard",
         "short query",
+        "caret only",
     ] {
         let mut state = history();
         open(&mut state);
@@ -445,9 +530,21 @@ async fn real_scan_publication_preserves_generation_through_late_and_covered_del
                 assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
             }
             "discard" => export::close_cross_search(&mut state),
+            "caret only" => {
+                for key in [Key::Left, Key::Home, Key::Ctrl('k')] {
+                    if key == Key::Ctrl('k') {
+                        press(&mut state, Key::End);
+                    }
+                    assert_eq!(press(&mut state, key), InputAction::Consumed);
+                    assert_eq!(state.cross_search.query.as_str(), "ab");
+                    assert_eq!(state.cross_search.request_revision, old_revision);
+                    assert!(state.cross_search.running);
+                }
+                press(&mut state, Key::Left);
+            }
             "short query" => {
                 assert_eq!(edit(&mut state, Key::Backspace), Scan::Cleared);
-                assert_eq!(state.cross_search.query, "a");
+                assert_eq!(state.cross_search.query.as_str(), "a");
             }
             _ => unreachable!(),
         }
@@ -486,10 +583,12 @@ async fn real_scan_publication_preserves_generation_through_late_and_covered_del
             panic!("real publisher returned the wrong event");
         }
         let outcome = deliver_event(&mut state, event);
-        if path == "covered" {
+        if matches!(path, "covered" | "caret only") {
             assert_eq!(outcome, Outcome::Applied);
-            assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
-            press(&mut state, Key::Esc);
+            if path == "covered" {
+                assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
+                press(&mut state, Key::Esc);
+            }
             assert_eq!(state.modal_stack.top().unwrap().id, old_id);
             assert_eq!(
                 state.cross_search.results[0].conversation_id,
@@ -591,7 +690,7 @@ fn cross_search_preserves_the_real_stage_and_composer_with_a_scroll_control() {
         } else {
             press(&mut h.state, Key::Esc);
             assert_eq!(h.state.modal_stack.top().unwrap().id, id);
-            assert_eq!(h.state.cross_search.query, "ab");
+            assert_eq!(h.state.cross_search.query.as_str(), "ab");
             assert_eq!(h.state.cross_search.selected, 1);
         }
         crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
@@ -728,7 +827,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
                 press(&mut h.state, Key::Char('c')),
                 InputAction::CrossSearchQueryChanged
             );
-            assert_eq!(h.state.cross_search.query, "abc");
+            assert_eq!(h.state.cross_search.query.as_str(), "abc");
             index.touch("stored-result", Some("stale stored result".into()), Some(1));
             let scan_storage: Arc<dyn StoragePort> = storage.clone();
             let task =
@@ -748,6 +847,13 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         let before_view = super::stage_support::view(&tabs);
         assert!(tabs.active_tab().view_state.scroll_offset > 0);
         assert!(!h.state.cross_search.load_failed);
+        if path == "covered" {
+            press(&mut h.state, Key::Esc);
+        }
+        assert_eq!(press(&mut h.state, Key::Left), InputAction::Consumed);
+        if path == "covered" {
+            press(&mut h.state, Key::Ctrl('p'));
+        }
         let before_query = h.state.cross_search.query.clone();
         h.state.needs_redraw = false;
         let mut session = SessionManager::new(SessionState::Empty);
@@ -816,6 +922,13 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         assert_eq!(
             press(&mut h.state, Key::Char('y')),
             InputAction::CrossSearchQueryChanged
+        );
+        let query = before_query.as_str();
+        let split = query.len() - 1;
+        assert_eq!(
+            h.state.cross_search.query.as_str(),
+            format!("{}y{}", &query[..split], &query[split..]),
+            "failed load must retain the interior caret as well as text and owner"
         );
         let _ = export::apply_cross_search_query_change(&mut h.state);
         assert!(
@@ -934,7 +1047,7 @@ fn cross_search_boundary_owns_every_ingress_and_recovers_after_tiny_resize() {
     let _ = query(&mut state, "ab");
     let owner = state.modal_stack.top().cloned();
     for event in [
-        DomainInputEvent::Paste("not composer text".into()),
+        DomainInputEvent::Paste(String::new()),
         DomainInputEvent::ImagePaste(vec![1, 2, 3]),
         DomainInputEvent::MouseScroll(ScrollDelta::WheelUp(3)),
     ] {
@@ -943,14 +1056,20 @@ fn cross_search_boundary_owns_every_ingress_and_recovers_after_tiny_resize() {
             InputAction::Consumed
         );
         assert!(state.input_buffer.is_empty() && state.pending_images.is_empty());
-        assert_eq!(state.cross_search.query, "ab");
+        assert_eq!(state.cross_search.query.as_str(), "ab");
         assert_eq!(state.modal_stack.top(), owner.as_ref());
     }
+    assert_eq!(
+        rustain::adapters::tui::app::handle_input(&mut state, &DomainInputEvent::Paste("c".into()),),
+        InputAction::CrossSearchQueryChanged
+    );
+    assert_eq!(state.cross_search.query.as_str(), "abc");
+    let _ = edit(&mut state, Key::Backspace);
     rustain::adapters::tui::app::handle_input(&mut state, &DomainInputEvent::Resize(59, 16));
     for key in Key::universe() {
         assert_eq!(press(&mut state, key), InputAction::Consumed, "{key:?}");
         assert_eq!(state.modal_stack.top(), owner.as_ref());
-        assert_eq!(state.cross_search.query, "ab");
+        assert_eq!(state.cross_search.query.as_str(), "ab");
     }
     rustain::adapters::tui::app::handle_input(&mut state, &DomainInputEvent::Resize(80, 24));
     assert_eq!(
@@ -958,7 +1077,8 @@ fn cross_search_boundary_owns_every_ingress_and_recovers_after_tiny_resize() {
         InputAction::CrossSearchQueryChanged
     );
     assert_eq!(
-        state.cross_search.query, "aba",
+        state.cross_search.query.as_str(),
+        "aba",
         "visible-width control must really edit the owner"
     );
 }
@@ -1068,7 +1188,7 @@ fn frame_origin_menu_quit_and_nested_palette_preserve_cross_and_refuse_history_v
             press(&mut h.state, Key::Esc);
         }
         assert_eq!(h.state.modal_stack.top(), owner.as_ref());
-        assert_eq!(h.state.cross_search.query, "ab");
+        assert_eq!(h.state.cross_search.query.as_str(), "ab");
         assert_eq!(
             h.state.focus,
             FocusState::Sidebar {

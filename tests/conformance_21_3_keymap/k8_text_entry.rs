@@ -1,8 +1,7 @@
-//! K8 (local leg, AC11, RU-24, A4): TextEntry. The composer edits by grapheme and
-//! logical line; the append-only fields (palette filter, search, cross-search,
-//! reverse search, permission feedback, question answer) edit their tail; no
-//! printable key becomes a command inside any text field. The attached composer
-//! legs are `story21_3_attached_composer_*` in `attach_keys.rs`.
+//! K8 (local leg, AC11, RU-24, A4): composer and migrated queries edit at a
+//! grapheme-safe caret; permission feedback and question answers retain their
+//! legacy tail editors. Printables never become commands inside a field, except
+//! CrossSearch's reserved j/k navigation. Attached twins live in attach_keys.rs.
 
 use std::sync::Arc;
 
@@ -208,6 +207,7 @@ fn lint_no_printable_resolves_to_a_row_in_any_text_entry() {
         Context::CommandPalette,
         Context::ReverseSearch,
         Context::CrossSearch,
+        Context::InspectorSearch,
         Context::FieldEdit,
     ];
     for context in fields {
@@ -226,7 +226,7 @@ fn lint_no_printable_resolves_to_a_row_in_any_text_entry() {
 }
 
 /// K8 effect sweep (review R6; M6 is re-sited here once 3-B2 dispatches through the resolver): every printable ASCII key types itself into
-/// every append-only field and answers with a typing action, never a command.
+/// every text field and answers with a typing action, never a command.
 /// Cross-search `j` / `k` navigate instead (they are rows). The model selector's
 /// search has its own sweep in `k4_overlays`. The "pending plan / delegation /
 /// consolidation card" leg of K8 moved to K11 (3-C): it cannot pass before AC17.
@@ -312,7 +312,7 @@ const FIELDS: &[Field] = &[
     Field {
         name: "cross-search query",
         open: |s| *s = cross_search_state(),
-        text: |s| &s.cross_search.query,
+        text: |s| s.cross_search.query.as_str(),
         set: |s, text| s.cross_search.query = text.into(),
     },
     Field {
@@ -322,6 +322,26 @@ const FIELDS: &[Field] = &[
         },
         text: |s| s.reverse_search.query.as_str(),
         set: |s, text| s.reverse_search.query.set(text),
+    },
+    Field {
+        name: "log inspector query",
+        open: |s| {
+            press(s, Key::Ctrl('x'));
+            press(s, Key::Char('n'));
+            press(s, Key::Char('/'));
+        },
+        text: |s| s.notification_log.as_ref().unwrap().search.query.as_str(),
+        set: |s, text| s.notification_log.as_mut().unwrap().search.query.set(text),
+    },
+    Field {
+        name: "help inspector query",
+        open: |s| {
+            press(s, Key::Ctrl('x'));
+            press(s, Key::Char('?'));
+            press(s, Key::Char('/'));
+        },
+        text: |s| s.help_overlay.search.query.as_str(),
+        set: |s, text| s.help_overlay.search.query.set(text),
     },
     Field {
         name: "permission feedback",

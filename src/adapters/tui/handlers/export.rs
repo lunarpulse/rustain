@@ -37,10 +37,10 @@ pub fn apply_cross_search_query_change(state: &mut TuiState) -> CrossSearchScanA
         .request_revision
         .checked_add(1)
         .expect("cross-search request revision overflow");
-    if state.cross_search.query.chars().count() >= 2 {
+    if state.cross_search.query.as_str().chars().count() >= 2 {
         state.cross_search.running = true;
         CrossSearchScanAction::Spawn {
-            query: state.cross_search.query.clone(),
+            query: state.cross_search.query.as_str().to_owned(),
             frame_id,
             revision: state.cross_search.request_revision,
         }
@@ -76,7 +76,7 @@ pub fn apply_cross_search_results(
             frame.surface == crate::adapters::tui::presentation::Surface::CrossSearch
                 && frame.id == frame_id
         })
-        || state.cross_search.query != query
+        || state.cross_search.query.as_str() != query
     {
         return CrossSearchResultsOutcome::DiscardedStale;
     }

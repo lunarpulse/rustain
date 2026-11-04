@@ -11,12 +11,18 @@ The independent Bb1b-i node runs the local Bookmark/Wave leg in the generic lane
 With DESKCHECK=1, RUSTAIN_MODAL_STACK_BB1B_I_FRAMES must name the Rust export
 directory (120 bb1b-i-*.json frames); no prior-leg evidence is needed.
 Export before capture under gate-4bb1b-i; capture under smoke-evidence-4bb1b-i.
-The generic lane is not a dedicated attempt. Parent permits one dedicated
-attempt, plus one correction only for a byte-identically quarantined design failure.
+The generic lane is not dedicated evidence, but a design failure there counts
+as the first execution: quarantine it unchanged, then exactly one corrected capture.
 Bb1b-ii independently consumes RUSTAIN_MODAL_STACK_BB1B_II_FRAMES offline;
 its native leg uses one real local turn, supported History, then live resize.
 Bb2a extends the main node: palette caret/paste in both hosts, local Search and
 ReverseSearch. Its 102 real-frame controls use RUSTAIN_MODAL_STACK_BB2A_FRAMES.
+Bb2b adds the six-field completion leg: shared Log/Help InspectorSearch in both
+hosts and real local CrossSearch pasted-query scans. Predicates consume only
+complete Rust exports through RUSTAIN_MODAL_STACK_BB2B_FRAMES before capture.
+Live inspector captures also require Crossterm's complete hidden-cursor draw
+postlude (including split CSI reads), not merely intact borders; each Help
+scroll is independently observed before its exact restoration is compared.
 """
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -563,6 +569,8 @@ class _Terminal:
     def __init__(self, stack, binary, args, ws, env, evidence, tag, errors):
         self.tag, self.evidence, self.errors = tag, evidence, errors
         self.screen = harness.TerminalScreen(80, 24)
+        self._draw_tail = b""
+        self.hidden_draw_complete = False
         self.stream = harness.pyte.Stream(self.screen)
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.sent = []
@@ -581,6 +589,10 @@ class _Terminal:
             assert self.child.isalive(), f"{self.tag} exited unexpectedly"
             return
         self.stream.feed(self.decoder.decode(data))
+        # Crossterm ends a hidden-cursor draw with HideCursor. Borders alone
+        # can already match halfway through a scroll; carry split CSI bytes.
+        self._draw_tail = (self._draw_tail+data)[-6:]
+        self.hidden_draw_complete = self._draw_tail == b"\x1b[?25l"
         self.frames.write(json.dumps({"at": time.monotonic(), "screen": "\n".join(self.screen.display),
                                      "cursor_hidden": self.screen.cursor.hidden})+"\n")
         self.frames.flush()
@@ -1623,8 +1635,9 @@ def _bb1b_ii_leg(tui, ws):
     queried = step("cross-filtered", b"Bb1a", cross("Bb1a", "1/1 matches", title))
     owner = cross("Bb1a", "1/1 matches", title)(queried)
     step("reserved-navigation", b"jk", lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
-    step("paste-blocked", b"\x1b[200~blocked\x1b[201~",
-         lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
+    step("paste-edits-query", b"\x1b[200~blocked\x1b[201~",
+         cross("Bb1ablocked"))
+    step("restore-query-after-paste", b"\x15Bb1a", cross("Bb1a", "1/1 matches", title))
     step("cross-quit", b"\x11",
          lambda s: _bbii_quit(s, tui.screen.cursor.hidden, FULL_DRAFT, "Cross-Search › System · Quit"))
     step("cross-quit-cancel", b"n", lambda s: cross("Bb1a", "1/1 matches", title)(s) == owner)
@@ -1675,12 +1688,285 @@ def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
             monkeypatch.delenv("RUSTAIN_CAPTURE_EVIDENCE_DIR")
 
 
+def _bb2b_box(screen, hidden, draft, kind):
+    """Complete fitted inspector sheet; bottom-border list hints may vary."""
+    shell = _bbii_shell(screen, draft)
+    if not shell or not hidden:
+        return None
+    rows, region = shell
+    width = len(rows[0])
+    w, h = ((width, region) if width < 100 else
+            (width*9//10, min(region, max(5, region*85//100))))
+    left, top = (width-w)//2, (region-h)//2
+    box = tuple(row[left:left+w] for row in rows[top:top+h])
+    title = LOG if kind == "log" else HELP
+    prefix = "┌ "+title+" "
+    if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
+            or not (box[-1].startswith("└") and box[-1].endswith("┘"))
+            or any(not (r.startswith("│") and r.endswith("│")) for r in box[1:-1])):
+        return None
+    return box
+
+
+def _bb2b_inspector(screen, hidden, draft, kind, query, position, editing,
+                    cells, mode="some", token=None):
+    box = _bb2b_box(screen, hidden, draft, kind)
+    if not box or box[1][1:-1].rstrip() != ("/ "+query).rstrip():
+        return None
+    content = "\n".join(row[1:-1] for row in box[2:-1])
+    rail = "\n".join(box[2:])
+    if editing:
+        if not all(t in rail for t in ("[Enter]", "Keep filter", "[Esc]", "Clear")):
+            return None
+    elif "[/] Search" not in "\n".join(box):
+        return None
+    empty = "No matching notifications." if kind == "log" else "No matching keybindings."
+    if mode == "empty":
+        if empty not in content:
+            return None
+    elif empty in content or not content.strip():
+        return None
+    if kind == "log" and mode != "empty":
+        if not re.search(r"\b(?:Info|Success|Warning|Error)\s*·", content):
+            return None
+    if kind == "log" and not editing:
+        if not all(t in rail for t in ("[Enter]", "Detail", "[c]", "Copy")):
+            return None
+    if mode == "filtered" and (not token or token.lower() not in content.lower()):
+        return None
+    rows, region = _bbii_shell(screen, draft)
+    top, left = (region-len(box))//2, (len(rows[0])-len(box[0]))//2
+    actual = {(x, y) for x, y in cells if y == top+1}
+    expected = {(left+3+position, top+1)} if editing else set()
+    return box if actual == expected else None
+
+
+def _bb2b_list(screen, hidden, draft, kind, token=None):
+    box = _bb2b_box(screen, hidden, draft, kind)
+    if not box or box[1][1:-1].lstrip().startswith("/") or "[/] Search" not in "\n".join(box):
+        return None
+    content = "\n".join(box[1:-1])
+    if kind == "log":
+        if not re.search(r"\b(?:Info|Success|Warning|Error)\s*·", content):
+            return None
+        if not all(t in "\n".join(box) for t in ("[Enter]", "Detail", "[c]", "Copy")):
+            return None
+    elif not content.strip("│ \n"):
+        return None
+    return box if token is None or token in content else None
+
+
+def _bb2b_cross(screen, hidden, draft, query, position, cells, count=None, title=None):
+    box = _bbii_frame(screen, hidden, draft, "Cross-Search", " [Enter] open  [Esc] close ")
+    if not box or not _bbii_cross(screen, hidden, draft, query, count, title):
+        return None
+    rows, region = _bbii_shell(screen, draft)
+    top, left = (region-len(box))//2, (len(rows[0])-len(box[0]))//2
+    return box if {(x, y) for x, y in cells if y == top+1} == {(left+3+position, top+1)} else None
+
+
+def _deskcheck_bb2b_frames(directory):
+    """Real frames are positive controls; query styles, rails and torn edges aren't optional."""
+    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb2b-*.json")]
+    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
+    cases = {}
+    for kind, needle, token in (("log", "aone", "/aone"), ("help", "notification", "notification")):
+        for suffix, query, position, editing, mode in [
+            ("unfiltered", "", 0, True, "some"),
+            ("filtered", needle, len(needle), True, "filtered"),
+            ("caret", needle, 1, True, "filtered"),
+            ("empty", needle[:1]+"x"+needle[1:], 2, True, "empty"),
+            ("restored", needle, 1, True, "filtered"),
+            ("accepted", needle, 1, False, "filtered"),
+            ("cleared", "", 0, False, "list"),
+        ]:
+            cases[kind+"-"+suffix] = (kind, query, position, editing, mode, token)
+    for suffix, query, position, count, title in [
+        ("unfiltered", "", 0, None, None),
+        ("filtered", "Bb1a", 4, "1/1 matches", TURN),
+        ("caret", "Bb1a", 1, "1/1 matches", TURN),
+        ("empty", "Bxb1a", 2, None, None),
+        ("restored", "Bb1a", 1, "1/1 matches", TURN),
+        ("counted", "Bb1a", 4, "20/20 matches", TURN),
+    ]:
+        cases["cross-"+suffix] = ("cross", query, position, count, title, None)
+    assert len(records) == len(frames) == 6*len(cases), (len(records), frames.keys())
+    for width, height in ((60, 16), (80, 24), (130, 30)):
+        for full in (False, True):
+            for kind in ("log", "help", "cross"):
+                a, b = (frames[width, height, full, kind+"-"+s] for s in ("filtered", "caret"))
+                assert a["screen"] == b["screen"], "caret motion alone changes no query/body/shell text"
+                assert a["reversed_cells"] != b["reversed_cells"], "observable style-motion control"
+            for stage, values in cases.items():
+                r = frames[width, height, full, stage]
+                kind = values[0]
+                def predicate(screen, hidden=r["cursor_hidden"], cells=r["reversed_cells"]):
+                    if kind == "cross":
+                        _, query, position, count, title, _ = values
+                        return _bb2b_cross(screen, hidden, r["draft"], query, position, cells, count, title)
+                    _, query, position, editing, mode, token = values
+                    if mode == "list":
+                        return _bb2b_list(screen, hidden, r["draft"], kind, token if kind == "log" else None)
+                    return _bb2b_inspector(screen, hidden, r["draft"], kind, query, position,
+                                           editing, cells, mode, token)
+                box = predicate(r["screen"])
+                assert box, (stage, r)
+                assert not predicate(r["screen"], hidden=False), (stage, "second hardware cursor")
+                assert not _bb2b_box(r["screen"], True, r["draft"],
+                                     "help" if kind == "log" else "log"), (stage, "wrong owner")
+                if kind == "cross" or values[3] is True:
+                    assert not predicate(r["screen"], cells=[]), (stage, "missing actual caret")
+                rows = r["screen"].split("\n")
+                top = next(y for y, row in enumerate(rows) if box[0] in row)
+                for y in (top, top+1, top+len(box)-1, harness.composer_top(rows)-1, height-1):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn)), (stage, width, full, y)
+                left = rows[top].index(box[0])
+                if kind == "cross" or values[4] != "list":
+                    wrong_query = rows.copy()
+                    y, x = top+1, left+1
+                    wrong_query[y] = wrong_query[y][:x]+"#"+wrong_query[y][x+1:]
+                    assert not predicate("\n".join(wrong_query)), (stage, "wrong query marker")
+                for y in range(top+1, top+len(box)-1):
+                    for x in (left, left+len(box[0])-1):
+                        torn = rows.copy(); torn[y] = torn[y][:x]+" "+torn[y][x+1:]
+                        assert not predicate("\n".join(torn)), (stage, "torn side", x, y)
+                # Remove actual body content but retain every footer rail and
+                # every border. The predicate must not accept a footer-only
+                # partial frame as a settled nonempty result.
+                bodyless = rows.copy()
+                body_start = 1 if kind != "cross" and values[4] == "list" else 2
+                for y in range(top+body_start, top+len(box)-1):
+                    row = bodyless[y][left:left+len(box[0])]
+                    if kind == "log" and re.search(
+                            r"\[[^]]+\]\s+(?:Move|Detail|Copy|Retry|Dismiss|Search|Close|Keep filter|Clear)", row):
+                        continue
+                    bodyless[y] = (bodyless[y][:left+1]
+                                   + " "*(len(box[0])-2)
+                                   + bodyless[y][left+len(box[0])-1:])
+                assert not predicate("\n".join(bodyless)), (stage, "missing actual body")
+                if kind != "cross" and values[3] is True:
+                    for label in ("[Enter]", "Keep filter", "[Esc]", "Clear"):
+                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
+                if kind != "cross" and values[3] is False:
+                    assert not predicate(r["screen"].replace("[/] Search", " "*10)), (stage, "missing Search rail")
+                if kind == "log" and values[3] is False:
+                    for label in ("Detail", "Copy"):
+                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
+                if "empty" in stage:
+                    marker = "No matches found" if kind == "cross" else (
+                        "No matching notifications." if kind == "log" else "No matching keybindings.")
+                    assert not predicate(r["screen"].replace(marker, " "*len(marker))), stage
+    print(f"BB2B_DESKCHECK_FRAMES={len(frames)}", flush=True)
+    return len(frames)
+
+
+def _bb2b_fields_leg(tui):
+    attached = tui.tag == "attached"
+    notices = ("mode", "plan") if attached else ("aone", "btwo")
+    tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, "Bb2b Input ready")
+    for marker in notices:
+        command = "/"+marker
+        tui.send("Bb2b real notice command", (command+" ").encode())
+        tui.wait(lambda s: _composer(s) == command, "Bb2b slash delimiter consumed")
+        tui.send("Bb2b submit local notice", b"\r")
+        tui.wait(lambda s: _notice_ready(s, command, attached), "Bb2b actual notice settled")
+    tui.send("Bb2b retained draft", DRAFT.encode())
+    tui.wait(lambda s: _composer(s) == DRAFT, "Bb2b draft settled")
+    for kind in ("log", "help"):
+        title = LOG if kind == "log" else HELP
+        tui.send("Bb2b open "+kind, b"\x18"+(b"n" if kind == "log" else b"?"))
+        original = tui.wait(lambda s: tui.hidden_draw_complete and
+                            _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind),
+                            "Bb2b complete unfiltered "+kind)
+        if kind == "log":
+            tui.send("Bb2b select retained non-newest record", b"j")
+            tui.wait(lambda s: tui.hidden_draw_complete and _selected(tui, notices) == notices[0],
+                     "Bb2b selected id control")
+        else:
+            for offset in range(1, 4):
+                before = _help_box(original)
+                tui.send(f"Bb2b actual Help scroll control {offset}", b"j")
+                original = tui.wait(
+                    lambda s: tui.hidden_draw_complete and
+                    _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind) and
+                    _help_box(s) != before and _help_box(s)[:-1] == before[1:],
+                    f"Bb2b complete one-row Help scroll {offset}")
+        before_help = _help_box(original) if kind == "help" else None
+        needle = ("/"+notices[0] if attached else notices[0]) if kind == "log" else "notification"
+        token = "/"+notices[0] if kind == "log" else "notification"
+        def field(query, position, mode="some", editing=True):
+            return lambda s: _bb2b_inspector(s, tui.screen.cursor.hidden, DRAFT, kind,
+                                              query, position, editing, _reversed_cells(tui), mode, token)
+        def step(label, data, predicate):
+            tui.send("Bb2b "+kind+" "+label, data)
+            screen = tui.wait(lambda s: predicate(s) and
+                              (tui.hidden_draw_complete or not tui.screen.cursor.hidden),
+                              "Bb2b settled "+kind+" "+label)
+            tui.capture("bb2b-"+kind+"-"+label, screen)
+            return screen
+        step("unfiltered", b"/", field("", 0))
+        step("filtered", b"\x1b[200~"+needle.encode()+b"\x1b[201~", field(needle, len(needle), "filtered"))
+        step("caret", b"\x1b[H\x1b[C", field(needle, 1, "filtered"))
+        step("empty", b"\x1b[200~x\x1b[201~", field(needle[:1]+"x"+needle[1:], 2, "empty"))
+        step("restored", b"\x08", field(needle, 1, "filtered"))
+        step("kill-tail", b"\x0b", field(needle[:1], 1))
+        step("kill-prefix", b"\x15", field("", 0))
+        step("refilter", b"\x1b[200~"+needle.encode()+b"\x1b[201~\x1b[H\x1b[C", field(needle, 1, "filtered"))
+        step("keep-filter", b"\r", field(needle, 1, "filtered", False))
+        step("reenter", b"/", field(needle, 1, "filtered"))
+        step("quit-cover", b"\x11", lambda s: _box(s, title+" › System · Quit", "Stay") and _status(s))
+        step("quit-return", b"n", field(needle, 1, "filtered"))
+        step("clear-child", b"\x1b", lambda s:
+             _bb2b_list(s, tui.screen.cursor.hidden, DRAFT, kind, token if kind == "log" else None) and
+             (kind != "help" or _help_box(s) == before_help))
+        if kind == "log":
+            assert _selected(tui, notices) == notices[0], "matching selected record id survives filtering"
+        else:
+            assert _help_box("\n".join(tui.screen.display)) == before_help, "unfiltered Help scroll restored"
+        step("back-frame", b"\x1b", lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden)
+
+
+def _bb2b_cross_leg(tui, ws):
+    """Pasted content starts the actual local scan; caret-only input keeps its result."""
+    tui.resize(130, 30)
+    tui.wait(lambda s: _bbii_shell(s, DRAFT) and not tui.screen.cursor.hidden, "Bb2b supported History width")
+    tui.send("Bb2b supported History opener", b"\x18h")
+    tui.wait(lambda s: (p := _bbii_persisted(ws)) and
+             _bbii_history(s, tui.screen.cursor.hidden, DRAFT, title=p["history_title"]),
+             "Bb2b persisted real History")
+    title = _bbii_persisted(ws)["result_title"]
+    tui.send("Bb2b CrossSearch opener", b"/")
+    tui.wait(lambda s: _bbii_cross(s, tui.screen.cursor.hidden, DRAFT, ""), "Bb2b CrossSearch owned")
+    tui.resize(80, 24)
+    def field(query, position, count=None, selected=None):
+        return lambda s: tui.hidden_draw_complete and _bb2b_cross(
+            s, tui.screen.cursor.hidden, DRAFT, query, position, _reversed_cells(tui), count, selected)
+    def step(label, data, predicate):
+        tui.send("Bb2b CrossSearch "+label, data)
+        screen = tui.wait(predicate, "Bb2b settled CrossSearch "+label)
+        tui.capture("bb2b-cross-"+label, screen)
+    tui.wait(field("", 0), "Bb2b 80x24 CrossSearch query caret")
+    step("pasted-scan", b"\x1b[200~Bb1a\x1b[201~", field("Bb1a", 4, "1/1 matches", title))
+    step("caret", b"\x1b[H\x1b[C", field("Bb1a", 1, "1/1 matches", title))
+    step("empty", b"\x1b[200~x\x1b[201~", field("Bxb1a", 2))
+    step("restored", b"\x08", field("Bb1a", 1, "1/1 matches", title))
+    step("short-query", b"\x0b", field("B", 1))
+    step("clear-query", b"\x15", field("", 0))
+    step("refilter", b"\x1b[200~Bb1a\x1b[201~\x1b[H\x1b[C", field("Bb1a", 1, "1/1 matches", title))
+    step("enter-result", b"\r", lambda s: _bbii_base(s, tui.screen.cursor.hidden, DRAFT)
+         and "Bb1a-row-0" in s and REPLY not in s)
+
+
 def _run_modal_stack_smoke(part):
-    assert part in ("bb1a", "bb1b-i", "bb1b-ii")
-    local_only = part != "bb1a"
+    assert part in ("bb1a", "bb1b-i", "bb1b-ii", "bb2b")
+    local_only = part not in ("bb1a", "bb2b")
     turns = 3 if part == "bb1b-i" else 1
     part_name = part.replace("bb", "Bb", 1)
     if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
+        if part == "bb2b":
+            _deskcheck_bb2b_frames(os.environ["RUSTAIN_MODAL_STACK_BB2B_FRAMES"])
+            return
         frames_ii = os.environ.get("RUSTAIN_MODAL_STACK_BB1B_II_FRAMES")
         if part == "bb1b-ii" or (frames_ii and not os.environ.get("RUSTAIN_MODAL_STACK_BB1B_I_FRAMES")):
             _deskcheck_bb1b_ii_frames(frames_ii)
@@ -1700,6 +1986,8 @@ def _run_modal_stack_smoke(part):
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
                 "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a", "Bb2a"]}
+    if part == "bb2b":
+        manifest.update(story_parts=["Bb2b"], cross_search="local only; attached unavailable")
     if local_only:
         surface = "Bookmark/Wave" if part == "bb1b-i" else "CrossSearch"
         manifest.update(legs=["local"], story_parts=[part_name],
@@ -1796,6 +2084,17 @@ def _run_modal_stack_smoke(part):
                         tui.exit()
                     else:
                         _bb1b_ii_leg(tui, ws)
+                elif part == "bb2b":
+                    if tag == "local":
+                        release.set()
+                        tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, "Bb2b initial Input")
+                        tui.send("Bb2b real persisted fixture turn", TURN.encode()+b"\r")
+                        tui.wait(lambda s: held.is_set() and _status(s) and REPLY in s,
+                                 "Bb2b real fixture completion")
+                    _bb2b_fields_leg(tui)
+                    if tag == "local":
+                        _bb2b_cross_leg(tui, ws)
+                    tui.exit()
                 else:
                     _leg(tui, held, release)
         assert errors.empty(), list(errors.queue)
@@ -1835,3 +2134,9 @@ def test_modal_stack_bb1b_i_local_80x24():
 @pytest.mark.timeout(240)
 def test_modal_stack_bb1b_ii_local_cross_search():
     _run_modal_stack_smoke("bb1b-ii")
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_modal_stack_bb2b_inspector_fields_both_hosts_and_cross_query():
+    _run_modal_stack_smoke("bb2b")

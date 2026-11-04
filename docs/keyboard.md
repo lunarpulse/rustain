@@ -265,6 +265,19 @@ Also inherits: Text field.
 | `Home` | Move the field caret to the start of the current line | local, attached | portable |  |
 | `End` | Move the field caret to the end of the current line | local, attached | portable |  |
 
+## Inspector search
+
+Also inherits: Caret text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Keep the filter and return to the list | local, attached | portable |  |
+| `Esc` | Clear the filter and leave the search field | local, attached | portable |  |
+| `Ctrl+C` | Clear the filter and leave the search field | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the search field | local, attached | portable |  |
+| `Ctrl+X` | Open the menu above this search field | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this search field | local, attached | portable |  |
+
 ## Task drill-down
 
 Also inherits: Chat.
@@ -408,6 +421,7 @@ Also inherits: Sidebar.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `/` | Search help keybindings | local, attached | portable |  |
 | `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
 | `Ctrl+P` | Open the command palette above this frame | local, attached | portable |  |
 | `j` | Scroll the help down one line | local, attached | portable |  |
@@ -490,7 +504,7 @@ Also inherits: Append-only text field.
 
 ## Cross-search
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -500,7 +514,6 @@ Also inherits: Append-only text field.
 | `Esc` | Close the cross-conversation search | local | portable |  |
 | `Ctrl+C` | Close the cross-conversation search (back one frame) | local | portable |  |
 | `Enter` | Open the selected result | local | portable |  |
-| `Backspace` | Delete the last query character and search again | local | portable |  |
 | `Up` | Select the previous result | local | portable |  |
 | `k` | Select the previous result (k is never typed into the query) | local | portable |  |
 | `Down` | Select the next result | local | portable |  |
@@ -540,6 +553,7 @@ Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `/` | Search notification severity, source and message | local, attached | portable |  |
 | `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
 | `Ctrl+P` | Open the command palette above this frame | local, attached | portable |  |
 | `Esc` | Close the notification log | local, attached | portable |  |

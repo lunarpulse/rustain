@@ -453,8 +453,11 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             open_palette(ctx).await;
             KeyFlow::Continue
         }
-        Some(RouteEffect::Frame(Context::Help)) => help_key(ctx, key).await,
         Some(RouteEffect::Frame(Context::CommandPalette)) => palette_key(ctx, key).await,
+        Some(RouteEffect::Frame(Context::Help)) => {
+            popup_delegate(ctx, key);
+            KeyFlow::Continue
+        }
         Some(RouteEffect::Leader) => leader_key(ctx, key).await,
         Some(RouteEffect::Frame(context)) => unreachable!("attached frame context: {context:?}"),
         Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
@@ -895,24 +898,6 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             );
             ctx.state.needs_redraw |= half;
         }
-        CommandId::Overlay(
-            cmd @ (OverlayCmd::HelpDown
-            | OverlayCmd::HelpUp
-            | OverlayCmd::HelpBottom
-            | OverlayCmd::HelpTop),
-        ) => {
-            let help = &mut ctx.state.help_overlay;
-            help.scroll_offset = match cmd {
-                OverlayCmd::HelpDown => help.scroll_offset.saturating_add(1),
-                OverlayCmd::HelpUp => help.scroll_offset.saturating_sub(1),
-                OverlayCmd::HelpBottom => usize::MAX / 2,
-                _ => 0,
-            };
-            ctx.state.needs_redraw = true;
-        }
-        CommandId::Overlay(OverlayCmd::HelpClose) => {
-            presentation::reducer::close(ctx.state, Surface::Help);
-        }
         CommandId::Overlay(OverlayCmd::PaletteClose) => {
             presentation::reducer::close(ctx.state, Surface::CommandPalette);
         }
@@ -1168,17 +1153,6 @@ async fn run_team_log(
     *ctx.auto_scroll = true;
 }
 
-// ── help overlay ─────────────────────────────────────────────────────────────
-
-/// Help is passive: Esc / `?` / Ctrl+C close it and restore the origin (Input
-/// text is untouched); scroll keys move it. Everything else is consumed.
-async fn help_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
-    match command_in(Context::Help, overlay_key(&key)) {
-        Some(command) => execute_attached(ctx, command, key).await,
-        None => KeyFlow::Continue,
-    }
-}
-
 // ── slash popup ──────────────────────────────────────────────────────────────
 
 /// A key while the slash popup is open. `Some` = consumed; `None` = the popup
@@ -1200,14 +1174,30 @@ async fn popup_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> Option<KeyFlow> {
     }
 }
 
-/// Hand a popup key to the shared autocomplete handler (the composer is lent to it).
+/// Shared Help/popup dispatch with the real composer lent for viewport geometry.
 fn popup_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
+    let help = ctx
+        .state
+        .modal_stack
+        .top()
+        .is_some_and(|f| f.surface == Surface::Help);
     if let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) {
         with_lent_input(ctx.state, ctx.input, |state| {
-            let _ = handle_input(state, &event);
+            let _ = if help {
+                crate::adapters::tui::app::dispatch_frame_key(
+                    state,
+                    Context::Help,
+                    overlay_key(&key),
+                    Host::Attached,
+                )
+            } else {
+                handle_input(state, &event)
+            };
         });
     }
-    ctx.chrome.sync_slash(ctx.state, ctx.workspace);
+    if !help {
+        ctx.chrome.sync_slash(ctx.state, ctx.workspace);
+    }
 }
 
 // ── command palette ──────────────────────────────────────────────────────────
@@ -2338,11 +2328,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_bb2a_attached_every_printable_inserts_at_the_palette_caret() {
-        for read_only in [false, true] {
+    async fn story21_4_attached_every_printable_inserts_at_each_shared_query_caret() {
+        for (surface, read_only) in [
+            Surface::CommandPalette,
+            Surface::NotificationLog,
+            Surface::Help,
+        ]
+        .into_iter()
+        .flat_map(|surface| [false, true].map(move |read_only| (surface, read_only)))
+        {
             let mut rig = Rig::new(read_only);
             rig.input = "draft".into();
-            rig.ctrl('p').await;
+            open_shared_query(&mut rig, surface).await;
             for ch in (0x20u8..0x7f).map(char::from) {
                 rig.chrome
                     .paste(
@@ -2358,22 +2355,23 @@ mod tests {
                 let frame = rig.state.modal_stack.top().unwrap().clone();
                 rig.ch(ch).await;
                 assert_eq!(
-                    rig.state.command_palette.filter_text.as_str(),
+                    shared_query(&rig, surface).as_str(),
                     format!("a{ch}b"),
                     "{read_only}: {ch:?}"
                 );
                 assert_eq!(rig.state.modal_stack.top(), Some(&frame));
                 assert_eq!(rig.input, "draft");
                 assert!(rig.frames().is_empty());
+                assert!(rig.state.input_buffer.is_empty());
                 rig.key(Key::Home).await;
                 rig.ctrl('k').await;
-                assert!(rig.state.command_palette.filter_text.is_empty());
+                assert!(shared_query(&rig, surface).is_empty());
             }
         }
     }
 
     #[tokio::test]
-    async fn story21_4_bb2a_attached_readline_keys_edit_graphemes_at_the_caret() {
+    async fn story21_4_attached_readline_keys_edit_graphemes_in_every_shared_query() {
         const SEED: &str = "a界e\u{301} z";
         const FAMILY: &str = "a👩‍👩‍👧‍👦b";
         let cases: &[(Key, &str, &[Key], &str, usize)] = &[
@@ -2487,11 +2485,18 @@ mod tests {
             ),
             (Key::Delete, "a\r\nb", &[], "a\r\nb", 4),
         ];
-        for read_only in [false, true] {
+        for (surface, read_only) in [
+            Surface::CommandPalette,
+            Surface::NotificationLog,
+            Surface::Help,
+        ]
+        .into_iter()
+        .flat_map(|surface| [false, true].map(move |read_only| (surface, read_only)))
+        {
             for &(edit, seed, prefix, expected, cursor) in cases {
                 let mut rig = Rig::new(read_only);
                 rig.input = "untouched draft".into();
-                rig.ctrl('p').await;
+                open_shared_query(&mut rig, surface).await;
                 let frame = rig.state.modal_stack.top().unwrap().clone();
                 let stage = (rig.scroll_offset, rig.auto_scroll);
                 rig.chrome
@@ -2504,7 +2509,7 @@ mod tests {
                     )
                     .await;
                 assert_eq!(
-                    rig.state.command_palette.filter_text.as_str(),
+                    shared_query(&rig, surface).as_str(),
                     seed,
                     "actual paste control"
                 );
@@ -2513,12 +2518,12 @@ mod tests {
                 }
                 assert_eq!(rig.key(edit).await, KeyFlow::Continue);
                 assert_eq!(
-                    rig.state.command_palette.filter_text.as_str(),
+                    shared_query(&rig, surface).as_str(),
                     expected,
                     "{read_only}: {edit:?} {seed}"
                 );
                 assert_eq!(
-                    rig.state.command_palette.filter_text.cursor(),
+                    shared_query(&rig, surface).cursor(),
                     cursor,
                     "{read_only}: {edit:?} {seed}"
                 );
@@ -2526,6 +2531,7 @@ mod tests {
                 assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
                 assert_eq!(rig.input, "untouched draft");
                 assert!(rig.frames().is_empty());
+                assert!(rig.state.input_buffer.is_empty());
             }
         }
     }
@@ -4520,7 +4526,7 @@ mod tests {
     fn help_digest(rig: &Rig) -> String {
         let h = &rig.state.help_overlay;
         let scroll = if h.scroll_offset > 1_000_000 { "bottom".to_owned() } else { h.scroll_offset.to_string() };
-        format!("help={} scroll={scroll} {}", presentation::is_open(&rig.state, Surface::Help), open_surface(rig))
+        format!("help={} scroll={scroll} {}{}", presentation::is_open(&rig.state, Surface::Help), open_surface(rig), if h.search.editing { " search=active" } else { "" })
     }
 
     /// Catches a Help row that scrolls the wrong way, closes into the wrong focus or skips the quit question, or a rowless key that acts.
@@ -4536,6 +4542,7 @@ mod tests {
             // AC2/A18: the exact Help caller survives underneath Quit.
             (Key::Ctrl('q'), "Continue | help=true scroll=5 quit=true focus=Input input=draft".to_owned()),
             (Key::Ctrl('x'), at("5")), (Key::Ctrl('p'), at("5")),
+            (Key::Char('/'), at("5") + " search=active"),
         ];
         witness_rows(Context::Help, help_rig, help_digest, &cases).await;
         witness_inert(Context::Help, help_rig, help_digest, |_| false).await;
@@ -4686,7 +4693,7 @@ mod tests {
         };
         let archived = s.notifications.records().filter(|r| r.source == NoticeSource::Attached && r.presentation != Presentation::Visible).count();
         let clip = rig.notice(NoticeSource::Clipboard).is_some();
-        format!("log={} sel={sel} detail={detail} scroll={scroll} archived={archived} records={} clip={clip} {}", s.notification_log.is_some(), s.notifications.len(), open_surface(rig))
+        format!("log={} sel={sel} detail={detail} scroll={scroll} archived={archived} records={} clip={clip} {}{}", s.notification_log.is_some(), s.notifications.len(), open_surface(rig), if s.notification_log.as_ref().is_some_and(|log| log.search.editing) { " search=active" } else { "" })
     }
 
     /// Catches a log row that moves the selection wrongly, copies or dismisses the wrong record, or swallows Ctrl+Q.
@@ -4708,6 +4715,7 @@ mod tests {
             (Key::Char('x'), on("second", false, 1, 2, false)),
             (Key::Ctrl('x'), on("second", false, 0, 2, false)),
             (Key::Ctrl('p'), on("second", false, 0, 2, false)),
+            (Key::Char('/'), on("second", false, 0, 2, false) + " search=active"),
         ];
         witness_rows(Context::NotificationLog, log_rig, log_digest, &cases).await;
         // `r`, `K`, `n` are local-only rows: with no retry path and no decisions they are inert here.
@@ -5370,9 +5378,23 @@ mod tests {
                                             };
                                             let body =
                                                 if quit { "Daemon work" } else { "body-witness" };
-                                            let footer = if quit { "Stay" } else { "Close" };
+                                            let footer = if quit { "Stay" } else { "Detail" };
                                             assert!(row(buffer, rect, rect.y + 1).contains(header));
                                             assert!(row(buffer, rect, rect.y + 2).contains(body));
+                                            if !quit {
+                                                let sheet = (rect.y..rect.bottom())
+                                                    .map(|y| row(buffer, rect, y))
+                                                    .collect::<Vec<_>>()
+                                                    .join("\n");
+                                                for action in [
+                                                    "[Enter] Detail",
+                                                    "[c] Copy",
+                                                    "[/] Search",
+                                                    "[Esc] Close",
+                                                ] {
+                                                    assert!(sheet.contains(action), "{sheet}");
+                                                }
+                                            }
                                             let footer_y = (rect.y + 2..rect.bottom() - 1)
                                                 .find(|&y| row(buffer, rect, y).contains(footer))
                                                 .expect("fitted footer");
@@ -6101,6 +6123,295 @@ mod tests {
             }
             assert_eq!(rig.input, "attached draft");
             assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+        }
+    }
+
+    fn shared_query(rig: &Rig, surface: Surface) -> &presentation::text_field::TextField {
+        match surface {
+            Surface::CommandPalette => &rig.state.command_palette.filter_text,
+            Surface::NotificationLog => &rig.state.notification_log.as_ref().unwrap().search.query,
+            Surface::Help => &rig.state.help_overlay.search.query,
+            _ => unreachable!("only queries offered by both hosts"),
+        }
+    }
+
+    async fn open_shared_query(rig: &mut Rig, surface: Surface) {
+        if surface == Surface::CommandPalette {
+            rig.ctrl('p').await;
+        } else {
+            rig.ctrl('x').await;
+            rig.ch(if surface == Surface::Help { '?' } else { 'n' })
+                .await;
+            rig.ch('/').await;
+            assert!(match surface {
+                Surface::NotificationLog =>
+                    rig.state.notification_log.as_ref().unwrap().search.editing,
+                Surface::Help => rig.state.help_overlay.search.editing,
+                _ => unreachable!("only inspectors have this sub-context"),
+            });
+        }
+        assert_eq!(rig.state.modal_stack.top().unwrap().surface, surface);
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_inspector_paste_caret_cover_and_back_keep_the_owner() {
+        use ratatui::style::Modifier;
+        let carets = |rig: &Rig, width, height| {
+            paint_buffer_at(&rig.state, width, height, &rig.input)
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "界" && cell.modifier.contains(Modifier::REVERSED))
+                .count()
+        };
+        for read_only in [false, true] {
+            for surface in [Surface::NotificationLog, Surface::Help] {
+                for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                    let draft = ["inspector retained draft"; 8].join("\n");
+                    let mut rig = Rig::at(FocusState::Input, &draft);
+                    rig.read_only = read_only;
+                    rig.state.terminal_width = width;
+                    rig.state.terminal_height = height;
+                    notifications::info(&mut rig.state, NoticeSource::Attached, "info control");
+                    notifications::error(&mut rig.state, NoticeSource::Attached, "error control");
+                    let stage = (rig.scroll_offset, rig.auto_scroll);
+                    let allocation = (rig.input.as_ptr(), rig.input.capacity());
+                    rig.ctrl('x').await;
+                    rig.ch(if surface == Surface::Help { '?' } else { 'n' })
+                        .await;
+                    let owner = rig.state.modal_stack.top().unwrap().clone();
+                    assert_eq!(owner.surface, surface, "actual opener is reachable");
+                    assert_eq!(
+                        carets(&rig, width, height),
+                        0,
+                        "independent no-field control"
+                    );
+                    rig.ch('/').await;
+                    rig.chrome
+                        .paste(
+                            &mut rig.state,
+                            &mut rig.input,
+                            "a界",
+                            false,
+                            rig.workspace.path(),
+                        )
+                        .await;
+                    rig.key(Key::Home).await;
+                    rig.key(Key::Right).await;
+                    assert_eq!(
+                        carets(&rig, width, height),
+                        1,
+                        "{surface:?} {width}x{height} readonly={read_only}: actual pasted field caret"
+                    );
+                    rig.ctrl('x').await;
+                    assert!(
+                        rig.state.pending_leader.is_some(),
+                        "cover must be reachable"
+                    );
+                    assert_eq!(
+                        carets(&rig, width, height),
+                        0,
+                        "leader hides only the caret"
+                    );
+                    rig.esc().await;
+                    assert_eq!(carets(&rig, width, height), 1, "same caret restored");
+                    rig.ch('Z').await;
+                    rig.ctrl('k').await;
+                    rig.esc().await;
+                    assert_eq!(
+                        rig.state.modal_stack.top(),
+                        Some(&owner),
+                        "first Esc leaves field"
+                    );
+                    rig.esc().await;
+                    assert!(
+                        rig.state.modal_stack.is_empty(),
+                        "second Esc backs the frame"
+                    );
+                    assert_eq!(rig.input, draft);
+                    assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
+                    assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
+                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                }
+            }
+        }
+    }
+
+    async fn inspector_rig(_: Key) -> Rig {
+        let mut rig = Rig::at(FocusState::Input, "draft");
+        open_shared_query(&mut rig, Surface::Help).await;
+        rig.type_text("ab").await;
+        rig.key(Key::Left).await;
+        assert_eq!(shared_query(&rig, Surface::Help).cursor(), 1);
+        rig
+    }
+
+    fn inspector_digest(rig: &Rig) -> String {
+        let search = &rig.state.help_overlay.search;
+        format!(
+            "q={} cur={} editing={} palette={} leader={:?} {}",
+            search.query.as_str(),
+            search.query.cursor(),
+            search.editing,
+            presentation::is_open(&rig.state, Surface::CommandPalette),
+            rig.state.pending_leader,
+            open_surface(rig),
+        )
+    }
+
+    #[rustfmt::skip]
+    #[tokio::test]
+    async fn story21_4_attached_inspector_rows_have_effects_and_other_non_text_keys_are_inert() {
+        let at = |query: &str, cursor, editing, palette, leader: &str, quit| format!(
+            "Continue | q={query} cur={cursor} editing={editing} palette={palette} leader={leader} quit={quit} focus=Input input=draft"
+        );
+        let cases = [
+            (Key::Enter, at("ab", 1, false, false, "None", false)),
+            (Key::Esc, at("", 0, false, false, "None", false)),
+            (Key::Ctrl('c'), at("", 0, false, false, "None", false)),
+            (Key::Ctrl('q'), at("ab", 1, true, false, "None", true)),
+            (Key::Ctrl('p'), at("ab", 1, true, true, "None", false)),
+            (Key::Ctrl('x'), at("ab", 1, true, false, "Some(InspectorSearch)", false)),
+        ];
+        witness_rows(Context::InspectorSearch, inspector_rig, inspector_digest, &cases).await;
+        witness_inert(Context::InspectorSearch, inspector_rig, inspector_digest, |key| {
+            matches!(key, Key::Char(' '..='~')) ||
+                matches!(keymap::resolve(Context::InspectorSearch, Host::Attached, &[key]), Resolved::Hit(row)
+                    if matches!(row.command, CommandId::Field(_)))
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_accepted_inspector_filters_retain_log_id_and_separate_help_scroll()
+    {
+        for read_only in [false, true] {
+            for surface in [Surface::NotificationLog, Surface::Help] {
+                let draft = ["retained inspector draft"; 8].join("\n");
+                let mut rig = Rig::at(FocusState::Input, &draft);
+                rig.read_only = read_only;
+                rig.state.terminal_width = 60;
+                rig.state.terminal_height = 16;
+                notifications::error(&mut rig.state, NoticeSource::Attached, "retained failure");
+                let retained = rig.state.notifications.records().next_back().unwrap().id;
+                notifications::info(&mut rig.state, NoticeSource::Attached, "ordinary arrival");
+                rig.ctrl('x').await;
+                rig.ch(if surface == Surface::Help { '?' } else { 'n' })
+                    .await;
+                for _ in 0..if surface == Surface::Help { 3 } else { 1 } {
+                    rig.ch('j').await;
+                }
+                if surface == Surface::Help {
+                    rig.state.help_overlay.selected_category = 2;
+                }
+                let original = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                if surface == Surface::NotificationLog {
+                    assert_eq!(
+                        rig.state.notification_log.as_ref().unwrap().selected_id,
+                        Some(retained)
+                    );
+                    let visible: String =
+                        original.content.iter().map(|cell| cell.symbol()).collect();
+                    assert!(
+                        visible.contains("retained failure"),
+                        "selected non-newest record must be the fitted visible row: {visible}"
+                    );
+                    assert!(
+                        !visible.contains("ordinary arrival"),
+                        "one available body row must not show the unselected newest record"
+                    );
+                }
+                let stage = (rig.scroll_offset, rig.auto_scroll);
+                let owner = rig.state.modal_stack.top().unwrap().clone();
+                rig.ch('/').await;
+                let needle = if surface == Surface::Help {
+                    "scroll"
+                } else {
+                    "eRr"
+                };
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        needle,
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                rig.enter().await;
+                if surface == Surface::Help {
+                    assert!(!rig.state.help_overlay.search.editing);
+                    let filtered = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                    rig.ch('j').await;
+                    assert_eq!(rig.state.help_overlay.filtered_scroll_offset, 1);
+                    assert_ne!(paint_buffer_at(&rig.state, 60, 16, &rig.input), filtered);
+                    for up in [Key::Char('k'), Key::Up] {
+                        rig.ch('G').await;
+                        let bottom = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                        let end = rig.state.help_overlay.filtered_scroll_offset;
+                        assert_ne!(bottom, filtered, "end jump changes actual attached rows");
+                        rig.key(up).await;
+                        assert_ne!(
+                            paint_buffer_at(&rig.state, 60, 16, &rig.input),
+                            bottom,
+                            "read_only={read_only} {up:?} moves up after the filtered end jump"
+                        );
+                        assert_eq!(rig.state.help_overlay.filtered_scroll_offset, end - 1);
+                        rig.ch('G').await;
+                        for _ in 0..8 {
+                            rig.ch('j').await;
+                        }
+                        assert_eq!(rig.state.help_overlay.filtered_scroll_offset, end);
+                        assert_eq!(paint_buffer_at(&rig.state, 60, 16, &rig.input), bottom);
+                    }
+                    rig.ch('g').await;
+                    rig.ch('j').await;
+                    assert_eq!(rig.state.help_overlay.scroll_offset, 3);
+                    assert_eq!(rig.state.help_overlay.selected_category, 2);
+                    rig.ch('/').await;
+                    rig.key(Key::Home).await;
+                    rig.key(Key::Right).await;
+                    assert_eq!(rig.state.help_overlay.filtered_scroll_offset, 1);
+                    rig.ch('x').await;
+                    assert_eq!(rig.state.help_overlay.filtered_scroll_offset, 0);
+                } else {
+                    assert_eq!(
+                        rig.state.notification_log.as_ref().unwrap().selected_id,
+                        Some(retained)
+                    );
+                    rig.ch('/').await;
+                    rig.key(Key::Home).await;
+                    rig.ctrl('k').await;
+                    rig.chrome
+                        .paste(
+                            &mut rig.state,
+                            &mut rig.input,
+                            "no-match",
+                            false,
+                            rig.workspace.path(),
+                        )
+                        .await;
+                    let empty = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                    let text: String = empty.content.iter().map(|cell| cell.symbol()).collect();
+                    assert!(text.contains("No matching notifications."));
+                    assert!(
+                        !text.contains("retained failure") && !text.contains("ordinary arrival")
+                    );
+                    rig.enter().await;
+                    for key in ['j', 'k'] {
+                        rig.ch(key).await;
+                    }
+                    assert_eq!(
+                        rig.state.notification_log.as_ref().unwrap().selected_id,
+                        Some(retained)
+                    );
+                    rig.ch('/').await;
+                }
+                rig.esc().await;
+                assert_eq!(rig.state.modal_stack.top(), Some(&owner));
+                assert_eq!(paint_buffer_at(&rig.state, 60, 16, &rig.input), original);
+                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
+                assert_eq!(rig.input, draft);
+                assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+            }
         }
     }
 }

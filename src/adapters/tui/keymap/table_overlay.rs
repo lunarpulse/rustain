@@ -26,6 +26,8 @@ use super::model::{Binding, CommandId, Context, Key, bind};
 pub enum OverlayCmd {
     // Help.
     HelpDown, HelpUp, HelpBottom, HelpTop, HelpClose, QuitRequest,
+    // In-frame Log/Help search.
+    InspectorSearch, InspectorAccept, InspectorBack,
     // Command palette.
     PaletteUp, PaletteDown, PaletteRun, PaletteClose,
     // Model selector.
@@ -36,7 +38,7 @@ pub enum OverlayCmd {
     // Usage panel.
     UsageClose, UsagePrev, UsageNext,
     // Cross-search.
-    CrossClose, CrossOpen, CrossBackspace, CrossPrev, CrossNext,
+    CrossClose, CrossOpen, CrossPrev, CrossNext,
     // Reverse search.
     RevAccept, RevClose, RevOlder, RevNewer, RevPalette, RevLeader,
     // Autocomplete popup.
@@ -97,6 +99,14 @@ const fn g(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
 
 #[rustfmt::skip]
 pub const ROWS: &[Binding] = &[
+    bind(Context::Help, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").does("Search help keybindings"),
+    bind(Context::NotificationLog, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").does("Search notification severity, source and message"),
+    bind(Context::InspectorSearch, &[Key::Enter], CommandId::Overlay(OverlayCmd::InspectorAccept), "Keep filter").te().does("Keep the filter and return to the list"),
+    bind(Context::InspectorSearch, &[Key::Esc], CommandId::Overlay(OverlayCmd::InspectorBack), "Clear").te().does("Clear the filter and leave the search field"),
+    bind(Context::InspectorSearch, &[Key::Ctrl('c')], CommandId::Overlay(OverlayCmd::InspectorBack), "Clear").te().does("Clear the filter and leave the search field"),
+    bind(Context::InspectorSearch, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").te().does("Ask to quit without closing the search field"),
+    bind(Context::InspectorSearch, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").te().does("Open the menu above this search field"),
+    bind(Context::InspectorSearch, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").te().does("Open the command palette above this search field"),
     bind(Context::Help, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
     bind(Context::Help, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
     bind(Context::CommandPalette, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
@@ -180,16 +190,15 @@ pub const ROWS: &[Binding] = &[
     u(&[Key::Ctrl('c')], OverlayCmd::UsageClose).does("Close the usage panel (back one frame)"),
     u(&[Key::Up], OverlayCmd::UsagePrev).does("Select the previous section"),
     u(&[Key::Down], OverlayCmd::UsageNext).does("Select the next section"),
-    // ── Cross-search (the query is an append-only field; j and k move, never type) ──
+    // ── Cross-search (shared caret editor; j and k still move, never type) ──
     x(&[Key::Esc], OverlayCmd::CrossClose).does("Close the cross-conversation search"),
     x(&[Key::Ctrl('c')], OverlayCmd::CrossClose).does("Close the cross-conversation search (back one frame)"),
     x(&[Key::Enter], OverlayCmd::CrossOpen).does("Open the selected result"),
-    x(&[Key::Backspace], OverlayCmd::CrossBackspace).does("Delete the last query character and search again"),
     x(&[Key::Up], OverlayCmd::CrossPrev).does("Select the previous result"),
     x(&[Key::Char('k')], OverlayCmd::CrossPrev).does("Select the previous result (k is never typed into the query)"),
     x(&[Key::Down], OverlayCmd::CrossNext).does("Select the next result"),
     x(&[Key::Char('j')], OverlayCmd::CrossNext).does("Select the next result (j is never typed into the query)"),
-    // ── Reverse search (the query is an append-only field) ──
+    // ── Reverse search (shared caret editor) ──
     r(&[Key::Enter], OverlayCmd::RevAccept).does("Put the selected history entry in the composer"),
     r(&[Key::Esc], OverlayCmd::RevClose).does("Close the history search"),
     r(&[Key::Ctrl('c')], OverlayCmd::RevClose).does("Close the history search (back one frame)"),

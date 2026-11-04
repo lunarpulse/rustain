@@ -106,7 +106,7 @@ pub fn compose(
                 rect,
                 &state.cross_search,
                 theme,
-                false,
+                show_caret,
             ),
             Surface::BookmarkList => {
                 let (conversation, bookmarks) =
@@ -148,6 +148,7 @@ pub fn compose(
                 &state.help_overlay,
                 theme,
                 state.multiplexer_detected,
+                show_caret,
             ),
             Surface::CommandPalette => {
                 command_palette::render(frame, rect, &state.command_palette, theme, show_caret)
@@ -172,6 +173,7 @@ pub fn compose(
                 &state.notifications,
                 theme,
                 facts,
+                show_caret,
             ),
             Surface::QuitConfirm => quit_confirm::render(
                 frame,

@@ -122,6 +122,7 @@ const HELP: &[W] = &[
     w(&[Key::Ctrl('q')], "Quit | scroll=3 active=true focus=Chat"),
     w(&[Key::Ctrl('x')], "Consumed | scroll=3 active=true focus=Chat"),
     w(&[Key::Ctrl('p')], "Consumed | scroll=3 active=true focus=Chat"),
+    w(&[Key::Char('/')], "Consumed | scroll=3 active=true focus=Chat search=active"),
 ];
 
 /// Catches a Help row that scrolls the wrong way, closes into the wrong focus, or leaks a key.
@@ -138,10 +139,15 @@ fn help_rows_by_value_and_every_other_key_is_inert() {
     let salient = |s: &TuiState| {
         let h = &s.help_overlay;
         format!(
-            "scroll={} active={} focus={:?}",
+            "scroll={} active={} focus={:?}{}",
             h.scroll_offset.min(99),
             is_open(s, Surface::Help),
-            s.focus
+            s.focus,
+            if h.search.editing {
+                " search=active"
+            } else {
+                ""
+            },
         )
     };
     run(&local(Context::Help, setup, salient, HELP));
@@ -466,7 +472,9 @@ fn cross_search_rows_by_value_and_every_other_non_text_key_is_inert() {
     let salient = |s: &TuiState| {
         format!(
             "q={} sel={} focus={:?}",
-            s.cross_search.query, s.cross_search.selected, s.focus
+            s.cross_search.query.as_str(),
+            s.cross_search.selected,
+            s.focus
         )
     };
     run(&Case {
@@ -828,6 +836,7 @@ const LOG: &[W] = &[
     wp(&[Key::Char('n')], "Closed | sel=None detail=None vis=3 dec=[Carryover] focus=Chat", select_warn),
     w(&[Key::Ctrl('x')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
     w(&[Key::Ctrl('p')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat"),
+    w(&[Key::Char('/')], "Consumed | sel=Some((0, Some(3))) detail=Some(false) vis=3 dec=[] focus=Chat search=active"),
 ];
 
 /// Catches a log row that mis-selects, copies/retries the wrong record, or raises a decision from an ineligible one.
@@ -856,12 +865,17 @@ fn notification_log_rows_by_value_and_every_other_key_is_swallowed() {
     let salient = |s: &TuiState| {
         let l = s.notification_log.as_ref();
         format!(
-            "sel={:?} detail={:?} vis={} dec={:?} focus={:?}",
+            "sel={:?} detail={:?} vis={} dec={:?} focus={:?}{}",
             l.map(|l| (l.selected, l.selected_id)),
             l.map(|l| l.detail),
             s.notifications.visible().count(),
             s.decisions.items().map(|i| i.kind).collect::<Vec<_>>(),
-            s.focus
+            s.focus,
+            if l.is_some_and(|log| log.search.editing) {
+                " search=active"
+            } else {
+                ""
+            },
         )
     };
     run(&Case {
@@ -1000,5 +1014,51 @@ fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
         door,
         off: PANE_OFF,
         ..local(Context::DecisionPane, setup, salient, PANE)
+    });
+}
+
+#[rustfmt::skip]
+const INSPECTOR: &[W] = &[
+    w(&[Key::Enter], "Consumed | q=ab cur=1 editing=false help=true palette=false leader=None"),
+    w(&[Key::Esc], "Consumed | q= cur=0 editing=false help=true palette=false leader=None"),
+    w(&[Key::Ctrl('c')], "Consumed | q= cur=0 editing=false help=true palette=false leader=None"),
+    w(&[Key::Ctrl('q')], "Quit | q=ab cur=1 editing=true help=true palette=false leader=None"),
+    w(&[Key::Ctrl('x')], "Consumed | q=ab cur=1 editing=true help=true palette=false leader=Some(InspectorSearch)"),
+    w(&[Key::Ctrl('p')], "Consumed | q=ab cur=1 editing=true help=true palette=true leader=None"),
+];
+
+#[test]
+fn inspector_search_rows_by_value_and_every_other_non_text_key_is_inert() {
+    let setup = || {
+        let mut s = fresh();
+        s.focus = FocusState::Chat;
+        for key in [
+            Key::Char('?'),
+            Key::Char('/'),
+            Key::Char('a'),
+            Key::Char('b'),
+            Key::Left,
+        ] {
+            press(&mut s, key);
+        }
+        assert!(s.help_overlay.search.editing);
+        assert_eq!(s.help_overlay.search.query.as_str(), "ab");
+        s
+    };
+    let salient = |s: &TuiState| {
+        let search = &s.help_overlay.search;
+        format!(
+            "q={} cur={} editing={} help={} palette={} leader={:?}",
+            search.query.as_str(),
+            search.query.cursor(),
+            search.editing,
+            is_open(s, Surface::Help),
+            is_open(s, Surface::CommandPalette),
+            s.pending_leader,
+        )
+    };
+    run(&Case {
+        acts_without_row: printable,
+        ..local(Context::InspectorSearch, setup, salient, INSPECTOR)
     });
 }

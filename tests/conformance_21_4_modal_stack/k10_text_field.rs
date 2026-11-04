@@ -1,9 +1,6 @@
 //! Shared fields are exercised through the real key boundary, never a helper-only editor.
 use super::keymap_support::press;
-use super::{
-    k8_stage::search_key as key,
-    stage_support::{cache_keys, chat_pixels, paste, stage, view},
-};
+use super::stage_support::{cache_keys, chat_pixels, paste, stage, view};
 use rustain::adapters::tui::{
     app::{InputAction, handle_input},
     keymap::Key,
@@ -11,42 +8,120 @@ use rustain::adapters::tui::{
     state::TuiState,
 };
 use rustain::domain::events::DomainInputEvent;
-use rustain::domain::models::FocusState;
+use rustain::domain::models::{
+    FocusState, TabManager,
+    visual::{DensityMode, PanelType},
+};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Field {
     Palette,
     Search,
     Reverse,
+    Cross,
+    Log,
+    Help,
+}
+
+const FIELDS: [Field; 6] = [
+    Field::Palette,
+    Field::Search,
+    Field::Reverse,
+    Field::Cross,
+    Field::Log,
+    Field::Help,
+];
+
+fn key(h: &mut crate::e2e_harness::TestHarness, tabs: &mut TabManager, key: Key) -> InputAction {
+    let action = super::k8_stage::search_key(h, tabs, key);
+    if action == InputAction::CloseCrossSearch {
+        rustain::adapters::tui::handlers::export::close_cross_search(&mut h.state);
+    }
+    action
 }
 
 impl Field {
-    fn open(self, state: &mut TuiState) {
-        state.focus = FocusState::Input;
-        press(
-            state,
-            Key::Ctrl(match self {
-                Self::Palette => 'p',
-                Self::Search => 'f',
-                Self::Reverse => 'r',
-            }),
-        );
+    fn prepare(self, state: &mut TuiState) {
+        state.focus = if self == Self::Cross {
+            state.sidebar_visible = true;
+            state.sidebar_panel = Some(PanelType::History);
+            state.density_mode = DensityMode::Monitor;
+            FocusState::Sidebar {
+                panel: PanelType::History,
+                selected: 0,
+            }
+        } else {
+            FocusState::Input
+        };
+    }
+
+    fn begin_open(self, state: &mut TuiState) -> (u16, u16) {
+        self.prepare(state);
+        let size = (state.terminal_width, state.terminal_height);
+        if self == Self::Cross {
+            // The legacy History opener is reachable at 130 columns; the
+            // resulting global frame then owns editing at all supported sizes.
+            handle_input(state, &DomainInputEvent::Resize(130, 30));
+        }
+        size
+    }
+
+    fn finish_open(self, state: &mut TuiState, size: (u16, u16)) {
+        if self == Self::Cross {
+            handle_input(state, &DomainInputEvent::Resize(size.0, size.1));
+        }
         match self {
-            Self::Palette => assert_eq!(
-                state.modal_stack.top().unwrap().surface,
-                Surface::CommandPalette
-            ),
-            Self::Search => assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Search),
             Self::Reverse => assert!(state.reverse_search.is_open()),
+            _ => assert_eq!(
+                state.modal_stack.top().unwrap().surface,
+                match self {
+                    Self::Palette => Surface::CommandPalette,
+                    Self::Search => Surface::Search,
+                    Self::Cross => Surface::CrossSearch,
+                    Self::Log => Surface::NotificationLog,
+                    Self::Help => Surface::Help,
+                    Self::Reverse => unreachable!(),
+                }
+            ),
+        }
+        if self.inspector() {
+            assert!(match self {
+                Self::Log => state.notification_log.as_ref().unwrap().search.editing,
+                Self::Help => state.help_overlay.search.editing,
+                _ => unreachable!(),
+            });
         }
     }
 
-    fn text(self, state: &TuiState) -> &str {
+    fn open_keys(self) -> &'static [Key] {
         match self {
-            Self::Palette => state.command_palette.filter_text.as_str(),
-            Self::Search => state.search_state.query.as_str(),
-            Self::Reverse => state.reverse_search.query.as_str(),
+            Self::Palette => &[Key::Ctrl('p')],
+            Self::Search => &[Key::Ctrl('f')],
+            Self::Reverse => &[Key::Ctrl('r')],
+            Self::Cross => &[Key::Char('/')],
+            Self::Log => &[Key::Ctrl('x'), Key::Char('n'), Key::Char('/')],
+            Self::Help => &[Key::Ctrl('x'), Key::Char('?'), Key::Char('/')],
         }
+    }
+
+    fn open(self, state: &mut TuiState) {
+        let size = self.begin_open(state);
+        for key in self.open_keys() {
+            press(state, *key);
+        }
+        self.finish_open(state, size);
+    }
+
+    fn open_on_stage(self, h: &mut crate::e2e_harness::TestHarness, tabs: &mut TabManager) {
+        let size = self.begin_open(&mut h.state);
+        for input in self.open_keys() {
+            key(h, tabs, *input);
+        }
+        self.finish_open(&mut h.state, size);
+    }
+
+    fn text(self, state: &TuiState) -> &str {
+        self.value(state).as_str()
     }
 
     fn value(self, state: &TuiState) -> &TextField {
@@ -54,22 +129,21 @@ impl Field {
             Self::Palette => &state.command_palette.filter_text,
             Self::Search => &state.search_state.query,
             Self::Reverse => &state.reverse_search.query,
+            Self::Cross => &state.cross_search.query,
+            Self::Log => &state.notification_log.as_ref().unwrap().search.query,
+            Self::Help => &state.help_overlay.search.query,
         }
     }
 
-    fn open_key(self) -> Key {
-        Key::Ctrl(match self {
-            Self::Palette => 'p',
-            Self::Search => 'f',
-            Self::Reverse => 'r',
-        })
+    fn inspector(self) -> bool {
+        matches!(self, Self::Log | Self::Help)
     }
 }
 
 #[test]
 fn insert_and_kill_line_at_the_caret_grapheme_safe() {
     const TAIL: &str = "👩‍👩‍👧‍👦界e\u{301} z";
-    for field in [Field::Palette, Field::Search, Field::Reverse] {
+    for field in FIELDS {
         let mut state = TuiState::new(130, 30);
         field.open(&mut state);
         for ch in format!("a{TAIL}").chars() {
@@ -113,7 +187,7 @@ fn insert_and_kill_line_at_the_caret_grapheme_safe() {
 
 #[test]
 fn crlf_deletions_route_through_every_migrated_local_field() {
-    for field in [Field::Palette, Field::Search, Field::Reverse] {
+    for field in FIELDS {
         for (edit, position, expected, cursor) in [
             (Key::Ctrl('k'), 1, "a\r\nb", 1),
             (Key::Ctrl('k'), 0, "\r\nb", 0),
@@ -135,17 +209,7 @@ fn crlf_deletions_route_through_every_migrated_local_field() {
             let (mut h, mut tabs) = stage(80, 24);
             h.state.focus = FocusState::Input;
             h.state.input_history.push("history control".into());
-            key(&mut h, &mut tabs, field.open_key());
-            match field {
-                Field::Palette => assert_eq!(
-                    h.state.modal_stack.top().unwrap().surface,
-                    Surface::CommandPalette
-                ),
-                Field::Search => {
-                    assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Search)
-                }
-                Field::Reverse => assert!(h.state.reverse_search.is_open()),
-            }
+            field.open_on_stage(&mut h, &mut tabs);
             h.state.input_buffer = "untouched composer".into();
             paste(&mut h, &mut tabs, "a\r\nb");
             assert_eq!(field.text(&h.state), "a\r\nb", "real paste control");
@@ -168,10 +232,10 @@ fn crlf_deletions_route_through_every_migrated_local_field() {
             assert_eq!(field.value(&h.state).cursor(), cursor);
             assert_eq!(
                 action,
-                if matches!(field, Field::Search) && expected != "a\r\nb" {
-                    InputAction::SearchQueryChanged
-                } else {
-                    InputAction::Consumed
+                match (field, expected != "a\r\nb") {
+                    (Field::Search, true) => InputAction::SearchQueryChanged,
+                    (Field::Cross, true) => InputAction::CrossSearchQueryChanged,
+                    _ => InputAction::Consumed,
                 }
             );
             assert_eq!(view(&tabs), before);
@@ -252,11 +316,11 @@ fn reverse_query_owns_the_only_visible_caret() {
 
 #[test]
 fn routed_paste_and_every_edit_key_keep_whole_clusters_and_the_composer() {
-    for field in [Field::Palette, Field::Search, Field::Reverse] {
+    for field in FIELDS {
         let (mut h, mut tabs) = stage(80, 24);
         h.state.focus = FocusState::Input;
         h.state.input_history.push("history control".into());
-        key(&mut h, &mut tabs, field.open_key());
+        field.open_on_stage(&mut h, &mut tabs);
         h.state.input_buffer = "retained composer".into();
         h.state.cursor_position = 4;
         paste(&mut h, &mut tabs, "a👩‍👩‍👧‍👦界e\u{301} z");
@@ -310,7 +374,7 @@ fn routed_paste_and_every_edit_key_keep_whole_clusters_and_the_composer() {
 
 #[test]
 fn every_ascii_printable_inserts_at_the_query_caret_without_commanding() {
-    for field in [Field::Palette, Field::Search, Field::Reverse] {
+    for field in FIELDS {
         for ch in (0x20u8..0x7f).map(char::from) {
             let mut state = TuiState::new(80, 24);
             field.open(&mut state);
@@ -319,12 +383,27 @@ fn every_ascii_printable_inserts_at_the_query_caret_without_commanding() {
             press(&mut state, Key::Home);
             press(&mut state, Key::Right);
             let frame = state.modal_stack.top().cloned();
+            if field == Field::Cross {
+                h_cross_results(&mut state);
+            }
             let action = press(&mut state, Key::Char(ch));
-            assert_eq!(field.text(&state), format!("a{ch}b"), "{field:?}: {ch:?}");
-            assert!(matches!(
-                action,
-                InputAction::Consumed | InputAction::SearchQueryChanged
-            ));
+            if field == Field::Cross && matches!(ch, 'j' | 'k') {
+                assert_eq!(field.text(&state), "ab");
+                assert_eq!(state.cross_search.selected, if ch == 'j' { 2 } else { 0 });
+                assert_eq!(
+                    action,
+                    InputAction::Consumed,
+                    "legacy j/k reserve navigation"
+                );
+            } else {
+                assert_eq!(field.text(&state), format!("a{ch}b"), "{field:?}: {ch:?}");
+                assert!(matches!(
+                    action,
+                    InputAction::Consumed
+                        | InputAction::SearchQueryChanged
+                        | InputAction::CrossSearchQueryChanged
+                ));
+            }
             assert_eq!(
                 state.modal_stack.top(),
                 frame.as_ref(),
@@ -339,11 +418,11 @@ fn every_ascii_printable_inserts_at_the_query_caret_without_commanding() {
 fn query_carets_are_fitted_owned_and_hidden_under_a_leader() {
     use ratatui::style::Modifier;
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-        for field in [Field::Palette, Field::Search, Field::Reverse] {
+        for field in FIELDS {
             let (mut h, mut tabs) = stage(width, height);
             h.state.focus = FocusState::Input;
             h.state.input_history.push("history fixture".into());
-            key(&mut h, &mut tabs, field.open_key());
+            field.open_on_stage(&mut h, &mut tabs);
             // Preserve the empty-composer opener; fit a retained draft underneath it.
             h.state.input_buffer = ["full composer"; 8].join("\n");
             h.render_active_tab(&tabs);
@@ -401,11 +480,17 @@ fn query_carets_are_fitted_owned_and_hidden_under_a_leader() {
 }
 
 #[test]
-fn palette_and_reverse_fields_do_not_navigate_the_owning_stage() {
-    for field in [Field::Palette, Field::Reverse] {
+fn non_search_fields_do_not_navigate_the_owning_stage() {
+    for field in [
+        Field::Palette,
+        Field::Reverse,
+        Field::Cross,
+        Field::Log,
+        Field::Help,
+    ] {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let (mut h, mut tabs) = stage(width, height);
-            h.state.focus = FocusState::Input;
+            field.prepare(&mut h.state);
             h.state.input_buffer = "composer 界\nsecond row".into();
             h.state.cursor_position = 3;
             h.render_active_tab(&tabs);
@@ -413,7 +498,7 @@ fn palette_and_reverse_fields_do_not_navigate_the_owning_stage() {
                 (view(&tabs), cache_keys(&h, &tabs), chat_pixels(&h));
             assert!(!before_keys.0.is_empty() || !before_keys.1.is_empty());
             let layout = super::k3_compose::layout(&h.state);
-            key(&mut h, &mut tabs, field.open_key());
+            field.open_on_stage(&mut h, &mut tabs);
             paste(&mut h, &mut tabs, "a界e\u{301}");
             key(&mut h, &mut tabs, Key::Home);
             key(&mut h, &mut tabs, Key::Right);
@@ -435,6 +520,13 @@ fn palette_and_reverse_fields_do_not_navigate_the_owning_stage() {
                 layout.input_area
             );
             key(&mut h, &mut tabs, Key::Esc);
+            if field.inspector() {
+                assert!(
+                    h.state.modal_stack.top().is_some(),
+                    "first Esc clears only the child"
+                );
+                key(&mut h, &mut tabs, Key::Esc);
+            }
             h.render_active_tab(&tabs);
             assert_eq!(
                 chat_pixels(&h),
@@ -443,6 +535,29 @@ fn palette_and_reverse_fields_do_not_navigate_the_owning_stage() {
             );
             assert_eq!(h.state.input_buffer, "composer 界\nsecond row");
             assert_eq!(h.state.cursor_position, 3);
+            h.state.focus = FocusState::Chat;
+            assert_eq!(
+                key(&mut h, &mut tabs, Key::Char('k')),
+                InputAction::ScrollLineUp
+            );
+            let conversation = tabs.active_tab().conversation.clone();
+            rustain::adapters::tui::handlers::scroll::handle_apply_scroll_intent(
+                &mut tabs,
+                &mut h.state,
+                &conversation,
+                rustain::domain::models::ScrollDelta::LineUp,
+            );
+            h.render_active_tab(&tabs);
+            assert_ne!(
+                view(&tabs),
+                before_view,
+                "same manager's independent navigation control"
+            );
+            assert_ne!(
+                chat_pixels(&h),
+                before_pixels,
+                "the rendered owner really moves"
+            );
         }
     }
 }
@@ -552,11 +667,11 @@ fn edited_fields_defer_the_exact_request_and_release_it_on_actual_close() {
     use super::k2_boundary::{
         assert_permission_deferred, assert_permission_painted, request_permission,
     };
-    for field in [Field::Palette, Field::Search, Field::Reverse] {
+    for field in FIELDS {
         let (mut h, mut tabs) = stage(80, 24);
         h.state.focus = FocusState::Input;
         h.state.input_history.push("history control".into());
-        key(&mut h, &mut tabs, field.open_key());
+        field.open_on_stage(&mut h, &mut tabs);
         paste(&mut h, &mut tabs, "ab");
         key(&mut h, &mut tabs, Key::Home);
         key(&mut h, &mut tabs, Key::Right);
@@ -578,8 +693,17 @@ fn edited_fields_defer_the_exact_request_and_release_it_on_actual_close() {
         }
         let frame = h.state.modal_stack.top().unwrap().clone();
         key(&mut h, &mut tabs, Key::Ctrl('x'));
-        key(&mut h, &mut tabs, Key::Char('?'));
-        assert_eq!(h.state.modal_stack.top().unwrap().surface, Surface::Help);
+        let cover = if field == Field::Help {
+            Surface::NotificationLog
+        } else {
+            Surface::Help
+        };
+        key(
+            &mut h,
+            &mut tabs,
+            Key::Char(if field == Field::Help { 'n' } else { '?' }),
+        );
+        assert_eq!(h.state.modal_stack.top().unwrap().surface, cover);
         assert_permission_deferred(&h.state, &id);
         key(&mut h, &mut tabs, Key::Esc);
         assert_eq!(h.state.modal_stack.top(), Some(&frame));
@@ -594,6 +718,527 @@ fn edited_fields_defer_the_exact_request_and_release_it_on_actual_close() {
         );
         assert_permission_deferred(&h.state, &id);
         key(&mut h, &mut tabs, Key::Esc);
+        if field.inspector() {
+            assert_eq!(h.state.modal_stack.top(), Some(&frame));
+            assert_permission_deferred(&h.state, &id);
+            key(&mut h, &mut tabs, Key::Esc);
+        }
         assert_permission_painted(&mut h, &tabs, &id);
     }
+}
+
+fn h_cross_results(state: &mut TuiState) {
+    state.cross_search.results = (0..3)
+        .map(
+            |n| rustain::domain::services::cross_search::CrossSearchResult {
+                conversation_id: format!("cross-{n}"),
+                title: format!("result {n}"),
+                excerpt: "ab".into(),
+                timestamp: 0,
+                first_match_message_index: 0,
+            },
+        )
+        .collect();
+    state.cross_search.selected = 1;
+}
+
+#[tokio::test]
+async fn model_query_control_keeps_the_real_owning_stage_and_composer() {
+    use rustain::adapters::tui::handlers::scroll;
+    use rustain::domain::models::ScrollDelta;
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let (mut h, mut tabs) = stage(width, height);
+        h.state.focus = FocusState::Input;
+        h.state.input_buffer = "model query must not edit 界\nsecond row".into();
+        h.state.cursor_position = 3;
+        h.render_active_tab(&tabs);
+        let before = (view(&tabs), cache_keys(&h, &tabs), chat_pixels(&h));
+        let layout = super::k3_compose::layout(&h.state);
+        super::k7_surfaces::open(&mut h.state, Surface::ModelSelector).await;
+        let owner = h.state.modal_stack.top().unwrap().clone();
+        assert_eq!(h.state.model_selector.columns[0].models.len(), 2);
+        key(&mut h, &mut tabs, Key::Char('/'));
+        assert!(
+            h.state.model_selector.search_active,
+            "legacy search is reachable"
+        );
+        for c in "one".chars() {
+            key(&mut h, &mut tabs, Key::Char(c));
+        }
+        assert_eq!(h.state.model_selector.search_query, "one");
+        assert_eq!(
+            h.state.model_selector.filtered_indices,
+            vec![0],
+            "observable filtering control, not an inert input path"
+        );
+        for caret_only in [Key::Home, Key::Ctrl('a'), Key::Ctrl('e'), Key::Ctrl('k')] {
+            key(&mut h, &mut tabs, caret_only);
+            assert_eq!(
+                h.state.model_selector.search_query, "one",
+                "ModelSelector retains its legacy no-caret field"
+            );
+        }
+        let provider = h.state.model_selector.selected_provider;
+        key(&mut h, &mut tabs, Key::Right);
+        assert_ne!(
+            h.state.model_selector.selected_provider, provider,
+            "legacy Right changes provider, not a query caret"
+        );
+        assert!(!h.state.model_selector.search_active);
+        assert!(h.state.model_selector.search_query.is_empty());
+        h.render_active_tab(&tabs);
+        assert_eq!(view(&tabs), before.0);
+        assert_eq!(cache_keys(&h, &tabs), before.1);
+        key(&mut h, &mut tabs, Key::Left);
+        assert_eq!(h.state.model_selector.selected_provider, provider);
+        key(&mut h, &mut tabs, Key::Char('/'));
+        for c in "one".chars() {
+            key(&mut h, &mut tabs, Key::Char(c));
+        }
+        assert_eq!(h.state.model_selector.search_query, "one");
+        h.render_active_tab(&tabs);
+        assert_eq!(view(&tabs), before.0);
+        assert_eq!(cache_keys(&h, &tabs), before.1);
+        assert_eq!(
+            super::k3_compose::layout(&h.state).chat_pane,
+            layout.chat_pane
+        );
+        assert_eq!(
+            super::k3_compose::layout(&h.state).input_area,
+            layout.input_area
+        );
+        assert_eq!(h.state.modal_stack.top(), Some(&owner));
+        assert_eq!(
+            h.state.input_buffer,
+            "model query must not edit 界\nsecond row"
+        );
+        assert_eq!(h.state.cursor_position, 3);
+        key(&mut h, &mut tabs, Key::Esc);
+        assert_eq!(
+            h.state.modal_stack.top(),
+            Some(&owner),
+            "legacy search back first"
+        );
+        key(&mut h, &mut tabs, Key::Esc);
+        assert!(h.state.modal_stack.is_empty());
+        h.render_active_tab(&tabs);
+        assert_eq!(view(&tabs), before.0);
+        assert_eq!(cache_keys(&h, &tabs), before.1);
+        assert_eq!(chat_pixels(&h), before.2);
+
+        key(&mut h, &mut tabs, Key::Esc);
+        assert_eq!(h.state.focus, FocusState::Chat);
+        assert_eq!(
+            key(&mut h, &mut tabs, Key::Char('k')),
+            InputAction::ScrollLineUp
+        );
+        let conversation = tabs.active_tab().conversation.clone();
+        scroll::handle_apply_scroll_intent(
+            &mut tabs,
+            &mut h.state,
+            &conversation,
+            ScrollDelta::LineUp,
+        );
+        h.render_active_tab(&tabs);
+        assert_ne!(
+            view(&tabs),
+            before.0,
+            "same manager really navigates when asked"
+        );
+        assert_ne!(
+            chat_pixels(&h),
+            before.2,
+            "production render observes that move"
+        );
+    }
+}
+
+#[test]
+fn empty_inspector_editor_protects_typing_even_without_recent_printable_or_draft() {
+    use rustain::adapters::tui::presentation;
+    for field in [Field::Log, Field::Help] {
+        let (mut h, mut tabs) = stage(80, 24);
+        h.state.focus = FocusState::Chat;
+        key(&mut h, &mut tabs, Key::Ctrl('x'));
+        key(
+            &mut h,
+            &mut tabs,
+            Key::Char(if field == Field::Log { 'n' } else { '?' }),
+        );
+        h.state.last_printable_at = None;
+        assert!(h.state.input_buffer.is_empty());
+        assert!(
+            presentation::arrival_may_preempt(&h.state, h.state.notifications.now()),
+            "{field:?}: idle list is the independent arrival control"
+        );
+        key(&mut h, &mut tabs, Key::Char('/'));
+        h.state.last_printable_at = None;
+        assert!(
+            field.value(&h.state).is_empty(),
+            "empty field is genuinely active"
+        );
+        assert!(
+            !presentation::arrival_may_preempt(&h.state, h.state.notifications.now()),
+            "{field:?}: the actual child context protects input, not a draft/timer"
+        );
+        key(&mut h, &mut tabs, Key::Enter);
+        h.state.last_printable_at = None;
+        assert!(
+            presentation::arrival_may_preempt(&h.state, h.state.notifications.now()),
+            "{field:?}: accepting returns to the non-typing list"
+        );
+    }
+}
+
+#[test]
+fn accepted_help_filter_scrolls_its_own_list_and_restores_the_original_pixels() {
+    let (mut h, mut tabs) = stage(60, 16);
+    h.state.input_buffer = ["retained draft"; 8].join("\n");
+    key(&mut h, &mut tabs, Key::Ctrl('x'));
+    key(&mut h, &mut tabs, Key::Char('?'));
+    for _ in 0..3 {
+        key(&mut h, &mut tabs, Key::Char('j'));
+    }
+    h.state.help_overlay.selected_category = 2;
+    h.render_active_tab(&tabs);
+    let original = h.terminal.backend().buffer().clone();
+    let owning_view = view(&tabs);
+    key(&mut h, &mut tabs, Key::Char('/'));
+    paste(&mut h, &mut tabs, "scroll");
+    key(&mut h, &mut tabs, Key::Enter);
+    assert!(!h.state.help_overlay.search.editing);
+    h.render_active_tab(&tabs);
+    let filtered = h.terminal.backend().buffer().clone();
+    key(&mut h, &mut tabs, Key::Char('j'));
+    h.render_active_tab(&tabs);
+    assert_eq!(h.state.help_overlay.filtered_scroll_offset, 1);
+    assert_ne!(
+        h.terminal.backend().buffer(),
+        &filtered,
+        "actual matching rows move in the fitted sheet"
+    );
+    for up in [Key::Char('k'), Key::Up] {
+        key(&mut h, &mut tabs, Key::Char('G'));
+        h.render_active_tab(&tabs);
+        let bottom = h.terminal.backend().buffer().clone();
+        let end = h.state.help_overlay.filtered_scroll_offset;
+        assert_ne!(&bottom, &filtered, "end jump actually changes visible rows");
+        key(&mut h, &mut tabs, up);
+        h.render_active_tab(&tabs);
+        assert_ne!(
+            h.terminal.backend().buffer(),
+            &bottom,
+            "{up:?} moves upward immediately after the filtered end jump"
+        );
+        assert_eq!(h.state.help_overlay.filtered_scroll_offset, end - 1);
+        key(&mut h, &mut tabs, Key::Char('G'));
+        for _ in 0..8 {
+            key(&mut h, &mut tabs, Key::Char('j'));
+        }
+        h.render_active_tab(&tabs);
+        assert_eq!(h.state.help_overlay.filtered_scroll_offset, end);
+        assert_eq!(
+            h.terminal.backend().buffer(),
+            &bottom,
+            "downward overscroll is bounded"
+        );
+    }
+    key(&mut h, &mut tabs, Key::Char('g'));
+    key(&mut h, &mut tabs, Key::Char('j'));
+    assert_eq!(h.state.help_overlay.scroll_offset, 3);
+    assert_eq!(h.state.help_overlay.selected_category, 2);
+    key(&mut h, &mut tabs, Key::Char('/'));
+    key(&mut h, &mut tabs, Key::Home);
+    key(&mut h, &mut tabs, Key::Right);
+    assert_eq!(
+        h.state.help_overlay.filtered_scroll_offset, 1,
+        "caret-only edit preserves list position"
+    );
+    key(&mut h, &mut tabs, Key::Char('x'));
+    assert_eq!(
+        h.state.help_overlay.filtered_scroll_offset, 0,
+        "content change resets only filtered scrolling"
+    );
+    key(&mut h, &mut tabs, Key::Esc);
+    h.render_active_tab(&tabs);
+    assert_eq!(
+        h.terminal.backend().buffer(),
+        &original,
+        "same original Help pixels, not merely an unchanged counter"
+    );
+    assert_eq!(view(&tabs), owning_view);
+}
+
+#[test]
+fn clearing_log_filter_keeps_the_retained_selected_record_in_the_fitted_window() {
+    use rustain::adapters::tui::notifications::{self, NoticeSource};
+    let (mut h, mut tabs) = stage(60, 16);
+    h.state.input_buffer = ["retained draft"; 8].join("\n");
+    let owning_view = view(&tabs);
+    notifications::error(&mut h.state, NoticeSource::System, "retained failure");
+    let retained = h.state.notifications.records().next_back().unwrap().id;
+    notifications::info(&mut h.state, NoticeSource::System, "ordinary arrival");
+    key(&mut h, &mut tabs, Key::Ctrl('x'));
+    key(&mut h, &mut tabs, Key::Char('n'));
+    key(&mut h, &mut tabs, Key::Char('j'));
+    let owner = h.state.modal_stack.top().unwrap().clone();
+    assert_eq!(
+        h.state.notification_log.as_ref().unwrap().selected_id,
+        Some(retained)
+    );
+    key(&mut h, &mut tabs, Key::Char('/'));
+    paste(&mut h, &mut tabs, "eRr");
+    h.render_active_tab(&tabs);
+    assert!(
+        h.screen_text().contains("retained failure"),
+        "real severity-filter control"
+    );
+    paste(&mut h, &mut tabs, "no-match");
+    h.render_active_tab(&tabs);
+    assert!(h.screen_text().contains("No matching notifications."));
+    key(&mut h, &mut tabs, Key::Esc);
+    assert_eq!(h.state.modal_stack.top(), Some(&owner));
+    assert_eq!(
+        h.state.notification_log.as_ref().unwrap().selected_id,
+        Some(retained)
+    );
+    h.render_active_tab(&tabs);
+    let screen = h.screen_text();
+    assert!(
+        screen.contains("retained failure"),
+        "the retained id's actual row must remain visible: {screen}"
+    );
+    assert!(
+        !screen.contains("ordinary arrival"),
+        "only the selected row fits this sheet"
+    );
+    assert_eq!(view(&tabs), owning_view);
+    assert_eq!(h.state.input_buffer, ["retained draft"; 8].join("\n"));
+}
+
+#[test]
+fn review_bb2b_sigma_log_filter_uses_real_dispatch_and_paint() {
+    use rustain::adapters::tui::notifications::{self, NoticeSource};
+    for (message, query) in [("ΟΣ", "ος"), ("ος", "ΟΣ"), ("σ", "ς"), ("ς", "σ")] {
+        let (mut h, mut tabs) = stage(60, 16);
+        h.state.input_buffer = ["retained draft"; 8].join("\n");
+        let owning_view = view(&tabs);
+        notifications::info(
+            &mut h.state,
+            NoticeSource::System,
+            format!("Greek {message} record"),
+        );
+        let retained = h.state.notifications.records().next_back().unwrap().id;
+        notifications::info(&mut h.state, NoticeSource::System, "independent decoy");
+        key(&mut h, &mut tabs, Key::Ctrl('x'));
+        key(&mut h, &mut tabs, Key::Char('n'));
+        h.render_active_tab(&tabs);
+        let unfiltered = h.terminal.backend().buffer().clone();
+        key(&mut h, &mut tabs, Key::Char('/'));
+        paste(&mut h, &mut tabs, query);
+        h.render_active_tab(&tabs);
+        let painted: String = h
+            .terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            painted.contains(&format!("Greek {message} record")),
+            "{message:?}/{query:?}: {painted}"
+        );
+        assert!(!painted.contains("independent decoy"));
+        assert!(!painted.contains("No matching notifications."));
+        assert_ne!(
+            h.terminal.backend().buffer(),
+            &unfiltered,
+            "filter changes actual rows"
+        );
+        assert_eq!(
+            h.state.notification_log.as_ref().unwrap().selected_id,
+            Some(retained)
+        );
+        key(&mut h, &mut tabs, Key::Home);
+        key(&mut h, &mut tabs, Key::Ctrl('k'));
+        paste(&mut h, &mut tabs, "not-a-match");
+        h.render_active_tab(&tabs);
+        let absent: String = h
+            .terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(absent.contains("No matching notifications."));
+        assert!(
+            !absent.contains("Greek "),
+            "independent nonmatching production control"
+        );
+        assert_eq!(view(&tabs), owning_view);
+    }
+}
+
+fn review_bb2b_help_payload_fixture(
+    lower: &[Surface],
+) -> (crate::e2e_harness::TestHarness, TabManager) {
+    use rustain::adapters::tui::presentation::reducer;
+    let (mut h, mut tabs) = stage(60, 16);
+    h.state.focus = FocusState::Input;
+    h.state.input_buffer = ["retained draft"; 8].join("\n");
+    for &surface in lower {
+        reducer::open(&mut h.state, surface);
+    }
+    reducer::open(&mut h.state, Surface::Help);
+    h.state.help_overlay.scroll_offset = 3;
+    h.state.help_overlay.selected_category = 2;
+    key(&mut h, &mut tabs, Key::Char('/'));
+    paste(&mut h, &mut tabs, "scroll");
+    key(&mut h, &mut tabs, Key::Enter);
+    key(&mut h, &mut tabs, Key::Char('j'));
+    assert_eq!(h.state.help_overlay.filtered_scroll_offset, 1);
+    key(&mut h, &mut tabs, Key::Char('/'));
+    key(&mut h, &mut tabs, Key::Home);
+    key(&mut h, &mut tabs, Key::Right);
+    assert!(h.state.help_overlay.search.editing);
+    assert_eq!(h.state.help_overlay.search.query.as_str(), "scroll");
+    (h, tabs)
+}
+
+#[test]
+fn review_bb2b_help_payload_is_released_after_accepted_filter_question_close() {
+    let (mut h, mut tabs) = review_bb2b_help_payload_fixture(&[]);
+    let owning_view = view(&tabs);
+    key(&mut h, &mut tabs, Key::Enter);
+    assert!(!h.state.help_overlay.search.editing);
+    assert!(!h.state.help_overlay.search.query.is_empty());
+    key(&mut h, &mut tabs, Key::Char('?'));
+    assert!(!rustain::adapters::tui::presentation::is_open(
+        &h.state,
+        Surface::Help
+    ));
+    assert_eq!(h.state.help_overlay.search, Default::default());
+    assert_eq!(h.state.help_overlay.filtered_scroll_offset, 0);
+    assert_eq!(
+        (
+            h.state.help_overlay.scroll_offset,
+            h.state.help_overlay.selected_category
+        ),
+        (3, 2)
+    );
+    assert_eq!(view(&tabs), owning_view);
+}
+
+#[test]
+fn review_bb2b_help_payload_is_released_on_truncation_replacement_and_continuation_discard() {
+    use rustain::adapters::tui::presentation::{self, reducer};
+    let full = [
+        Surface::CommandPalette,
+        Surface::ModelSelector,
+        Surface::NotificationLog,
+    ];
+    let mut reached = 0;
+    for mode in 0..3 {
+        let lower: &[Surface] = if mode == 0 { &full[..1] } else { &full };
+        let (mut h, mut tabs) = review_bb2b_help_payload_fixture(lower);
+        let owning_view = view(&tabs);
+        if mode == 1 {
+            reducer::open(&mut h.state, Surface::ProfileSwitcher);
+        } else {
+            if mode == 2 {
+                review_bb2b_request_guarded_quit(&mut h, &mut tabs);
+                assert!(presentation::is_open(&h.state, Surface::Help));
+                assert!(
+                    !h.state
+                        .modal_stack
+                        .iter()
+                        .any(|f| f.surface == Surface::Help)
+                );
+            }
+            reducer::open(&mut h.state, Surface::CommandPalette);
+        }
+        assert!(
+            !presentation::is_open(&h.state, Surface::Help),
+            "mode={mode}"
+        );
+        assert_eq!(
+            h.state.help_overlay.search,
+            Default::default(),
+            "mode={mode}"
+        );
+        assert_eq!(
+            h.state.help_overlay.filtered_scroll_offset, 0,
+            "mode={mode}"
+        );
+        assert_eq!(
+            (
+                h.state.help_overlay.scroll_offset,
+                h.state.help_overlay.selected_category
+            ),
+            (3, 2)
+        );
+        assert_eq!(view(&tabs), owning_view);
+        reached += 1;
+    }
+    assert_eq!(reached, 3, "all release paths are actually reached");
+}
+
+#[test]
+fn review_bb2b_help_payload_is_retained_exactly_under_quit_cover_and_continuation() {
+    let full = [
+        Surface::CommandPalette,
+        Surface::ModelSelector,
+        Surface::NotificationLog,
+    ];
+    let mut reached = 0;
+    for lower in [&[][..], &full[..]] {
+        let (mut h, mut tabs) = review_bb2b_help_payload_fixture(lower);
+        let owner = h.state.modal_stack.top().unwrap().clone();
+        let search = h.state.help_overlay.search.clone();
+        let owning_view = view(&tabs);
+        h.render_active_tab(&tabs);
+        let original = h.terminal.backend().buffer().clone();
+        review_bb2b_request_guarded_quit(&mut h, &mut tabs);
+        assert_eq!(
+            h.state.modal_stack.top().unwrap().surface,
+            Surface::QuitConfirm
+        );
+        assert_eq!(h.state.help_overlay.search, search);
+        assert_eq!(h.state.help_overlay.filtered_scroll_offset, 1);
+        assert_eq!(
+            h.state
+                .modal_stack
+                .iter()
+                .any(|f| f.surface == Surface::Help),
+            lower.is_empty()
+        );
+        key(&mut h, &mut tabs, Key::Char('n'));
+        assert_eq!(h.state.modal_stack.top(), Some(&owner));
+        assert_eq!(h.state.help_overlay.search, search);
+        assert_eq!(h.state.help_overlay.filtered_scroll_offset, 1);
+        h.render_active_tab(&tabs);
+        assert_eq!(h.terminal.backend().buffer(), &original);
+        assert_eq!(view(&tabs), owning_view);
+        reached += 1;
+    }
+    assert_eq!(reached, 2, "both cover and actual continuation reached");
+}
+
+fn review_bb2b_request_guarded_quit(
+    h: &mut crate::e2e_harness::TestHarness,
+    tabs: &mut TabManager,
+) {
+    use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
+    assert_eq!(key(h, tabs, Key::Ctrl('q')), InputAction::Quit);
+    let facts = QuitFacts {
+        composer_draft: !h.state.input_buffer.is_empty(),
+        ..QuitFacts::idle(QuitHost::Local)
+    };
+    assert!(
+        facts.composer_draft,
+        "actual retained composer arms the guard"
+    );
+    quit_confirm::request(&mut h.state, facts);
 }

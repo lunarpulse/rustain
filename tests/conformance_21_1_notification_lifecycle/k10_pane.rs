@@ -1073,6 +1073,7 @@ fn k10_slog_paints_k_and_n_only_on_an_eligible_record() {
                     &state.notifications,
                     &theme,
                     f,
+                    false,
                 );
             })
             .unwrap();

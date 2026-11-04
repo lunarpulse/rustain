@@ -1063,7 +1063,7 @@ pub async fn run(
                 match event_result {
                     Ok(event) => {
                         if let crossterm::event::Event::Paste(text) = &event
-                            && handlers::search::handle_query_paste(&mut tab_manager, &mut state, &conversation, text).is_some()
+                            && apply_query_paste(&mut tab_manager, &mut state, &conversation, text, &storage, &session_index, &domain_tx).is_some()
                         {
                             if state.pending_leader.is_none() && !presentation::too_small(&state)
                                 && state.modal_stack.top().is_some_and(|frame| frame.surface == presentation::Surface::CommandPalette)
@@ -7091,6 +7091,25 @@ pub use crate::adapters::tui::handlers::export::{
     apply_export_command,
 };
 
+/// Apply the local runtime's borrowed query-paste ingress.
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn apply_query_paste(
+    tabs: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    text: &str,
+    storage: &Arc<dyn StoragePort>,
+    index: &SessionIndex,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+) -> Option<InputAction> {
+    let action = handlers::search::handle_query_paste(tabs, state, conversation, text)?;
+    if action == InputAction::CrossSearchQueryChanged {
+        let _ = start_cross_search_scan(state, storage, index, tx);
+    }
+    Some(action)
+}
+
 /// Claim and publish one scan through the same path used by query dispatch.
 #[doc(hidden)]
 pub fn start_cross_search_scan(
@@ -7259,7 +7278,7 @@ pub async fn apply_open_cross_search_result(
     if !preserved_query.is_empty() {
         use crate::adapters::tui::state::PeekHighlight;
         use crate::domain::services::search::find_matches;
-        let matches = find_matches(conversation, &preserved_query);
+        let matches = find_matches(conversation, preserved_query.as_str());
         let target = matches
             .iter()
             .find(|m| m.message_index == result.first_match_message_index)
@@ -7282,7 +7301,7 @@ pub async fn apply_open_cross_search_result(
         }
     }
     // Keep the query for a later Ctrl+F without opening Search or copying it.
-    state.search_state.query = preserved_query.into();
+    state.search_state.query = preserved_query;
     state.needs_redraw = true;
 }
 

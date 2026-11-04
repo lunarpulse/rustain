@@ -186,6 +186,19 @@ pub fn route(
             _ => {}
         }
     }
+    if context == Context::InspectorSearch {
+        let action = app::dispatch_frame_key(state, context, key, host);
+        return Some(if host == Host::Local {
+            RouteEffect::Action(action)
+        } else {
+            assert_eq!(
+                action,
+                InputAction::Consumed,
+                "attached inspector is state-only"
+            );
+            RouteEffect::Consumed
+        });
+    }
     Some(match surface {
         Surface::DecisionPane => match decision_pane::handle_domain_event(state, event, facts) {
             Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),

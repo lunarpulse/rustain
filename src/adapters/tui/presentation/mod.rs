@@ -5,6 +5,7 @@
 
 mod compose;
 pub mod geometry;
+pub mod inspector_search;
 pub mod reducer;
 pub mod route;
 mod stack;
@@ -33,8 +34,28 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
             SearchSubstate::Typing => Context::SearchTyping,
             SearchSubstate::Navigating => Context::SearchNavigating,
         },
+        Surface::Help if state.help_overlay.search.editing => Context::InspectorSearch,
+        Surface::NotificationLog
+            if state
+                .notification_log
+                .as_ref()
+                .is_some_and(|log| log.search.editing) =>
+        {
+            Context::InspectorSearch
+        }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
         _ => surface.context(),
+    }
+}
+
+/// Only the current Log/Help frame may lend its child field to the common editor.
+pub(crate) fn inspector_search_mut(
+    state: &mut TuiState,
+) -> Option<&mut inspector_search::InspectorSearch> {
+    match state.modal_stack.top()?.surface {
+        Surface::Help => Some(&mut state.help_overlay.search),
+        Surface::NotificationLog => state.notification_log.as_mut().map(|log| &mut log.search),
+        _ => None,
     }
 }
 

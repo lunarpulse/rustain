@@ -91,7 +91,7 @@ fn test_e2e_slash_in_sidebar_opens_cross_search() {
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
     assert_eq!(action, InputAction::OpenCrossSearch);
     assert_cross_search_frame(&state);
-    assert_eq!(state.cross_search.query, "");
+    assert_eq!(state.cross_search.query.as_str(), "");
 }
 
 #[test]
@@ -114,21 +114,80 @@ fn test_e2e_cross_search_typing_extends_query() {
         // Each char emits CrossSearchQueryChanged (event loop runs the scan).
         assert_eq!(action, InputAction::CrossSearchQueryChanged);
     }
-    assert_eq!(state.cross_search.query, "deploy");
+    assert_eq!(state.cross_search.query.as_str(), "deploy");
     assert_cross_search_frame(&state);
 }
 
 #[test]
 fn test_e2e_cross_search_backspace_pops_query() {
     let mut state = cross_search_state();
-    state.cross_search.query = "deploy".to_string();
+    state.cross_search.query = "deploy".into();
     let action = handle_input(
         &mut state,
         &DomainInputEvent::SpecialKey(DomainKey::Backspace),
     );
     assert_eq!(action, InputAction::CrossSearchQueryChanged);
-    assert_eq!(state.cross_search.query, "deplo");
+    assert_eq!(state.cross_search.query.as_str(), "deplo");
     assert_cross_search_frame(&state);
+}
+
+#[test]
+fn cross_query_middle_insert_and_paste_use_the_real_local_front_door() {
+    let mut state = cross_search_state();
+    for ch in "ab".chars() {
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress(ch)),
+            InputAction::CrossSearchQueryChanged
+        );
+    }
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left)),
+        InputAction::Consumed
+    );
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::KeyPress('界')),
+        InputAction::CrossSearchQueryChanged
+    );
+    assert_eq!(state.cross_search.query.as_str(), "a界b");
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::Paste("e\u{301}👩‍💻".into())),
+        InputAction::CrossSearchQueryChanged
+    );
+    assert_eq!(state.cross_search.query.as_str(), "a界e\u{301}👩‍💻b");
+    for expected in ["a界e\u{301}b", "a界b", "ab"] {
+        assert_eq!(
+            handle_input(
+                &mut state,
+                &DomainInputEvent::SpecialKey(DomainKey::Backspace)
+            ),
+            InputAction::CrossSearchQueryChanged
+        );
+        assert_eq!(state.cross_search.query.as_str(), expected);
+    }
+    assert_cross_search_frame(&state);
+    assert!(state.input_buffer.is_empty());
+}
+
+#[test]
+fn cross_query_single_multibyte_scalar_keeps_the_byte_painter_threshold() {
+    let mut state = cross_search_state();
+    assert_eq!(
+        handle_input(&mut state, &DomainInputEvent::KeyPress('界')),
+        InputAction::CrossSearchQueryChanged
+    );
+    assert_eq!(
+        rustain::adapters::tui::handlers::export::apply_cross_search_query_change(&mut state),
+        rustain::adapters::tui::handlers::export::CrossSearchScanAction::Cleared
+    );
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    terminal
+        .draw(|frame| {
+            cross_search::render(frame, frame.area(), &state.cross_search, &state.theme, true);
+        })
+        .unwrap();
+    let text = common::buffer_text(&terminal);
+    assert!(text.contains("No matches found"), "{text}");
+    assert!(!text.contains("Type at least 2 characters"), "{text}");
 }
 
 // ── AC5: j/k navigate results ──────────────────────────────────────────────
@@ -176,7 +235,7 @@ fn test_e2e_cross_search_j_with_no_results_is_noop() {
     assert!(state.cross_search.results.is_empty());
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
     assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.cross_search.query, "");
+    assert_eq!(state.cross_search.query.as_str(), "");
     assert_cross_search_frame(&state);
 }
 
@@ -221,7 +280,7 @@ fn test_e2e_cross_search_widget_renders_query_prompt_when_short_query() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.query = "a".to_string();
+    state.query = "a".into();
     terminal
         .draw(|frame| {
             cross_search::render(frame, frame.area(), &state, &theme, true);
@@ -238,7 +297,7 @@ fn test_e2e_cross_search_widget_renders_results_vertical_stack() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.query = "hit".to_string();
+    state.query = "hit".into();
     state.total = 2;
     state.scanned = 2;
     state.results = vec![
@@ -261,7 +320,7 @@ fn test_e2e_cross_search_widget_shows_no_matches_when_empty_results() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.query = "xyz".to_string();
+    state.query = "xyz".into();
     terminal
         .draw(|frame| {
             cross_search::render(frame, frame.area(), &state, &theme, true);
@@ -302,7 +361,7 @@ fn test_e2e_cross_search_below_2_chars_no_scan() {
     state.cross_search.running = true;
 
     // User types just one char — query length 1.
-    state.cross_search.query = "a".to_string();
+    state.cross_search.query = "a".into();
     let action = apply_cross_search_query_change(&mut state);
 
     assert_eq!(
@@ -329,7 +388,7 @@ fn test_e2e_cross_search_query_at_2_chars_spawns_scan() {
     };
 
     let mut state = cross_search_state();
-    state.cross_search.query = "ab".to_string();
+    state.cross_search.query = "ab".into();
     let action = apply_cross_search_query_change(&mut state);
 
     match action {
@@ -364,10 +423,10 @@ fn test_e2e_cross_search_stale_result_discard() {
     };
 
     let mut state = cross_search_state();
-    state.cross_search.query = "foo".to_string();
+    state.cross_search.query = "foo".into();
     let (frame_id, revision, query) = claim_scan(&mut state);
     // The real request remains in flight while the current query changes.
-    state.cross_search.query = "foobar".to_string();
+    state.cross_search.query = "foobar".into();
 
     // Stale scan completes for query "foo".
     let outcome = apply_cross_search_results(
@@ -401,7 +460,7 @@ fn test_e2e_cross_search_fresh_result_applied() {
     };
 
     let mut state = cross_search_state();
-    state.cross_search.query = "foobar".to_string();
+    state.cross_search.query = "foobar".into();
     let (frame_id, revision, query) = claim_scan(&mut state);
 
     let outcome = apply_cross_search_results(
@@ -433,7 +492,7 @@ fn test_e2e_cross_search_applied_results_clamp_selection() {
     };
 
     let mut state = cross_search_state();
-    state.cross_search.query = "qq".to_string();
+    state.cross_search.query = "qq".into();
     let (frame_id, revision, query) = claim_scan(&mut state);
     state.cross_search.selected = 15;
 
@@ -470,7 +529,7 @@ fn test_e2e_cross_search_widget_shows_truncation_by_count_hint() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.query = "hit".to_string();
+    state.query = "hit".into();
     state.truncated_by_count = true;
     state.total = 40;
     state.scanned = 40;
@@ -491,7 +550,7 @@ fn test_e2e_cross_search_widget_shows_truncation_by_time_hint() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.query = "hit".to_string();
+    state.query = "hit".into();
     state.truncated_by_time = true;
     state.total = 100;
     state.scanned = 40;

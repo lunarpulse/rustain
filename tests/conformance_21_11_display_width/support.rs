@@ -29,11 +29,10 @@ pub struct Painted {
 pub fn paint(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> Painted {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(draw).unwrap();
-    let cursor = terminal.get_cursor_position().ok().filter(|p| {
-        // A hidden cursor reports (0,0) without having been set; the callers
-        // that assert a caret always set one, so keep the position as-is.
-        p.x < width && p.y < height
-    });
+    let cursor = terminal
+        .get_cursor_position()
+        .ok()
+        .filter(|p| terminal.backend().cursor_visible() && p.x < width && p.y < height);
     Painted {
         buffer: terminal.backend().buffer().clone(),
         cursor,

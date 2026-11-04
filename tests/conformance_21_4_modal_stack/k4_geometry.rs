@@ -116,7 +116,7 @@ fn log_and_quit_keep_header_body_and_footer_in_a_minimum_height_frame() {
                 "System · Notifications",
                 "Notifications (1)",
                 "body-witness",
-                "Close",
+                "Detail",
             )
         };
         let buffer = draw(&state, &layout, Some(title));
@@ -132,6 +132,16 @@ fn log_and_quit_keep_header_body_and_footer_in_a_minimum_height_frame() {
             row(&buffer, region, region.y + 3).contains(footer),
             "{title}: footer"
         );
+        if !quit {
+            assert!(row(&buffer, region, region.y + 3).contains("[c] Copy"));
+            let sheet: String = (region.y..region.bottom())
+                .map(|y| row(&buffer, region, y))
+                .collect();
+            assert!(
+                sheet.contains("[/] Search") && sheet.contains("[Esc] Close"),
+                "{sheet}"
+            );
+        }
         assert_eq!(buffer[(region.x, region.bottom() - 1)].symbol(), "└");
         assert_eq!(buffer[(region.right() - 1, region.y)].symbol(), "┐");
     }
@@ -183,15 +193,13 @@ fn eligible_log_actions_cannot_starve_the_five_row_body() {
         assert!(all.contains("Close"), "{height}: {all}");
         if height == 16 {
             assert!(
-                row(buffer, rect, rect.bottom() - 2).contains("Close"),
+                row(buffer, rect, rect.bottom() - 2).contains("[Enter] Detail")
+                    && row(buffer, rect, rect.bottom() - 2).contains("[c] Copy"),
                 "{all}"
             );
         }
-        if height == 24 {
-            assert!(
-                all.contains("Compact") && all.contains("Start fresh"),
-                "{all}"
-            );
+        for action in ["Compact", "Start fresh", "[/] Search", "[Esc] Close"] {
+            assert!(all.contains(action), "{all}");
         }
     }
 }

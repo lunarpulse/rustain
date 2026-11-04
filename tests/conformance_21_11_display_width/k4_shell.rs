@@ -529,7 +529,7 @@ fn k4_reverse_search_query_scrolls_and_history_rows_fit_the_border() {
 
 fn cross(width: u16, query: &str, title: &str, excerpt: &str) -> Painted {
     let mut state = CrossSearchState::new();
-    state.query = query.to_string();
+    state.query = query.into();
     state.results = vec![CrossSearchResult {
         conversation_id: "c1".into(),
         title: title.to_string(),
@@ -554,13 +554,23 @@ fn cross_query_shown(width: u16, query: &str) -> String {
         .unwrap_or_else(|| panic!("{width} {query:?}: {row:?}"))
         .trim_end()
         .to_string();
-    let caret = painted.cursor.expect("cross search shows the caret");
-    assert_eq!(
-        usize::from(caret.x),
-        1 + 2 + cells(&shown),
-        "{width} {query:?}"
+    assert!(
+        painted.cursor.is_none(),
+        "frame fields do not claim the hardware cursor"
     );
-    assert_eq!(caret.y, 1);
+    let carets: Vec<_> = (1..width - 1)
+        .filter(|x| {
+            painted.buffer[(*x, 1)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        })
+        .collect();
+    assert_eq!(
+        carets,
+        vec![(1 + 2 + cells(&shown)) as u16],
+        "{width} {query:?}: the styled caret must follow the actual whole query tail"
+    );
+    assert_eq!(painted.buffer[(carets[0], 1)].symbol(), " ");
     assert_whole_clusters(&painted.buffer);
     shown
 }

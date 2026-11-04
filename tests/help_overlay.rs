@@ -335,7 +335,7 @@ fn test_help_overlay_renders_no_crash() {
 
     terminal
         .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &overlay, &theme, false);
+            help_overlay::render(frame, frame.area(), &overlay, &theme, false, false);
         })
         .unwrap();
 }
@@ -359,7 +359,7 @@ fn test_help_overlay_renders_with_tmux_no_crash() {
 
     terminal
         .draw(|frame| {
-            help_overlay::render(frame, frame.area(), &overlay, &theme, true);
+            help_overlay::render(frame, frame.area(), &overlay, &theme, true, false);
         })
         .unwrap();
 }
@@ -663,7 +663,7 @@ fn test_shared_geometry_wide_terminal_no_overflow() {
     terminal
         .draw(|frame| {
             let area = presentation::geometry::frame_rect(frame.area());
-            help_overlay::render(frame, area, &overlay, &theme, false);
+            help_overlay::render(frame, area, &overlay, &theme, false, false);
         })
         .unwrap();
 }

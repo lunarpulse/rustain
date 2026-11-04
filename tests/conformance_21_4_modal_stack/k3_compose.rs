@@ -609,7 +609,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
             );
         }
         if surface == "cross" {
-            assert_eq!(state.cross_search.query, "fox");
+            assert_eq!(state.cross_search.query.as_str(), "fox");
             assert_eq!(
                 restored.0, before.0,
                 "cancel restores exact Cross-Search frame cells"

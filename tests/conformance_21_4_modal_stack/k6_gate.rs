@@ -366,7 +366,7 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "field-tail",
-        r"\.\s*(?:command_palette\s*\.\s*filter_text|(?:search_state|reverse_search)\s*\.\s*query)\s*\.\s*(?:push|push_str|pop|truncate|drain|replace_range|insert_str)\s*\(|\bfn\s+(?:palette_edit|search_edit)\b|\b(?:SearchClear|PaletteBackspace|RevBackspace)\b",
+        r"\.\s*(?:command_palette\s*\.\s*filter_text|(?:search_state|reverse_search|cross_search)\s*\.\s*query|(?:help_overlay|notification_log)\s*\.\s*search\s*\.\s*query)\s*\.\s*(?:push|push_str|pop|truncate|drain|replace_range|insert_str)\s*\(|\bfn\s+(?:palette_edit|search_edit|cross_search_edit)\b|\b(?:SearchClear|PaletteBackspace|RevBackspace|CrossBackspace)\b",
     ),
 ];
 
@@ -492,7 +492,11 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 if *rule == "field-string"
                     && !matches!(
                         scope(&code, m.start()).as_str(),
-                        "CommandPaletteState" | "SearchState" | "ReverseSearchState"
+                        "CommandPaletteState"
+                            | "SearchState"
+                            | "ReverseSearchState"
+                            | "CrossSearchState"
+                            | "InspectorSearch"
                     )
                 {
                     continue;
@@ -1386,7 +1390,7 @@ fn k6_cross_search_owners_patterns_and_renderer_reject_future_pins() {
 fn k6_cross_search_payload_edits_and_presentation_widget_data_remain_allowed() {
     for path in ["src/x.rs", "src/adapters/tui/presentation/route.rs"] {
         for text in [
-            "s.cross_search.query.push(c);",
+            "s.cross_search.query.insert(\"c\");",
             "s.cross_search.selected = Some(0);",
             "s.cross_search.request_revision += 1;",
             "s.cross_search.results.clear();",
@@ -1394,7 +1398,7 @@ fn k6_cross_search_payload_edits_and_presentation_widget_data_remain_allowed() {
             "s.cross_search.reset();",
             "presentation::reducer::open(s, Surface::CrossSearch);",
             "let CrossSearchState { query, selected, request_revision, .. } = payload;",
-            "struct CrossSearchState { query: String, selected: Option<usize>, request_revision: u64, running: bool }",
+            "struct CrossSearchState { query: TextField, selected: Option<usize>, request_revision: u64, running: bool }",
             "impl CrossSearchState { fn reset(&mut self) { self.query.clear(); } }",
         ] {
             assert!(
@@ -1458,11 +1462,13 @@ fn k6_paint_legacy_seam_cannot_return_even_inside_presentation() {
 }
 
 #[test]
-fn k6_bb2a_fields_are_typed_and_tail_helpers_cannot_return() {
+fn k6_bb2_fields_are_typed_and_tail_helpers_cannot_return() {
     for (kind, field) in [
         ("CommandPaletteState", "filter_text"),
         ("SearchState", "query"),
         ("ReverseSearchState", "query"),
+        ("CrossSearchState", "query"),
+        ("InspectorSearch", "query"),
     ] {
         let old = format!("struct {kind} {{ {field}: String }}");
         let site = format!("field-string|{kind}|{old}");
@@ -1491,6 +1497,9 @@ fn k6_bb2a_fields_are_typed_and_tail_helpers_cannot_return() {
         "command_palette.filter_text",
         "search_state.query",
         "reverse_search.query",
+        "cross_search.query",
+        "help_overlay.search.query",
+        "notification_log.search.query",
     ] {
         for method in [
             "push",
@@ -1513,9 +1522,11 @@ fn k6_bb2a_fields_are_typed_and_tail_helpers_cannot_return() {
     for source in [
         "fn palette_edit() {}",
         "fn search_edit() {}",
+        "fn cross_search_edit() {}",
         "fn old() { let x = InputAction::SearchClear; }",
         "fn old() { let x = OverlayCmd::PaletteBackspace; }",
         "fn old() { let x = OverlayCmd::RevBackspace; }",
+        "fn old() { let x = OverlayCmd::CrossBackspace; }",
     ] {
         assert!(
             scan(&[("src/field.rs".into(), source.into())], &[])
@@ -1524,8 +1535,8 @@ fn k6_bb2a_fields_are_typed_and_tail_helpers_cannot_return() {
             "{source}"
         );
     }
-    // Independent negative control: CrossSearch's String editor is allocated to 2b.
-    let legacy = "struct CrossSearchState { query: String }
-        fn cross_search_edit() { state.cross_search.query.push(x); }";
+    // Independent negative control: genuinely unmigrated editors remain allowed.
+    let legacy = "struct FeedbackInputState { query: String }
+        fn edit_field() { state.model_selector.search_query.push(x); }";
     assert!(scan(&[("src/field.rs".into(), legacy.into())], &[]).is_empty());
 }
