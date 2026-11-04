@@ -4684,6 +4684,8 @@ mod tests {
                     | Surface::ProfileSwitcher
                     | Surface::UsagePanel
                     | Surface::Search
+                    | Surface::BookmarkList
+                    | Surface::WaveOverlay
                     | Surface::Login => unreachable!("surface not offered attached"),
                 }
                 let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);

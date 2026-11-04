@@ -205,6 +205,57 @@ fn render_lines_bottom(
     frame.render_widget(ratatui::widgets::Clear, card_area);
     frame.render_widget(ratatui::widgets::Paragraph::new(all_lines), card_area);
 }
+
+/// Base-only Wave paint shared with behavioral witnesses; full views belong to compose.
+#[doc(hidden)]
+pub fn paint_wave_base(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    gate: Option<&crate::adapters::tui::state::PendingSpawnGate>,
+    handle: Option<&dyn crate::domain::ports::wave_handle::WaveHandle>,
+    wave: Option<&crate::adapters::tui::state::WaveViewState>,
+    rerunning_slot: Option<usize>,
+    frame_open: bool,
+) {
+    if let Some(gate) = gate {
+        let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
+            &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
+                requested: gate.requested,
+                threshold: gate.threshold,
+                adjusted: gate.adjusted,
+            },
+            area.width,
+        );
+        render_lines_bottom(frame, area, lines);
+    } else if let Some(handle) = handle {
+        if !frame_open {
+            let snap = handle.snapshot();
+            let rows = wave_result_rows(&snap, rerunning_slot);
+            let lines = rows
+                .iter()
+                .map(|row| {
+                    crate::adapters::tui::widgets::result_row::render_result_row(row, area.width)
+                })
+                .collect();
+            render_lines_bottom(frame, area, lines);
+        }
+    } else if let Some(wave) = wave {
+        let snap = crate::adapters::tui::widgets::wave_strip::WaveStripSnapshot {
+            handle_count: wave.spoke_count,
+            completed: wave.completed_count,
+            high: 0,
+            degraded: 0,
+            burn_micros: 0,
+            paused: false,
+            cancelled: wave.cancelled,
+        };
+        let line = crate::adapters::tui::widgets::wave_strip::render_wave_strip_line(
+            &snap,
+            !wave.cancelled,
+        );
+        render_lines_bottom(frame, area, vec![line]);
+    }
+}
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
@@ -3713,10 +3764,10 @@ pub async fn run(
                                     ).await;
                                 }
                                 InputAction::OpenBookmarkList => {
-                                    handlers::bookmark::handle_apply_open_bookmark_list(&tab_manager, &mut state);
+                                    handlers::bookmark::handle_apply_open_bookmark_list(&tab_manager, &mut state, &conversation);
                                 }
                                 InputAction::JumpToBookmark => {
-                                    handlers::bookmark::handle_apply_jump_bookmark(&tab_manager, &mut state, &conversation);
+                                    handlers::bookmark::handle_apply_jump_bookmark(&mut tab_manager, &mut state, &conversation);
                                 }
                                 InputAction::DeleteBookmark => {
                                     if let Some(prev) = _pending_save.take() {
@@ -3741,9 +3792,7 @@ pub async fn run(
                                     ).await;
                                 }
                                 InputAction::CloseBookmarkList => {
-                                    state.focus = FocusState::Chat;
-                                    state.bookmark_list_selected = 0;
-                                    state.needs_redraw = true;
+                                    handlers::bookmark::close(&mut state);
                                 }
                                 // ── Story 4-4: Cross-Conversation Search ──────────────
                                 InputAction::OpenCrossSearch => {
@@ -4672,46 +4721,18 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
-                                InputAction::OpenWaveOverlay => {
-                                    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
-                                    state.wave_overlay_selected = 0;
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::CloseWaveOverlay => {
-                                    state.pending_spawn_gate = None;
-                                    state.wave_diverge_open = false;
-                                    state.wave_drill_body = None;
-                                    state.focus = FocusState::Chat;
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::WaveDrillSpoke(slot) => {
-                                    // P8 (review): lazy drill — store the body in state so
-                                    // the render path can show it inline, instead of dumping
-                                    // it as a SystemNotice that scrolls away.
-                                    if let Some(ref handle) = state.wave_run {
-                                        if let Some(body) = handle.drill(slot) {
-                                            state.wave_drill_body =
-                                                Some((slot, body.as_render_str().to_string()));
-                                        }
+                                action @ (InputAction::OpenWaveOverlay | InputAction::CloseWaveOverlay
+                                | InputAction::WaveDrillSpoke(_) | InputAction::OpenDivergeView
+                                | InputAction::CloseDivergeView | InputAction::DismissWave) => {
+                                    // SpawnGate remains legacy; its cancel reused this action
+                                    // before Wave was a frame and must still clear its own gate.
+                                    if matches!(action, InputAction::CloseWaveOverlay)
+                                        && !presentation::is_open(&state, presentation::Surface::WaveOverlay)
+                                        && state.pending_spawn_gate.take().is_some()
+                                    {
+                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
                                     }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::OpenDivergeView => {
-                                    if state.wave_run.is_some() {
-                                        state.wave_diverge_open = true;
-                                        state.focus = FocusState::Chat;
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::CloseDivergeView => {
-                                    state.wave_diverge_open = false;
-                                    state.focus = FocusState::Chat;
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::DismissWave => {
-                                    // Story 14.3c: Esc-unwind dismiss of a
-                                    // completed/cancelled wave display.
-                                    state.dismiss_wave();
+                                    handlers::wave_overlay::apply(&mut state, &conversation.id, &action);
                                 }
                                 InputAction::SpawnGateConfirm => {
                                     if let Some(mut pending) = state.pending_spawn_gate.take() {
@@ -7430,8 +7451,10 @@ pub fn replace_stage_conversation(
     state: &mut TuiState,
     replacement: Conversation,
 ) {
-    presentation::reducer::reconcile_stage(state);
-    *conversation = replacement;
+    crate::adapters::tui::app::with_card_focus_reconcile(state, |state| {
+        presentation::reducer::reconcile_stage(state);
+        *conversation = replacement;
+    });
 }
 
 /// Reset the owning tab's view and the replacement Stage's render metrics.
@@ -7705,9 +7728,10 @@ fn advance_skill_trust_queue(state: &mut TuiState) {
 }
 
 /// Render the full TUI frame.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-fn render(
-    terminal: &mut Tui,
+pub fn render(
+    terminal: &mut ratatui::Terminal<impl ratatui::backend::Backend<Error: Send + Sync + 'static>>,
     state: &mut TuiState,
     conversation: &Conversation,
     streaming: &StreamingState,
@@ -7752,6 +7776,7 @@ fn render(
 
     let mut decision_painted = false;
     terminal.draw(|frame| {
+    let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
     let TuiState {
         ref tool_block_states,
         ref feedback_blocks,
@@ -7799,22 +7824,9 @@ fn render(
         ) {
             Some(mut app_layout) => {
                 let mut shell = presentation::Shell::new(area, &app_layout);
+                shell.stage = tab_manager_for_bar.map(|tm| (conversation, tm.active_tab().session_meta.bookmarks.as_slice()));
                 let _is_compact = area.width < 80 || area.height < 24;
 
-                // Story 4-4 AC10: reserve the bottom panel when the bookmark
-                // list overlay is focused. Panel height scales with the
-                // bookmark count (1 header + N entries + 1 footer, capped at 6).
-                if focus
-                    == &FocusState::Overlay(
-                        crate::domain::models::visual::OverlayType::BookmarkList,
-                    )
-                {
-                    let bookmark_count = tab_manager_for_bar
-                        .map(|tm| tm.active_tab().session_meta.bookmarks.len())
-                        .unwrap_or(0);
-                    let requested_height = ((bookmark_count + 3).min(6)) as u16;
-                    app_layout.reserve_bookmark_panel(requested_height);
-                }
                 let card = card.prepare(&mut app_layout, area, theme);
 
                 // Render tab bar if present
@@ -8297,99 +8309,17 @@ fn render(
                     visible_feedback_ids = result.visible_feedback_ids;
                 }
 
-                if let Some(gate) = &state.pending_spawn_gate
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Spawn) {
-                    let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
-                        &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
-                            requested: gate.requested,
-                            threshold: gate.threshold,
-                            adjusted: gate.adjusted,
-                        },
-                        app_layout.chat_pane.width,
-                    );
-                    render_lines_bottom(frame, app_layout.chat_pane, lines);
-                } else if let Some(ref handle) = state.wave_run {
-                    let snap = handle.snapshot();
-                    if state.wave_diverge_open {
-                        let lines = crate::adapters::tui::widgets::diverge_view::render_diverge_view(
-                            &crate::adapters::tui::widgets::diverge_view::DivergeSnapshot::new(
-                                snap.outcome
-                                    .spokes
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(slot, (_, result))| {
-                                        (format!("SPOKE-{slot}"), result.clone())
-                                    })
-                                    .collect(),
-                                app_layout.chat_pane.width,
-                            ),
-                        );
-                        render_lines_bottom(frame, app_layout.chat_pane, lines);
-                    } else if let Some((drill_slot, ref drill_text)) = state.wave_drill_body {
-                        // P8 (review): render the drilled spoke body inline
-                        // instead of dumping it as a SystemNotice.
-                        let header = ratatui::text::Line::styled(
-                            format!("── Drill: spoke {drill_slot} ──"),
-                            ratatui::style::Style::default()
-                                .fg(ratatui::style::Color::Cyan)
-                                .add_modifier(ratatui::style::Modifier::BOLD),
-                        );
-                        let mut lines = vec![header];
-                        for line in drill_text.lines().take(app_layout.chat_pane.height.saturating_sub(2) as usize) {
-                            lines.push(ratatui::text::Line::raw(line.to_string()));
-                        }
-                        render_lines_bottom(frame, app_layout.chat_pane, lines);
-                    } else if state.focus == FocusState::Overlay(OverlayType::WaveOverlay) {
-                        let rows = wave_result_rows(&snap, state.rerunning_slot);
-                        let lines = crate::adapters::tui::widgets::wave_overlay::render_wave_overlay(
-                            &crate::adapters::tui::widgets::wave_overlay::WaveOverlaySnapshot {
-                                rows,
-                                selected: state.wave_overlay_selected,
-                                viewport_height: app_layout.chat_pane.height,
-                                collapsed: false,
-                            },
-                            app_layout.chat_pane.width,
-                        );
-                        render_lines_bottom(frame, app_layout.chat_pane, lines);
-                    } else {
-                        let rows = wave_result_rows(&snap, state.rerunning_slot);
-                        let lines: Vec<_> = rows
-                            .iter()
-                            .map(|row| {
-                                crate::adapters::tui::widgets::result_row::render_result_row(
-                                    row,
-                                    app_layout.chat_pane.width,
-                                )
-                            })
-                            .collect();
-                        render_lines_bottom(frame, app_layout.chat_pane, lines);
-                    }
-                // WAVE_RUN_RENDER_BLOCK_END — conformance boundary. The COMPLETED
-                // wave render above must PULL its counts from `handle.snapshot()`
-                // (AC11 honesty); the IN-PROGRESS strip below legitimately reads
-                // the push-counter `wave_state` because there is no handle yet.
-                } else if let Some(ref wave) = state.wave_state {
-                    // 14.3c (human-smoke fix): the IN-PROGRESS wave strip. `wave_run`
-                    // is None until the wave reaches a terminal state, so without
-                    // this branch a running `/fanout` paints nothing on screen —
-                    // the user saw only the spokes' tool-permission prompts and the
-                    // final results. The strip is a single bottom-anchored line fed
-                    // from `wave_state`; it ticks 0/N → N/N and offers cancel-all.
-                    let snap = crate::adapters::tui::widgets::wave_strip::WaveStripSnapshot {
-                        handle_count: wave.spoke_count,
-                        completed: wave.completed_count,
-                        high: 0,
-                        degraded: 0,
-                        burn_micros: 0,
-                        paused: false,
-                        cancelled: wave.cancelled,
-                    };
-                    let line = crate::adapters::tui::widgets::wave_strip::render_wave_strip_line(
-                        &snap,
-                        !wave.cancelled,
-                    );
-                    render_lines_bottom(frame, app_layout.chat_pane, vec![line]);
-                }
+                paint_wave_base(
+                    frame,
+                    app_layout.chat_pane,
+                    state.pending_spawn_gate.as_ref().filter(|_| {
+                        inline_card == Some(crate::adapters::tui::app::InlineCard::Spawn)
+                    }),
+                    state.wave_run.as_deref(),
+                    state.wave_state.as_ref(),
+                    state.rerunning_slot,
+                    wave_frame_open,
+                );
 
                 if !recipient_blocked {
                     if let Some(surface) = state.recipient_surface.as_mut() {
@@ -8493,20 +8423,6 @@ fn render(
                     }
                 }
 
-                // Story 4-4 AC10: render the bookmark list panel into its reserved slot.
-                if let Some(bookmark_panel_area) = app_layout.bookmark_panel {
-                    let bookmarks: &[usize] = tab_manager_for_bar
-                        .map(|tm| tm.active_tab().session_meta.bookmarks.as_slice())
-                        .unwrap_or(&[]);
-                    crate::adapters::tui::widgets::bookmark_list::render(
-                        frame,
-                        bookmark_panel_area,
-                        conversation,
-                        bookmarks,
-                        state.bookmark_list_selected,
-                        theme,
-                    );
-                }
 
                 // Render peek overlay if any tool block has peek_active (AC5)
                 for (tool_id, tbs) in tool_block_states.iter() {

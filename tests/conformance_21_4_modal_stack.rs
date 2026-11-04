@@ -11,6 +11,8 @@ mod k6_gate;
 mod k7_smoke_frames;
 #[path = "conformance_21_4_modal_stack/k9_reconcile.rs"]
 mod k9_reconcile;
+#[path = "conformance_21_4_modal_stack/stage_support.rs"]
+mod stage_support;
 use crate::conformance_21_3_keymap::support as keymap_support;
 
 mod k1_stack {
@@ -1261,6 +1263,147 @@ mod k7_surfaces {
         .await
         .expect("bounded independent global arrival cases");
     }
+
+    #[test]
+    fn bookmarks_open_through_the_real_handler_as_a_visible_frame() {
+        use rustain::adapters::tui::handlers::bookmark;
+        let (mut h, tabs) = super::stage_support::stage(80, 24);
+        let before = super::stage_support::view(&tabs);
+        assert_eq!(
+            press(&mut h.state, Key::Char('\'')),
+            InputAction::OpenBookmarkList
+        );
+        bookmark::handle_apply_open_bookmark_list(
+            &tabs,
+            &mut h.state,
+            &tabs.active_tab().conversation,
+        );
+        assert_eq!(
+            h.state.modal_stack.top().map(|f| f.surface.title()),
+            Some("Bookmarks")
+        );
+        h.render_active_tab(&tabs);
+        assert!(
+            h.screen_contains("Bookmarks (2)"),
+            "actual tab bookmark facts must paint"
+        );
+        assert!(h.screen_contains("Jump"));
+        press(&mut h.state, Key::Esc);
+        assert!(h.state.modal_stack.is_empty());
+        assert_eq!(super::stage_support::view(&tabs), before);
+    }
+
+    #[test]
+    fn bookmark_acceptance_moves_the_authoritative_tab_not_only_the_mirrors() {
+        use rustain::adapters::tui::handlers::bookmark;
+        let (mut h, mut tabs) = super::stage_support::stage(80, 24);
+        bookmark::handle_apply_open_bookmark_list(
+            &tabs,
+            &mut h.state,
+            &tabs.active_tab().conversation,
+        );
+        let before = super::stage_support::view(&tabs);
+        h.state.bookmark_list_selected = 0;
+        let conversation = tabs.active_tab().conversation.clone();
+        bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
+        assert_ne!(
+            super::stage_support::view(&tabs),
+            before,
+            "observable move in the same manager"
+        );
+        assert_eq!(
+            tabs.active_tab().view_state.scroll_offset,
+            h.state.scroll_offset()
+        );
+        assert!(h.state.modal_stack.is_empty());
+    }
+
+    #[test]
+    fn retained_wave_opener_owns_a_frame_without_overwriting_base_focus() {
+        use rustain::domain::models::FocusState;
+        use std::sync::Arc;
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Chat;
+        state.wave_run = Some(Arc::new(super::keymap_support::StubWave(3)));
+        assert_eq!(
+            press(&mut state, Key::Char('r')),
+            InputAction::OpenWaveOverlay
+        );
+        assert_eq!(
+            state.modal_stack.top().map(|f| f.surface.title()),
+            Some("Wave")
+        );
+        assert_eq!(state.focus, FocusState::Chat);
+    }
+
+    fn stage_frame_for_pushes(
+        wave: bool,
+        diverge: bool,
+    ) -> (
+        crate::e2e_harness::TestHarness,
+        rustain::domain::models::TabManager,
+    ) {
+        use rustain::adapters::tui::handlers::{bookmark, wave_overlay};
+        let (mut h, tabs) = super::stage_support::stage(80, 24);
+        if wave {
+            h.state.wave_run = Some(std::sync::Arc::new(super::keymap_support::StubWave(3)));
+            let action = press(&mut h.state, Key::Char('r'));
+            wave_overlay::apply(&mut h.state, &tabs.active_tab().conversation.id, &action);
+            if diverge {
+                let action = press(&mut h.state, Key::Char('d'));
+                wave_overlay::apply(&mut h.state, &tabs.active_tab().conversation.id, &action);
+            }
+        } else {
+            bookmark::handle_apply_open_bookmark_list(
+                &tabs,
+                &mut h.state,
+                &tabs.active_tab().conversation,
+            );
+        }
+        (h, tabs)
+    }
+
+    fn assert_palette_push(
+        h: &mut crate::e2e_harness::TestHarness,
+        tabs: &rustain::domain::models::TabManager,
+    ) {
+        let owner = h.state.modal_stack.top().cloned().unwrap();
+        let view = super::stage_support::view(tabs);
+        let base = h.state.focus.clone();
+        assert_eq!(press(&mut h.state, Key::Ctrl('p')), InputAction::Consumed);
+        assert_eq!(
+            h.state.modal_stack.top().unwrap().surface,
+            Surface::CommandPalette
+        );
+        press(&mut h.state, Key::Esc);
+        assert_eq!(h.state.modal_stack.top(), Some(&owner));
+        assert_eq!(h.state.focus, base);
+        assert_eq!(super::stage_support::view(tabs), view);
+        assert_eq!(
+            press(&mut h.state, Key::Ctrl('q')),
+            InputAction::Quit,
+            "unconditional precedence"
+        );
+    }
+
+    #[test]
+    fn bookmark_wave_palette_pushes_restore_the_actual_caller() {
+        for wave in [false, true] {
+            let (mut h, tabs) = stage_frame_for_pushes(wave, false);
+            assert_palette_push(&mut h, &tabs);
+        }
+    }
+
+    #[test]
+    fn wave_divergence_palette_push_restores_the_chat_wave_subcontext() {
+        let (mut h, tabs) = stage_frame_for_pushes(true, true);
+        assert_palette_push(&mut h, &tabs);
+        assert!(h.state.wave_diverge_open);
+        assert_eq!(
+            rustain::adapters::tui::presentation::frame_context(&h.state, Surface::WaveOverlay),
+            rustain::adapters::tui::keymap::Context::ChatWave
+        );
+    }
 }
 
 mod k8_stage {
@@ -1704,6 +1847,117 @@ mod k8_stage {
         })
         .await
         .expect("bounded streaming invariance");
+    }
+
+    #[test]
+    fn bookmark_and_wave_keep_the_real_view_cache_and_unreserved_shell() {
+        use super::stage_support::{cache_keys, chat_pixels, stage, view};
+        use rustain::adapters::tui::{
+            app,
+            handlers::{bookmark, scroll, wave_overlay},
+        };
+        use rustain::domain::{events::DomainInputEvent, models::view_state::ScrollDelta};
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            for full in [false, true] {
+                for wave in [false, true] {
+                    let (mut h, mut tabs) = stage(width, height);
+                    if full {
+                        h.state.input_buffer = "composer\n".repeat(12);
+                    }
+                    h.state.cursor_position = 3;
+                    h.state.wave_run =
+                        wave.then(|| std::sync::Arc::new(super::keymap_support::StubWave(3)) as _);
+                    h.render_active_tab(&tabs);
+                    let before_view = view(&tabs);
+                    let before_keys = cache_keys(&h, &tabs);
+                    assert!(
+                        !before_keys.0.is_empty() || !before_keys.1.is_empty(),
+                        "real render populates cache keys"
+                    );
+                    let before_pixels = chat_pixels(&h);
+                    let layout = k3_compose::layout(&h.state);
+                    let composer = (h.state.input_buffer.clone(), h.state.cursor_position);
+                    let action = press(
+                        &mut h.state,
+                        if wave {
+                            Key::Char('r')
+                        } else {
+                            Key::Char('\'')
+                        },
+                    );
+                    if wave {
+                        wave_overlay::apply(
+                            &mut h.state,
+                            &tabs.active_tab().conversation.id,
+                            &action,
+                        );
+                    } else {
+                        bookmark::handle_apply_open_bookmark_list(
+                            &tabs,
+                            &mut h.state,
+                            &tabs.active_tab().conversation,
+                        );
+                    }
+                    assert!(h.state.modal_stack.top().is_some());
+                    let owner = h.state.modal_stack.top().cloned();
+                    press(&mut h.state, Key::Char('j'));
+                    let wheel = DomainInputEvent::MouseScroll(ScrollDelta::WheelUp(12));
+                    assert_eq!(
+                        app::handle_input(&mut h.state, &wheel),
+                        app::InputAction::Consumed
+                    );
+                    for closing in [false, true] {
+                        if closing {
+                            let action = press(&mut h.state, Key::Esc);
+                            if wave {
+                                wave_overlay::apply(
+                                    &mut h.state,
+                                    &tabs.active_tab().conversation.id,
+                                    &action,
+                                );
+                            }
+                        }
+                        h.render_active_tab(&tabs);
+                        assert_eq!(k3_compose::layout(&h.state).chat_pane, layout.chat_pane);
+                        assert_eq!(k3_compose::layout(&h.state).input_area, layout.input_area);
+                        assert_eq!(view(&tabs), before_view);
+                        assert_eq!(cache_keys(&h, &tabs), before_keys);
+                        assert_eq!(
+                            (h.state.input_buffer.clone(), h.state.cursor_position),
+                            composer
+                        );
+                        if !closing {
+                            assert_eq!(h.state.modal_stack.top(), owner.as_ref());
+                            assert!(
+                                h.screen_contains(if wave { "close" } else { "Jump" }),
+                                "primary action fits {width}x{height}, full={full}"
+                            );
+                        }
+                    }
+                    assert!(h.state.modal_stack.is_empty());
+                    assert_eq!(chat_pixels(&h), before_pixels);
+                    let app::InputAction::MouseScroll(delta) =
+                        app::handle_input(&mut h.state, &wheel)
+                    else {
+                        panic!("uncovered scroll control");
+                    };
+                    let conversation = tabs.active_tab().conversation.clone();
+                    scroll::handle_apply_scroll_intent(
+                        &mut tabs,
+                        &mut h.state,
+                        &conversation,
+                        delta,
+                    );
+                    h.render_active_tab(&tabs);
+                    assert_ne!(view(&tabs), before_view, "same manager actually moves");
+                    assert_ne!(
+                        chat_pixels(&h),
+                        before_pixels,
+                        "view mutation reaches real paint"
+                    );
+                }
+            }
+        }
     }
 }
 

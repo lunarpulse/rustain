@@ -11,9 +11,25 @@
 //! Pure render: no async, no mutation. Composes with the chat-pane render
 //! pipeline like `synthesis_block` / `wave_strip`. Glyphs are sourced from
 //! `orchestration_glyph` via the per-row renderer — no new glyph constants.
+//!
+//! Expanded list, drill and divergence are painted only by `render_frame` in
+//! the owning Stage rectangle. The line builder remains a pure widget contract.
 
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+
+use crate::adapters::tui::keymap::{
+    render::{key_text, key_text_at},
+    table_panels::PanelCmd,
+};
+use crate::adapters::tui::state::TuiState;
+use crate::adapters::tui::theme::Theme;
+use crate::domain::ports::wave_handle::WaveSnapshot;
+
+use super::diverge_view::{DivergeSnapshot, render_diverge_view};
+use super::modal::{ModalPart, fit_modal};
 
 use super::result_row::{ResultRowSnapshot, render_result_row};
 
@@ -78,6 +94,146 @@ pub fn render_wave_overlay(snap: &WaveOverlaySnapshot, width: u16) -> Vec<Line<'
     // Footer: keybinding hint.
     lines.push(hint_footer());
     lines
+}
+
+/// Paint the frame's complete view, without consulting or changing base focus.
+/// The caller supplies one borrowed snapshot; only visible list rows are
+/// projected into the existing ResultRow builder.
+pub fn render_frame(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    state: &TuiState,
+    snap: &WaveSnapshot,
+    theme: &Theme,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.colors.accent))
+        .title(" Wave ");
+    let inner = block.inner(area);
+    let width = inner.width;
+    let height = usize::from(inner.height);
+    let total = snap.outcome.spokes.len();
+    let selected = state.wave_overlay_selected.min(total.saturating_sub(1));
+    let (header, rows, selected_row) = if state.wave_diverge_open {
+        let mut lines = render_diverge_view(&DivergeSnapshot::new(
+            snap.outcome
+                .spokes
+                .iter()
+                .enumerate()
+                .map(|(slot, (_, result))| (format!("SPOKE-{slot}"), result.clone()))
+                .collect(),
+            width,
+        ));
+        let header = lines.remove(0);
+        let row = if width >= 120 { selected / 2 } else { selected };
+        (header, lines, row)
+    } else if let Some((slot, text)) = &state.wave_drill_body {
+        (
+            Line::from(format!("Drill: spoke {slot}")),
+            text.lines()
+                .take(height)
+                .map(|line| Line::raw(line.to_owned()))
+                .collect(),
+            0,
+        )
+    } else {
+        // Limit work by the actual frame height, not by the number of spokes.
+        let (start, count) = visible_window(total, selected, height.saturating_sub(2));
+        let rows = snap.outcome.spokes[start..start + count]
+            .iter()
+            .enumerate()
+            .map(|(offset, (agent, result))| {
+                let slot = start + offset;
+                let row = ResultRowSnapshot {
+                    agent_label: agent.as_str().to_owned(),
+                    result: result.clone(),
+                    slot,
+                    is_self: false,
+                    rerun_count: snap.rerun_counts.get(slot).copied().unwrap_or(0),
+                    rerunning: state.rerunning_slot == Some(slot),
+                };
+                let line = render_result_row(&row, width);
+                if slot == selected {
+                    highlight_selected(line)
+                } else {
+                    line
+                }
+            })
+            .collect();
+        (
+            position_line(total, selected),
+            rows,
+            selected.saturating_sub(start),
+        )
+    };
+    let footer = if state.wave_diverge_open {
+        format!(
+            "{} back · {} back · {} back",
+            key_text(PanelCmd::WaveDivergeClose),
+            key_text(PanelCmd::WaveBack),
+            key_text_at(PanelCmd::WaveClose, 1)
+        )
+    } else if state.wave_chat_keys {
+        format!(
+            "{}/{} overlay · {} diverge · {} dismiss · {} close",
+            key_text(PanelCmd::WaveOpenOverlay),
+            key_text(PanelCmd::WaveOpenFromChat),
+            key_text(PanelCmd::WaveOpenDiverge),
+            key_text(PanelCmd::WaveBack),
+            key_text_at(PanelCmd::WaveClose, 1)
+        )
+    } else {
+        format!(
+            "{} drill · {} rerun · {} diverge · {}/{} close",
+            key_text(PanelCmd::WaveDrill),
+            key_text(PanelCmd::WaveRerun),
+            key_text(PanelCmd::WaveDiverge),
+            key_text(PanelCmd::WaveClose),
+            key_text_at(PanelCmd::WaveClose, 1)
+        )
+    };
+    let detail = if state.wave_chat_keys {
+        format!(
+            "{} overlay · {} select · {} diverge",
+            key_text(PanelCmd::WaveOpenOverlay),
+            key_text(PanelCmd::WaveOpenFromChat),
+            key_text(PanelCmd::WaveOpenDiverge)
+        )
+    } else {
+        format!(
+            "{}/{} select · {} opens the selected spoke",
+            key_text(PanelCmd::WaveNext),
+            key_text(PanelCmd::WavePrev),
+            key_text(PanelCmd::WaveDrill)
+        )
+    };
+    let lines = fit_modal(
+        vec![
+            ModalPart::Header(vec![header]),
+            ModalPart::Notice(vec![Line::from(detail)]),
+            ModalPart::Rows {
+                lines: rows,
+                selected: (selected_row, selected_row + 1),
+            },
+            ModalPart::Footer(vec![Line::styled(
+                footer,
+                Style::default().fg(theme.colors.fg_muted),
+            )]),
+        ],
+        height,
+        usize::from(width),
+    );
+    frame.render_widget(Clear, area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(lines).style(
+            Style::default()
+                .fg(theme.colors.fg_primary)
+                .bg(theme.colors.bg_surface),
+        ),
+        inner,
+    );
 }
 
 /// The single shared `▾ k of N` indicator line. `pos` is the 1-indexed selected
@@ -362,5 +518,109 @@ mod tests {
         let txt = line_text(&lines[0]);
         // selected 137 → position 138 of 500.
         assert!(txt.contains("138 of 500"), "large-N collapsed line: {txt}");
+    }
+
+    fn retained_snapshot(n: usize) -> WaveSnapshot {
+        use crate::domain::models::AgentId;
+        use crate::domain::models::orchestration::{ForkJoinOutcome, SynthesisView};
+        WaveSnapshot {
+            spoke_count: n,
+            completed: n,
+            honest_empty: Some(false),
+            cancelled: false,
+            outcome: ForkJoinOutcome {
+                spokes: make_rows(n)
+                    .into_iter()
+                    .map(|row| (AgentId::root(), row.result))
+                    .collect(),
+                synthesis: SynthesisView::default(),
+            },
+            resolve_count: 0,
+            slots: vec![AgentId::root(); n],
+            rerun_counts: vec![0; n],
+        }
+    }
+
+    #[test]
+    fn story21_4_wave_frame_all_views_keep_primary_keys_and_real_selected_data_in_five_rows() {
+        use ratatui::{Terminal, backend::TestBackend};
+        for view in 0..3 {
+            let mut state = TuiState::new(60, 16);
+            state.wave_overlay_selected = 49;
+            state.wave_diverge_open = view == 2;
+            state.wave_chat_keys = view == 2;
+            if view == 1 {
+                state.wave_drill_body = Some((49, "actual drill body\nsecond body line".into()));
+            }
+            let snap = retained_snapshot(50);
+            let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+            terminal
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new("full composer payload"),
+                        Rect::new(0, 12, 60, 4),
+                    );
+                    render_frame(frame, Rect::new(0, 1, 60, 5), &state, &snap, &state.theme);
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            assert!(text.contains("full composer payload"), "{text}");
+            if view == 2 {
+                assert!(
+                    text.contains("s back") && text.contains("Ctrl+C back"),
+                    "{text}"
+                );
+                assert!(text.contains("SPOKE-49: done-49"), "{text}");
+            } else {
+                for key in ["Enter drill", "r rerun", "d diverge", "Esc/Ctrl+C close"] {
+                    assert!(text.contains(key), "missing {key}: {text}");
+                }
+                assert!(
+                    text.contains(if view == 1 {
+                        "actual drill body"
+                    } else {
+                        "done-49"
+                    }),
+                    "{text}"
+                );
+            }
+            assert_eq!(state.wave_overlay_selected, 49, "pure render");
+        }
+    }
+
+    #[test]
+    fn story21_4_wave_frame_chat_drill_exposes_dismiss_instead_of_overlay_close() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut state = TuiState::new(60, 16);
+        state.wave_chat_keys = true;
+        state.wave_drill_body = Some((1, "retained drill after divergence".into()));
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_frame(
+                    frame,
+                    Rect::new(0, 0, 60, 5),
+                    &state,
+                    &retained_snapshot(2),
+                    &state.theme,
+                );
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("retained drill after divergence"), "{text}");
+        assert!(
+            text.contains("Enter/r overlay")
+                && text.contains("Esc dismiss")
+                && text.contains("Ctrl+C close"),
+            "{text}"
+        );
+        assert!(!text.contains("Esc/Ctrl+C close"), "{text}");
     }
 }

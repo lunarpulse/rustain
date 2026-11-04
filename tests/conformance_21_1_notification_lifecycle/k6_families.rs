@@ -55,7 +55,7 @@ fn meta() -> SessionMeta {
 fn k6_bookmark_teaching_notice_is_an_info_notice_not_a_status() {
     let tabs = TabManager::new(CancellationToken::new());
     let mut state = idle_state();
-    handle_apply_open_bookmark_list(&tabs, &mut state);
+    handle_apply_open_bookmark_list(&tabs, &mut state, &tabs.active_tab().conversation);
     let (source, severity, message) = newest(&state);
     assert_eq!(source, NoticeSource::Bookmark);
     assert_eq!(severity, NoticeSeverity::Info);

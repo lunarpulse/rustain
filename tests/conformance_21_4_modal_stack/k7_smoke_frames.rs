@@ -227,3 +227,192 @@ fn bb1a_real_frames_for_smoke_predicates() {
         }
     }
 }
+
+// Render-only retained-data fixture. No TaskHandle, run, or drill capability is
+// fabricated: the native leg below /fanout owns that proof. The sealed DrillBody
+// cannot be constructed by integration tests; subview text is fixture DATA.
+#[derive(Debug)]
+struct Bb1bPayload(super::keymap_support::StubWave);
+
+impl rustain::domain::ports::wave_handle::WaveHandle for Bb1bPayload {
+    fn snapshot(&self) -> rustain::domain::ports::wave_handle::WaveSnapshot {
+        use rustain::domain::models::{AgentId, SpokeResult};
+        let mut snap = self.0.snapshot();
+        snap.completed = snap.spoke_count;
+        snap.outcome.spokes = (0..snap.spoke_count)
+            .map(|slot| {
+                (
+                    AgentId::root(),
+                    SpokeResult::Completed {
+                        summary: ["a1-first-invalid", "a1-second-invalid"][slot % 2].into(),
+                    },
+                )
+            })
+            .collect();
+        snap.slots = self.slots();
+        snap.rerun_counts = vec![0; snap.spoke_count];
+        snap
+    }
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+    fn drill(&self, slot: usize) -> Option<rustain::domain::ports::wave_handle::DrillBody> {
+        self.0.drill(slot)
+    }
+    fn drill_id(&self, slot: usize) -> Option<rustain::domain::models::orchestration::DrillId> {
+        self.0.drill_id(slot)
+    }
+    fn slots(&self) -> Vec<rustain::domain::models::AgentId> {
+        vec![rustain::domain::models::AgentId::root(); self.0.0]
+    }
+    fn rerun_count_for_slot(&self, slot: usize) -> u8 {
+        self.0.rerun_count_for_slot(slot)
+    }
+    fn resolve_count(&self) -> usize {
+        self.0.resolve_count()
+    }
+}
+
+fn bb1b_capture(
+    h: &mut TestHarness,
+    tabs: &TabManager,
+    stage: &str,
+    full: bool,
+    dir: &Option<PathBuf>,
+) {
+    let screen = capture(h, tabs, stage, full, &None);
+    if let Some(dir) = dir {
+        let buffer = h.terminal.backend().buffer();
+        let reversed: Vec<usize> = (0..buffer.area.height)
+            .filter(|&y| {
+                (0..buffer.area.width).any(|x| {
+                    buffer[(x, y)]
+                        .modifier
+                        .contains(ratatui::style::Modifier::REVERSED)
+                })
+            })
+            .map(usize::from)
+            .collect();
+        let record = serde_json::json!({
+            "width": h.state.terminal_width, "height": h.state.terminal_height,
+            "stage": stage, "full": full, "screen": screen,
+            "draft": h.state.input_buffer, "cursor_hidden": !h.terminal.backend().cursor_visible(),
+            "reversed": reversed,
+        });
+        std::fs::write(
+            dir.join(format!(
+                "bb1b-i-{}x{}-{}-{stage}.json",
+                h.state.terminal_width,
+                h.state.terminal_height,
+                if full { "full" } else { "normal" }
+            )),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn bb1b_i_real_frames_for_smoke_predicates() {
+    use rustain::adapters::tui::{
+        app::InputAction,
+        handlers::{bookmark, wave_overlay},
+    };
+    use std::sync::Arc;
+    let dir = output_dir();
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for full in [false, true] {
+            let (mut h, mut tabs) = super::stage_support::stage(width, height);
+            h.finalize_turn();
+            let draft = if full {
+                "1\n2\n3\n4\n5\n6\n7\n8"
+            } else {
+                DRAFT
+            };
+            h.state.input_buffer = draft.into();
+            h.state.cursor_position = draft.chars().count();
+            bb1b_capture(&mut h, &tabs, "before", full, &dir);
+            let before = super::stage_support::view(&tabs);
+            let action = press(&mut h.state, Key::Char('\''));
+            assert_eq!(action, InputAction::OpenBookmarkList);
+            bookmark::handle_apply_open_bookmark_list(
+                &tabs,
+                &mut h.state,
+                &tabs.active_tab().conversation,
+            );
+            bb1b_capture(&mut h, &tabs, "bookmark-open", full, &dir);
+            press(&mut h.state, Key::Char('j'));
+            assert_eq!(h.state.bookmark_list_selected, 1);
+            bb1b_capture(&mut h, &tabs, "bookmark-selected", full, &dir);
+            press(&mut h.state, Key::Esc);
+            bookmark::close(&mut h.state);
+            assert_eq!(super::stage_support::view(&tabs), before);
+            bb1b_capture(&mut h, &tabs, "bookmark-back", full, &dir);
+            bookmark::handle_apply_open_bookmark_list(
+                &tabs,
+                &mut h.state,
+                &tabs.active_tab().conversation,
+            );
+            let conversation = tabs.active_tab().conversation.clone();
+            bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
+            assert_ne!(super::stage_support::view(&tabs), before);
+            bb1b_capture(&mut h, &tabs, "bookmark-jump", full, &dir);
+            tabs.active_tab_mut().session_meta.bookmarks = vec![0, 1, 2];
+            bookmark::handle_apply_open_bookmark_list(
+                &tabs,
+                &mut h.state,
+                &tabs.active_tab().conversation,
+            );
+            press(&mut h.state, Key::Char('j'));
+            press(&mut h.state, Key::Char('j'));
+            bb1b_capture(&mut h, &tabs, "bookmark-counted", full, &dir);
+            bookmark::close(&mut h.state);
+            tabs.active_tab_mut().session_meta.bookmarks.clear();
+            bookmark::handle_apply_open_bookmark_list(
+                &tabs,
+                &mut h.state,
+                &tabs.active_tab().conversation,
+            );
+            assert!(!presentation::is_open(&h.state, Surface::BookmarkList));
+            h.state.notifications.clear_toasts();
+            bb1b_capture(&mut h, &tabs, "bookmark-empty", full, &dir);
+            h.state.wave_run = Some(Arc::new(Bb1bPayload(super::keymap_support::StubWave(2))));
+            let id = tabs.active_tab().conversation.id.clone();
+            for (key, stage) in [
+                (Key::Char('r'), "wave-open"),
+                (Key::Char('j'), "wave-selected"),
+            ] {
+                let action = press(&mut h.state, key);
+                wave_overlay::apply(&mut h.state, &id, &action);
+                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+            }
+            // Fixture payload, not a claimed successful lazy handle resolution.
+            h.state.wave_drill_body = Some((1, "a1-second-invalid".into()));
+            bb1b_capture(&mut h, &tabs, "wave-drill", full, &dir);
+            for (key, stage) in [
+                (Key::Char('d'), "wave-diverge"),
+                (Key::Char('s'), "wave-drill-return"),
+                (Key::Ctrl('c'), "wave-closed"),
+                (Key::Char('d'), "wave-direct-diverge"),
+                (Key::Esc, "wave-compact"),
+                (Key::Enter, "wave-reopen"),
+                (Key::Char('d'), "wave-list-diverge"),
+                (Key::Esc, "wave-list-compact"),
+            ] {
+                let action = press(&mut h.state, key);
+                wave_overlay::apply(&mut h.state, &id, &action);
+                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+            }
+            for (count, selected, stage) in [(0, 0, "wave-empty"), (24, 23, "wave-counted")] {
+                h.state.wave_run = Some(Arc::new(Bb1bPayload(super::keymap_support::StubWave(
+                    count,
+                ))));
+                let action = press(&mut h.state, Key::Char('r'));
+                wave_overlay::apply(&mut h.state, &id, &action);
+                h.state.wave_overlay_selected = selected;
+                bb1b_capture(&mut h, &tabs, stage, full, &dir);
+                wave_overlay::apply(&mut h.state, &id, &InputAction::CloseWaveOverlay);
+            }
+        }
+    }
+}

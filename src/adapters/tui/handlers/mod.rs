@@ -54,6 +54,7 @@ pub mod transcript_target;
 pub mod transparency;
 pub mod turn_finalize;
 pub mod usage_panel;
+pub mod wave_overlay;
 
 /// Handler-to-dispatch contract per ADR-08-01 §D1.
 ///

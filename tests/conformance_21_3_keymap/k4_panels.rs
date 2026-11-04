@@ -9,7 +9,7 @@ use rustain::adapters::tui::app::{InputAction, handle_input};
 use rustain::adapters::tui::keymap::{Context, Key};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::DomainInputEvent;
-use rustain::domain::models::visual::{OverlayType, PanelType};
+use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
     AgentId, ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, Direction, EvidenceArtifact,
     FocusState, HostBinding, OrchestrationRoom, OrchestrationRoomId, PermissionMode, ProvenanceTag,
@@ -182,14 +182,22 @@ fn wave_state() -> TuiState {
 /// The wave overlay open on the second of three spokes.
 fn overlay_state() -> TuiState {
     let mut state = wave_state();
-    state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+    rustain::adapters::tui::presentation::reducer::open(
+        &mut state,
+        rustain::adapters::tui::presentation::Surface::WaveOverlay,
+    );
     state.wave_overlay_selected = 1;
     state
 }
 
 fn wave_salient(state: &TuiState) -> String {
     let (sel, div) = (state.wave_overlay_selected, state.wave_diverge_open);
-    format!("{:?} sel={sel} div={div}", state.focus)
+    let frame = state.modal_stack.top().map(|frame| frame.surface);
+    format!(
+        "{:?} frame={frame:?} sel={sel} div={div} leader={}",
+        state.focus,
+        state.pending_leader.is_some()
+    )
 }
 
 /// Regression caught: `Esc` / `Enter` on a retained wave dismiss or open the wrong surface (divergence view first).
@@ -197,18 +205,22 @@ fn wave_salient(state: &TuiState) -> String {
 #[rustfmt::skip]
 fn chat_wave_rows_dismiss_or_open_the_retained_wave() {
     const ROWS: &[W] = &[
-        w(&[Key::Esc], "DismissWave | Chat sel=0 div=false"),
-        wp(&[Key::Esc], "CloseDivergeView | Chat sel=0 div=true", |s| s.wave_diverge_open = true),
-        w(&[Key::Enter], "OpenWaveOverlay | Chat sel=0 div=false"),
-        w(&[Key::Char('d')], "OpenDivergeView | Chat sel=0 div=false"),
-        w(&[Key::Char('s')], "CloseDivergeView | Chat sel=0 div=false"),
-        wp(&[Key::Char('r')], "OpenWaveOverlay | Overlay(WaveOverlay) sel=0 div=false", |s| s.wave_overlay_selected = 3),
+        w(&[Key::Esc], "DismissWave | Chat frame=None sel=0 div=false leader=false"),
+        wp(&[Key::Esc], "CloseDivergeView | Chat frame=Some(WaveOverlay) sel=0 div=true leader=false", |s| {
+            let action = press(s, Key::Char('d'));
+            assert_eq!(action, InputAction::OpenDivergeView);
+            assert!(rustain::adapters::tui::handlers::wave_overlay::apply(s, "", &action));
+        }),
+        w(&[Key::Enter], "OpenWaveOverlay | Chat frame=Some(WaveOverlay) sel=0 div=false leader=false"),
+        w(&[Key::Char('d')], "OpenDivergeView | Chat frame=Some(WaveOverlay) sel=0 div=false leader=false"),
+        w(&[Key::Char('s')], "CloseDivergeView | Chat frame=None sel=0 div=false leader=false"),
+        wp(&[Key::Char('r')], "OpenWaveOverlay | Chat frame=Some(WaveOverlay) sel=0 div=false leader=false", |s| s.wave_overlay_selected = 3),
     ];
     // Without a retained wave the same three keys do nothing (the arms are conditional): off-state (R3).
     const OFF: &[W] = &[
-        wp(&[Key::Char('d')], "Ignored | Chat sel=0 div=false", |s| s.wave_run = None),
-        wp(&[Key::Char('s')], "Ignored | Chat sel=0 div=false", |s| s.wave_run = None),
-        wp(&[Key::Char('r')], "Ignored | Chat sel=0 div=false", |s| s.wave_run = None),
+        wp(&[Key::Char('d')], "Ignored | Chat frame=None sel=0 div=false leader=false", |s| s.wave_run = None),
+        wp(&[Key::Char('s')], "Ignored | Chat frame=None sel=0 div=false leader=false", |s| s.wave_run = None),
+        wp(&[Key::Char('r')], "Ignored | Chat frame=None sel=0 div=false leader=false", |s| s.wave_run = None),
     ];
     run(&Case { off: OFF, ..local(Context::ChatWave, wave_state, wave_salient, ROWS) });
 }
@@ -218,17 +230,19 @@ fn chat_wave_rows_dismiss_or_open_the_retained_wave() {
 #[rustfmt::skip]
 fn wave_overlay_rows_select_open_close_and_act_on_the_selected_spoke() {
     const ROWS: &[W] = &[
-        w(&[Key::Char('j')], "Consumed | Overlay(WaveOverlay) sel=2 div=false"),
-        w(&[Key::Down], "Consumed | Overlay(WaveOverlay) sel=2 div=false"),
-        w(&[Key::Char('k')], "Consumed | Overlay(WaveOverlay) sel=0 div=false"),
-        w(&[Key::Up], "Consumed | Overlay(WaveOverlay) sel=0 div=false"),
-        w(&[Key::Enter], "WaveDrillSpoke(1) | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Esc], "CloseWaveOverlay | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Ctrl('c')], "CloseWaveOverlay | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Char('r')], "WaveRerunSpoke(1) | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Char('d')], "OpenDivergeView | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Char('s')], "CloseDivergeView | Overlay(WaveOverlay) sel=1 div=false"),
-        w(&[Key::Ctrl('q')], "Quit | Overlay(WaveOverlay) sel=1 div=false"),
+        w(&[Key::Char('j')], "Consumed | Chat frame=Some(WaveOverlay) sel=2 div=false leader=false"),
+        w(&[Key::Down], "Consumed | Chat frame=Some(WaveOverlay) sel=2 div=false leader=false"),
+        w(&[Key::Char('k')], "Consumed | Chat frame=Some(WaveOverlay) sel=0 div=false leader=false"),
+        w(&[Key::Up], "Consumed | Chat frame=Some(WaveOverlay) sel=0 div=false leader=false"),
+        w(&[Key::Enter], "WaveDrillSpoke(1) | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Esc], "CloseWaveOverlay | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Ctrl('c')], "CloseWaveOverlay | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Char('r')], "WaveRerunSpoke(1) | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Char('d')], "OpenDivergeView | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Char('s')], "CloseDivergeView | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Ctrl('q')], "Quit | Chat frame=Some(WaveOverlay) sel=1 div=false leader=false"),
+        w(&[Key::Ctrl('x')], "Consumed | Chat frame=Some(WaveOverlay) sel=1 div=false leader=true"),
+        w(&[Key::Ctrl('p')], "Consumed | Chat frame=Some(CommandPalette) sel=1 div=false leader=false"),
     ];
     run(&local(Context::WaveOverlay, overlay_state, wave_salient, ROWS));
 }

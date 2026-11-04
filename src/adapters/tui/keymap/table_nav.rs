@@ -6,7 +6,7 @@
 //! A2A log drill) belong to slice 3-B and are not rows here.
 //!
 //! The sidebar is a local-only surface (the attached client has no sidebar), so
-//! every Sidebar row is `.local()`; Search and BookmarkList are local overlays
+//! every Sidebar row is `.local()`; Search and BookmarkList are local frames
 //! too. One row per line on purpose (`rustfmt::skip`): the table is data.
 
 use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};

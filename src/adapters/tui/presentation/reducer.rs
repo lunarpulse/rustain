@@ -26,12 +26,12 @@ pub fn initialize_surface(state: &mut TuiState, surface: Surface) -> bool {
         .is_some_and(|frame| std::mem::take(&mut frame.needs_initialization))
 }
 
-/// Bind a freshly initialized stage-navigation frame to its conversation.
-pub fn bind_search_stage(state: &mut TuiState, conversation_id: &str) {
+/// Bind a freshly initialized Stage owner to its actual conversation.
+pub fn bind_stage(state: &mut TuiState, surface: Surface, conversation_id: &str) {
     if let Some(frame) = state
         .modal_stack
         .all_frames_mut()
-        .find(|frame| frame.surface == Surface::Search)
+        .find(|frame| frame.surface == surface)
     {
         frame.conversation_id = Some(conversation_id.to_owned());
     }
@@ -271,6 +271,8 @@ fn fresh_frame(state: &mut TuiState, surface: Surface, decision: Option<Decision
                 | Surface::UsagePanel
                 | Surface::Login
                 | Surface::Search
+                | Surface::BookmarkList
+                | Surface::WaveOverlay
         ),
     }
 }
@@ -280,6 +282,17 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         Surface::CommandPalette => state.command_palette.reset(),
         Surface::Help => state.help_overlay.reset(),
         Surface::Search => state.search_state = Default::default(),
+        Surface::BookmarkList => {
+            state.bookmark_list_selected = 0;
+            state.bookmark_list_count = 0;
+            state.bookmark_owning_tab = None;
+        }
+        Surface::WaveOverlay => {
+            state.wave_overlay_selected = 0;
+            state.wave_diverge_open = false;
+            state.wave_drill_body = None;
+            state.wave_chat_keys = false;
+        }
         Surface::NotificationLog => {
             state.notification_log = Some(NotificationLogState {
                 selected_id: state
@@ -343,6 +356,8 @@ pub fn back(state: &mut TuiState) -> Option<Surface> {
 /// Global frames and their identities survive; an old Search snapshot is never
 /// restored into the replacement conversation.
 pub fn reconcile_stage(state: &mut TuiState) {
+    // Undo remains available after an ordinary close, but never in another Stage.
+    state.bookmark_undo_buffer = None;
     loop {
         let stage = state
             .modal_stack
@@ -354,9 +369,9 @@ pub fn reconcile_stage(state: &mut TuiState) {
     }
 }
 
-/// A replacement effect's normal base target; retained global callers take priority.
+/// A replacement effect's base target yields to retained frames or a promoted approval.
 pub fn settle_stage_base(state: &mut TuiState, focus: crate::domain::models::FocusState) {
-    if state.modal_stack.is_empty() {
+    if state.modal_stack.is_empty() && state.pending_permission.is_none() {
         state.focus = focus;
         transition(state);
     }
@@ -443,6 +458,19 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::Search => {
             state.search_state = Default::default();
+            None
+        }
+        Surface::BookmarkList => {
+            state.bookmark_list_selected = 0;
+            state.bookmark_list_count = 0;
+            state.bookmark_owning_tab = None;
+            None
+        }
+        Surface::WaveOverlay => {
+            state.wave_overlay_selected = 0;
+            state.wave_diverge_open = false;
+            state.wave_drill_body = None;
+            state.wave_chat_keys = false;
             None
         }
         Surface::NotificationLog => {

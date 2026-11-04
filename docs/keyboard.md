@@ -214,6 +214,8 @@ Also inherits: Append-only text field.
 | `Enter` | Jump to the selected bookmark | local | portable |  |
 | `Esc` | Close the bookmark list | local | portable |  |
 | `Ctrl+C` | Close the bookmark list (back one frame) | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing bookmarks | local | portable |  |
 
 ## Permission
@@ -382,6 +384,8 @@ Also inherits: Sidebar.
 | `r` | Re-run the selected spoke | local | portable |  |
 | `d` | Open the divergence view | local | portable |  |
 | `s` | Close the divergence view | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing waves | local | portable |  |
 
 ## Help

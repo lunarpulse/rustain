@@ -650,7 +650,7 @@ fn bookmarks(width: u16, text: &str) -> Painted {
 
 fn bookmark_body(width: u16, text: &str) -> String {
     let painted = bookmarks(width, text);
-    let row = row_text(&painted.buffer, 2);
+    let row = row_text(&painted.buffer, 1);
     let body = row
         .strip_prefix("│▸ msg 0: ")
         .and_then(|rest| rest.strip_suffix('│'))

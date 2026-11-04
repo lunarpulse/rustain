@@ -661,6 +661,176 @@ fn reset_clears_tab_owned_view_before_search_snapshot(command: &str) {
     }
 }
 
+#[tokio::test]
+async fn new_bookmarks_use_the_live_stage_without_saving_the_tab_mirror() {
+    reset_bookmarks_use_the_live_stage("/new").await;
+}
+
+#[tokio::test]
+async fn clear_bookmarks_use_the_live_stage_without_saving_the_tab_mirror() {
+    reset_bookmarks_use_the_live_stage("/clear").await;
+}
+
+async fn reset_bookmarks_use_the_live_stage(command: &str) {
+    use rustain::adapters::filesystem::FileSystemStorage;
+    use rustain::adapters::tui::handlers::{bookmark, wave_overlay};
+    use rustain::adapters::tui::widgets::chat_pane::find_scroll_offset_for_message;
+    use rustain::domain::models::Conversation;
+    use rustain::domain::ports::StoragePort;
+    use rustain::infrastructure::runtime::event_loop::reset_stage_conversation;
+    let tmp = tempfile::tempdir().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let (mut h, mut tabs) = super::stage_support::stage(80, 24);
+    tabs.active_tab_mut().session_meta.bookmarks.clear();
+    let mirror_id = tabs.active_tab().conversation.id.clone();
+    let mut conversation = tabs.active_tab().conversation.clone();
+    let replacement = Conversation {
+        id: command.into(),
+        ..conversation.clone()
+    };
+    reset_stage_conversation(&mut tabs, &mut conversation, &mut h.state, replacement);
+    assert_ne!(mirror_id, conversation.id, "distinct current Stage control");
+    h.render_current_stage(&tabs, &conversation);
+    for message in [2, 0] {
+        let offset = find_scroll_offset_for_message(
+            message,
+            &h.state.message_boundaries,
+            h.state.total_content_height,
+            h.state.viewport_height as usize,
+        );
+        if message == 0 {
+            assert!(offset > 0, "nontrivial jump control");
+        }
+        tabs.active_tab_mut().view_state.scroll_offset = offset;
+        tabs.active_tab_mut().view_state.mode = if offset == 0 {
+            AnchorMode::Following
+        } else {
+            AnchorMode::Reading
+        };
+        h.state.set_scroll_offset(offset);
+        h.state.set_auto_scroll(offset == 0);
+        bookmark::handle_apply_bookmark_toggle(&mut tabs, &mut h.state, &conversation, &storage)
+            .await;
+    }
+    assert_eq!(tabs.active_tab().session_meta.bookmarks, [0, 2]);
+    tabs.active_tab_mut().view_state.scroll_offset = 0;
+    tabs.active_tab_mut().view_state.mode = AnchorMode::Following;
+    h.state.set_scroll_offset(0);
+    h.state.set_auto_scroll(true);
+    h.render_current_stage(&tabs, &conversation);
+    let following = super::stage_support::chat_pixels(&h);
+    assert_eq!(
+        press(&mut h.state, Key::Char('\'')),
+        InputAction::OpenBookmarkList
+    );
+    bookmark::handle_apply_open_bookmark_list(&tabs, &mut h.state, &conversation);
+    h.render_current_stage(&tabs, &conversation);
+    assert_eq!(
+        h.state
+            .modal_stack
+            .top()
+            .unwrap()
+            .conversation_id
+            .as_deref(),
+        Some(command)
+    );
+    assert!(h.screen_text().contains("Bookmarks"));
+    assert_eq!(press(&mut h.state, Key::Enter), InputAction::JumpToBookmark);
+    bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
+    assert!(tabs.active_tab().view_state.scroll_offset > 0);
+    assert_eq!(tabs.active_tab().view_state.mode, AnchorMode::Reading);
+    h.render_current_stage(&tabs, &conversation);
+    assert_ne!(super::stage_support::chat_pixels(&h), following);
+    assert_eq!(
+        press(&mut h.state, Key::Char('\'')),
+        InputAction::OpenBookmarkList
+    );
+    bookmark::handle_apply_open_bookmark_list(&tabs, &mut h.state, &conversation);
+    assert_eq!(
+        press(&mut h.state, Key::Char('d')),
+        InputAction::DeleteBookmark
+    );
+    bookmark::handle_apply_delete_bookmark(&mut tabs, &mut h.state, &conversation, &storage).await;
+    assert_eq!(tabs.active_tab().session_meta.bookmarks, [2]);
+    assert!(presentation::is_open(&h.state, Surface::BookmarkList));
+    assert_eq!(
+        press(&mut h.state, Key::Char('u')),
+        InputAction::UndoBookmarkDelete
+    );
+    bookmark::handle_apply_undo_bookmark_delete(&mut tabs, &mut h.state, &conversation, &storage)
+        .await;
+    assert_eq!(tabs.active_tab().session_meta.bookmarks, [0, 2]);
+    assert!(h.state.bookmark_undo_buffer.is_none());
+    assert_eq!(
+        storage
+            .load_session_meta(command)
+            .await
+            .unwrap()
+            .unwrap()
+            .bookmarks,
+        [0, 2]
+    );
+    assert!(
+        storage
+            .load_session_meta(&mirror_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // The current proxy and owning tab are independent of the stale mirror.
+    // A genuinely different proxy must still fail closed for all three effects.
+    bookmark::handle_apply_delete_bookmark(&mut tabs, &mut h.state, &conversation, &storage).await;
+    let other = Conversation {
+        id: "wrong-live-stage".into(),
+        ..conversation.clone()
+    };
+    let view = super::stage_support::view(&tabs);
+    bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &other);
+    assert_eq!(super::stage_support::view(&tabs), view);
+    assert!(!presentation::is_open(&h.state, Surface::BookmarkList));
+    bookmark::handle_apply_open_bookmark_list(&tabs, &mut h.state, &conversation);
+    bookmark::handle_apply_delete_bookmark(&mut tabs, &mut h.state, &other, &storage).await;
+    bookmark::handle_apply_undo_bookmark_delete(&mut tabs, &mut h.state, &other, &storage).await;
+    assert_eq!(tabs.active_tab().session_meta.bookmarks, [2]);
+    assert!(
+        storage
+            .load_session_meta(&other.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    bookmark::handle_apply_undo_bookmark_delete(&mut tabs, &mut h.state, &conversation, &storage)
+        .await;
+    assert_eq!(tabs.active_tab().session_meta.bookmarks, [0, 2]);
+
+    // Wave binds the same live proxy; Search already has this reset regression.
+    h.state.wave_run = Some(std::sync::Arc::new(super::keymap_support::StubWave(2)));
+    let action = press(&mut h.state, Key::Char('r'));
+    assert_eq!(action, InputAction::OpenWaveOverlay);
+    assert!(wave_overlay::apply(&mut h.state, &conversation.id, &action));
+    h.render_current_stage(&tabs, &conversation);
+    assert_eq!(
+        h.state
+            .modal_stack
+            .top()
+            .unwrap()
+            .conversation_id
+            .as_deref(),
+        Some(command)
+    );
+    wave_overlay::apply(
+        &mut h.state,
+        &conversation.id,
+        &InputAction::CloseWaveOverlay,
+    );
+    assert_eq!(
+        tabs.active_tab().conversation.id,
+        mirror_id,
+        "no hidden mirror save"
+    );
+}
+
 #[test]
 fn readonly_tab_return_loads_destination_before_search() {
     use rustain::domain::models::FocusState;
@@ -838,4 +1008,314 @@ fn readonly_first_tab_return_does_not_wrap() {
     assert_eq!(conversation.id, id);
     assert_eq!(format!("{:?}", tabs.active_tab().view_state), expected);
     assert_eq!(state.scroll_offset(), 41);
+}
+
+// These are the existing production post-storage/load assignments, not command
+// parsing or storage-success witnesses. CrossSearch remains a legacy producer.
+fn replace_bookmark_wave_stage(
+    reason: &str,
+    tabs: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &mut rustain::domain::models::Conversation,
+) {
+    use rustain::infrastructure::runtime::event_loop::{
+        position_cross_search_result, replace_stage_conversation, reset_stage_conversation,
+    };
+    let mut replacement = conversation.clone();
+    if reason != "switch" && reason != "rewind" {
+        replacement.id = format!("replacement-{reason}");
+    }
+    match reason {
+        "/new" | "/clear" => {
+            replacement.messages.clear();
+            reset_stage_conversation(tabs, conversation, state, replacement);
+            return;
+        }
+        "CrossSearch direct" => {
+            // Like the legacy direct branch, this replaces the live proxy,
+            // not the switch-time conversation mirror in the owning manager.
+            replace_stage_conversation(conversation, state, replacement);
+            position_cross_search_result(tabs, state, 1);
+            return;
+        }
+        "switch" => {
+            tabs.create_tab_with_conversation(replacement);
+            tabs.switch_to_index(1);
+            tabs.switch_to_index(2);
+        }
+        "fork" => {
+            tabs.create_tab_with_conversation(replacement);
+        }
+        "rewind" => tabs.active_tab_mut().conversation = replacement,
+        _ => unreachable!("replacement reason inventory"),
+    }
+    tabs.active_tab_mut().view_state.mode = AnchorMode::Reading;
+    tabs.active_tab_mut().view_state.scroll_offset = 7;
+    load_active_tab(
+        tabs,
+        conversation,
+        &mut StreamingState::default(),
+        &mut SessionManager::new(SessionState::Empty),
+        state,
+        &mut TurnQueue::default(),
+    );
+}
+
+#[test]
+fn bookmark_wave_replacements_discard_live_covered_and_continued_stage_payloads() {
+    use super::stage_support::{stage, view};
+    use rustain::adapters::tui::{
+        handlers::{bookmark, wave_overlay},
+        presentation::reducer,
+        quit_confirm::{self, QuitFacts, QuitHost},
+        state::WaveViewState,
+    };
+    use rustain::domain::{models::AgentId, ports::wave_handle::WaveHandle};
+    use std::{sync::Arc, time::Instant};
+
+    for reason in [
+        "switch",
+        "/new",
+        "/clear",
+        "fork",
+        "rewind",
+        "CrossSearch direct",
+    ] {
+        for surface in [Surface::BookmarkList, Surface::WaveOverlay] {
+            for placement in ["live", "covered", "suspended", "continued", "closed"] {
+                if placement == "closed" && surface != Surface::BookmarkList {
+                    continue;
+                }
+                let (mut h, mut tabs) = stage(60, 16);
+                let state = &mut h.state;
+                let mut conversation = tabs.active_tab().conversation.clone();
+                let original = paint_active_stage(&tabs, state, &conversation, 60);
+                let run: Arc<dyn WaveHandle> = Arc::new(super::keymap_support::StubWave(3));
+                state.wave_run = Some(run.clone());
+                state.wave_state = Some(WaveViewState::started(AgentId::root(), 3));
+                let wave_state = format!("{:?}", state.wave_state);
+                state.wave_cancel = Some(CancellationToken::new());
+                let child = state.wave_cancel.as_ref().unwrap().child_token();
+                state.active_wave_id = Some(7);
+                state.rerunning_slot = Some(1);
+                if matches!(placement, "suspended" | "continued") {
+                    // Reducer-only depth setup, as in the Search continuation
+                    // witness: these covered openers are NOT offered by keys.
+                    for global in [Surface::Help, Surface::NotificationLog, Surface::UsagePanel] {
+                        reducer::open(state, global);
+                    }
+                } else {
+                    let action = press(
+                        state,
+                        Key::Char(if surface == Surface::BookmarkList {
+                            '\''
+                        } else {
+                            'r'
+                        }),
+                    );
+                    assert_eq!(
+                        action,
+                        if surface == Surface::BookmarkList {
+                            InputAction::OpenBookmarkList
+                        } else {
+                            InputAction::OpenWaveOverlay
+                        }
+                    );
+                }
+                if surface == Surface::BookmarkList {
+                    bookmark::handle_apply_open_bookmark_list(&tabs, state, &conversation);
+                    press(state, Key::Char('j'));
+                    assert_eq!(
+                        (state.bookmark_list_selected, state.bookmark_list_count),
+                        (1, 2)
+                    );
+                    // Post-success Delete producer payload, not a save/Delete
+                    // reachability claim; serial Delete has separate witnesses.
+                    state.bookmark_undo_buffer =
+                        Some(rustain::adapters::tui::state::BookmarkUndo {
+                            index: 2,
+                            when: Instant::now(),
+                            owning_tab: tabs.active_tab_id(),
+                            conversation_id: conversation.id.clone(),
+                        });
+                } else {
+                    assert!(wave_overlay::apply(
+                        state,
+                        &conversation.id,
+                        &InputAction::OpenWaveOverlay
+                    ));
+                    wave_overlay::apply(state, &conversation.id, &InputAction::CloseWaveOverlay);
+                    assert!(!presentation::is_open(state, surface));
+                    assert!(Arc::ptr_eq(state.wave_run.as_ref().unwrap(), &run));
+                    assert_eq!(format!("{:?}", state.wave_state), wave_state);
+                    assert_eq!(
+                        (state.active_wave_id, state.rerunning_slot),
+                        (Some(7), Some(1))
+                    );
+                    assert!(!child.is_cancelled());
+                    // Handler opener seam when globals cover Chat, not a
+                    // claim that r is offered through those global owners.
+                    wave_overlay::apply(state, &conversation.id, &InputAction::OpenWaveOverlay);
+                    press(state, Key::Char('j'));
+                    assert_eq!(state.wave_overlay_selected, 1);
+                    // StubWave is retained data only and cannot drill. Seed the
+                    // completed drill producer payload; d still takes App/effect.
+                    state.wave_drill_body = Some((1, "retained drill payload".into()));
+                    let action = press(state, Key::Char('d'));
+                    assert_eq!(action, InputAction::OpenDivergeView);
+                    wave_overlay::apply(state, &conversation.id, &action);
+                    assert!(state.wave_diverge_open && state.wave_chat_keys);
+                    assert!(state.wave_drill_body.is_some());
+                }
+                assert_eq!(
+                    state.modal_stack.top().unwrap().conversation_id.as_deref(),
+                    Some(conversation.id.as_str())
+                );
+                let mut continued_quit = None;
+                match placement {
+                    "covered" => {
+                        for key in ['?', 'n'] {
+                            press(state, Key::Ctrl('x'));
+                            press(state, Key::Char(key));
+                        }
+                        assert_eq!(state.modal_stack.len(), 3);
+                    }
+                    "suspended" | "continued" => {
+                        assert_eq!(state.modal_stack.len(), 4);
+                        assert_eq!(press(state, Key::Ctrl('q')), InputAction::Quit);
+                        quit_confirm::request(
+                            state,
+                            QuitFacts {
+                                streams: 1,
+                                ..QuitFacts::idle(QuitHost::Local)
+                            },
+                        );
+                        if placement == "continued" {
+                            continued_quit = state.modal_stack.top().cloned();
+                            // Reducer-only nested continuation setup: Login
+                            // displaces Quit, which still owns the Stage frame.
+                            reducer::open(state, Surface::Login);
+                        }
+                        assert!(
+                            !state
+                                .modal_stack
+                                .iter()
+                                .any(|frame| frame.surface == surface)
+                        );
+                        assert!(
+                            presentation::is_open(state, surface),
+                            "real suspended payload"
+                        );
+                    }
+                    "closed" => {
+                        bookmark::close(state);
+                        assert!(!presentation::is_open(state, surface));
+                        assert!(
+                            state.bookmark_undo_buffer.is_some(),
+                            "ordinary close retains undo"
+                        );
+                    }
+                    _ => {}
+                }
+                let globals: Vec<_> = state
+                    .modal_stack
+                    .iter()
+                    .filter(|frame| frame.surface != surface)
+                    .cloned()
+                    .collect();
+                let focus = state.focus.clone();
+                // Observable destination authority differs from the old Stage;
+                // a stale Back/StageRestore must not put offset 3 back here.
+                tabs.active_tab_mut().view_state.scroll_offset = 7;
+                let expected_offset = match reason {
+                    "/new" | "/clear" => 0,
+                    "CrossSearch direct" => state
+                        .total_content_height
+                        .saturating_sub(state.viewport_height as usize)
+                        .saturating_sub(state.message_boundaries[1]),
+                    _ => 7,
+                };
+                let old_tab = tabs.active_tab_id();
+                let old_id = conversation.id.clone();
+                replace_bookmark_wave_stage(reason, &mut tabs, state, &mut conversation);
+                let destination = view(&tabs);
+                assert_eq!(
+                    tabs.active_tab_id() != old_tab,
+                    matches!(reason, "switch" | "fork")
+                );
+                assert_eq!(
+                    conversation.id == old_id,
+                    matches!(reason, "switch" | "rewind")
+                );
+                assert_eq!(
+                    tabs.active_tab().view_state.scroll_offset,
+                    expected_offset,
+                    "{reason}"
+                );
+                assert!(
+                    !presentation::is_open(state, surface),
+                    "{reason}/{surface:?}/{placement}"
+                );
+                assert_eq!(
+                    state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                    globals
+                );
+                assert_eq!(state.focus, focus);
+                assert_eq!(
+                    (state.bookmark_list_selected, state.bookmark_list_count),
+                    (0, 0)
+                );
+                assert!(
+                    state.bookmark_undo_buffer.is_none(),
+                    "including an already closed list"
+                );
+                assert_eq!(state.wave_overlay_selected, 0);
+                assert!(!state.wave_diverge_open && !state.wave_chat_keys);
+                assert!(state.wave_drill_body.is_none());
+                assert!(Arc::ptr_eq(state.wave_run.as_ref().unwrap(), &run));
+                assert_eq!(format!("{:?}", state.wave_state), wave_state);
+                assert_eq!(
+                    (state.active_wave_id, state.rerunning_slot),
+                    (Some(7), Some(1))
+                );
+                assert!(!child.is_cancelled());
+                let painted = paint_active_stage(&tabs, state, &conversation, 60);
+                assert_ne!(
+                    painted, original,
+                    "independent real-manager destination view control"
+                );
+                while let Some(top) = state.modal_stack.top().map(|frame| frame.surface) {
+                    if top == Surface::QuitConfirm {
+                        press(state, Key::Char('n'));
+                    } else {
+                        reducer::back(state);
+                    }
+                    if top == Surface::Login {
+                        assert_eq!(
+                            state.modal_stack.top(),
+                            continued_quit.as_ref(),
+                            "retained hidden Quit identity"
+                        );
+                    }
+                    assert!(
+                        !presentation::is_open(state, surface),
+                        "Back cannot resurrect discarded payload"
+                    );
+                    assert!(presentation::consistent(state));
+                }
+                bookmark::close(state);
+                wave_overlay::apply(state, &conversation.id, &InputAction::CloseWaveOverlay);
+                assert_eq!(
+                    view(&tabs),
+                    destination,
+                    "late closes never restore an old view"
+                );
+                assert_eq!(paint_active_stage(&tabs, state, &conversation, 60), painted);
+                // Positive identity control: the retained root is still the
+                // original token, not merely a fresh uncancelled replacement.
+                state.wave_cancel.as_ref().unwrap().cancel();
+                assert!(child.is_cancelled());
+            }
+        }
+    }
 }

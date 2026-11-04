@@ -179,9 +179,9 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("ReverseSearch", FocusState::Input),
         ("Search", FocusState::Input),
         ("CrossSearch", overlay(OverlayType::CrossSearch)),
-        ("BookmarkList", overlay(OverlayType::BookmarkList)),
+        ("BookmarkList", FocusState::Chat),
         ("UsagePanel", FocusState::Input),
-        ("WaveOverlay", overlay(OverlayType::WaveOverlay)),
+        ("WaveOverlay", FocusState::Chat),
         (
             "Confirmation",
             overlay(OverlayType::Confirmation(ConfirmationType::Fork)),
@@ -207,6 +207,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
             "UsagePanel" => Some(Surface::UsagePanel),
             "Login" => Some(Surface::Login),
             "Search" => Some(Surface::Search),
+            "BookmarkList" => Some(Surface::BookmarkList),
+            "WaveOverlay" => Some(Surface::WaveOverlay),
             _ => None,
         } {
             reducer::open(&mut state, surface);
@@ -222,7 +224,7 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     }
     assert_eq!(
         (opened, blocked),
-        (10, 4),
+        (12, 2),
         "Input, Chat, ReverseSearch popup and migrated frames open; remaining legacy overlays block"
     );
 }

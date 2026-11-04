@@ -1,20 +1,13 @@
-//! Bookmark list panel widget (Story 4-4 AC10).
+//! Frame-owned bookmark list body (Story 4-4 AC10).
 //!
-//! Renders a bottom-aligned list panel inside the chat pane region showing
-//! the active conversation's bookmarks. NOT a centered modal — the panel
-//! slides up from the bottom (like the status bar) so the conversation
-//! stays visible above it, letting the user confirm "yes, that's the
-//! message I want" before jumping.
-//!
-//! Wired to layout via `AppLayout::reserve_bookmark_panel()` (Task 2.3).
-//!
-//! Pure render — no state mutation. Input dispatch lives in `app.rs` and
-//! the handler functions in `event_loop.rs`.
-// Covers: Story 4-4 AC10 (UX-DR91)
+//! The shared presentation composer supplies the region and owning-tab facts.
+//! Title count, selected durable zero-based row and primary actions fit together
+//! even in a five-row region. Rendering never owns frame presence.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use super::modal::{ModalPart, fit_modal};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::cross_search::shorten_to_cells;
@@ -31,21 +24,15 @@ pub fn render(
     selected: usize,
     theme: &Theme,
 ) {
-    if bookmarks.is_empty() || area.height < 3 {
+    if bookmarks.is_empty() || area.height < 5 {
         return;
     }
 
     frame.render_widget(Clear, area);
 
-    // Compute how many entries fit: reserve 1 row for header, 1 for footer,
-    // and account for the top/bottom border.
-    let border_overhead: usize = 2; // top + bottom border
-    let header_rows: usize = 1;
-    let footer_rows: usize = 1;
-    let visible_rows = (area.height as usize)
-        .saturating_sub(border_overhead)
-        .saturating_sub(header_rows)
-        .saturating_sub(footer_rows);
+    // Put the count in the border title instead of spending a body row on it.
+    // Keep one primary-action footer row before allocating the selected window.
+    let visible_rows = (area.height as usize).saturating_sub(3);
     let visible_entries = visible_rows.min(bookmarks.len());
     let selected_clamped = selected.min(bookmarks.len().saturating_sub(1));
 
@@ -58,13 +45,7 @@ pub fn render(
         0
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("Bookmarks ({})", bookmarks.len()),
-        Style::default()
-            .fg(theme.colors.bookmark_accent)
-            .add_modifier(Modifier::BOLD),
-    )));
+    let mut lines = Vec::with_capacity(visible_entries);
 
     // AC10: shortened to the display cells left in the row after the borders,
     // the `▸ ` prefix and the `msg K: ` label (derived per row below). The
@@ -72,15 +53,12 @@ pub fn render(
     let inner_width = (area.width as usize).saturating_sub(2);
     for i in 0..visible_entries {
         let entry_idx = scroll_offset + i;
-        if entry_idx >= bookmarks.len() {
-            break;
-        }
         let msg_idx = bookmarks[entry_idx];
         let first_line = conversation
             .live_message_index(msg_idx)
             .and_then(|index| conversation.messages.get(index))
-            .map(|m| m.content.lines().next().unwrap_or("").to_string())
-            .unwrap_or_else(|| "(missing message)".to_string());
+            .map(|m| m.content.lines().next().unwrap_or(""))
+            .unwrap_or("(missing message)");
         let prefix = if entry_idx == selected_clamped {
             "▸ "
         } else {
@@ -91,7 +69,7 @@ pub fn render(
         let label = format!("msg {}: ", msg_idx);
         let prefix_cells = geom::cells(prefix) + geom::cells(&label);
         let content_budget = inner_width.saturating_sub(prefix_cells);
-        let shortened = shorten_to_cells(&first_line, content_budget);
+        let shortened = shorten_to_cells(first_line, content_budget);
         let row_style = if entry_idx == selected_clamped {
             Style::default()
                 .fg(theme.colors.accent)
@@ -104,12 +82,12 @@ pub fn render(
         // original AC10 spec. A future UX discussion about 1-based display
         // for end users is tracked as DF-126 (party-mode third-audit).
         lines.push(Line::from(vec![
-            Span::styled(prefix.to_string(), row_style),
+            Span::styled(prefix, row_style),
             Span::styled(format!("{label}{shortened}"), row_style),
         ]));
     }
 
-    lines.push(Line::from(Span::styled(
+    let footer = Line::from(Span::styled(
         {
             use crate::adapters::tui::keymap::table_nav::BookmarkCmd;
             use crate::adapters::tui::keymap::{render::key_text, render::key_text_at};
@@ -123,13 +101,27 @@ pub fn render(
             )
         },
         Style::default().fg(theme.colors.fg_muted),
-    )));
+    ));
+    let lines = fit_modal(
+        vec![
+            ModalPart::Rows {
+                lines,
+                selected: (
+                    selected_clamped - scroll_offset,
+                    selected_clamped - scroll_offset + 1,
+                ),
+            },
+            ModalPart::Footer(vec![footer]),
+        ],
+        area.height.saturating_sub(2) as usize,
+        inner_width,
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.colors.bookmark_accent))
         .title(Span::styled(
-            " Bookmarks ",
+            format!(" Bookmarks ({}) ", bookmarks.len()),
             Style::default()
                 .fg(theme.colors.bookmark_accent)
                 .add_modifier(Modifier::BOLD),
@@ -213,6 +205,29 @@ mod tests {
     }
 
     #[test]
+    fn story21_4_five_row_region_keeps_title_selected_window_and_all_primary_actions() {
+        let c = conv((0..20).map(|_| msg("durable body")).collect());
+        let bookmarks: Vec<_> = (0..20).collect();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 5)).unwrap();
+        term.draw(|frame| {
+            render(frame, frame.area(), &c, &bookmarks, 19, &Theme::dark());
+        })
+        .unwrap();
+        let buffer = term.backend().buffer();
+        let rows: Vec<String> = (0..5)
+            .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        assert!(rows[0].contains("Bookmarks (20)"), "{rows:?}");
+        assert!(rows[1].contains("msg 18: durable body"), "{rows:?}");
+        assert!(rows[2].contains("▸ msg 19: durable body"), "{rows:?}");
+        for action in ["Jump", "Delete", "Undo", "Close"] {
+            assert!(rows[3].contains(action), "{rows:?}");
+        }
+        assert_eq!(buffer[(59, 3)].symbol(), "│");
+        assert!(rows[4].starts_with('└'));
+    }
+
+    #[test]
     fn render_selected_entry_has_marker() {
         let theme = Theme::dark();
         let c = conv(vec![msg("first"), msg("second"), msg("third")]);
@@ -229,7 +244,7 @@ mod tests {
             }
             screen.push('\n');
         }
-        // Header + both entries + footer visible.
+        // Title, both entries and primary actions are visible.
         // Third-audit Fix R1: indices are 0-based per AC10, so bookmarks
         // [0, 2] render as "msg 0" and "msg 2".
         assert!(screen.contains("Bookmarks (2)"));
@@ -241,8 +256,7 @@ mod tests {
 
     // ── Story 21.11 AC4/K4: display-width correctness ──────────────────────
 
-    /// Paint the real panel (`width` x 5: border, header, one entry, footer,
-    /// border) and return the glyph rows plus the buffer.
+    /// Paint the real five-row region and return the glyph rows plus buffer.
     fn draw(
         width: u16,
         c: &Conversation,
@@ -280,18 +294,18 @@ mod tests {
         let c = conv(messages);
         let (rows, buffer) = draw(40, &c, 10);
         assert!(
-            rows[2].starts_with(&format!("│▸ msg 10: {}...", "y".repeat(25))),
+            rows[1].starts_with(&format!("│▸ msg 10: {}...", "y".repeat(25))),
             "{:?}",
-            rows[2]
+            rows[1]
         );
-        assert_eq!(buffer.cell((39, 2)).unwrap().symbol(), "│");
+        assert_eq!(buffer.cell((39, 1)).unwrap().symbol(), "│");
         // The ASCII 29-cell text still fits whole beside the one-digit label.
         let c = conv(vec![msg(&"y".repeat(29))]);
         let (rows, _) = draw(40, &c, 0);
         assert!(
-            rows[2].starts_with(&format!("│▸ msg 0: {}│", "y".repeat(29))),
+            rows[1].starts_with(&format!("│▸ msg 0: {}│", "y".repeat(29))),
             "{:?}",
-            rows[2]
+            rows[1]
         );
     }
 }

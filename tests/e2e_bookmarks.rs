@@ -13,6 +13,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::presentation::{self, Surface};
 use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::bookmark_list;
@@ -21,7 +22,6 @@ use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::view_state::ViewState;
-use rustain::domain::models::visual::OverlayType;
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FocusState, MessageRole, StreamingState,
 };
@@ -190,7 +190,8 @@ fn test_e2e_quote_in_chat_returns_open_bookmark_list() {
 
 fn open_bookmark_list_state() -> TuiState {
     let mut s = TuiState::new(80, 24);
-    s.focus = FocusState::Overlay(OverlayType::BookmarkList);
+    s.focus = FocusState::Chat;
+    presentation::reducer::open(&mut s, Surface::BookmarkList);
     s.bookmark_list_selected = 0;
     // AC10 clamp (party-mode Fix 18): the key handler now requires
     // `bookmark_list_count` to be set before `j`/`Down` can advance past 0.
@@ -373,9 +374,7 @@ fn test_e2e_bookmark_list_j_clamps_at_upper_bound() {
     // AC10 + party-mode Fix 18: j repeated past the last entry must clamp,
     // not drift unbounded. With `bookmark_list_count = 3`, pressing j four
     // times must leave selected at 2 (the last valid index).
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::BookmarkList);
-    state.bookmark_list_selected = 0;
+    let mut state = open_bookmark_list_state();
     state.bookmark_list_count = 3;
 
     handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
@@ -391,9 +390,7 @@ fn test_e2e_bookmark_list_j_clamps_at_upper_bound() {
 #[test]
 fn test_e2e_bookmark_list_down_arrow_clamps_at_upper_bound() {
     // AC10 + party-mode Fix 18: Down arrow shares the clamp path with j.
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::BookmarkList);
-    state.bookmark_list_selected = 0;
+    let mut state = open_bookmark_list_state();
     state.bookmark_list_count = 2;
 
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Down));

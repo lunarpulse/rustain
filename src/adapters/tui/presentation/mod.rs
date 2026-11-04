@@ -32,6 +32,7 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
             SearchSubstate::Typing => Context::SearchTyping,
             SearchSubstate::Navigating => Context::SearchNavigating,
         },
+        Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
         _ => surface.context(),
     }
 }

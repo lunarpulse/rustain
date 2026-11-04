@@ -100,12 +100,19 @@ const SURFACES: &[(&str, Open, Option<InputAction>)] = &[
     ),
     (
         "BookmarkList",
-        |s| overlay(s, OverlayType::BookmarkList),
+        |s| {
+            reducer::open(s, Surface::BookmarkList);
+        },
         Some(InputAction::CloseBookmarkList),
     ),
     (
         "WaveOverlay",
-        |s| overlay(s, OverlayType::WaveOverlay),
+        |s| {
+            s.focus = FocusState::Chat;
+            s.wave_run = Some(std::sync::Arc::new(super::support::StubWave(3)));
+            let action = press(s, Key::Char('r'));
+            rustain::adapters::tui::handlers::wave_overlay::apply(s, "", &action);
+        },
         Some(InputAction::CloseWaveOverlay),
     ),
     (
@@ -160,6 +167,16 @@ fn ctrl_c_in_every_overlay_goes_back_one_frame() {
                 "{name}: closed, caller restored"
             ),
             Some(action) => assert_eq!(&ctrl_c, action, "{name}: the host closes it"),
+        }
+        if *name == "BookmarkList" {
+            assert!(!is_open(&by_ctrl_c, Surface::BookmarkList));
+        } else if *name == "WaveOverlay" {
+            assert!(
+                is_open(&by_ctrl_c, Surface::WaveOverlay),
+                "the emitted effect still owns its frame"
+            );
+            rustain::adapters::tui::handlers::wave_overlay::apply(&mut by_ctrl_c, "", &ctrl_c);
+            assert!(!is_open(&by_ctrl_c, Surface::WaveOverlay));
         }
     }
 }

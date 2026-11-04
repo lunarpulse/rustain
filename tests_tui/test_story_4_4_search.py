@@ -69,7 +69,7 @@ class TestBookmarks:
         tui.wait(0.5)
 
     def test_bookmark_list_panel_appears_on_apostrophe(self, tui: RustainTUI):
-        """Pressing ' opens the bookmark list panel; Esc closes it."""
+        """Pressing ' opens the Bookmark frame over the unchanged Stage; Esc closes it."""
         tui.send_message("Say hello for bookmark list test")
         tui.wait_for_idle()
 
@@ -82,8 +82,8 @@ class TestBookmarks:
         # Open the list
         tui.open_bookmark_list()
         tui.wait(0.5)
-        # The bookmark list panel or the toast should appear
-        # (toast if no bookmarks remain, panel otherwise; the toggle toast is
+        # The Bookmark frame or the existing empty-list toast should appear
+        # (toast if no bookmarks remain, frame otherwise; the toggle toast is
         # still alive here: ~2 s of the 4 s TTL have elapsed)
         tui.assert_screen_contains("Bookmark", "Bookmark state should be visible")
         tui.close_overlay()

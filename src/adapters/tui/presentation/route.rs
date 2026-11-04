@@ -181,12 +181,16 @@ pub fn route(
         Surface::Login => {
             RouteEffect::Action(crate::adapters::tui::handlers::login::on_key(state, event))
         }
+        Surface::WaveOverlay if host == Host::Local => RouteEffect::Action(
+            crate::adapters::tui::handlers::wave_overlay::on_key(state, key, host),
+        ),
         Surface::Help
         | Surface::CommandPalette
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
         | Surface::Search
+        | Surface::BookmarkList
             if host == Host::Local =>
         {
             RouteEffect::Action(app::dispatch_frame_key(state, context, key, host))
@@ -196,7 +200,9 @@ pub fn route(
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
-        | Surface::Search => RouteEffect::Frame(context),
+        | Surface::Search
+        | Surface::BookmarkList
+        | Surface::WaveOverlay => RouteEffect::Frame(context),
         Surface::QuitConfirm => unreachable!("Quit handled before the pending leader"),
     })
 }

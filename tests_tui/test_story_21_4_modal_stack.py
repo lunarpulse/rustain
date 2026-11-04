@@ -1,4 +1,4 @@
-"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a: debug binary, both hosts, one 80x24 viewport.
+"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a and opt-in local Bb1b-i; debug binary.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 held loopback model turn crosses a tiny budget over scrolled Help. Unknown local
@@ -7,6 +7,12 @@ Structural waits require the whole box, footer, status and cursor, not a title
 substring. Raw sent/received bytes, settled screens, dated logs and binary SHA
 stay in an env-scoped scratch run; publication is the parent's responsibility.
 RUSTAIN_MODAL_STACK_DESKCHECK=1 exercises predicates OFFLINE (no binary/spawn).
+The independent Bb1b-i node runs the local Bookmark/Wave leg in the generic lane too.
+With DESKCHECK=1, RUSTAIN_MODAL_STACK_BB1B_I_FRAMES must name the Rust export
+directory (120 bb1b-i-*.json frames); no prior-leg evidence is needed.
+Export before capture under gate-4bb1b-i; capture under smoke-evidence-4bb1b-i.
+The generic lane is not a dedicated attempt. Parent permits one dedicated
+attempt, plus one correction only for a byte-identically quarantined design failure.
 """
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -911,6 +917,223 @@ def _bb1a_leg(tui):
     tui.capture("35-bb1a-final-draft", screen)
 
 
+def _bb1b_frame(screen, hidden, draft, title):
+    """The same Stage geometry at all sizes, including the full composer."""
+    shell = _bb1a_shell(screen, draft)
+    if not shell or not hidden:
+        return None
+    rows, region = shell
+    width = len(rows[0])
+    w, h = ((width, region) if width < 100 else
+            (width*9//10, min(region, max(5, region*85//100))))
+    left, top = (width-w)//2, (region-h)//2
+    box = tuple(row[left:left+w] for row in rows[top:top+h])
+    prefix = "┌ "+title+" "
+    if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
+            or box[-1] != "└"+"─"*(w-2)+"┘"
+            or any(not (r.startswith("│") and r.endswith("│")) for r in box[1:-1])):
+        return None
+    return box
+
+
+def _bb1b_book(screen, hidden, draft, count, index, payload):
+    box = _bb1b_frame(screen, hidden, draft, f"Bookmarks ({count})")
+    if not box:
+        return None
+    selected = [r[1:-1].strip() for r in box[1:-1] if "▸ " in r]
+    footer = next((r for r in reversed(box[1:-1]) if r[1:-1].strip()), "")
+    # Source tails may ellipsize; the selected durable index and lede may not.
+    return box if (len(selected) == 1 and selected[0].startswith(f"▸ msg {index}: {payload}")
+                   and all(t in footer for t in ("Jump", "Delete", "Undo", "Close"))) else None
+
+
+def _bb1b_wave(screen, hidden, draft, kind, slot=0, total=2, payload=None, reversed_rows=()):
+    box = _bb1b_frame(screen, hidden, draft, "Wave")
+    if not box:
+        return None
+    body = "\n".join(box[1:-1])
+    footer = next((r for r in reversed(box[1:-1]) if r[1:-1].strip()), "")
+    list_actions = ("Enter drill", "r rerun", "d diverge", "Esc/Ctrl+C close")
+    if kind == "list":
+        selected = [screen.split("\n")[y] for y in reversed_rows]
+        return box if (box[1][1:-1].strip() == f"▾ {slot+1 if total else 0} of {total}"
+                       and (not total or (payload and sum(payload in r and "↵" in r for r in selected) == 1))
+                       and all(t in footer for t in list_actions)) else None
+    if kind == "drill":
+        return box if (box[1][1:-1].strip() == f"Drill: spoke {slot}" and payload in body
+                       and (all(t in footer for t in list_actions)
+                            or all(t in footer for t in ("Enter/r overlay", "d diverge", "Esc dismiss", "Ctrl+C close")))) else None
+    if kind == "diverge":
+        return box if (box[1][1:-1].strip() == f"{total} spokes disagree"
+                       and payload in body and all(t in footer for t in ("s back", "Esc back", "Ctrl+C back"))) else None
+    raise AssertionError(kind)
+
+
+def _bb1b_base(screen, hidden, draft):
+    stage = _bb1a_base(screen, draft)
+    # This fixture's plain Stage rows have no sheet corners or right-hand rail.
+    # Reject partial sheet erasure, not merely an absent title.
+    if not hidden or not stage or any(
+            row.lstrip().startswith(("┌", "└")) or row.endswith("│") for row in stage):
+        return None
+    return stage
+
+
+def _bb1b_settled_base(screen, hidden, draft):
+    stage = _bb1b_base(screen, hidden, draft)
+    # Toast expiry is a legitimate paint change, not a change to Tab.view_state.
+    return stage if stage and not any(
+        text in screen for text in ("Bookmark added", "Mouse scroll enabled.")) else None
+
+
+def _deskcheck_bb1b_i_frames(directory):
+    stages = {"before", "bookmark-open", "bookmark-selected", "bookmark-back", "bookmark-jump",
+              "bookmark-counted", "bookmark-empty", "wave-open", "wave-selected", "wave-drill",
+              "wave-diverge", "wave-drill-return", "wave-closed", "wave-direct-diverge",
+              "wave-compact", "wave-reopen", "wave-list-diverge", "wave-list-compact", "wave-empty", "wave-counted"}
+    records = [json.loads(p.read_text()) for p in Path(directory).glob("bb1b-i-*.json")]
+    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
+    assert len(records) == len(frames) == 6*len(stages), frames.keys()
+    for width, height in ((60, 16), (80, 24), (130, 30)):
+        for full in (False, True):
+            def record(stage):
+                r = frames[width, height, full, stage]
+                assert _bb1a_shell(r["screen"], r["draft"]), r
+                assert len(r["screen"].split("\n")) == height and len(r["screen"].split("\n")[0]) == width
+                return r
+            before = record("before")
+            checks = [
+                ("bookmark-open", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 2, 0, "stage-0-row-00")),
+                ("bookmark-selected", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 2, 2, "stage-2-row-00")),
+                ("bookmark-counted", lambda s, r: _bb1b_book(s, r["cursor_hidden"], r["draft"], 3, 2, "stage-2-row-00")),
+            ]
+            for stage, kind, slot, total in [
+                ("wave-open", "list", 0, 2), ("wave-selected", "list", 1, 2),
+                ("wave-reopen", "list", 0, 2), ("wave-empty", "list", 0, 0), ("wave-counted", "list", 23, 24),
+                ("wave-drill", "drill", 1, 2), ("wave-drill-return", "drill", 1, 2),
+                ("wave-diverge", "diverge", 1, 2), ("wave-direct-diverge", "diverge", 0, 2),
+                ("wave-list-diverge", "diverge", 0, 2),
+            ]:
+                payload = NOTICES[slot % 2]
+                checks.append((stage, lambda s, r, k=kind, i=slot, n=total, p=payload:
+                               _bb1b_wave(s, r["cursor_hidden"], r["draft"], k, i, n, p, r["reversed"])))
+            for stage, predicate in checks:
+                r = record(stage); box = predicate(r["screen"], r)
+                assert box, (stage, r)
+                assert not predicate(before["screen"], r), "independent absent-owner control"
+                rows = r["screen"].split("\n")
+                top = next(y for y, row in enumerate(rows) if box[0] in row)
+                status = harness.composer_top(rows)-1
+                for y in (top, top+1, top+len(box)-2, top+len(box)-1, status, height-1):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn), r), (stage, y)
+                footer = next(r[1:-1] for r in reversed(box[1:-1]) if r[1:-1].strip())
+                assert not predicate(r["screen"].replace(footer, " "*len(footer)), r), "missing action rail"
+                for action in ("Jump", "Delete", "Undo", "Close", "Enter drill", "r rerun",
+                               "d diverge", "Esc/Ctrl+C close", "Enter/r overlay", "Esc dismiss",
+                               "Ctrl+C close", "s back", "Esc back", "Ctrl+C back"):
+                    if action in footer:
+                        assert not predicate(r["screen"].replace(action, " "*len(action)), r), (stage, action)
+                assert not predicate(r["screen"], {**r, "cursor_hidden": False}), stage
+                if stage.startswith("bookmark"):
+                    assert not predicate(r["screen"].replace("▸ msg ", "  msg "), r)
+                    assert not predicate(r["screen"].replace("▸ msg ", "▸ bad "), r), "wrong durable selection"
+                elif stage not in ("wave-empty",):
+                    assert not predicate(r["screen"].replace(NOTICES[0], "x"*len(NOTICES[0])).replace(
+                        NOTICES[1], "x"*len(NOTICES[1])), r), "incorrect selected/payload control"
+            for stage in ("before", "bookmark-back", "bookmark-jump", "bookmark-empty",
+                          "wave-closed", "wave-compact", "wave-list-compact"):
+                r = record(stage)
+                assert _bb1b_base(r["screen"], r["cursor_hidden"], r["draft"]), r
+                assert _bb1b_settled_base(r["screen"], r["cursor_hidden"], r["draft"]), r
+                rows = r["screen"].split("\n")
+                for border in ("┌"+"─"*(width-2)+"┐", "└"+"─"*(width-2)+"┘"):
+                    torn = rows.copy(); torn[0] = border
+                    assert not _bb1b_base("\n".join(torn), True, r["draft"]), "leftover sheet border"
+                torn = rows.copy(); torn[0] = torn[0][:-1]+"│"
+                assert not _bb1b_base("\n".join(torn), True, r["draft"]), "leftover sheet rail"
+                for notice in ("Success Bookmark added (msg 1)", "Info Mouse scroll enabled."):
+                    transient = rows.copy(); transient[harness.composer_top(rows)-2] = notice.ljust(width)
+                    screen = "\n".join(transient)
+                    assert _bb1b_base(screen, True, r["draft"]), "complete but transient control"
+                    assert not _bb1b_settled_base(screen, True, r["draft"]), "toast cannot define the restore baseline"
+            assert _bb1a_base(record("bookmark-back")["screen"], before["draft"]) == _bb1a_base(before["screen"], before["draft"])
+            assert _bb1a_base(record("bookmark-jump")["screen"], before["draft"]) != _bb1a_base(before["screen"], before["draft"])
+            selected = record("wave-selected")
+            assert not _bb1b_wave(selected["screen"], True, selected["draft"], "list", 0, 2,
+                                  NOTICES[0], selected["reversed"]), "wrong actual selection"
+    return len(frames)
+
+
+def _bb1b_i_leg(tui):
+    """Local-only front doors; attached Bookmark/Wave are intentionally n/a."""
+    def reverse_rows():
+        return [y for y, row in enumerate(tui.screen.display)
+                if any(tui.screen.buffer[y][x].reverse for x in range(len(row)))]
+    def book(count, index, payload):
+        return lambda s: _bb1b_book(s, tui.screen.cursor.hidden, DRAFT, count, index, payload)
+    def wave(kind, slot=0, payload=NOTICES[0]):
+        return lambda s: _bb1b_wave(s, tui.screen.cursor.hidden, DRAFT, kind, slot, 2, payload, reverse_rows())
+    def base(s):
+        return _bb1b_base(s, tui.screen.cursor.hidden, DRAFT)
+    def retained(s):
+        return all(any(p in row and "↵" in row for row in s.split("\n")) for p in NOTICES[:2])
+    def step(label, data, predicate):
+        tui.send(label, data)
+        screen = tui.wait(predicate, label)
+        tui.capture("bb1b-i-"+label, screen)
+        return screen
+    # The pre-existing real model turn supplies user msg 0 / assistant msg 1.
+    step("chat-focus", b"\x1b", base)
+    step("chat-oldest", b"g", lambda s: base(s) and TURN in s and REPLY not in s)
+    step("bookmark-user", b"m", lambda s: base(s) and "Bookmark added (msg 0)" in s)
+    step("chat-bottom", b"G", lambda s: base(s) and REPLY in s)
+    step("bookmark-assistant", b"m", lambda s: base(s) and "Bookmark added (msg 1)" in s)
+    screen = tui.wait(
+        lambda s: _bb1b_settled_base(s, tui.screen.cursor.hidden, DRAFT) and REPLY in s,
+        "bookmark baseline after real transient notices expire")
+    tui.capture("bb1b-i-bookmark-settled-baseline", screen)
+    before = _bb1a_base(screen, DRAFT)
+    step("bookmark-open", b"'", book(2, 0, TURN))
+    step("bookmark-selected", b"j", book(2, 1, "Bb1a-row-00"))
+    step("bookmark-back", b"\x1b", lambda s: base(s) and _bb1a_base(s, DRAFT) == before)
+    step("bookmark-reopen", b"'", book(2, 0, TURN))
+    step("bookmark-jump", b"\r", lambda s: base(s) and TURN in s and REPLY not in s
+         and _bb1a_base(s, DRAFT) != before)
+    step("input-for-fanout", b"i"+b"\x7f"*len(DRAFT), lambda s: _composer(s) == "" and not tui.screen.cursor.hidden)
+    step("fanout-submit", ("/fanout 2 "+TURN).encode(), lambda s: _composer(s) == "/fanout 2 "+TURN)
+    step("fanout-completed", b"\r", lambda s: _status(s) and retained(s) and _composer(s) == ""
+         and not tui.screen.cursor.hidden)
+    step("wave-chat", DRAFT.encode()+b"\x1b", base)
+    screen = step("wave-open", b"r", lambda s: all(p in s for p in NOTICES[:2])
+                  and any(wave("list", 0, p)(s) for p in NOTICES[:2]))
+    # Learn only request scheduling, not selection: subsequent j must select the OTHER actual row.
+    first = next(p for p in NOTICES[:2] if any(p in tui.screen.display[y] for y in reverse_rows()))
+    second = next(p for p in NOTICES[:2] if p != first)
+    assert wave("list", 0, first)(screen)
+    step("wave-selected", b"j", wave("list", 1, second))
+    step("wave-drill", b"\r", wave("drill", 1, second))
+    step("wave-drill-list-keys-close", b"\x1b", base)
+    step("wave-enter-open", b"\r", wave("list", 0, first))
+    step("wave-list-diverge", b"d", wave("diverge", 0, first))
+    step("wave-list-diverge-back", b"\x1b", base)
+    step("wave-direct-diverge", b"d", wave("diverge", 0, first))
+    step("wave-direct-diverge-back", b"s", base)
+    step("wave-reopen", b"r", wave("list", 0, first))
+    step("wave-selected-again", b"j", wave("list", 1, second))
+    step("wave-drill-again", b"\r", wave("drill", 1, second))
+    step("wave-drill-diverge", b"d", wave("diverge", 1, first))
+    step("wave-prior-drill-chat-keys", b"\x1b", lambda s: wave("drill", 1, second)(s) and "Esc dismiss" in s)
+    step("wave-ordinary-close-retains", b"\x03", base)
+    step("wave-retained-reopen", b"r", wave("list", 0, first))
+    step("wave-retained-drill", b"\r", wave("drill", 0, first))
+    step("wave-retained-diverge", b"d", wave("diverge", 0, first))
+    step("wave-return-drill-for-dismiss", b"s", wave("drill", 0, first))
+    step("wave-full-dismiss", b"\x1b", lambda s: base(s) and not any(p in s for p in NOTICES[:2]))
+    step("wave-no-retained-reopen", b"r", lambda s: base(s) and not any(p in s for p in NOTICES[:2]))
+    step("input-restored", b"i", lambda s: _composer(s) == DRAFT and not tui.screen.cursor.hidden)
+
+
 def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
     """Filesystem-only controls: no binary resolution, server, socket or TUI."""
     with tempfile.TemporaryDirectory(prefix="r214-paths-", dir="/tmp") as directory:
@@ -943,23 +1166,27 @@ def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
             monkeypatch.delenv("RUSTAIN_CAPTURE_EVIDENCE_DIR")
 
 
-@pytest.mark.flaky(reruns=0)
-@pytest.mark.timeout(240)
-def test_modal_stack_a1_a2a_local_and_attached_80x24():
+def _run_modal_stack_smoke(bb1b):
     if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
-        _deskcheck()
+        if bb1b:
+            _deskcheck_bb1b_i_frames(os.environ["RUSTAIN_MODAL_STACK_BB1B_I_FRAMES"])
+        else:
+            _deskcheck()
         return
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
     parent = _evidence_parent()
     parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="21-4-bb1a-", dir=parent))
+    evidence = Path(tempfile.mkdtemp(prefix="21-4-bb1b-i-" if bb1b else "21-4-bb1a-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
                 "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a"]}
+    if bb1b:
+        manifest.update(legs=["local"], story_parts=["Bb1b-i"], attached="Bookmark/Wave n/a: local-only")
     errors, posts = queue.Queue(), []
     held, release = threading.Event(), threading.Event()
+    request_lock = threading.Lock()
     try:
         with ExitStack() as stack:
             class Handler(BaseHTTPRequestHandler):
@@ -975,19 +1202,23 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
                     try:
                         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                         probe = body.get("max_tokens") == 1 and "stream" not in body
-                        posts.append({"kind": "probe" if probe else "turn",
-                                      "max_tokens": body.get("max_tokens"), "stream": body.get("stream", False)})
+                        with request_lock:
+                            posts.append({"kind": "probe" if probe else "turn",
+                                          "max_tokens": body.get("max_tokens"), "stream": body.get("stream", False)})
+                            turn = sum(post["kind"] == "turn" for post in posts)
                         if probe:
                             self.reply(b'{"type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}')
                             return
                         assert body.get("stream") is True and TURN in json.dumps(body.get("messages", []))
-                        assert sum(post["kind"] == "turn" for post in posts) == 1, "unexpected extra real turn"
-                        held.set()
-                        assert release.wait(90), "held A2b model turn was never released"
+                        assert turn <= (3 if bb1b else 1), "unexpected extra real turn"
+                        reply = SEARCH_REPLY if turn == 1 else NOTICES[turn-2]
+                        if turn == 1:
+                            held.set()
+                            assert release.wait(90), "held model turn was never released"
                         events = [
                             {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
                             {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
-                            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": SEARCH_REPLY}},
+                            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}},
                             {"type": "content_block_stop", "index": 0},
                             {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 5}},
                             {"type": "message_stop"},
@@ -1015,7 +1246,7 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
             def environment(tag, ws):
                 config = ws / ".rustain"; config.mkdir(parents=True)
                 settings = "[notifications]\ninfo_ttl_secs = 30\n"
-                if tag == "local":
+                if tag == "local" and not bb1b:
                     settings += ('\n[budget]\ndaily_limit_usd = 0.000001\n'
                                  '\n[pricing."claude-sonnet-4-6"]\ninput_per_million = 3.0\noutput_per_million = 15.0\n')
                 (ws / ".env").write_text(""); (config / "config.toml").write_text(settings)
@@ -1024,19 +1255,29 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
                         "XDG_CACHE_HOME": str(root / "cache"), "RUSTAIN_CONFIG_DIR": str(config), "RUSTAIN_DATA_DIR": str(ws / "data"),
                         "RUSTAIN_LOG_PATH": str(evidence / f"{tag}.runtime.log"), "RUST_LOG": "debug",
                         "ANTHROPIC_API_KEY": KEY, "ANTHROPIC_BASE_URL": origin, "RUSTAIN_MODELS_DEV_URL": origin, "NO_PROXY": "*"}
-            for tag in ("local", "attached"):
+            for tag in (("local",) if bb1b else ("local", "attached")):
                 ws = root / ("l" if tag == "local" else "a"); env = environment(tag, ws)
                 assert len(os.fsencode(ws / "data/daemons" / ("0"*16+".sock"))) < 108
                 if tag == "attached":
                     daemon_env = {**env, "RUSTAIN_LOG_PATH": str(evidence / "daemon.runtime.log")}
                     _daemon(stack, binary, ws, daemon_env, evidence)
                 tui = _Terminal(stack, binary, ["--new"] if tag == "local" else ["daemon", "attach"], ws, env, evidence, tag, errors)
-                _leg(tui, held, release)
+                if bb1b:
+                    release.set()
+                    tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, "Bb1b-i initial Input")
+                    tui.send("Bb1b-i real fixture turn", TURN.encode()+b"\r")
+                    tui.wait(lambda s: held.is_set() and _status(s) and REPLY in s, "Bb1b-i real fixture completion")
+                    tui.send("Bb1b-i retained draft", DRAFT.encode())
+                    tui.wait(lambda s: _composer(s) == DRAFT, "Bb1b-i fixture draft")
+                    _bb1b_i_leg(tui)
+                    tui.exit()
+                else:
+                    _leg(tui, held, release)
         assert errors.empty(), list(errors.queue)
         assert held.is_set() and release.is_set()
-        assert sum(post["kind"] == "turn" for post in posts) == 1, posts
+        assert sum(post["kind"] == "turn" for post in posts) == (3 if bb1b else 1), posts
         logs = sorted(evidence.glob("*.runtime.log.*"))
-        for tag in ("local", "attached", "daemon"):
+        for tag in (("local",) if bb1b else ("local", "attached", "daemon")):
             assert any(p.name.startswith(tag+".runtime.log.") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.suffix[1:]) for p in logs), f"missing dated {tag} debug log"
         (evidence / "requests.json").write_text(json.dumps(posts, indent=2)+"\n")
         for path in evidence.iterdir():
@@ -1049,4 +1290,17 @@ def test_modal_stack_a1_a2a_local_and_attached_80x24():
     finally:
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2)+"\n")
-        print(f"NATIVE_21_4_BB1A_EVIDENCE={evidence}", flush=True)
+        label = "NATIVE_21_4_BB1B_I_EVIDENCE" if bb1b else "NATIVE_21_4_BB1A_EVIDENCE"
+        print(f"{label}={evidence}", flush=True)
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_modal_stack_a1_a2a_local_and_attached_80x24():
+    _run_modal_stack_smoke(False)
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(240)
+def test_modal_stack_bb1b_i_local_80x24():
+    _run_modal_stack_smoke(True)

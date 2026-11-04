@@ -12,15 +12,15 @@ use crate::adapters::tui::{
     quit_confirm,
     state::TuiState,
     widgets::{
-        autocomplete_popup, command_palette, help_overlay, login_dialog, model_selector,
-        profile_switcher, reverse_search, toast_layer, usage_panel, which_key_bar,
+        autocomplete_popup, bookmark_list, command_palette, help_overlay, login_dialog,
+        model_selector, profile_switcher, reverse_search, toast_layer, usage_panel, wave_overlay,
+        which_key_bar,
     },
 };
 
-/// Snapshot the unreserved layout before legacy bookmark reservations.
-/// Painting frames never changes any of the host's base rectangles.
+/// Snapshot the unreserved layout; frame paint never changes base rectangles.
 #[derive(Debug, Clone, Copy)]
-pub struct Shell {
+pub struct Shell<'a> {
     pub area: Rect,
     pub region: Rect,
     pub chat_pane: Rect,
@@ -28,9 +28,11 @@ pub struct Shell {
     pub status_bar: Rect,
     pub supports_osc8: bool,
     sidebar: Option<Rect>,
+    /// Live active conversation proxy and its owning tab's durable bookmarks.
+    pub stage: Option<(&'a crate::domain::models::Conversation, &'a [usize])>,
 }
 
-impl Shell {
+impl<'a> Shell<'a> {
     #[must_use]
     pub fn new(area: Rect, layout: &AppLayout) -> Self {
         Self {
@@ -41,6 +43,7 @@ impl Shell {
             status_bar: layout.status_bar,
             supports_osc8: crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8(),
             sidebar: layout.sidebar,
+            stage: None,
         }
     }
 }
@@ -50,7 +53,7 @@ impl Shell {
 pub fn compose(
     frame: &mut Frame,
     state: &TuiState,
-    shell: &Shell,
+    shell: &Shell<'_>,
     host: Host,
     facts: &LogFacts,
     paint_legacy: impl FnOnce(&mut Frame),
@@ -94,6 +97,30 @@ pub fn compose(
                     &breadcrumb
                 };
                 stage_search::render(frame, rect, &state.search_state, theme, label, false);
+            }
+            Surface::BookmarkList => {
+                let (conversation, bookmarks) =
+                    shell.stage.expect("Bookmark frame paints its owning tab");
+                debug_assert_eq!(
+                    modal.conversation_id.as_deref(),
+                    Some(conversation.id.as_str())
+                );
+                bookmark_list::render(
+                    frame,
+                    rect,
+                    conversation,
+                    bookmarks,
+                    state.bookmark_list_selected,
+                    theme,
+                );
+            }
+            Surface::WaveOverlay => {
+                let snap = state
+                    .wave_run
+                    .as_ref()
+                    .expect("Wave frame has its retained run")
+                    .snapshot();
+                wave_overlay::render_frame(frame, rect, state, &snap, theme);
             }
             Surface::DecisionPane => {
                 let Some(pane_rect) =
@@ -166,6 +193,7 @@ pub fn compose(
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel
                 | Surface::Login => theme.colors.accent,
+                Surface::BookmarkList | Surface::WaveOverlay => theme.colors.accent,
                 Surface::QuitConfirm => theme.colors.warning,
                 Surface::Search => unreachable!("Search owns its inline breadcrumb"),
             };

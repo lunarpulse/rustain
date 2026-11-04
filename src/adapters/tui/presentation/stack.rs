@@ -13,6 +13,8 @@ pub enum Surface {
     UsagePanel,
     Login,
     Search,
+    BookmarkList,
+    WaveOverlay,
 }
 
 impl Surface {
@@ -29,6 +31,8 @@ impl Surface {
             Self::UsagePanel => "Usage & Cost",
             Self::Login => "Sign in",
             Self::Search => "Search",
+            Self::BookmarkList => "Bookmarks",
+            Self::WaveOverlay => "Wave",
         }
     }
 
@@ -45,6 +49,8 @@ impl Surface {
             Self::UsagePanel => Context::UsagePanel,
             Self::Login => Context::Login,
             Self::Search => Context::SearchTyping,
+            Self::BookmarkList => Context::BookmarkList,
+            Self::WaveOverlay => Context::WaveOverlay,
         }
     }
 
@@ -57,6 +63,8 @@ impl Surface {
                 | Self::ProfileSwitcher
                 | Self::UsagePanel
                 | Self::Search
+                | Self::BookmarkList
+                | Self::WaveOverlay
         )
     }
 }

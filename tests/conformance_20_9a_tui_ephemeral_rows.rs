@@ -752,6 +752,7 @@ async fn plan_host_renders_and_real_save_reload_discards_display_only() {
         assert!(!saved.contains("ephemeralDisplay"));
         let mut tabs = rustain::domain::models::tab::TabManager::new(CancellationToken::new());
         tabs.active_tab_mut().session_meta = meta;
+        tabs.active_tab_mut().conversation = conversation.clone();
         state.message_boundaries = vec![0, 10, 20];
         state.total_content_height = 40;
         state.viewport_height = 10;
@@ -786,8 +787,13 @@ async fn plan_host_renders_and_real_save_reload_discards_display_only() {
                 .bookmarks,
             [1]
         );
-        rustain::adapters::tui::handlers::bookmark::handle_apply_jump_bookmark(
+        rustain::adapters::tui::handlers::bookmark::handle_apply_open_bookmark_list(
             &tabs,
+            &mut state,
+            &conversation,
+        );
+        rustain::adapters::tui::handlers::bookmark::handle_apply_jump_bookmark(
+            &mut tabs,
             &mut state,
             &conversation,
         );
@@ -807,8 +813,12 @@ async fn plan_host_renders_and_real_save_reload_discards_display_only() {
         assert!(loaded.messages.iter().any(|m| m.id == "later"));
         assert_eq!(loaded.plans["plan"].host_message_id, None);
         state.message_boundaries = vec![0, 10];
-        rustain::adapters::tui::handlers::bookmark::handle_apply_jump_bookmark(
+        tabs.active_tab_mut().conversation = loaded.clone();
+        rustain::adapters::tui::handlers::bookmark::handle_apply_open_bookmark_list(
             &tabs, &mut state, &loaded,
+        );
+        rustain::adapters::tui::handlers::bookmark::handle_apply_jump_bookmark(
+            &mut tabs, &mut state, &loaded,
         );
         assert_eq!(state.scroll_offset(), 20);
         loaded.rebuild_messages_mirror();

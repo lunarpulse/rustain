@@ -189,13 +189,6 @@ pub enum OverlayType {
     /// Cross-conversation search overlay (/ in sidebar).
     // Covers: UX-DR87, Story 4-4 AC5-AC7
     CrossSearch,
-    /// Bookmark list bottom panel (' key).
-    // Covers: UX-DR91, Story 4-4 AC10
-    BookmarkList,
-    /// Wave overlay for fan-out result rows (Story 14.3a AC5). Opened by
-    /// expanding the wave strip; intercepts j/k/↵/r/d/s/Esc before the
-    /// chat/drill-down handlers.
-    WaveOverlay,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

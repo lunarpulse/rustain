@@ -356,9 +356,9 @@ fn test_focus_state_variants() {
 fn test_overlay_type_variants() {
     use rustain::domain::models::visual::OverlayType;
 
-    // Migrated Search/selectors/Login are frames; these two still-legacy variants remain.
-    let variants = [OverlayType::CrossSearch, OverlayType::BookmarkList];
-    assert_eq!(variants.len(), 2);
+    // CrossSearch is the only legacy non-Confirmation overlay after Bb1b-i.
+    let variants = [OverlayType::CrossSearch];
+    assert_eq!(variants.len(), 1);
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::Surface;
     assert_ne!(Surface::Help, Surface::CommandPalette);
@@ -368,6 +368,8 @@ fn test_overlay_type_variants() {
         (Surface::UsagePanel, Context::UsagePanel),
         (Surface::Login, Context::Login),
         (Surface::Search, Context::SearchTyping),
+        (Surface::BookmarkList, Context::BookmarkList),
+        (Surface::WaveOverlay, Context::WaveOverlay),
     ] {
         assert_eq!(surface.context(), context);
     }

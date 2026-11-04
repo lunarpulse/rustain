@@ -27,6 +27,15 @@ use super::theme::Theme;
 mod login_overlay;
 pub use login_overlay::*;
 
+/// A five-second bookmark undo belongs to the live Stage and tab, even after close.
+#[derive(Debug)]
+pub struct BookmarkUndo {
+    pub index: usize,
+    pub when: Instant,
+    pub owning_tab: TabId,
+    pub conversation_id: String,
+}
+
 /// Attach-mode view descriptor for the status bar (Story 12.2c AC1/AC6).
 ///
 /// Present only when the TUI is an attached client (`run_attached`); the local
@@ -2783,11 +2792,13 @@ pub struct TuiState {
     /// key-handler layer in `app.rs` reads this to clamp `j`/`Down` to the
     /// upper bound (Story 4-4 AC10 clamping requirement).
     pub bookmark_list_count: usize,
+    /// Actual tab owning the live Bookmark frame, not its saved conversation mirror.
+    pub bookmark_owning_tab: Option<TabId>,
     /// Single-entry undo buffer for bookmark list deletes (AC10 synthesis).
-    /// Stores `(deleted_index, timestamp)`; `u` within 5 s restores it, then
-    /// the buffer clears silently on expiry.
+    /// Ownership is retained after ordinary close; expiry and Stage replacement
+    /// discard it without restoring into another conversation or tab.
     // Covers: Story 4-4 AC10 amendment
-    pub bookmark_undo_buffer: Option<(usize, Instant)>,
+    pub bookmark_undo_buffer: Option<BookmarkUndo>,
     /// Pending export overwrite confirmation — set when `/export <name>` is
     /// invoked on a path that already exists. Carries the resolved target
     /// `PathBuf` and the *pre-rendered* markdown content captured at the
@@ -2889,6 +2900,9 @@ pub struct TuiState {
     /// the synthesis surface. Separate from focus so `s` can be an involution
     /// back to the regular chat-pane wave surface.
     pub wave_diverge_open: bool,
+    /// Frame subview uses the legacy ChatWave return keys after divergence.
+    /// Presence belongs only to the WaveOverlay frame, never to this mode flag.
+    pub wave_chat_keys: bool,
     /// Story 14.3c — pending above-threshold fan-out gate rendered in the chat
     /// pane and controlled by ←/→/c/Enter/Esc before any wave is spawned.
     pub pending_spawn_gate: Option<PendingSpawnGate>,
@@ -3084,6 +3098,7 @@ impl TuiState {
         self.rerunning_slot = None;
         self.wave_drill_body = None;
         self.wave_diverge_open = false;
+        self.wave_chat_keys = false;
         self.wave_overlay_selected = 0;
         self.active_wave_id = None;
         self.needs_redraw = true;
@@ -3213,6 +3228,7 @@ impl TuiState {
             rewind_preview: None,
             bookmark_list_selected: 0,
             bookmark_list_count: 0,
+            bookmark_owning_tab: None,
             bookmark_undo_buffer: None,
             pending_export: None,
             skill_registry: Arc::new(tokio::sync::RwLock::new(SkillRegistry::new())),
@@ -3254,6 +3270,7 @@ impl TuiState {
             rerunning_slot: None,
             wave_cancel: None,
             wave_diverge_open: false,
+            wave_chat_keys: false,
             pending_spawn_gate: None,
             wave_drill_body: None,
             active_wave_id: None,
@@ -4410,5 +4427,300 @@ mod tests {
         );
         assert!(s.is_wave_in_flight(), "the live marker is still wave B");
         assert_eq!(s.active_wave_id, Some(new_id));
+    }
+}
+
+#[cfg(test)]
+mod wave_frame_tests {
+    use super::{PendingPermission, TuiState, WaveViewState};
+    use crate::adapters::tui::{
+        app::{self, InputAction},
+        handlers::wave_overlay::{apply, back_action, command, context},
+        keymap::{Context, table_panels::PanelCmd},
+        presentation::{self, Surface, reducer},
+    };
+    use crate::domain::models::orchestration::{
+        DrillId, ForkJoinOutcome, SpokeResult, SynthesisView,
+    };
+    use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+    use crate::domain::models::{AgentId, FocusState, ToolRisk};
+    use crate::domain::ports::wave_handle::{DrillBody, WaveHandle, WaveSnapshot};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    // Retained-data fixture only: this does not launch or simulate a run.
+    #[derive(Debug, Default)]
+    struct Retained {
+        drills: AtomicUsize,
+        cancelled: AtomicBool,
+    }
+
+    impl WaveHandle for Retained {
+        fn snapshot(&self) -> WaveSnapshot {
+            WaveSnapshot {
+                spoke_count: 2,
+                completed: 2,
+                honest_empty: Some(false),
+                cancelled: false,
+                outcome: ForkJoinOutcome {
+                    spokes: vec![
+                        (
+                            AgentId::root(),
+                            SpokeResult::Completed {
+                                summary: "retained result".into()
+                            }
+                        );
+                        2
+                    ],
+                    synthesis: SynthesisView::default(),
+                },
+                resolve_count: self.resolve_count(),
+                slots: self.slots(),
+                rerun_counts: vec![0, 1],
+            }
+        }
+        fn cancel(&self) {
+            self.cancelled.store(true, Ordering::SeqCst);
+        }
+        fn drill(&self, slot: usize) -> Option<DrillBody> {
+            if slot >= 2 {
+                return None;
+            }
+            self.drills.fetch_add(1, Ordering::SeqCst);
+            Some(DrillBody(format!("body for spoke {slot}")))
+        }
+        fn drill_id(&self, _: usize) -> Option<DrillId> {
+            None
+        }
+        fn slots(&self) -> Vec<AgentId> {
+            vec![AgentId::root(); 2]
+        }
+        fn rerun_count_for_slot(&self, slot: usize) -> u8 {
+            u8::from(slot == 1)
+        }
+        fn resolve_count(&self) -> usize {
+            self.drills.load(Ordering::SeqCst)
+        }
+    }
+
+    fn retained() -> (TuiState, Arc<Retained>) {
+        let mut state = TuiState::new(60, 16);
+        state.input_buffer = "composer payload".into();
+        let handle = Arc::new(Retained::default());
+        state.wave_run = Some(handle.clone());
+        (state, handle)
+    }
+
+    fn dispatch(state: &mut TuiState, cmd: PanelCmd) {
+        let action = command(state, cmd);
+        apply(state, "stage-a", &action);
+    }
+
+    #[test]
+    fn story21_4_wave_frame_back_matrix_preserves_legacy_drill_and_divergence_returns() {
+        for drilled in [false, true] {
+            for from_list in [false, true] {
+                let (mut state, handle) = retained();
+                if from_list || drilled {
+                    dispatch(&mut state, PanelCmd::WaveOpenOverlay);
+                }
+                if drilled {
+                    state.wave_overlay_selected = 1;
+                    apply(&mut state, "stage-a", &InputAction::WaveDrillSpoke(1));
+                    assert_eq!(context(&state), Context::WaveOverlay);
+                    assert_eq!(back_action(&state, false), InputAction::CloseWaveOverlay);
+                    assert_eq!(handle.resolve_count(), 1);
+                }
+                dispatch(&mut state, PanelCmd::WaveOpenDiverge);
+                let id = state.modal_stack.top().unwrap().id;
+                assert_eq!(context(&state), Context::ChatWave);
+                for ctrl_c in [false, true] {
+                    assert_eq!(back_action(&state, ctrl_c), InputAction::CloseDivergeView);
+                }
+                apply(&mut state, "stage-a", &InputAction::CloseDivergeView);
+                assert_eq!(presentation::is_open(&state, Surface::WaveOverlay), drilled);
+                assert!(state.wave_run.is_some());
+                assert_eq!(state.focus, FocusState::Input);
+                if drilled {
+                    assert_eq!(state.modal_stack.top().unwrap().id, id);
+                    assert_eq!(
+                        state.wave_drill_body.as_ref().unwrap().1,
+                        "body for spoke 1"
+                    );
+                    assert_eq!(context(&state), Context::ChatWave);
+                    assert_eq!(back_action(&state, false), InputAction::DismissWave);
+                    assert_eq!(back_action(&state, true), InputAction::CloseWaveOverlay);
+                    dispatch(&mut state, PanelCmd::WaveOpenOverlay);
+                    assert_eq!(context(&state), Context::WaveOverlay);
+                    assert!(state.wave_drill_body.is_some());
+                    assert_eq!(
+                        state.wave_overlay_selected, 0,
+                        "legacy OpenWaveOverlay resets selection without discarding the drill body"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn story21_4_wave_frame_close_retains_globals_and_late_completion_cannot_reopen() {
+        let (mut state, handle) = retained();
+        state.wave_cancel = Some(tokio_util::sync::CancellationToken::new());
+        let child = state.wave_cancel.as_ref().unwrap().child_token();
+        state.wave_state = Some(WaveViewState::started(AgentId::root(), 2));
+        state.active_wave_id = Some(7);
+        state.rerunning_slot = Some(1);
+        dispatch(&mut state, PanelCmd::WaveOpenFromChat);
+        apply(&mut state, "stage-a", &InputAction::WaveDrillSpoke(1));
+        let action = back_action(&state, true);
+        apply(&mut state, "stage-a", &action);
+        assert!(state.modal_stack.is_empty());
+        assert!(state.wave_run.is_some() && state.wave_state.is_some());
+        assert_eq!(state.active_wave_id, Some(7));
+        assert_eq!(state.rerunning_slot, Some(1));
+        assert!(!child.is_cancelled());
+        assert!(!handle.cancelled.load(Ordering::SeqCst));
+        assert!(state.wave_drill_body.is_none());
+        assert!(!state.wave_chat_keys && !state.wave_diverge_open);
+        state.handle_wave_run_ready(handle.clone());
+        state.handle_spoke_rerun_started(1);
+        state.handle_spoke_rerun_reverted(1);
+        assert!(
+            state.modal_stack.is_empty(),
+            "completion has no open authority"
+        );
+        dispatch(&mut state, PanelCmd::WaveOpenFromChat);
+        assert_eq!(
+            state.modal_stack.top().unwrap().conversation_id.as_deref(),
+            Some("stage-a")
+        );
+        assert_eq!(handle.resolve_count(), 1, "reopen is not a drill");
+        apply(&mut state, "stage-a", &InputAction::DismissWave);
+        assert!(state.modal_stack.is_empty());
+        assert!(
+            state.wave_run.is_none() && state.wave_state.is_none() && state.wave_cancel.is_none()
+        );
+        assert!(state.active_wave_id.is_none() && state.rerunning_slot.is_none());
+        state.handle_wave_run_ready(handle);
+        assert!(
+            state.modal_stack.is_empty(),
+            "even late data after dismiss cannot reopen"
+        );
+    }
+
+    fn queue_approval(state: &mut TuiState) -> RequestId {
+        let id = RequestId::new();
+        state.permission_queue.push(PendingPermission {
+            id: id.clone(),
+            source: ApprovalSource::ForegroundTurn {
+                conversation_id: "stage-a".into(),
+            },
+            tool_name: "Bash".into(),
+            input: Arc::new(serde_json::json!({"command": "payload-safe-approval"})),
+            risk: ToolRisk::Elevated,
+        });
+        id
+    }
+
+    fn assert_approval_painted(state: &mut TuiState, id: &RequestId) {
+        use crate::adapters::tui::widgets::permission_prompt::render_permission_surface;
+        use ratatui::{Terminal, backend::TestBackend};
+        assert_eq!(&state.pending_permission.as_ref().unwrap().id, id);
+        assert!(state.permission_queue.queue.is_empty());
+        assert_eq!(state.input_buffer, "composer payload");
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_permission_surface(
+                    frame,
+                    frame.area(),
+                    state.pending_permission.as_ref(),
+                    None,
+                    0,
+                    &mut state.permission_reader,
+                    &state.theme,
+                );
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("payload-safe-approval"), "{text}");
+    }
+
+    #[test]
+    fn story21_4_wave_frame_effects_reconcile_real_queued_approval_including_wrong_owner() {
+        for effect in [
+            InputAction::CloseWaveOverlay,
+            InputAction::CloseDivergeView,
+            InputAction::DismissWave,
+            InputAction::WaveDrillSpoke(1),
+        ] {
+            let (mut state, handle) = retained();
+            dispatch(&mut state, PanelCmd::WaveOpenOverlay);
+            let id = queue_approval(&mut state);
+            dispatch(&mut state, PanelCmd::WaveDiverge);
+            assert!(state.pending_permission.is_none(), "frame still owns keys");
+            if matches!(effect, InputAction::WaveDrillSpoke(_)) {
+                // Wrong owning Stage closes safely without drilling its data.
+                apply(&mut state, "stage-b", &effect);
+                assert_eq!(handle.resolve_count(), 0);
+                assert!(state.wave_run.is_some());
+            } else {
+                apply(&mut state, "stage-a", &effect);
+            }
+            assert!(state.modal_stack.is_empty());
+            assert_approval_painted(&mut state, &id);
+        }
+        // Divergence -> retained drill is NOT a close and cannot promote early.
+        let (mut state, _) = retained();
+        dispatch(&mut state, PanelCmd::WaveOpenOverlay);
+        let id = queue_approval(&mut state);
+        apply(&mut state, "stage-a", &InputAction::WaveDrillSpoke(1));
+        dispatch(&mut state, PanelCmd::WaveDiverge);
+        apply(&mut state, "stage-a", &InputAction::CloseDivergeView);
+        assert!(state.pending_permission.is_none());
+        let action = back_action(&state, false);
+        apply(&mut state, "stage-a", &action);
+        assert_approval_painted(&mut state, &id);
+    }
+
+    #[test]
+    fn story21_4_wave_frame_effects_do_not_touch_covering_or_unowned_payloads() {
+        let (mut state, handle) = retained();
+        dispatch(&mut state, PanelCmd::WaveOpenOverlay);
+        reducer::open(&mut state, Surface::Help);
+        for action in [
+            InputAction::DismissWave,
+            InputAction::CloseWaveOverlay,
+            InputAction::WaveDrillSpoke(1),
+        ] {
+            assert!(apply(&mut state, "stage-a", &action));
+            assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
+            assert!(state.wave_run.is_some());
+        }
+        assert_eq!(handle.resolve_count(), 0);
+        assert!(!apply(
+            &mut state,
+            "stage-a",
+            &InputAction::WaveRerunSpoke(0)
+        ));
+        let id = queue_approval(&mut state);
+        apply(&mut state, "stage-b", &InputAction::OpenDivergeView);
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
+        assert!(!presentation::is_open(&state, Surface::WaveOverlay));
+        assert!(state.pending_permission.is_none());
+        assert!(state.wave_run.is_some());
+        // Removing a stale covered Stage did not consume or promote the queue.
+        app::with_card_focus_reconcile(&mut state, |state| {
+            reducer::close(state, Surface::Help);
+        });
+        assert_approval_painted(&mut state, &id);
     }
 }

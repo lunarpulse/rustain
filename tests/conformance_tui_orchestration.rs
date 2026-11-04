@@ -1,7 +1,169 @@
-// Story 14.3c: TUI ergonomics wiring conformance guards.
-// These tests intentionally inspect source wiring: they fail when an
-// InputAction variant becomes dead or a shipped widget render becomes orphaned.
+// Story 14.3c wiring contracts, with 21.4 behavioral migrations of moved Wave seams.
+// Unchanged legacy guards remain below; migrated paint/effect witnesses call the
+// actual production collaborators instead of pinning their source layout.
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use rustain::adapters::tui::{
+    app::InputAction,
+    handlers::wave_overlay,
+    presentation::Surface,
+    state::{PendingSpawnGate, WaveViewState},
+};
+use rustain::domain::models::orchestration::{
+    DrillId, ForkJoinOutcome, SpokeResult, SynthesisView,
+};
+use rustain::domain::models::{AgentId, FocusState, TabManager};
+use rustain::domain::ports::wave_handle::{DrillBody, WaveHandle, WaveSnapshot};
+
+// Retained-data witness only; the native smoke proves real provider request counts.
+#[derive(Debug)]
+struct PaintWave {
+    count: usize,
+    snapshots: AtomicUsize,
+    drills: AtomicUsize,
+    cancels: AtomicUsize,
+}
+
+impl PaintWave {
+    fn new(count: usize) -> Arc<Self> {
+        Arc::new(Self {
+            count,
+            snapshots: AtomicUsize::new(0),
+            drills: AtomicUsize::new(0),
+            cancels: AtomicUsize::new(0),
+        })
+    }
+}
+
+impl WaveHandle for PaintWave {
+    fn snapshot(&self) -> WaveSnapshot {
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        WaveSnapshot {
+            spoke_count: self.count,
+            completed: self.count,
+            honest_empty: Some(self.count == 0),
+            cancelled: false,
+            outcome: ForkJoinOutcome {
+                spokes: (0..self.count)
+                    .map(|slot| {
+                        (
+                            AgentId::root(),
+                            SpokeResult::Completed {
+                                summary: format!("PULLED-SPOKE-{slot}"),
+                            },
+                        )
+                    })
+                    .collect(),
+                synthesis: SynthesisView::default(),
+            },
+            resolve_count: self.resolve_count(),
+            slots: self.slots(),
+            rerun_counts: vec![0; self.count],
+        }
+    }
+    fn cancel(&self) {
+        self.cancels.fetch_add(1, Ordering::SeqCst);
+    }
+    fn drill(&self, _: usize) -> Option<DrillBody> {
+        self.drills.fetch_add(1, Ordering::SeqCst);
+        None
+    }
+    fn drill_id(&self, _: usize) -> Option<DrillId> {
+        None
+    }
+    fn slots(&self) -> Vec<AgentId> {
+        vec![AgentId::root(); self.count]
+    }
+    fn rerun_count_for_slot(&self, _: usize) -> u8 {
+        0
+    }
+    fn resolve_count(&self) -> usize {
+        self.drills.load(Ordering::SeqCst)
+    }
+}
+
+fn paint_base(
+    gate: Option<&PendingSpawnGate>,
+    handle: Option<&dyn WaveHandle>,
+    wave: Option<&WaveViewState>,
+    frame_open: bool,
+) -> String {
+    use ratatui::{Terminal, backend::TestBackend};
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    terminal
+        .draw(|frame| {
+            rustain::infrastructure::runtime::event_loop::paint_wave_base(
+                frame,
+                frame.area(),
+                gate,
+                handle,
+                wave,
+                None,
+                frame_open,
+            )
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+fn render_runtime(
+    h: &mut crate::e2e_harness::TestHarness,
+    tabs: &mut TabManager,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+) -> String {
+    rustain::infrastructure::runtime::event_loop::render(
+        &mut h.terminal,
+        &mut h.state,
+        &h.conversation,
+        &h.streaming,
+        "fixture-model",
+        "fixture-provider",
+        &rustain::adapters::noop::NoOpSecurity,
+        1,
+        0,
+        Some(tabs),
+        &rustain::domain::services::session_index::SessionIndex::new(),
+        128_000,
+        core,
+    )
+    .unwrap();
+    h.screen_text()
+}
+
+fn wave_stage(handle: Arc<PaintWave>) -> (crate::e2e_harness::TestHarness, TabManager) {
+    let mut h = crate::e2e_harness::TestHarness::new();
+    let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+    tabs.active_tab_mut().conversation = std::mem::take(&mut h.conversation);
+    h.state.active_tab_id = tabs.active_tab_id();
+    h.state.focus = FocusState::Chat;
+    h.state.wave_run = Some(handle);
+    (h, tabs)
+}
+
+fn apply_wave(
+    h: &mut crate::e2e_harness::TestHarness,
+    tabs: &TabManager,
+    key: char,
+    expected: InputAction,
+) {
+    let action = h.type_char(key);
+    assert_eq!(action, expected);
+    assert!(wave_overlay::apply(
+        &mut h.state,
+        &tabs.active_tab().conversation.id,
+        &action
+    ));
+}
 fn count(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
 }
@@ -36,36 +198,137 @@ fn wave_input_actions_are_produced_and_consumed() {
 }
 
 #[test]
-fn wave_widgets_are_called_from_chat_pane_composition_root() {
-    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
-    // P7 (review): scope to the `fn render(` body, then further to the region
-    // after `chat_pane::render_with_search` — proves the calls are in the
-    // composition root, not just anywhere after the split point in the file.
-    let render_fn = event_loop
-        .split("fn render(")
-        .nth(1)
-        .expect("fn render( must exist in event_loop.rs");
-    let chat_render = render_fn
-        .split("let result = chat_pane::render_with_search(")
-        .nth(1)
-        .expect("chat pane render call must exist within fn render");
+fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
+    let mut h = crate::e2e_harness::TestHarness::new();
+    let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+    tabs.active_tab_mut().conversation = h.conversation.clone();
+    h.state.active_tab_id = tabs.active_tab_id();
+    h.state.focus = FocusState::Chat;
+    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
 
-    for call in [
-        "render_result_row(",
-        "render_wave_overlay(",
-        "render_diverge_view(",
-        "render_spawn_gate(",
-        // 14.3c (human-smoke fix): the IN-PROGRESS wave strip. This entry was
-        // MISSING — the widget shipped in 14.3 with green unit tests but zero
-        // production wiring, so a running `/fanout` painted nothing. Guarding it
-        // here keeps the live strip wired (a mutant that drops the call → RED).
-        "render_wave_strip_line(",
-    ] {
-        assert!(
-            chat_render.contains(call),
-            "{call} must be reachable from the chat-pane composition root within fn render"
-        );
-    }
+    let absent = render_runtime(&mut h, &mut tabs, &core);
+    assert!(!absent.contains("handles") && !absent.contains("spawn 5?"));
+    h.state.wave_state = Some(WaveViewState::started(AgentId::root(), 3));
+    let first = render_runtime(&mut h, &mut tabs, &core);
+    assert!(
+        first.contains("3 handles") && first.contains("0/3 done"),
+        "{first}"
+    );
+    assert_ne!(absent, first, "runtime must paint the live strip");
+
+    h.state.wave_state.as_mut().unwrap().completed_count = 2;
+    let advanced = render_runtime(&mut h, &mut tabs, &core);
+    assert!(advanced.contains("2/3 done"), "{advanced}");
+    assert!(!advanced.contains("0/3 done"));
+    assert_ne!(first, advanced, "runtime progress must change pixels");
+
+    h.state.pending_spawn_gate = Some(PendingSpawnGate {
+        spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("5 payload-safe-fixture"))
+            .unwrap(),
+        requested: 5,
+        threshold: 2,
+        adjusted: None,
+    });
+    let gated = render_runtime(&mut h, &mut tabs, &core);
+    assert!(
+        gated.contains("spawn 5?") && gated.contains("confirm"),
+        "{gated}"
+    );
+    assert!(!gated.contains("2/3 done"), "gate must replace the strip");
+    assert_ne!(advanced, gated, "runtime must paint the pending gate");
+
+    h.state.pending_spawn_gate.as_mut().unwrap().adjusted = Some(4);
+    let adjusted = render_runtime(&mut h, &mut tabs, &core);
+    assert!(adjusted.contains("spawn 4?"), "{adjusted}");
+    assert!(!adjusted.contains("spawn 5?"));
+    assert_ne!(gated, adjusted, "runtime must repaint gate adjustment");
+
+    h.state.pending_spawn_gate = None;
+    let restored = render_runtime(&mut h, &mut tabs, &core);
+    assert!(
+        restored.contains("2/3 done") && !restored.contains("spawn 4?"),
+        "{restored}"
+    );
+    h.state.wave_state = None;
+    let cleared = render_runtime(&mut h, &mut tabs, &core);
+    assert!(
+        !cleared.contains("handles") && !cleared.contains("spawn 4?"),
+        "{cleared}"
+    );
+}
+
+#[test]
+fn wave_widgets_are_called_from_chat_pane_composition_root() {
+    let mut wave = WaveViewState::started(AgentId::root(), 3);
+    let first = paint_base(None, None, Some(&wave), false);
+    assert!(
+        first.contains("3 handles") && first.contains("0/3 done"),
+        "{first}"
+    );
+    wave.completed_count = 2;
+    let advanced = paint_base(None, None, Some(&wave), false);
+    assert!(advanced.contains("2/3 done"), "{advanced}");
+    assert_ne!(
+        first, advanced,
+        "real live-strip progress must change pixels"
+    );
+    assert!(!paint_base(None, None, None, false).contains("handles"));
+
+    let handle = PaintWave::new(2);
+    let mut gate = PendingSpawnGate {
+        spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("5 payload-safe-fixture"))
+            .unwrap(),
+        requested: 5,
+        threshold: 2,
+        adjusted: None,
+    };
+    let gated = paint_base(Some(&gate), Some(handle.as_ref()), Some(&wave), false);
+    assert!(
+        gated.contains("spawn 5?") && gated.contains("confirm"),
+        "{gated}"
+    );
+    assert!(!gated.contains("PULLED-SPOKE") && !gated.contains("2/3 done"));
+    assert_eq!(
+        handle.snapshots.load(Ordering::SeqCst),
+        0,
+        "gate wins before a retained snapshot is pulled"
+    );
+    gate.adjusted = Some(4);
+    let adjusted = paint_base(Some(&gate), Some(handle.as_ref()), Some(&wave), false);
+    assert!(adjusted.contains("spawn 4?"), "{adjusted}");
+    assert_ne!(gated, adjusted);
+
+    let (mut h, tabs) = wave_stage(handle.clone());
+    h.render_active_tab(&tabs);
+    let before = h.screen_text();
+    apply_wave(&mut h, &tabs, 'r', InputAction::OpenWaveOverlay);
+    h.render_active_tab(&tabs);
+    let list = h.screen_text();
+    assert!(
+        list.contains("PULLED-SPOKE-0") && list.contains("PULLED-SPOKE-1"),
+        "{list}"
+    );
+    assert_ne!(before, list);
+    let caller = h.state.modal_stack.top().unwrap().id;
+    assert_eq!(
+        h.state.modal_stack.top().unwrap().surface,
+        Surface::WaveOverlay
+    );
+    apply_wave(&mut h, &tabs, 'd', InputAction::OpenDivergeView);
+    h.render_active_tab(&tabs);
+    let divergence = h.screen_text();
+    assert!(
+        divergence.contains("SPOKE-0") && divergence.contains("SPOKE-1"),
+        "{divergence}"
+    );
+    assert!(divergence.contains("PULLED-SPOKE-0") && divergence.contains("PULLED-SPOKE-1"));
+    assert_ne!(
+        list, divergence,
+        "the real divergence painter must replace the list projection"
+    );
+    assert_eq!(h.state.modal_stack.top().unwrap().id, caller);
+    assert_eq!(handle.drills.load(Ordering::SeqCst), 0);
+    assert_eq!(handle.cancels.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -214,45 +477,57 @@ fn ac3_diverge_view_degrade_layout() {
     );
 }
 
-// ─── AC11 push-vs-pull structural guard (14.3c AI-12.3, DF-CR-14-3c-6) ───────
-// The companion to the value-differential keystone in app.rs
-// (`ac11_push_vs_pull_render_reads_swapped_handle_*`). That one proves the
-// swapped handle reports the honest count; this one proves the RENDER block
-// reads it by PULL — it must never reference the stale push counter
-// `wave_state.completed_count`. A mutant that rewires the render to the push
-// counter makes this fail the build.
-
+// Pull-vs-push honesty at the production base and frame painters, with a swapped-handle control.
 #[test]
 fn wave_render_pulls_count_from_handle_not_push_counter() {
-    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
-    let render_fn = event_loop
-        .split("fn render(")
-        .nth(1)
-        .expect("fn render( must exist in event_loop.rs");
-    // Scope to the COMPLETED wave-render block: from the `state.wave_run` branch
-    // to the `WAVE_RUN_RENDER_BLOCK_END` sentinel. The boundary is the sentinel
-    // (not `pending_delegation_card`) so the IN-PROGRESS strip branch — which
-    // legitimately reads the push counter `wave_state.completed_count` because no
-    // handle exists yet — is excluded. This keeps the test's teeth on the
-    // completed render (which MUST pull from the handle) without false-failing on
-    // the live strip.
-    let wave_block = render_fn
-        .split("else if let Some(ref handle) = state.wave_run {")
-        .nth(1)
-        .expect("wave render block must exist within fn render");
-    let wave_block = wave_block
-        .split("WAVE_RUN_RENDER_BLOCK_END")
-        .next()
-        .expect("wave render block must be bounded by the WAVE_RUN_RENDER_BLOCK_END sentinel");
-
+    let mut push = WaveViewState::started(AgentId::root(), 19);
+    push.completed_count = 18;
+    let old = PaintWave::new(2);
+    let first = paint_base(None, Some(old.as_ref()), Some(&push), false);
     assert!(
-        wave_block.contains("handle.snapshot()"),
-        "the wave render must PULL state from handle.snapshot()"
+        first.contains("PULLED-SPOKE-1") && !first.contains("PULLED-SPOKE-2"),
+        "{first}"
     );
+    push.completed_count = 17;
+    assert_eq!(
+        first,
+        paint_base(None, Some(old.as_ref()), Some(&push), false),
+        "stale push changes cannot affect retained paint"
+    );
+    let swapped = PaintWave::new(3);
+    let changed = paint_base(None, Some(swapped.as_ref()), Some(&push), false);
+    assert!(changed.contains("PULLED-SPOKE-2"), "{changed}");
+    assert_ne!(
+        first, changed,
+        "swapping the actual handle must visibly change the result rows"
+    );
+    let reads = swapped.snapshots.load(Ordering::SeqCst);
+    assert!(!paint_base(None, Some(swapped.as_ref()), Some(&push), true).contains("PULLED-SPOKE"));
+    assert_eq!(
+        swapped.snapshots.load(Ordering::SeqCst),
+        reads,
+        "an owned full frame suppresses duplicate base snapshots"
+    );
+
+    let (mut h, tabs) = wave_stage(old);
+    h.state.wave_state = Some(push);
+    apply_wave(&mut h, &tabs, 'r', InputAction::OpenWaveOverlay);
+    let caller = h.state.modal_stack.top().unwrap().id;
+    h.render_active_tab(&tabs);
+    let first_frame = h.screen_text();
+    assert!(first_frame.contains("1 of 2"), "{first_frame}");
+    h.state.handle_wave_run_ready(swapped);
+    h.render_active_tab(&tabs);
+    let swapped_frame = h.screen_text();
     assert!(
-        !wave_block.contains("completed_count"),
-        "the wave render must NOT read the push counter wave_state.completed_count — \
-         counts must be pulled from the swapped handle snapshot (AC11 honesty)"
+        swapped_frame.contains("1 of 3") && swapped_frame.contains("PULLED-SPOKE-2"),
+        "{swapped_frame}"
+    );
+    assert_ne!(first_frame, swapped_frame);
+    assert_eq!(
+        h.state.modal_stack.top().unwrap().id,
+        caller,
+        "completion updates data, never replaces the frame"
     );
 }
 
@@ -314,52 +589,61 @@ fn fanout_consults_gate_decision_before_launch() {
     );
 }
 
-// ─── D5 (AI-12.3, DF-CR-14-3c-5): the diverge toggle (d/s) is zero-dispatch ────
-// `ac3_diverge_view_render_does_not_dispatch` only proves the RENDER is a pure fn
-// (it cannot dispatch — no orchestrator in scope). The real AC3 claim is that the
-// d/s INPUT arms reuse handles and never re-fork. This guards exactly that: the
-// OpenDivergeView + CloseDivergeView arms only flip `wave_diverge_open`; they must
-// contain no dispatch. Positive control: the SpawnGateConfirm arm DOES launch — so
-// the scanner provably detects a dispatch when one exists. A mutant that makes
-// opening the diverge view re-launch the wave → RED.
+// The real dispatch/effect seam reuses the retained run; provider-count evidence is native.
 #[test]
 fn diverge_toggle_arms_never_dispatch() {
-    let event_loop = include_str!("../src/infrastructure/runtime/event_loop.rs");
-    let toggle_arms = event_loop
-        .split("InputAction::OpenDivergeView =>")
-        .nth(1)
-        .expect("OpenDivergeView arm must exist");
-    // Covers both OpenDivergeView and CloseDivergeView, bounded by the next arm.
-    let toggle_arms = toggle_arms
-        .split("InputAction::DismissWave =>")
-        .next()
-        .expect("toggle arms must be bounded by the next InputAction arm");
-
-    for dispatch in [
-        "launch_wave_request(",
-        "orchestrator",
-        "rerun_spoke",
-        "run_wave",
-    ] {
+    for from_list in [false, true] {
+        let handle = PaintWave::new(2);
+        let (mut h, tabs) = wave_stage(handle.clone());
+        h.state.wave_state = Some(WaveViewState::started(AgentId::root(), 2));
+        h.state.active_wave_id = Some(7);
+        h.state.rerunning_slot = Some(1);
+        if from_list {
+            apply_wave(&mut h, &tabs, 'r', InputAction::OpenWaveOverlay);
+        }
+        let retained = h.state.wave_run.as_ref().unwrap().clone();
+        let before = format!("{:?}", tabs.active_tab().view_state);
+        for _ in 0..3 {
+            apply_wave(&mut h, &tabs, 'd', InputAction::OpenDivergeView);
+            assert!(h.state.wave_diverge_open);
+            assert_eq!(
+                h.state.modal_stack.top().unwrap().surface,
+                Surface::WaveOverlay
+            );
+            apply_wave(&mut h, &tabs, 's', InputAction::CloseDivergeView);
+            assert!(!h.state.wave_diverge_open);
+            assert!(
+                h.state.modal_stack.is_empty(),
+                "without a drill, legacy s returns to the compact base"
+            );
+            assert!(Arc::ptr_eq(h.state.wave_run.as_ref().unwrap(), &retained));
+            assert!(h.state.wave_state.is_some());
+            assert_eq!(h.state.active_wave_id, Some(7));
+            assert_eq!(h.state.rerunning_slot, Some(1));
+            assert_eq!(format!("{:?}", tabs.active_tab().view_state), before);
+        }
+        assert_eq!(handle.drills.load(Ordering::SeqCst), 0);
+        assert_eq!(handle.cancels.load(Ordering::SeqCst), 0);
+        apply_wave(&mut h, &tabs, 'r', InputAction::OpenWaveOverlay);
+        let rerun = h.type_char('r');
+        assert_eq!(rerun, InputAction::WaveRerunSpoke(0));
         assert!(
-            !toggle_arms.contains(dispatch),
-            "the diverge toggle arms must never dispatch — found `{dispatch}`"
+            !wave_overlay::apply(&mut h.state, &tabs.active_tab().conversation.id, &rerun),
+            "the actual rerun action is outside the view-only effect boundary"
         );
+        assert!(wave_overlay::apply(
+            &mut h.state,
+            &tabs.active_tab().conversation.id,
+            &InputAction::WaveDrillSpoke(0)
+        ));
+        assert_eq!(
+            handle.drills.load(Ordering::SeqCst),
+            1,
+            "independent real handle-operation control"
+        );
+        handle.cancel();
+        assert_eq!(handle.cancels.load(Ordering::SeqCst), 1);
     }
-
-    // Positive control: a real dispatch IS detectable by this scan.
-    let confirm_arm = event_loop
-        .split("InputAction::SpawnGateConfirm =>")
-        .nth(1)
-        .expect("SpawnGateConfirm arm must exist");
-    let confirm_arm = confirm_arm
-        .split("InputAction::SpawnGateCap =>")
-        .next()
-        .expect("SpawnGateConfirm arm must be bounded");
-    assert!(
-        confirm_arm.contains("launch_wave_request("),
-        "positive control: SpawnGateConfirm must dispatch — else the scan is blind"
-    );
 }
 
 // ─── F1 (AI-12.3 post-review): the rerun arm is SUPERVISED (DN-1 parity) ──────

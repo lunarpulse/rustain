@@ -755,10 +755,7 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
                     && !matches!(
                         state.focus,
                         FocusState::Overlay(
-                            OverlayType::CrossSearch
-                                | OverlayType::BookmarkList
-                                | OverlayType::Confirmation(_)
-                                | OverlayType::WaveOverlay
+                            OverlayType::CrossSearch | OverlayType::Confirmation(_)
                         )
                     )
             }
@@ -1086,8 +1083,6 @@ pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
     };
     Some(match overlay {
         OverlayType::CrossSearch => Context::CrossSearch,
-        OverlayType::BookmarkList => Context::BookmarkList,
-        OverlayType::WaveOverlay => Context::WaveOverlay,
         _ => return None,
     })
 }
@@ -2068,7 +2063,10 @@ fn exec_bookmark(state: &mut TuiState, cmd: BookmarkCmd) -> InputAction {
         BookmarkCmd::Delete => InputAction::DeleteBookmark,
         BookmarkCmd::Undo => InputAction::UndoBookmarkDelete,
         BookmarkCmd::Jump => InputAction::JumpToBookmark,
-        BookmarkCmd::Close => InputAction::CloseBookmarkList,
+        BookmarkCmd::Close => {
+            crate::adapters::tui::handlers::bookmark::close(state);
+            InputAction::CloseBookmarkList
+        }
     }
 }
 
@@ -2138,27 +2136,19 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        // Esc unwinds the fan-out wave: the divergence view first, then the wave itself.
-        PanelCmd::WaveBack if state.wave_diverge_open => InputAction::CloseDivergeView,
-        PanelCmd::WaveBack => InputAction::DismissWave,
-        PanelCmd::WaveOpenOverlay => {
-            state.needs_redraw = true;
-            InputAction::OpenWaveOverlay
-        }
-        PanelCmd::WaveOpenDiverge => {
-            state.needs_redraw = true;
-            InputAction::OpenDivergeView
-        }
-        PanelCmd::WaveCloseDiverge => {
-            state.needs_redraw = true;
-            InputAction::CloseDivergeView
-        }
-        // From Chat focus open the wave overlay so a slot can be selected first (P3).
-        PanelCmd::WaveOpenFromChat => {
-            state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
-            state.wave_overlay_selected = 0;
-            state.needs_redraw = true;
-            InputAction::OpenWaveOverlay
+        PanelCmd::WaveBack
+        | PanelCmd::WaveOpenOverlay
+        | PanelCmd::WaveOpenDiverge
+        | PanelCmd::WaveCloseDiverge
+        | PanelCmd::WaveOpenFromChat
+        | PanelCmd::WaveNext
+        | PanelCmd::WavePrev
+        | PanelCmd::WaveDrill
+        | PanelCmd::WaveClose
+        | PanelCmd::WaveRerun
+        | PanelCmd::WaveDiverge
+        | PanelCmd::WaveDivergeClose => {
+            crate::adapters::tui::handlers::wave_overlay::command(state, cmd)
         }
         PanelCmd::ReorderCancel => {
             state.needs_redraw = true;
@@ -2246,24 +2236,6 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             // A zero-state panel still consumes the key (it must not reach the history).
             None => InputAction::Consumed,
         },
-        PanelCmd::WaveNext => {
-            if let Some(handle) = &state.wave_run {
-                let max = handle.snapshot().spoke_count.saturating_sub(1);
-                state.wave_overlay_selected = (state.wave_overlay_selected + 1).min(max);
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-        PanelCmd::WavePrev => {
-            state.wave_overlay_selected = state.wave_overlay_selected.saturating_sub(1);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        PanelCmd::WaveDrill => InputAction::WaveDrillSpoke(state.wave_overlay_selected),
-        PanelCmd::WaveClose => InputAction::CloseWaveOverlay,
-        PanelCmd::WaveRerun => InputAction::WaveRerunSpoke(state.wave_overlay_selected),
-        PanelCmd::WaveDiverge => InputAction::OpenDivergeView,
-        PanelCmd::WaveDivergeClose => InputAction::CloseDivergeView,
     })
 }
 
@@ -4616,13 +4588,17 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(BookmarkList)",
-                setup: overlay(OverlayType::BookmarkList),
+                label: "BookmarkList frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::BookmarkList);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(WaveOverlay)",
-                setup: overlay(OverlayType::WaveOverlay),
+                label: "WaveOverlay frame",
+                setup: Box::new(|s| {
+                    presentation::reducer::open(s, Surface::WaveOverlay);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
@@ -5027,7 +5003,8 @@ mod tests {
     }
 
     fn open_bookmark_list(state: &mut TuiState) {
-        state.focus = FocusState::Overlay(OverlayType::BookmarkList);
+        state.focus = FocusState::Chat;
+        presentation::reducer::open(state, Surface::BookmarkList);
         state.bookmark_list_selected = 0;
         // Mirror count for the clamp path — tests assume at least 5 entries
         // so j/Down advance freely within [0, 4].
@@ -5700,10 +5677,8 @@ mod tests {
             handle_input(&mut with_wave, &DomainInputEvent::KeyPress('r')),
             InputAction::OpenWaveOverlay
         );
-        assert_eq!(
-            with_wave.focus,
-            FocusState::Overlay(OverlayType::WaveOverlay)
-        );
+        assert!(presentation::is_open(&with_wave, Surface::WaveOverlay));
+        assert_eq!(with_wave.focus, FocusState::Chat);
     }
 
     #[test]
@@ -5879,7 +5854,7 @@ mod tests {
     #[test]
     fn ac1_esc_in_wave_overlay_closes_overlay() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
         assert_eq!(action, InputAction::CloseWaveOverlay);
     }
@@ -5887,7 +5862,7 @@ mod tests {
     #[test]
     fn ac1_enter_in_wave_overlay_drills_selected_slot() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         state.wave_overlay_selected = 1;
         let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
         assert_eq!(action, InputAction::WaveDrillSpoke(1));
@@ -5896,7 +5871,7 @@ mod tests {
     #[test]
     fn ac1_j_in_wave_overlay_advances_selection() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         state.wave_overlay_selected = 0;
         let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
         // With EmptyWaveHandle (0 spokes), selection stays clamped at 0
@@ -5907,7 +5882,7 @@ mod tests {
     #[test]
     fn ac1_k_in_wave_overlay_reverses_selection() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         state.wave_overlay_selected = 2;
         let _ = handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
         assert_eq!(state.wave_overlay_selected, 1);
@@ -5917,7 +5892,7 @@ mod tests {
     #[test]
     fn ac1_r_in_wave_overlay_reruns_selected_slot() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         state.wave_overlay_selected = 2;
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress('r'));
         assert_eq!(action, InputAction::WaveRerunSpoke(2));
@@ -5926,7 +5901,7 @@ mod tests {
     #[test]
     fn ac1_d_in_wave_overlay_opens_diverge() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
         assert_eq!(action, InputAction::OpenDivergeView);
     }
@@ -5934,7 +5909,7 @@ mod tests {
     #[test]
     fn ac1_s_in_wave_overlay_closes_diverge() {
         let mut state = state_with_wave();
-        state.focus = FocusState::Overlay(OverlayType::WaveOverlay);
+        presentation::reducer::open(&mut state, Surface::WaveOverlay);
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress('s'));
         assert_eq!(action, InputAction::CloseDivergeView);
     }
@@ -5990,9 +5965,14 @@ mod tests {
         // NOT a full dismiss.
         let mut state = state_with_wave();
         state.focus = FocusState::Chat;
-        state.wave_diverge_open = true;
+        let open = handle_input(&mut state, &DomainInputEvent::KeyPress('d'));
+        crate::adapters::tui::handlers::wave_overlay::apply(&mut state, "wave-stage", &open);
+        assert!(presentation::is_open(&state, Surface::WaveOverlay));
         let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
         assert_eq!(action, InputAction::CloseDivergeView);
+        crate::adapters::tui::handlers::wave_overlay::apply(&mut state, "wave-stage", &action);
+        assert!(!presentation::is_open(&state, Surface::WaveOverlay));
+        assert!(state.wave_run.is_some());
     }
 
     #[test]

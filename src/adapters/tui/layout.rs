@@ -18,52 +18,10 @@ pub struct AppLayout {
     pub tab_bar: Option<Rect>,
     /// Sidebar column (shown when sidebar_visible AND terminal_width >= 120).
     pub sidebar: Option<Rect>,
-    /// Bookmark list panel, reserved at the bottom of `chat_pane` when the
-    /// bookmark list overlay is active (Story 4-4 AC10). `None` when inactive.
-    /// Populated by `reserve_bookmark_panel`, which is wired up in Task 5
-    /// (bookmark list widget). The layout API is ready now so Task 5 doesn't
-    /// need to re-touch `compute_layout`.
-    #[allow(dead_code)]
-    pub bookmark_panel: Option<Rect>,
     /// Dashboard-mode panel area (Story 8.4b AC-4). When in Dashboard mode,
     /// 70% of the content area is reserved for panel widgets; the bottom 30%
     /// is compact chat. `None` in Focus/Monitor modes.
     pub dashboard_panel: Option<Rect>,
-}
-
-impl AppLayout {
-    /// Reserve a bottom panel slot of up to `requested_height` rows in
-    /// `chat_pane` for the bookmark list.
-    ///
-    /// Shrinks `chat_pane` upward, capping at half of `chat_pane.height` so
-    /// the conversation is never completely hidden. No-op when
-    /// `requested_height == 0` or `chat_pane.height < 4` (not enough room).
-    ///
-    /// Wired up by Task 5 (bookmark list widget). Exercised by `tests` below
-    /// so the method body is compiled and verified even while unused from the
-    /// production code path.
-    // Covers: Story 4-4 AC10 bottom panel layout
-    #[allow(dead_code)]
-    pub fn reserve_bookmark_panel(&mut self, requested_height: u16) {
-        if requested_height == 0 || self.chat_pane.height < 4 {
-            return;
-        }
-        let max_allowed = self.chat_pane.height / 2;
-        let panel_height = requested_height.min(max_allowed).max(1);
-        let panel = Rect {
-            x: self.chat_pane.x,
-            y: self.chat_pane.y + self.chat_pane.height - panel_height,
-            width: self.chat_pane.width,
-            height: panel_height,
-        };
-        self.chat_pane = Rect {
-            x: self.chat_pane.x,
-            y: self.chat_pane.y,
-            width: self.chat_pane.width,
-            height: self.chat_pane.height - panel_height,
-        };
-        self.bookmark_panel = Some(panel);
-    }
 }
 
 /// Minimum terminal width to show sidebar.
@@ -153,7 +111,6 @@ pub fn compute_layout(
             status_bar,
             input_area,
             sidebar: None,
-            bookmark_panel: None,
             dashboard_panel,
         });
     }
@@ -202,7 +159,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[2],
                 input_area: vertical_chunks[3],
                 sidebar: Some(sidebar_rect),
-                bookmark_panel: None,
                 dashboard_panel: None,
             })
         } else {
@@ -219,7 +175,6 @@ pub fn compute_layout(
                 status_bar: vertical_chunks[1],
                 input_area: vertical_chunks[2],
                 sidebar: Some(sidebar_rect),
-                bookmark_panel: None,
                 dashboard_panel: None,
             })
         }
@@ -238,7 +193,6 @@ pub fn compute_layout(
             status_bar: chunks[2],
             input_area: chunks[3],
             sidebar: None,
-            bookmark_panel: None,
             dashboard_panel: None,
         })
     } else {
@@ -255,7 +209,6 @@ pub fn compute_layout(
             status_bar: chunks[1],
             input_area: chunks[2],
             sidebar: None,
-            bookmark_panel: None,
             dashboard_panel: None,
         })
     }
@@ -264,76 +217,6 @@ pub fn compute_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_layout() -> AppLayout {
-        AppLayout {
-            chat_pane: Rect {
-                x: 0,
-                y: 0,
-                width: 80,
-                height: 20,
-            },
-            status_bar: Rect {
-                x: 0,
-                y: 20,
-                width: 80,
-                height: 1,
-            },
-            input_area: Rect {
-                x: 0,
-                y: 21,
-                width: 80,
-                height: 3,
-            },
-            tab_bar: None,
-            sidebar: None,
-            bookmark_panel: None,
-            dashboard_panel: None,
-        }
-    }
-
-    // The former Search reservation cases (one-row shrink, inactive no-op,
-    // undersized no-op) are obsolete: Search now overlays the unmodified Stage.
-    // Stage-top geometry and unchanged shell rectangles are covered by K8.
-
-    #[test]
-    fn reserve_bookmark_panel_shrinks_chat_pane_upward() {
-        let mut l = test_layout();
-        l.reserve_bookmark_panel(6);
-        assert_eq!(l.chat_pane.height, 14);
-        assert!(l.bookmark_panel.is_some());
-        let panel = l.bookmark_panel.unwrap();
-        assert_eq!(panel.height, 6);
-        assert_eq!(panel.y, 14);
-    }
-
-    #[test]
-    fn reserve_bookmark_panel_caps_at_half_chat_pane() {
-        let mut l = test_layout();
-        // 20-row chat pane; requesting 15 rows clamps to 10 (half).
-        l.reserve_bookmark_panel(15);
-        assert_eq!(l.bookmark_panel.unwrap().height, 10);
-        assert_eq!(l.chat_pane.height, 10);
-    }
-
-    #[test]
-    fn reserve_bookmark_panel_noop_when_zero_height() {
-        let mut l = test_layout();
-        let before = l.chat_pane;
-        l.reserve_bookmark_panel(0);
-        assert_eq!(l.chat_pane, before);
-        assert!(l.bookmark_panel.is_none());
-    }
-
-    #[test]
-    fn bookmark_reservation_keeps_the_unreserved_stage_origin() {
-        let mut l = test_layout();
-        l.reserve_bookmark_panel(4);
-        assert!(l.bookmark_panel.is_some());
-        // Search no longer reserves a top row (21.4 AC10); Bookmark remains legacy.
-        assert_eq!(l.chat_pane.y, 0);
-        assert_eq!(l.chat_pane.height, 20 - 4);
-    }
 
     // Story 8.4b layout tests
 

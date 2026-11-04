@@ -246,6 +246,15 @@ impl TestHarness {
 
     /// Render the actual active tab, including its view and TUI-owned cache.
     pub fn render_active_tab(&mut self, tabs: &rustain::domain::models::TabManager) {
+        self.render_current_stage(tabs, &tabs.active_tab().conversation);
+    }
+
+    /// Render the runtime's current proxy without saving its switch-time mirror.
+    pub fn render_current_stage(
+        &mut self,
+        tabs: &rustain::domain::models::TabManager,
+        conversation: &Conversation,
+    ) {
         let tab = tabs.active_tab();
         assert_eq!(self.state.active_tab_id, tab.id);
         let state = &mut self.state;
@@ -265,7 +274,7 @@ impl TestHarness {
                 let result = chat_pane::render_with_search(
                     frame,
                     app_layout.chat_pane,
-                    &tab.conversation,
+                    conversation,
                     tab.reducer.open_turn.as_ref(),
                     &tab.streaming,
                     &tab.view_state,
@@ -315,14 +324,15 @@ impl TestHarness {
                     state.input_scroll_offset,
                     None,
                 );
-                let shell = Shell::new(frame.area(), &app_layout);
+                let mut shell = Shell::new(frame.area(), &app_layout);
+                shell.stage = Some((conversation, &tab.session_meta.bookmarks));
                 presentation::compose(
                     frame,
                     state,
                     &shell,
                     rustain::adapters::tui::keymap::Host::Local,
                     &rustain::adapters::tui::notification_log::LogFacts {
-                        active_conversation_id: Some(tab.conversation.id.clone()),
+                        active_conversation_id: Some(conversation.id.clone()),
                         ..Default::default()
                     },
                     |_| {},

@@ -14,10 +14,12 @@
 //! appends itself (the whole printable range is one arm, not a row).
 
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::keymap::table::GlobalCmd;
+use rustain::adapters::tui::keymap::table_input::InputCmd;
 use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
-use rustain::adapters::tui::presentation::{Surface, is_open};
+use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::{OverlayType, PanelType};
@@ -63,7 +65,8 @@ fn search_state(navigating: bool) -> TuiState {
 /// The bookmark list open with five bookmarks, the third selected.
 fn bookmark_state() -> TuiState {
     let mut state = fresh();
-    state.focus = FocusState::Overlay(OverlayType::BookmarkList);
+    state.focus = FocusState::Chat;
+    reducer::open(&mut state, Surface::BookmarkList);
     state.bookmark_list_count = 5;
     state.bookmark_list_selected = 2;
     state
@@ -470,6 +473,7 @@ struct BookmarkSalient {
     selected: usize,
     count: usize,
     input: String,
+    frames: Vec<Surface>,
 }
 
 fn bookmark_salient(state: &TuiState) -> BookmarkSalient {
@@ -478,6 +482,11 @@ fn bookmark_salient(state: &TuiState) -> BookmarkSalient {
         selected: state.bookmark_list_selected,
         count: state.bookmark_list_count,
         input: state.input_buffer.clone(),
+        frames: state
+            .modal_stack
+            .iter()
+            .map(|frame| frame.surface)
+            .collect(),
     }
 }
 
@@ -516,6 +525,10 @@ fn bookmark_witness(cmd: BookmarkCmd, keys: &[Key]) {
         BookmarkCmd::Jump => assert_eq!(press(&mut state, key), InputAction::JumpToBookmark),
         BookmarkCmd::Close => assert_eq!(press(&mut state, key), InputAction::CloseBookmarkList),
     }
+    assert_eq!(
+        is_open(&state, Surface::BookmarkList),
+        cmd != BookmarkCmd::Close
+    );
 }
 
 #[test]
@@ -535,6 +548,26 @@ fn every_bookmark_row_resolves_to_its_command_by_value() {
                     before,
                     "S-QUIT keeps the exact bookmark list"
                 );
+            }
+            CommandId::Global(GlobalCmd::OpenLeader) | CommandId::Input(InputCmd::OpenPalette) => {
+                let mut state = bookmark_state();
+                let caller = state.modal_stack.top().unwrap().id;
+                let before = bookmark_salient(&state);
+                assert!(is_inert(&press(&mut state, row.keys[0])));
+                assert!(state.modal_stack.iter().any(|frame| frame.id == caller));
+                assert_eq!(state.focus, before.focus);
+                assert_eq!(state.bookmark_list_selected, before.selected);
+                assert_eq!(state.bookmark_list_count, before.count);
+                assert_eq!(state.input_buffer, before.input);
+                if row.command == CommandId::Global(GlobalCmd::OpenLeader) {
+                    assert!(state.pending_leader.is_some());
+                    assert_eq!(state.modal_stack.top().unwrap().id, caller);
+                } else {
+                    assert_eq!(
+                        state.modal_stack.top().unwrap().surface,
+                        Surface::CommandPalette
+                    );
+                }
             }
             _ => panic!("unexpected BookmarkList row {row:?}"),
         }

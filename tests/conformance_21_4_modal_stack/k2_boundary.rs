@@ -986,3 +986,266 @@ fn reverse_search_accept_and_cancel_promote_and_paint_the_exact_queued_request()
         assert_permission_painted(&mut h, &tabs, &id);
     }
 }
+
+#[tokio::test]
+async fn every_bookmark_close_effect_promotes_and_paints_the_queued_request() {
+    use rustain::adapters::{filesystem::FileSystemStorage, tui::handlers::bookmark};
+    for path in [
+        "esc",
+        "ctrl-c",
+        "jump",
+        "empty-jump",
+        "invalid-jump",
+        "last-delete",
+        "close",
+        "empty-open",
+        "wrong-stage",
+    ] {
+        let (mut h, mut tabs) = super::stage_support::stage(80, 24);
+        assert_eq!(
+            press(&mut h.state, Key::Char('\'')),
+            InputAction::OpenBookmarkList
+        );
+        bookmark::handle_apply_open_bookmark_list(
+            &tabs,
+            &mut h.state,
+            &tabs.active_tab().conversation,
+        );
+        assert!(
+            presentation::is_open(&h.state, Surface::BookmarkList),
+            "{path}: reachable owner"
+        );
+        let id = request_permission(&mut h.state);
+        assert_permission_deferred(&h.state, &id);
+        let mut conversation = tabs.active_tab().conversation.clone();
+        match path {
+            "esc" | "ctrl-c" => {
+                assert_eq!(
+                    press(
+                        &mut h.state,
+                        if path == "esc" {
+                            Key::Esc
+                        } else {
+                            Key::Ctrl('c')
+                        }
+                    ),
+                    InputAction::CloseBookmarkList
+                );
+            }
+            "jump" | "empty-jump" | "invalid-jump" | "wrong-stage" => {
+                if path == "empty-jump" {
+                    tabs.active_tab_mut().session_meta.bookmarks.clear();
+                }
+                if path == "invalid-jump" {
+                    tabs.active_tab_mut().session_meta.bookmarks = vec![999];
+                }
+                if path == "wrong-stage" {
+                    conversation.id = "not-the-owned-stage".into();
+                }
+                assert_eq!(press(&mut h.state, Key::Enter), InputAction::JumpToBookmark);
+                bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
+            }
+            "last-delete" => {
+                tabs.active_tab_mut().session_meta.bookmarks = vec![0];
+                let dir = tempfile::tempdir().unwrap();
+                let storage = FileSystemStorage::new(dir.path().join("sessions"));
+                assert_eq!(
+                    press(&mut h.state, Key::Char('d')),
+                    InputAction::DeleteBookmark
+                );
+                bookmark::handle_apply_delete_bookmark(
+                    &mut tabs,
+                    &mut h.state,
+                    &conversation,
+                    &storage,
+                )
+                .await;
+                assert!(tabs.active_tab().session_meta.bookmarks.is_empty());
+            }
+            "empty-open" => {
+                tabs.active_tab_mut().session_meta.bookmarks.clear();
+                bookmark::handle_apply_open_bookmark_list(
+                    &tabs,
+                    &mut h.state,
+                    &tabs.active_tab().conversation,
+                );
+            }
+            "close" => bookmark::close(&mut h.state),
+            _ => unreachable!(),
+        }
+        assert!(
+            !presentation::is_open(&h.state, Surface::BookmarkList),
+            "{path}"
+        );
+        assert_permission_painted(&mut h, &tabs, &id);
+        // Runtime's repeated close must not overwrite the newly promoted card.
+        bookmark::close(&mut h.state);
+        assert_eq!(
+            h.state.pending_permission.as_ref().map(|p| &p.id),
+            Some(&id)
+        );
+    }
+}
+
+#[test]
+fn covered_bookmark_effects_do_not_promote_until_the_last_owner_releases() {
+    use rustain::adapters::tui::handlers::bookmark;
+    for close in [false, true] {
+        let (mut h, mut tabs) = super::stage_support::stage(80, 24);
+        bookmark::handle_apply_open_bookmark_list(
+            &tabs,
+            &mut h.state,
+            &tabs.active_tab().conversation,
+        );
+        press(&mut h.state, Key::Ctrl('x'));
+        press(&mut h.state, Key::Char('?'));
+        let help = h.state.modal_stack.top().cloned().unwrap();
+        assert_eq!(help.surface, Surface::Help);
+        let id = request_permission(&mut h.state);
+        if close {
+            bookmark::close(&mut h.state);
+        } else {
+            let conversation = tabs.active_tab().conversation.clone();
+            let view = super::stage_support::view(&tabs);
+            bookmark::handle_apply_jump_bookmark(&mut tabs, &mut h.state, &conversation);
+            assert_eq!(super::stage_support::view(&tabs), view);
+            assert!(presentation::is_open(&h.state, Surface::BookmarkList));
+        }
+        assert_eq!(h.state.modal_stack.top(), Some(&help));
+        assert_permission_deferred(&h.state, &id);
+        press(&mut h.state, Key::Esc);
+        if !close {
+            assert_permission_deferred(&h.state, &id);
+            press(&mut h.state, Key::Esc);
+        }
+        assert_permission_painted(&mut h, &tabs, &id);
+    }
+}
+
+#[test]
+fn every_wave_close_effect_promotes_and_paints_without_cancelling_the_run() {
+    use rustain::adapters::tui::handlers::wave_overlay;
+    use std::sync::Arc;
+    for path in [
+        "esc",
+        "ctrl-c",
+        "direct-div-esc",
+        "direct-div-ctrl-c",
+        "list-div-esc",
+        "list-div-s",
+        "close",
+        "dismiss",
+        "covered-close",
+    ] {
+        let (mut h, tabs) = super::stage_support::stage(80, 24);
+        let run: Arc<dyn rustain::domain::ports::wave_handle::WaveHandle> =
+            Arc::new(super::keymap_support::StubWave(3));
+        h.state.wave_run = Some(run.clone());
+        let conversation_id = &tabs.active_tab().conversation.id;
+        let open = press(
+            &mut h.state,
+            if path.starts_with("direct-div") {
+                Key::Char('d')
+            } else {
+                Key::Char('r')
+            },
+        );
+        wave_overlay::apply(&mut h.state, conversation_id, &open);
+        if path.starts_with("list-div") {
+            let action = press(&mut h.state, Key::Char('d'));
+            wave_overlay::apply(&mut h.state, conversation_id, &action);
+        }
+        assert!(
+            presentation::is_open(&h.state, Surface::WaveOverlay),
+            "{path}: actual opener"
+        );
+        let cover = if path == "covered-close" {
+            press(&mut h.state, Key::Ctrl('x'));
+            press(&mut h.state, Key::Char('?'));
+            Some(h.state.modal_stack.top().cloned().unwrap())
+        } else {
+            None
+        };
+        let id = request_permission(&mut h.state);
+        assert_permission_deferred(&h.state, &id);
+        let action = match path {
+            "close" | "covered-close" => InputAction::CloseWaveOverlay,
+            "dismiss" => InputAction::DismissWave,
+            "ctrl-c" | "direct-div-ctrl-c" => press(&mut h.state, Key::Ctrl('c')),
+            "list-div-s" => press(&mut h.state, Key::Char('s')),
+            _ => press(&mut h.state, Key::Esc),
+        };
+        wave_overlay::apply(&mut h.state, conversation_id, &action);
+        if let Some(cover) = cover {
+            assert!(
+                presentation::is_open(&h.state, Surface::WaveOverlay),
+                "a covered foreground action is ignored"
+            );
+            assert_eq!(h.state.modal_stack.top(), Some(&cover));
+            assert_permission_deferred(&h.state, &id);
+            press(&mut h.state, Key::Esc);
+            assert_permission_deferred(&h.state, &id);
+            wave_overlay::apply(
+                &mut h.state,
+                conversation_id,
+                &InputAction::CloseWaveOverlay,
+            );
+        }
+        assert!(
+            !presentation::is_open(&h.state, Surface::WaveOverlay),
+            "{path}"
+        );
+        assert_permission_painted(&mut h, &tabs, &id);
+        if path == "dismiss" {
+            assert!(h.state.wave_run.is_none());
+        } else {
+            assert!(Arc::ptr_eq(h.state.wave_run.as_ref().unwrap(), &run));
+        }
+    }
+}
+
+#[test]
+fn stage_reconcile_releases_the_last_owner_without_clobbering_its_promoted_card() {
+    use rustain::adapters::tui::handlers::{bookmark, wave_overlay};
+    use rustain::infrastructure::runtime::event_loop::replace_stage_conversation;
+    for wave in [false, true] {
+        for covered in [false, true] {
+            let (mut h, mut tabs) = super::stage_support::stage(80, 24);
+            if wave {
+                h.state.wave_run = Some(std::sync::Arc::new(super::keymap_support::StubWave(3)));
+                let action = press(&mut h.state, Key::Char('r'));
+                wave_overlay::apply(&mut h.state, &tabs.active_tab().conversation.id, &action);
+            } else {
+                bookmark::handle_apply_open_bookmark_list(
+                    &tabs,
+                    &mut h.state,
+                    &tabs.active_tab().conversation,
+                );
+            }
+            if covered {
+                press(&mut h.state, Key::Ctrl('x'));
+                press(&mut h.state, Key::Char('?'));
+            }
+            let global = covered.then(|| h.state.modal_stack.top().cloned().unwrap());
+            let id = request_permission(&mut h.state);
+            assert_permission_deferred(&h.state, &id);
+            let replacement = rustain::domain::models::Conversation::default();
+            replace_stage_conversation(
+                &mut tabs.active_tab_mut().conversation,
+                &mut h.state,
+                replacement,
+            );
+            // This is the normal post-load/reset base target in the production arms.
+            presentation::reducer::settle_stage_base(
+                &mut h.state,
+                rustain::domain::models::FocusState::Input,
+            );
+            if let Some(global) = global {
+                assert_eq!(h.state.modal_stack.top(), Some(&global));
+                assert_permission_deferred(&h.state, &id);
+                press(&mut h.state, Key::Esc);
+            }
+            assert_permission_painted(&mut h, &tabs, &id);
+        }
+    }
+}

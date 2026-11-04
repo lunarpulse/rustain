@@ -36,7 +36,7 @@ fn search_action_inner(
         if reducer::initialize_surface(state, Surface::Search) {
             state.search_state.pre_search_view = Some(tabs.active_tab().view_state.clone());
             state.search_state.owning_tab = Some(tabs.active_tab_id());
-            reducer::bind_search_stage(state, &conversation.id);
+            reducer::bind_stage(state, Surface::Search, &conversation.id);
             sync_view(tabs, state);
             state.needs_redraw = true;
         }
