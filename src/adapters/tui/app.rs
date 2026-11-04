@@ -8,6 +8,7 @@ use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_panels::PanelCmd;
 use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
+use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::presentation::{self, Surface, reducer};
 use crate::adapters::tui::state::{Direction, TuiState};
 use crate::adapters::tui::text_geometry as geom;
@@ -286,13 +287,9 @@ pub enum InputAction {
     /// `N` (Shift+n) in Navigating — reverse focused match (wraps at start).
     // Covers: Story 4-4, AC3
     SearchPrev,
-    /// `Ctrl+U` — clear query, stay in Typing sub-state.
-    // Covers: Story 4-4, AC3 (Reviewer Fix 4)
-    SearchClear,
-    /// Printable char or Backspace in Navigating — return to Typing and
-    /// re-apply the keystroke so the user can refine the query without
-    /// pressing Esc. The char has already been appended / removed by
-    /// `handle_input`.
+    /// A content edit in Navigating returns to Typing and rescans. The owning
+    /// TextField has already applied it at its caret; motions and unchanged
+    /// edits return `Consumed` instead, without rescanning or navigating.
     // Covers: Story 4-4, AC3 amendment
     SearchReturnToTyping,
     /// Toggle bookmark on the currently focused message (m in Chat focus).
@@ -1198,7 +1195,6 @@ fn typed_before_rows(state: &mut TuiState, context: Context, key: Key) -> Option
 /// A key without a row: typing where the context is a text field, else its default
 /// (overlays consume every other key, the other contexts ignore it).
 fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
-    use crate::adapters::tui::state::SearchSubstate;
     let ignores = matches!(
         context,
         Context::Global
@@ -1231,34 +1227,11 @@ fn rowless(state: &mut TuiState, context: Context, key: Key) -> InputAction {
         };
     };
     match context {
-        Context::CommandPalette => {
-            if state.command_palette.filter_text.is_empty()
-                && let Some(scope) =
-                    crate::adapters::palette_registry::PaletteRegistry::scope_for_prefix(c)
-            {
-                state.command_palette.current_scope = Some(scope);
-            }
-            state.command_palette.filter_text.push(c);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        Context::ReverseSearch => {
-            state.reverse_search.query.push(c);
-            update_reverse_search_matches(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        Context::SearchTyping => {
-            state.search_state.query.push(c);
-            state.needs_redraw = true;
-            InputAction::SearchQueryChanged
-        }
-        Context::SearchNavigating => {
-            // Any other printable returns to typing and appends itself.
-            state.search_state.substate = SearchSubstate::Typing;
-            state.search_state.query.push(c);
-            state.needs_redraw = true;
-            InputAction::SearchReturnToTyping
+        context @ (Context::CommandPalette
+        | Context::ReverseSearch
+        | Context::SearchTyping
+        | Context::SearchNavigating) => {
+            edit_query(state, context, |field| field.insert_char(c)).expect("query context")
         }
         Context::CrossSearch => {
             state.cross_search.query.push(c);
@@ -1292,7 +1265,7 @@ fn execute(
         CommandId::Field(cmd) => exec_field(state, context, cmd),
         CommandId::Chat(cmd) => exec_chat(state, cmd, keys),
         CommandId::Sidebar(cmd) => exec_sidebar(state, cmd),
-        CommandId::Search(cmd) => exec_search(state, cmd),
+        CommandId::Search(cmd) => exec_search(cmd),
         CommandId::Bookmark(cmd) => exec_bookmark(state, cmd),
         CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
@@ -1763,24 +1736,19 @@ fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
     }
 }
 
-/// Editing keys of an append-only text field (A4): `context` names the field.
+/// Edit the owning query, or retain tail semantics for an unmigrated field.
 fn exec_field(state: &mut TuiState, context: Context, cmd: FieldCmd) -> InputAction {
+    if let Some(action) = edit_query(state, context, |field| field.edit(cmd)) {
+        return action;
+    }
     let key = match cmd {
         FieldCmd::DeleteWordBack => DomainKey::CtrlW,
         FieldCmd::Clear => DomainKey::CtrlU,
         FieldCmd::DeleteBack => DomainKey::CtrlH,
-        FieldCmd::NoCursor => return InputAction::Consumed,
+        _ => return InputAction::Consumed,
     };
     match context {
-        Context::CommandPalette => palette_edit(state, key),
-        Context::SearchTyping | Context::SearchNavigating => search_edit(state, key),
         Context::CrossSearch => cross_search_edit(state, key),
-        Context::ReverseSearch => {
-            edit_field(&mut state.reverse_search.query, key);
-            update_reverse_search_matches(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
         Context::ModelSelector => {
             if state.model_selector.search_active {
                 edit_field(&mut state.model_selector.search_query, key);
@@ -1991,38 +1959,66 @@ fn sidebar_move(state: &mut TuiState, down: bool) -> InputAction {
     InputAction::Consumed
 }
 
-fn exec_search(state: &mut TuiState, cmd: SearchCmd) -> InputAction {
+fn exec_search(cmd: SearchCmd) -> InputAction {
     match cmd {
         SearchCmd::Close => InputAction::CloseSearch,
         SearchCmd::Commit => InputAction::SearchCommit,
-        SearchCmd::DeleteBack | SearchCmd::DeleteBackToTyping => {
-            search_edit(state, DomainKey::Backspace)
-        }
-        SearchCmd::ClearQuery => {
-            state.search_state.query.clear();
-            state.search_state.matches.clear();
-            state.search_state.focused_match_index = 0;
-            state.search_state.substate = crate::adapters::tui::state::SearchSubstate::Typing;
-            state.needs_redraw = true;
-            InputAction::SearchClear
-        }
         SearchCmd::NextMatch => InputAction::SearchNext,
         SearchCmd::PrevMatch => InputAction::SearchPrev,
     }
 }
 
-/// Edit the search query tail; in the navigating sub-state the edit returns to typing.
-fn search_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
+/// Edit only the owning field; cursor-only changes redraw but never rescan.
+fn edit_query(
+    state: &mut TuiState,
+    context: Context,
+    edit: impl FnOnce(&mut TextField) -> bool,
+) -> Option<InputAction> {
     use crate::adapters::tui::state::SearchSubstate;
-    let navigating = matches!(state.search_state.substate, SearchSubstate::Navigating);
-    state.search_state.substate = SearchSubstate::Typing;
-    edit_field(&mut state.search_state.query, key);
+    let changed = match context {
+        Context::CommandPalette => {
+            let changed = edit(&mut state.command_palette.filter_text);
+            if changed {
+                state.command_palette.current_scope = state
+                    .command_palette
+                    .filter_text
+                    .as_str()
+                    .chars()
+                    .next()
+                    .and_then(crate::adapters::palette_registry::PaletteRegistry::scope_for_prefix);
+            }
+            changed
+        }
+        Context::ReverseSearch => edit(&mut state.reverse_search.query),
+        Context::SearchTyping | Context::SearchNavigating => {
+            state.search_state.substate = SearchSubstate::Typing;
+            edit(&mut state.search_state.query)
+        }
+        _ => return None,
+    };
     state.needs_redraw = true;
-    if navigating {
-        InputAction::SearchReturnToTyping
+    Some(if !changed {
+        InputAction::Consumed
     } else {
-        InputAction::SearchQueryChanged
+        match context {
+            Context::ReverseSearch => {
+                update_reverse_search_matches(state);
+                InputAction::Consumed
+            }
+            Context::SearchNavigating => InputAction::SearchReturnToTyping,
+            Context::SearchTyping => InputAction::SearchQueryChanged,
+            _ => InputAction::Consumed,
+        }
+    })
+}
+
+/// The borrowed paste seam edits only fields actually offered by this host.
+pub(crate) fn paste_query(state: &mut TuiState, text: &str, host: Host) -> Option<InputAction> {
+    let context = focus_context(state)?;
+    if host == Host::Attached && context != Context::CommandPalette {
+        return None;
     }
+    edit_query(state, context, |field| field.insert(text))
 }
 
 fn cross_search_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
@@ -2306,18 +2302,6 @@ fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
         _ => {}
     }
     state.needs_redraw = true;
-    InputAction::Consumed
-}
-
-/// Edit the palette filter (A4); the scope resets when the prefix character is deleted.
-fn palette_edit(state: &mut TuiState, key: DomainKey) -> InputAction {
-    if !state.command_palette.filter_text.is_empty() {
-        edit_field(&mut state.command_palette.filter_text, key);
-        if state.command_palette.filter_text.is_empty() {
-            state.command_palette.current_scope = None;
-        }
-        state.needs_redraw = true;
-    }
     InputAction::Consumed
 }
 
@@ -3471,7 +3455,6 @@ fn exec_palette(state: &mut TuiState, cmd: OverlayCmd, host: Host) -> InputActio
             presentation::reducer::close(state, Surface::CommandPalette);
             InputAction::Consumed
         }
-        OverlayCmd::PaletteBackspace => palette_edit(state, DomainKey::Backspace),
         OverlayCmd::QuitRequest => InputAction::Quit,
         _ => InputAction::Consumed,
     }
@@ -3620,12 +3603,6 @@ fn exec_reverse_search_keys(state: &mut TuiState, cmd: OverlayCmd) -> InputActio
             }
             InputAction::Consumed
         }
-        OverlayCmd::RevBackspace => {
-            edit_field(&mut state.reverse_search.query, DomainKey::Backspace);
-            update_reverse_search_matches(state);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
         _ => InputAction::Consumed,
     }
 }
@@ -3633,7 +3610,9 @@ fn exec_reverse_search_keys(state: &mut TuiState, cmd: OverlayCmd) -> InputActio
 /// Update reverse search matches from current query.
 fn update_reverse_search_matches(state: &mut TuiState) {
     let old_selected = state.reverse_search.selected_match;
-    let results = state.input_history.search(&state.reverse_search.query);
+    let results = state
+        .input_history
+        .search(state.reverse_search.query.as_str());
     state.reverse_search.matches = results
         .into_iter()
         .map(|(i, s)| (i, s.to_string()))
@@ -4744,7 +4723,7 @@ mod tests {
         assert_eq!(state.focus, FocusState::Input);
         assert!(presentation::is_open(&state, Surface::Search));
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
-        assert_eq!(state.search_state.query, "");
+        assert_eq!(state.search_state.query.as_str(), "");
     }
 
     #[test]
@@ -4811,7 +4790,7 @@ mod tests {
         for c in "nginx".chars() {
             handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
-        assert_eq!(state.search_state.query, "nginx");
+        assert_eq!(state.search_state.query.as_str(), "nginx");
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
     }
 
@@ -4850,13 +4829,13 @@ mod tests {
     fn printable_char_in_navigating_returns_to_typing_and_appends() {
         let mut state = make_state();
         open_search(&mut state);
-        state.search_state.query = "foo".to_string();
+        state.search_state.query = "foo".into();
         state.search_state.substate = SearchSubstate::Navigating;
         // Typing 'x' while in Navigating should return to Typing AND append 'x'
         // so the user can refine without pressing Esc.
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
         assert_eq!(action, InputAction::SearchReturnToTyping);
-        assert_eq!(state.search_state.query, "foox");
+        assert_eq!(state.search_state.query.as_str(), "foox");
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
     }
 
@@ -4864,11 +4843,11 @@ mod tests {
     fn ctrl_u_clears_query_and_stays_in_typing() {
         let mut state = make_state();
         open_search(&mut state);
-        state.search_state.query = "something".to_string();
+        state.search_state.query = "something".into();
         state.search_state.substate = SearchSubstate::Navigating;
         let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlU));
-        assert_eq!(action, InputAction::SearchClear);
-        assert_eq!(state.search_state.query, "");
+        assert_eq!(action, InputAction::SearchReturnToTyping);
+        assert_eq!(state.search_state.query.as_str(), "");
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
     }
 
@@ -4876,27 +4855,27 @@ mod tests {
     fn backspace_in_typing_pops_query_and_requests_rescan() {
         let mut state = make_state();
         open_search(&mut state);
-        state.search_state.query = "hello".to_string();
+        state.search_state.query = "hello".into();
         let action = handle_input(
             &mut state,
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
         assert_eq!(action, InputAction::SearchQueryChanged);
-        assert_eq!(state.search_state.query, "hell");
+        assert_eq!(state.search_state.query.as_str(), "hell");
     }
 
     #[test]
     fn backspace_in_navigating_returns_to_typing_and_pops() {
         let mut state = make_state();
         open_search(&mut state);
-        state.search_state.query = "hello".to_string();
+        state.search_state.query = "hello".into();
         state.search_state.substate = SearchSubstate::Navigating;
         let action = handle_input(
             &mut state,
             &DomainInputEvent::SpecialKey(DomainKey::Backspace),
         );
         assert_eq!(action, InputAction::SearchReturnToTyping);
-        assert_eq!(state.search_state.query, "hell");
+        assert_eq!(state.search_state.query.as_str(), "hell");
         assert_eq!(state.search_state.substate, SearchSubstate::Typing);
     }
 

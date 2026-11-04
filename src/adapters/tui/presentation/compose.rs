@@ -65,6 +65,11 @@ pub fn compose(
     let mut pane_painted = false;
     for (depth, modal) in state.modal_stack.iter().enumerate() {
         let mut rect = standard_rect;
+        let show_caret = state.pending_leader.is_none()
+            && state
+                .modal_stack
+                .top()
+                .is_some_and(|top| top.id == modal.id);
         for area in (modal.surface != Surface::Search)
             .then_some(shell.region)
             .into_iter()
@@ -94,7 +99,7 @@ pub fn compose(
                     breadcrumb.push_str("Search: ");
                     &breadcrumb
                 };
-                stage_search::render(frame, rect, &state.search_state, theme, label, false);
+                stage_search::render(frame, rect, &state.search_state, theme, label, show_caret);
             }
             Surface::CrossSearch => crate::adapters::tui::widgets::cross_search::render(
                 frame,
@@ -145,7 +150,7 @@ pub fn compose(
                 state.multiplexer_detected,
             ),
             Surface::CommandPalette => {
-                command_palette::render(frame, rect, &state.command_palette, theme)
+                command_palette::render(frame, rect, &state.command_palette, theme, show_caret)
             }
             Surface::ModelSelector => {
                 model_selector::render(frame, rect, &state.model_selector, theme)
@@ -218,7 +223,13 @@ pub fn compose(
     }
     if state.modal_stack.is_empty() && state.focus == crate::domain::models::FocusState::Input {
         autocomplete_popup::render(frame, shell.input_area, &state.autocomplete, theme);
-        reverse_search::render(frame, shell.chat_pane, &state.reverse_search, theme, true);
+        reverse_search::render(
+            frame,
+            shell.chat_pane,
+            &state.reverse_search,
+            theme,
+            state.pending_leader.is_none() && !state.autocomplete.is_open(),
+        );
     }
     if state.pending_leader.is_some()
         && state

@@ -455,7 +455,7 @@ fn test_reverse_search_flow() {
     handle_input(&mut state, &DomainInputEvent::KeyPress('t'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('h'));
 
-    assert_eq!(state.reverse_search.query, "auth");
+    assert_eq!(state.reverse_search.query.as_str(), "auth");
     assert_eq!(state.reverse_search.matches.len(), 2);
 
     // Enter selects the match

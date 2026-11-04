@@ -188,7 +188,7 @@ fn command_palette_rows_by_value_and_every_other_non_text_key_is_inert() {
         format!(
             "active={} filter={} sel={} focus={:?}",
             is_open(s, Surface::CommandPalette),
-            p.filter_text,
+            p.filter_text.as_str(),
             p.selected_index,
             s.focus
         )
@@ -517,7 +517,7 @@ fn reverse_search_rows_by_value_and_every_other_non_text_key_is_inert() {
         format!(
             "rev={} q={} sel={:?} m={} buf={} pal={} leader={} focus={:?}",
             r.is_open(),
-            r.query,
+            r.query.as_str(),
             r.selected_match,
             r.matches.len(),
             s.input_buffer,

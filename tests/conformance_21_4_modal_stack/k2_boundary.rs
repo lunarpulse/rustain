@@ -417,7 +417,7 @@ fn story21_4_a2a_help_palette_leader_preserve_the_frame_caller() {
     assert_eq!(state.help_overlay.scroll_offset, 1);
     press(&mut state, Key::Esc);
     assert_eq!(state.modal_stack.len(), 1);
-    assert_eq!(state.command_palette.filter_text, "mo");
+    assert_eq!(state.command_palette.filter_text.as_str(), "mo");
     press(&mut state, Key::Esc);
     assert!(state.modal_stack.is_empty());
     assert_eq!(state.input_buffer, "retained");
@@ -648,7 +648,7 @@ fn search_top(navigating: bool) -> (crate::e2e_harness::TestHarness, TabManager)
     (h, tabs)
 }
 
-fn assert_permission_deferred(state: &TuiState, id: &RequestId) {
+pub(super) fn assert_permission_deferred(state: &TuiState, id: &RequestId) {
     assert!(
         state.pending_permission.is_none(),
         "{id:?} must stay queued"
@@ -656,7 +656,7 @@ fn assert_permission_deferred(state: &TuiState, id: &RequestId) {
     assert_eq!(state.permission_queue.len(), 1);
 }
 
-fn assert_permission_painted(
+pub(super) fn assert_permission_painted(
     h: &mut crate::e2e_harness::TestHarness,
     tabs: &TabManager,
     id: &RequestId,
@@ -714,7 +714,8 @@ fn search_release_promotes_permission(key: Key, navigating: bool) {
         );
         assert_eq!(h.state.search_state.focused_match_index, 1);
         assert_eq!(
-            h.state.search_state.query, "needle",
+            h.state.search_state.query.as_str(),
+            "needle",
             "n navigates, not types"
         );
     }
@@ -787,7 +788,6 @@ fn search_top_routes_every_key_without_falling_through_to_the_composer_or_cards(
                         | InputAction::CloseSearch
                         | InputAction::SearchCommit
                         | InputAction::SearchQueryChanged
-                        | InputAction::SearchClear
                         | InputAction::SearchReturnToTyping
                         | InputAction::SearchNext
                         | InputAction::SearchPrev
@@ -803,7 +803,7 @@ fn search_top_routes_every_key_without_falling_through_to_the_composer_or_cards(
             assert!(h.state.pending_images.is_empty());
         }
         for event in [
-            DomainInputEvent::Paste("not the query or composer".into()),
+            DomainInputEvent::Paste("query paste, not composer input".into()),
             DomainInputEvent::ImagePaste(vec![1, 2, 3]),
         ] {
             let (mut h, mut tabs) = search_top(navigating);
@@ -823,18 +823,44 @@ fn search_top_routes_every_key_without_falling_through_to_the_composer_or_cards(
                 &conversation,
                 &action,
             );
-            assert_eq!(action, InputAction::Consumed);
+            if let DomainInputEvent::Paste(text) = &event {
+                assert_eq!(
+                    action,
+                    if navigating {
+                        InputAction::SearchReturnToTyping
+                    } else {
+                        InputAction::SearchQueryChanged
+                    }
+                );
+                assert_eq!(
+                    (h.state.input_buffer.clone(), h.state.cursor_position),
+                    (before.0, before.1)
+                );
+                assert_eq!(
+                    h.state.search_state.query.as_str(),
+                    format!("{}{text}", before.2.as_str())
+                );
+                assert_eq!(
+                    h.state.search_state.query.cursor(),
+                    before.2.cursor() + text.chars().count()
+                );
+                assert!(h.state.search_state.matches.is_empty());
+                assert_eq!(h.state.search_state.focused_match_index, 0);
+                assert_eq!(format!("{:?}", tabs.active_tab().view_state), before.4);
+            } else {
+                assert_eq!(action, InputAction::Consumed);
+                assert_eq!(
+                    (
+                        h.state.input_buffer.clone(),
+                        h.state.cursor_position,
+                        h.state.search_state.query.clone(),
+                        h.state.search_state.focused_match_index,
+                        format!("{:?}", tabs.active_tab().view_state)
+                    ),
+                    before
+                );
+            }
             assert_eq!(h.state.modal_stack.top(), frame.as_ref());
-            assert_eq!(
-                (
-                    h.state.input_buffer.clone(),
-                    h.state.cursor_position,
-                    h.state.search_state.query.clone(),
-                    h.state.search_state.focused_match_index,
-                    format!("{:?}", tabs.active_tab().view_state),
-                ),
-                before
-            );
             assert!(h.state.pending_images.is_empty());
         }
     }
@@ -859,7 +885,7 @@ fn search_context_switch_and_permission_controls_use_actual_dispatch() {
         search_press(&mut h.state, &mut tabs, Key::Char('y')),
         InputAction::SearchQueryChanged
     );
-    assert_eq!(h.state.search_state.query, "needley");
+    assert_eq!(h.state.search_state.query.as_str(), "needley");
     assert!(
         h.state.pending_permission.is_none(),
         "{id:?} must stay queued"

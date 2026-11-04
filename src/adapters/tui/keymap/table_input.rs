@@ -77,7 +77,7 @@ pub enum InputCmd {
     NoCursor,
 }
 
-/// Commands of the shared append-only text fields (A4).
+/// Commands shared by caret fields and the remaining legacy tail editors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FieldCmd {
     /// `Ctrl+W`: delete the last word of the field.
@@ -88,6 +88,12 @@ pub enum FieldCmd {
     DeleteBack,
     /// `Ctrl+A/E/K`: no cursor, so no effect.
     NoCursor,
+    LineStart,
+    LineEnd,
+    CursorLeft,
+    CursorRight,
+    DeleteForward,
+    KillToLineEnd,
 }
 
 fn no_cursor(_: &AvailCtx) -> Availability {
@@ -100,6 +106,10 @@ const fn i(keys: &'static [Key], cmd: InputCmd, label: &'static str) -> Binding 
 
 const fn f(keys: &'static [Key], cmd: FieldCmd) -> Binding {
     bind(Context::FieldEdit, keys, CommandId::Field(cmd), "")
+}
+
+const fn t(keys: &'static [Key], cmd: FieldCmd) -> Binding {
+    bind(Context::CaretField, keys, CommandId::Field(cmd), "").te()
 }
 
 const IN: HelpCat = HelpCat::Input;
@@ -143,8 +153,7 @@ const INPUT: &[Binding] = &[
     i(&[Key::PageDown], InputCmd::TranscriptPageDown, "").attached().does("Scroll the transcript one page down"),
 ];
 
-/// Append-only text fields (permission feedback, question answer, palette filter,
-/// search, cross-search, reverse search): the cursor sits at the end (A4).
+/// Legacy tail editors (feedback, answer, model selector and CrossSearch).
 #[rustfmt::skip]
 pub const FIELD: &[Binding] = &[
     f(&[Key::Ctrl('w')], FieldCmd::DeleteWordBack).does("Delete the last word of the field"),
@@ -153,6 +162,23 @@ pub const FIELD: &[Binding] = &[
     f(&[Key::Ctrl('a')], FieldCmd::NoCursor).avail(no_cursor).does("Move to the start of the field: it has no cursor, so nothing moves"),
     f(&[Key::Ctrl('e')], FieldCmd::NoCursor).avail(no_cursor).does("Move to the end of the field: it has no cursor, so nothing moves"),
     f(&[Key::Ctrl('k')], FieldCmd::NoCursor).avail(no_cursor).does("Delete to the end of the field: it has no cursor, so nothing is deleted"),
+];
+
+/// Caret fields inherit these rows; the composer's own rows retain precedence.
+#[rustfmt::skip]
+pub const TEXT: &[Binding] = &[
+    t(&[Key::Ctrl('a')], FieldCmd::LineStart).does("Move the field caret to the start of the current line"),
+    t(&[Key::Ctrl('e')], FieldCmd::LineEnd).does("Move the field caret to the end of the current line"),
+    t(&[Key::Ctrl('w')], FieldCmd::DeleteWordBack).does("Delete the word before the field caret"),
+    t(&[Key::Ctrl('u')], FieldCmd::Clear).does("Delete to the start of the current field line"),
+    t(&[Key::Ctrl('k')], FieldCmd::KillToLineEnd).does("Delete to the end of the current field line"),
+    t(&[Key::Ctrl('h')], FieldCmd::DeleteBack).does("Delete the grapheme before the field caret"),
+    t(&[Key::Backspace], FieldCmd::DeleteBack).does("Delete the grapheme before the field caret"),
+    t(&[Key::Delete], FieldCmd::DeleteForward).does("Delete the grapheme at the field caret"),
+    t(&[Key::Left], FieldCmd::CursorLeft).does("Move the field caret one grapheme left"),
+    t(&[Key::Right], FieldCmd::CursorRight).does("Move the field caret one grapheme right"),
+    t(&[Key::Home], FieldCmd::LineStart).does("Move the field caret to the start of the current line"),
+    t(&[Key::End], FieldCmd::LineEnd).does("Move the field caret to the end of the current line"),
 ];
 
 pub const ROWS: &[Binding] = INPUT;

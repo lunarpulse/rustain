@@ -1,5 +1,6 @@
 //! Bb1a smoke predicate controls: complete production frames, never native captures.
 use super::keymap_support::press;
+use super::stage_support::paste;
 use crate::e2e_harness::TestHarness;
 use rustain::adapters::tui::{
     handlers::search,
@@ -70,6 +71,7 @@ fn output_dir() -> Option<PathBuf> {
 fn capture(
     h: &mut TestHarness,
     tabs: &TabManager,
+    family: &str,
     stage: &str,
     full: bool,
     dir: &Option<PathBuf>,
@@ -84,6 +86,18 @@ fn capture(
         })
         .collect();
     let screen = rows.join("\n");
+    let reversed_cells: Vec<_> = buffer
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+        .map(|(index, _)| {
+            (
+                index % usize::from(buffer.area.width),
+                index / usize::from(buffer.area.width),
+            )
+        })
+        .collect();
     assert!(
         rows.iter().any(|row| row.contains("Ready")),
         "complete status: {screen}"
@@ -93,6 +107,8 @@ fn capture(
         h.terminal.backend().cursor_visible(),
         h.state.modal_stack.is_empty()
             && h.state.focus == rustain::domain::models::FocusState::Input
+            && h.state.pending_leader.is_none()
+            && !h.state.reverse_search.is_open()
     );
     if let Some(dir) = dir {
         let cursor = h.terminal.get_cursor_position().unwrap();
@@ -101,9 +117,10 @@ fn capture(
             "stage": stage, "full": full, "screen": screen,
             "draft": h.state.input_buffer, "cursor": [cursor.x, cursor.y],
             "cursor_hidden": !h.terminal.backend().cursor_visible(),
+            "reversed_cells": reversed_cells,
         });
         let name = format!(
-            "bb1a-{}x{}-{}-{stage}.json",
+            "{family}-{}x{}-{}-{stage}.json",
             h.state.terminal_width,
             h.state.terminal_height,
             if full { "full" } else { "normal" }
@@ -113,8 +130,8 @@ fn capture(
     screen
 }
 
-#[test]
-fn bb1a_real_frames_for_smoke_predicates() {
+#[tokio::test]
+async fn bb1a_real_frames_for_smoke_predicates() {
     let dir = output_dir();
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
         for full in [false, true] {
@@ -142,33 +159,47 @@ fn bb1a_real_frames_for_smoke_predicates() {
             let draft = if full { "1\n2\n3\n4\n5\n6\n7\n8" } else { "" };
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
-            let before = capture(&mut h, &tabs, "before", full, &dir);
+            let before = capture(&mut h, &tabs, "bb1a", "before", full, &dir);
             let view = format!("{:?}", tabs.active_tab().view_state);
             open(&mut h, &mut tabs, full);
             assert!(presentation::is_open(&h.state, Surface::Search));
-            capture(&mut h, &tabs, "search-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "search-unfiltered", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "search-unfiltered", full, &dir);
             text(&mut h, &mut tabs, "zzzz");
             assert!(h.state.search_state.matches.is_empty());
-            capture(&mut h, &tabs, "search-empty", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "search-empty", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "search-empty", full, &dir);
             key(&mut h, &mut tabs, Key::Esc);
             for keep in [false, true] {
                 open(&mut h, &mut tabs, full);
                 text(&mut h, &mut tabs, "A2b");
                 assert_eq!(h.state.search_state.matches.len(), 2);
-                capture(&mut h, &tabs, "search-filtered", full, &dir);
+                capture(&mut h, &tabs, "bb1a", "search-filtered", full, &dir);
+                if !keep {
+                    capture(&mut h, &tabs, "bb2a", "search-filtered", full, &dir);
+                    key(&mut h, &mut tabs, Key::Home);
+                    key(&mut h, &mut tabs, Key::Right);
+                    capture(&mut h, &tabs, "bb2a", "search-caret", full, &dir);
+                    paste(&mut h, &mut tabs, "x");
+                    capture(&mut h, &tabs, "bb2a", "search-pasted", full, &dir);
+                    key(&mut h, &mut tabs, Key::Ctrl('h'));
+                    capture(&mut h, &tabs, "bb2a", "search-refiltered", full, &dir);
+                    key(&mut h, &mut tabs, Key::End);
+                }
                 key(&mut h, &mut tabs, Key::Enter);
-                capture(&mut h, &tabs, "search-navigating-1", full, &dir);
+                capture(&mut h, &tabs, "bb1a", "search-navigating-1", full, &dir);
                 key(&mut h, &mut tabs, Key::Char('n'));
                 assert_eq!(h.state.search_state.focused_match_index, 1);
                 let matched_view = format!("{:?}", tabs.active_tab().view_state);
                 assert_ne!(matched_view, view, "long assistant jump must leave bottom");
-                let matched = capture(&mut h, &tabs, "search-navigating-2", full, &dir);
+                let matched = capture(&mut h, &tabs, "bb1a", "search-navigating-2", full, &dir);
                 assert!(matched.contains("Bb1a-row-01") && !matched.contains(REPLY));
                 key(&mut h, &mut tabs, if keep { Key::Enter } else { Key::Esc });
                 assert!(!presentation::is_open(&h.state, Surface::Search));
                 let after = capture(
                     &mut h,
                     &tabs,
+                    "bb1a",
                     if keep {
                         "search-kept"
                     } else {
@@ -201,17 +232,27 @@ fn bb1a_real_frames_for_smoke_predicates() {
                 h.state.input_history.push(entry.into());
             }
             key(&mut h, &mut tabs, Key::Ctrl('r'));
-            capture(&mut h, &tabs, "reverse-open", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-open", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "reverse-unfiltered", full, &dir);
             text(&mut h, &mut tabs, "a1-");
             assert_eq!(h.state.reverse_search.matches.len(), 3);
-            capture(&mut h, &tabs, "reverse-filtered", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-filtered", full, &dir);
+            capture(&mut h, &tabs, "bb2a", "reverse-filtered", full, &dir);
+            key(&mut h, &mut tabs, Key::Home);
+            key(&mut h, &mut tabs, Key::Right);
+            capture(&mut h, &tabs, "bb2a", "reverse-caret", full, &dir);
+            paste(&mut h, &mut tabs, "x");
+            capture(&mut h, &tabs, "bb2a", "reverse-pasted", full, &dir);
+            key(&mut h, &mut tabs, Key::Ctrl('h'));
+            capture(&mut h, &tabs, "bb2a", "reverse-refiltered", full, &dir);
+            key(&mut h, &mut tabs, Key::End);
             key(&mut h, &mut tabs, Key::Ctrl('r'));
             assert_eq!(h.state.reverse_search.selected_match, Some(1));
-            capture(&mut h, &tabs, "reverse-cycled", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-cycled", full, &dir);
             key(&mut h, &mut tabs, Key::Enter);
             assert_eq!(h.state.input_buffer, "/a1-second-invalid ");
             assert!(!h.state.reverse_search.is_open());
-            capture(&mut h, &tabs, "reverse-accepted", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-accepted", full, &dir);
             h.state.input_buffer = draft.into();
             h.state.cursor_position = draft.chars().count();
             key(&mut h, &mut tabs, Key::Ctrl('r'));
@@ -223,7 +264,46 @@ fn bb1a_real_frames_for_smoke_predicates() {
                 h.state.modal_stack.is_empty(),
                 "ReverseSearch is never a frame"
             );
-            capture(&mut h, &tabs, "reverse-restored", full, &dir);
+            capture(&mut h, &tabs, "bb1a", "reverse-restored", full, &dir);
+            key(&mut h, &mut tabs, Key::Ctrl('p'));
+            let mut commands = rustain::adapters::command_registry::CommandRegistry::new();
+            let mut palette = rustain::adapters::palette_registry::PaletteRegistry::new();
+            let mut gate = rustain::adapters::tui::palette_gate::PaletteGate::new();
+            let workspace = tempfile::tempdir().unwrap();
+            gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
+                .await;
+            let unfiltered_count = h.state.command_palette.filtered_entries.len();
+            capture(&mut h, &tabs, "bb2a", "palette-unfiltered", full, &dir);
+            paste(&mut h, &mut tabs, "/ml");
+            gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
+                .await;
+            assert!(
+                h.state
+                    .command_palette
+                    .filtered_entries
+                    .iter()
+                    .any(|entry| entry.name == "/ml")
+            );
+            assert!(h.state.command_palette.filtered_entries.len() < unfiltered_count);
+            capture(&mut h, &tabs, "bb2a", "palette-filtered", full, &dir);
+            key(&mut h, &mut tabs, Key::Home);
+            key(&mut h, &mut tabs, Key::Right);
+            capture(&mut h, &tabs, "bb2a", "palette-caret", full, &dir);
+            paste(&mut h, &mut tabs, "~");
+            gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
+                .await;
+            assert!(h.state.command_palette.filtered_entries.is_empty());
+            capture(&mut h, &tabs, "bb2a", "palette-pasted", full, &dir);
+            key(&mut h, &mut tabs, Key::Ctrl('k'));
+            gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
+                .await;
+            capture(&mut h, &tabs, "bb2a", "palette-killed", full, &dir);
+            key(&mut h, &mut tabs, Key::Ctrl('u'));
+            gate.sync(&mut h.state, &mut commands, &mut palette, workspace.path())
+                .await;
+            capture(&mut h, &tabs, "bb2a", "palette-cleared", full, &dir);
+            key(&mut h, &mut tabs, Key::Esc);
+            assert_eq!(h.state.input_buffer, draft);
         }
     }
 }
@@ -280,7 +360,7 @@ fn bb1b_capture(
     full: bool,
     dir: &Option<PathBuf>,
 ) {
-    let screen = capture(h, tabs, stage, full, &None);
+    let screen = capture(h, tabs, "bb1a", stage, full, &None);
     if let Some(dir) = dir {
         let buffer = h.terminal.backend().buffer();
         let reversed: Vec<usize> = (0..buffer.area.height)

@@ -467,7 +467,7 @@ fn test_e2e_help_blocked_during_command_palette() {
     assert!(!is_open(&h.state, Surface::Help));
 
     // ? should appear in filter text
-    assert!(h.state.command_palette.filter_text.contains('?'));
+    assert!(h.state.command_palette.filter_text.as_str().contains('?'));
 }
 
 /// Covers: Ctrl+X, ? chord opens help

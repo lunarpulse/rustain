@@ -131,7 +131,7 @@ fn test_command_palette_frontdoor_open_dismiss() {
 #[test]
 fn test_command_palette_reset_and_clear_only_change_payload() {
     let mut state = CommandPaletteState::new();
-    state.filter_text = "stale".to_owned();
+    state.filter_text = "stale".into();
     state.filtered_entries = vec![make_entry("/old", "Old", PaletteScope::SlashCommand)];
     state.selected_index = 3;
     state.scroll_offset = 2;
@@ -144,7 +144,7 @@ fn test_command_palette_reset_and_clear_only_change_payload() {
     assert_eq!(state.selected_index, 0);
     assert_eq!(state.scroll_offset, 0);
     assert_eq!(state.current_scope, None);
-    state.filter_text.push('x');
+    state.filter_text.insert_char('x');
     state.clear();
     assert!(state.filter_text.is_empty());
     assert_eq!(state.open_epoch, epoch.wrapping_add(1));
@@ -212,7 +212,7 @@ fn test_command_palette_filter_update_resets_selection() {
         vec![make_entry("/test", "Test", PaletteScope::SlashCommand)],
     );
 
-    assert_eq!(state.filter_text, "test");
+    assert_eq!(state.filter_text.as_str(), "test");
     assert_eq!(state.selected_index, 0);
     assert_eq!(state.scroll_offset, 0);
 }
@@ -437,13 +437,13 @@ fn test_ctrl_x_from_palette_routes_help_and_preserves_query_on_back() {
     handle_input(&mut state, &DomainInputEvent::KeyPress('?'));
     assert!(state.pending_leader.is_none());
     assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
-    assert_eq!(state.command_palette.filter_text, "m");
+    assert_eq!(state.command_palette.filter_text.as_str(), "m");
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(
         state.modal_stack.top().unwrap().surface,
         Surface::CommandPalette
     );
-    assert_eq!(state.command_palette.filter_text, "m");
+    assert_eq!(state.command_palette.filter_text.as_str(), "m");
 }
 
 #[test]
@@ -486,11 +486,11 @@ fn test_palette_scope_prefix_detection() {
         state.command_palette.current_scope,
         Some(PaletteScope::SlashCommand)
     );
-    assert_eq!(state.command_palette.filter_text, "/");
+    assert_eq!(state.command_palette.filter_text.as_str(), "/");
 
     // Type more characters
     handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
-    assert_eq!(state.command_palette.filter_text, "/n");
+    assert_eq!(state.command_palette.filter_text.as_str(), "/n");
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn test_command_palette_renders_caller_geometry() {
             state.input_buffer = ["draft"; 8].join("\n");
         }
         handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
-        state.command_palette.filter_text = "test".to_owned();
+        state.command_palette.filter_text = "test".into();
         state.command_palette.filtered_entries = vec![make_entry(
             "/test",
             "body-witness",
@@ -592,7 +592,14 @@ fn test_command_palette_renders_caller_geometry() {
         assert_eq!(buffer[(rect.x, rect.y)].symbol(), "┌");
         assert_eq!(buffer[(rect.right() - 1, rect.bottom() - 1)].symbol(), "┘");
         assert!(buffer_contains_text(buffer, "Command Palette"));
-        assert!(buffer_contains_text(buffer, "> test_"));
+        assert!(buffer_contains_text(buffer, "> test"));
+        assert!(
+            buffer[(rect.x + 7, rect.y + 1)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "the actual EOL caret stays inside the fitted query row"
+        );
+        assert!(!terminal.backend().cursor_visible());
         assert!(buffer_contains_text(buffer, "body-witness"));
         assert!(buffer_contains_text(buffer, "close"));
         assert_eq!(
@@ -619,7 +626,7 @@ fn test_command_palette_renders_with_entries() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            command_palette::render(frame, area, &state, &theme);
+            command_palette::render(frame, area, &state, &theme, true);
         })
         .unwrap();
 
@@ -636,13 +643,13 @@ fn test_command_palette_renders_no_matches() {
 
     let mut state = CommandPaletteState::new();
     state.reset();
-    state.filter_text = "xyz".to_string();
+    state.filter_text = "xyz".into();
     // No entries
 
     terminal
         .draw(|frame| {
             let area = frame.area();
-            command_palette::render(frame, area, &state, &theme);
+            command_palette::render(frame, area, &state, &theme, true);
         })
         .unwrap();
 

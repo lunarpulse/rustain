@@ -54,3 +54,18 @@ pub fn cache_keys(h: &TestHarness, tabs: &TabManager) -> (Vec<String>, Vec<Strin
     messages.sort();
     (turns, messages, render.tool_block_states_version)
 }
+
+pub fn paste(
+    h: &mut TestHarness,
+    tabs: &mut TabManager,
+    text: &str,
+) -> rustain::adapters::tui::app::InputAction {
+    let conversation = tabs.active_tab().conversation.clone();
+    rustain::adapters::tui::handlers::search::handle_query_paste(
+        tabs,
+        &mut h.state,
+        &conversation,
+        text,
+    )
+    .expect("the actual field owner handles borrowed paste")
+}

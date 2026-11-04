@@ -169,22 +169,21 @@ Also inherits: Sidebar.
 
 ## Search (typing)
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `Enter` | Commit query → enable n/N navigation | local | portable |  |
-| `Ctrl+U` | Clear search query | local | portable |  |
+| `Ctrl+U` | Delete search query to the caret | local | portable |  |
 | `Esc` | Close search, restore pre-search view | local | portable |  |
 | `Ctrl+C` | Close search and restore the pre-search view (back one frame) | local | portable |  |
-| `Backspace` | Delete the last query character and search again | local | portable |  |
 | `Ctrl+X` | Open the menu above this frame | local | portable |  |
 | `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
 
 ## Search (navigating)
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -193,8 +192,6 @@ Also inherits: Append-only text field.
 | `N` | Jump to the previous match | local | portable |  |
 | `Esc` | Close search and restore the pre-search view | local | portable |  |
 | `Ctrl+C` | Close search and restore the pre-search view (back one frame) | local | portable |  |
-| `Backspace` | Return to typing and delete the last query character | local | portable |  |
-| `Ctrl+U` | Clear the query and return to typing | local | portable |  |
 | `Ctrl+X` | Open the menu above this frame | local | portable |  |
 | `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing search | local | portable |  |
@@ -248,6 +245,25 @@ Also inherits: Append-only text field.
 | `Ctrl+A` | Move to the start of the field: it has no cursor, so nothing moves | local, attached | portable | no cursor in this field |
 | `Ctrl+E` | Move to the end of the field: it has no cursor, so nothing moves | local, attached | portable | no cursor in this field |
 | `Ctrl+K` | Delete to the end of the field: it has no cursor, so nothing is deleted | local, attached | portable | no cursor in this field |
+
+## Caret text field
+
+Also inherits: Text field.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Ctrl+A` | Move the field caret to the start of the current line | local, attached | portable |  |
+| `Ctrl+E` | Move the field caret to the end of the current line | local, attached | portable |  |
+| `Ctrl+W` | Delete the word before the field caret | local, attached | portable |  |
+| `Ctrl+U` | Delete to the start of the current field line | local, attached | portable |  |
+| `Ctrl+K` | Delete to the end of the current field line | local, attached | portable |  |
+| `Ctrl+H` | Delete the grapheme before the field caret | local, attached | portable |  |
+| `Backspace` | Delete the grapheme before the field caret | local, attached | portable |  |
+| `Del` | Delete the grapheme at the field caret | local, attached | portable |  |
+| `Left` | Move the field caret one grapheme left | local, attached | portable |  |
+| `Right` | Move the field caret one grapheme right | local, attached | portable |  |
+| `Home` | Move the field caret to the start of the current line | local, attached | portable |  |
+| `End` | Move the field caret to the end of the current line | local, attached | portable |  |
 
 ## Task drill-down
 
@@ -407,7 +423,7 @@ Also inherits: Sidebar.
 
 ## Command palette
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -418,7 +434,6 @@ Also inherits: Append-only text field.
 | `Enter` | Run the selected entry | local, attached | portable |  |
 | `Esc` | Close the palette | local, attached | portable |  |
 | `Ctrl+C` | Close the palette (back one frame) | local, attached | portable |  |
-| `Backspace` | Delete the last filter character | local, attached | portable |  |
 | `Ctrl+Q` | Ask to quit without closing the palette | local, attached | portable |  |
 
 ## Model selector
@@ -493,7 +508,7 @@ Also inherits: Append-only text field.
 
 ## Reverse search
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -504,7 +519,6 @@ Also inherits: Append-only text field.
 | `Up` | Select the next older match | local | portable |  |
 | `Ctrl+R` | Select the next older match | local | portable |  |
 | `Down` | Select the next newer match | local | portable |  |
-| `Backspace` | Delete the last query character | local | portable |  |
 | `Ctrl+P` | Close the history search and open the command palette | local | portable |  |
 | `Ctrl+X` | Close the history search and open the Ctrl+X menu | local | portable |  |
 

@@ -432,7 +432,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
         assert!(presentation::consistent(&state));
         let paint = |state: &TuiState| {
             let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
-            let show_cursor = state.modal_stack.is_empty();
+            let show_cursor = state.modal_stack.is_empty() && !state.reverse_search.is_open();
             terminal
                 .draw(|frame| {
                     let layout = compute_layout(
@@ -480,10 +480,9 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
             )
         };
         let before = paint(&state);
-        assert_eq!(
-            before.1,
-            surface == "reverse",
-            "{surface}: frames hide the hardware cursor under A7; the routed popup shows it"
+        assert!(
+            !before.1,
+            "{surface}: the query uses its in-widget caret, never hardware"
         );
         if surface == "search" {
             let stage = layout(&state).chat_pane;
@@ -522,16 +521,14 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
             };
             assert!(title(&before.0), "compose owns the reverse popup paint");
             assert!(row(&before.0, chat, chat.bottom() - 5).contains("Reverse Search"));
-            assert_eq!(
-                (before.2.x, before.2.y),
-                (
-                    chat.x
-                        + 1
-                        + rustain::adapters::tui::text_geometry::cells("(reverse-search): 界")
-                            as u16,
-                    chat.bottom() - 4,
-                ),
-                "popup cursor must win over the already-painted composer cursor"
+            let caret_x = chat.x
+                + 1
+                + rustain::adapters::tui::text_geometry::cells("(reverse-search): 界") as u16;
+            assert!(
+                before.0[(caret_x, chat.bottom() - 4)]
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "the popup owns its actual styled caret cell instead of the composer cursor"
             );
             state.focus = FocusState::Chat;
             let other_focus = paint(&state);
@@ -550,12 +547,15 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
             state.reverse_search.matches.clear();
             let empty = paint(&state);
             assert!(title(&empty.0), "Some(0) keeps empty results open");
-            assert!(empty.1, "empty results retain the popup cursor");
-            assert_eq!(empty.2.x, before.2.x);
-            assert_eq!(
-                empty.2.y,
-                chat.bottom() - 3,
-                "empty-results popup has four fitted rows"
+            assert!(
+                !empty.1,
+                "empty results retain the in-widget caret, not hardware"
+            );
+            assert!(
+                empty.0[(caret_x, chat.bottom() - 3)]
+                    .modifier
+                    .contains(Modifier::REVERSED),
+                "empty-results popup has four fitted rows and its own caret"
             );
             state.reverse_search.matches = reverse_payload.1.clone();
             state.reverse_search.selected_match = reverse_payload.2;
@@ -595,10 +595,9 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
         );
         assert!(presentation::consistent(&state));
         let restored = paint(&state);
-        assert_eq!(
-            restored.1,
-            surface == "reverse",
-            "{surface}: cancel restores the original A7 cursor policy"
+        assert!(
+            !restored.1,
+            "{surface}: cancel restores the in-widget caret policy"
         );
         assert_eq!(restored.2, before.2, "{surface}: exact cursor is restored");
         if surface == "search" {
@@ -890,13 +889,21 @@ fn nested_palette_refusal_is_visible_without_dispatch() {
                 .any(|y| row(&painted, rect, y).contains(CLOSE_WINDOW_FIRST)),
             "{width}x{height}: refusal must paint in the palette footer, below query and results"
         );
-        assert!((rect.y..rect.bottom()).any(|y| row(&painted, rect, y).contains("> m_")));
+        let query_y = (rect.y..rect.bottom())
+            .find(|&y| row(&painted, rect, y).contains("> m"))
+            .expect("the exact edited palette query remains visible");
+        assert!(
+            painted[(rect.x + 4, query_y)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "the visible query retains its EOL caret as well as its refusal"
+        );
         assert_eq!(press(&mut state, Key::Down), InputAction::Consumed);
         let cleared = draw(&state, &layout, None);
         assert!(
             !(rect.y..rect.bottom()).any(|y| row(&cleared, rect, y).contains(CLOSE_WINDOW_FIRST))
         );
-        assert_eq!(state.command_palette.filter_text, "m");
+        assert_eq!(state.command_palette.filter_text.as_str(), "m");
         assert_eq!(state.command_palette.selected_index, 0);
         assert_eq!(state.command_palette.filtered_entries.len(), 2);
         assert_eq!(

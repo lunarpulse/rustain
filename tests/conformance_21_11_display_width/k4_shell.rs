@@ -384,9 +384,24 @@ fn k4_sidebar_title_fits_its_budget_and_cuts_on_whole_graphemes() {
 
 // ── search bar ─────────────────────────────────────────────────────────────
 
+fn painted_caret(buffer: &ratatui::buffer::Buffer) -> (usize, usize) {
+    let mut cells = buffer
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.modifier.contains(Modifier::REVERSED));
+    let (index, _) = cells.next().expect("the owning field paints its caret");
+    assert!(
+        cells.next().is_none(),
+        "exactly one caret cell, not a hidden hardware position"
+    );
+    let width = usize::from(buffer.area.width);
+    (index % width, index / width)
+}
+
 fn search(width: u16, query: &str) -> Painted {
     let mut state = SearchState::new();
-    state.query = query.to_string();
+    state.query = query.into();
     state.matches = vec![SearchMatch {
         message_index: 0,
         byte_start: 0,
@@ -413,10 +428,10 @@ fn search_shown(width: u16, query: &str) -> String {
     let shown = row["Search: ".len()..row.len() - "1/1".len()]
         .trim_end()
         .to_string();
-    let caret = painted.cursor.expect("typing shows the caret");
-    assert_eq!(usize::from(caret.x), 8 + cells(&shown), "{width} {query:?}");
-    assert_eq!(caret.y, 0);
-    assert!(usize::from(caret.x) < usize::from(width) - 3);
+    let caret = painted_caret(&painted.buffer);
+    assert_eq!(caret.0, 8 + cells(&shown), "{width} {query:?}");
+    assert_eq!(caret.1, 0);
+    assert!(caret.0 < usize::from(width) - 3);
     let counter = painted.buffer.cell((width - 3, 0)).unwrap();
     assert_eq!(counter.symbol(), "1");
     assert_eq!(counter.fg, theme.colors.fg_muted);
@@ -445,7 +460,7 @@ fn k4_search_bar_reserves_the_counter_and_maps_the_caret() {
 
 fn reverse(width: u16, query: &str, entry: &str) -> Painted {
     let state = ReverseSearchState {
-        query: query.to_string(),
+        query: query.into(),
         matches: vec![(0, entry.to_string())],
         selected_match: Some(0),
     };
@@ -466,17 +481,10 @@ fn reverse_query_shown(width: u16, query: &str) -> String {
         .unwrap_or_else(|| panic!("{width} {query:?}: {row:?}"))
         .trim_end()
         .to_string();
-    let caret = painted.cursor.expect("reverse search shows the caret");
-    assert_eq!(
-        usize::from(caret.x),
-        1 + 18 + cells(&shown),
-        "{width} {query:?}"
-    );
-    assert_eq!(caret.y, 1);
-    assert!(
-        usize::from(caret.x) < usize::from(width) - 1,
-        "not on the border"
-    );
+    let caret = painted_caret(&painted.buffer);
+    assert_eq!(caret.0, 1 + 18 + cells(&shown), "{width} {query:?}");
+    assert_eq!(caret.1, 1);
+    assert!(caret.0 < usize::from(width) - 1, "not on the border");
     assert_whole_clusters(&painted.buffer);
     shown
 }
@@ -692,7 +700,7 @@ fn shortcut_column(width: u16, entry: PaletteEntry) -> u16 {
     state.filtered_entries = vec![entry];
     let theme = Theme::dark();
     let painted = paint(width, 30, |frame| {
-        command_palette::render(frame, frame.area(), &state, &theme);
+        command_palette::render(frame, frame.area(), &state, &theme, true);
     });
     let mut x = 0u16;
     let mut symbols: Vec<(u16, String)> = Vec::new();

@@ -1,6 +1,6 @@
 //! Command-palette populate gate (Story 21-2 AC3).
 //!
-//! `CommandPaletteState::open` clears `filtered_entries`, so the palette must
+//! `CommandPaletteState::reset` clears entries for a fresh palette frame, so it must
 //! be populated on every inactive→active transition — not only when the filter
 //! text differs from the previously cached text (an empty query on reopen is
 //! "unchanged" but the list is empty). [`PaletteGate`] caches the last
@@ -59,7 +59,7 @@ impl PaletteGate {
     fn key_for(state: &TuiState, command_registry: &CommandRegistry) -> PaletteKey {
         PaletteKey {
             open_epoch: state.command_palette.open_epoch,
-            filter_text: state.command_palette.filter_text.clone(),
+            filter_text: state.command_palette.filter_text.as_str().to_owned(),
             scope: state.command_palette.current_scope,
             discovery: PaletteRegistry::command_signature(command_registry),
         }
@@ -115,26 +115,16 @@ async fn refresh_entries(
     // Cached; rebuilds only if the discovery signature changed.
     palette_registry.populate_from_command_registry(command_registry);
 
-    // Determine scope from filter prefix
-    let (scope, query) = if let Some(palette_scope) = state.command_palette.current_scope {
-        // Strip prefix character from query
-        let q = if state.command_palette.filter_text.len() > 1 {
-            state
-                .command_palette
-                .filter_text
-                .chars()
-                .skip(1)
-                .collect::<String>()
-        } else {
-            String::new()
-        };
-        (Some(palette_scope), q)
+    let scope = state.command_palette.current_scope;
+    let raw_query = state.command_palette.filter_text.as_str();
+    let query = if scope.is_some() {
+        &raw_query[raw_query.chars().next().map_or(0, char::len_utf8)..]
     } else {
-        (None, state.command_palette.filter_text.clone())
+        raw_query
     };
 
     let entries: Vec<_> = palette_registry
-        .fuzzy_filter(&query, scope)
+        .fuzzy_filter(query, scope)
         .into_iter()
         .cloned()
         .collect();
@@ -254,6 +244,7 @@ mod tests {
                         frame.area(),
                         &self.state.command_palette,
                         &theme,
+                        true,
                     )
                 })
                 .unwrap();
@@ -338,7 +329,7 @@ mod tests {
             rig.key(DomainInputEvent::SpecialKey(DomainKey::Backspace))
                 .await;
         }
-        assert_eq!(rig.state.command_palette.filter_text, "");
+        assert_eq!(rig.state.command_palette.filter_text.as_str(), "");
         assert_eq!(rig.names(), all);
         assert!(!rig.render().contains("No matches"));
 

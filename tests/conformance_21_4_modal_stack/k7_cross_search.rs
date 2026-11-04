@@ -339,7 +339,7 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
             if !with_permission {
                 assert_eq!(h.state.focus, FocusState::Chat);
             }
-            assert_eq!(h.state.search_state.query, "ab");
+            assert_eq!(h.state.search_state.query.as_str(), "ab");
             assert!(h.state.search_state.peek_highlight.is_some());
             assert_eq!(
                 tabs.active_tab().view_state.scroll_offset,

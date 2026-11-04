@@ -1,4 +1,6 @@
 //! Story 21.4 A1: production-front-door ownership and compositor evidence.
+#[path = "conformance_21_4_modal_stack/k10_text_field.rs"]
+mod k10_text_field;
 #[path = "conformance_21_4_modal_stack/k2_boundary.rs"]
 mod k2_boundary;
 #[path = "conformance_21_4_modal_stack/k3_compose.rs"]
@@ -439,7 +441,7 @@ mod k5_restore {
             state.modal_stack.iter().cloned().collect::<Vec<_>>(),
             frames
         );
-        assert_eq!(state.command_palette.filter_text, "mo");
+        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
         assert_eq!(state.command_palette.selected_index, selection);
         assert!(
             state
@@ -735,7 +737,7 @@ mod k7_surfaces {
                             press(&mut state, Key::Down);
                             assert_eq!(
                                 state.command_palette.filter_text, query,
-                                "only the top receives keys"
+                                "only the top receives keys, including its caret"
                             );
                             match surface {
                                 Surface::ModelSelector => {
@@ -1418,7 +1420,11 @@ mod k8_stage {
     use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
-    fn search_key(h: &mut crate::e2e_harness::TestHarness, tabs: &mut TabManager, key: Key) {
+    pub(super) fn search_key(
+        h: &mut crate::e2e_harness::TestHarness,
+        tabs: &mut TabManager,
+        key: Key,
+    ) -> rustain::adapters::tui::app::InputAction {
         let action = press(&mut h.state, key);
         let conversation = tabs.active_tab().conversation.clone();
         rustain::adapters::tui::handlers::search::handle_search_action(
@@ -1427,6 +1433,7 @@ mod k8_stage {
             &conversation,
             &action,
         );
+        action
     }
 
     fn searchable_tab() -> (crate::e2e_harness::TestHarness, TabManager) {
@@ -1985,6 +1992,9 @@ mod k7_reverse {
         );
         assert_eq!(state.input_buffer, "untouched draft");
         assert_eq!(state.cursor_position, 3);
+        assert_eq!(state.reverse_search.query.as_str(), "must not leak");
+        press(&mut state, Key::Ctrl('u'));
+        assert!(state.reverse_search.query.is_empty());
         for c in "alpha".chars() {
             assert_eq!(press(&mut state, Key::Char(c)), app::InputAction::Consumed);
         }

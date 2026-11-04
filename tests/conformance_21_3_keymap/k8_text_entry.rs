@@ -251,7 +251,7 @@ fn every_printable_types_into_every_text_field() {
                     }
                 );
             }
-            let text = (field.text)(&mut state).clone();
+            let text = (field.text)(&state);
             let name = field.name;
             if name.starts_with("cross") && matches!(c, 'j' | 'k') {
                 assert!(
@@ -279,12 +279,13 @@ fn every_printable_types_into_every_text_field() {
     }
 }
 
-// ── append-only fields ────────────────────────────────────────────────────
+// ── text fields (caret-capable queries and remaining tail editors) ──────────
 
 struct Field {
     name: &'static str,
     open: fn(&mut TuiState),
-    text: fn(&mut TuiState) -> &mut String,
+    text: fn(&TuiState) -> &str,
+    set: fn(&mut TuiState, &str),
 }
 
 fn confirmation(state: &mut TuiState, kind: ConfirmationType) {
@@ -297,26 +298,30 @@ const FIELDS: &[Field] = &[
         open: |s| {
             press(s, Key::Ctrl('p'));
         },
-        text: |s| &mut s.command_palette.filter_text,
+        text: |s| s.command_palette.filter_text.as_str(),
+        set: |s, text| s.command_palette.filter_text.set(text),
     },
     Field {
         name: "search query",
         open: |s| {
             press(s, Key::Ctrl('f'));
         },
-        text: |s| &mut s.search_state.query,
+        text: |s| s.search_state.query.as_str(),
+        set: |s, text| s.search_state.query.set(text),
     },
     Field {
         name: "cross-search query",
         open: |s| *s = cross_search_state(),
-        text: |s| &mut s.cross_search.query,
+        text: |s| &s.cross_search.query,
+        set: |s, text| s.cross_search.query = text.into(),
     },
     Field {
         name: "reverse-search query",
         open: |s| {
             press(s, Key::Ctrl('r'));
         },
-        text: |s| &mut s.reverse_search.query,
+        text: |s| s.reverse_search.query.as_str(),
+        set: |s, text| s.reverse_search.query.set(text),
     },
     Field {
         name: "permission feedback",
@@ -336,7 +341,8 @@ const FIELDS: &[Field] = &[
             });
             confirmation(s, ConfirmationType::PermissionFeedback);
         },
-        text: |s| &mut s.pending_feedback_input.as_mut().expect("open").buffer,
+        text: |s| &s.pending_feedback_input.as_ref().expect("open").buffer,
+        set: |s, text| s.pending_feedback_input.as_mut().expect("open").buffer = text.into(),
     },
     Field {
         name: "question answer",
@@ -350,7 +356,8 @@ const FIELDS: &[Field] = &[
             });
             confirmation(s, ConfirmationType::Question);
         },
-        text: |s| &mut s.ask_user_question.as_mut().expect("open").input_buffer,
+        text: |s| &s.ask_user_question.as_ref().expect("open").input_buffer,
+        set: |s, text| s.ask_user_question.as_mut().expect("open").input_buffer = text.into(),
     },
 ];
 
@@ -361,7 +368,7 @@ fn append_only_fields_edit_their_tail_by_grapheme() {
         let name = field.name;
         let mut state = fresh();
         (field.open)(&mut state);
-        let set = |state: &mut TuiState, text: &str| *(field.text)(state) = text.to_string();
+        let set = |state: &mut TuiState, text: &str| (field.set)(state, text);
         set(&mut state, &format!("alpha beta {FAMILY}"));
         press(&mut state, Key::Ctrl('w'));
         assert_eq!(
@@ -381,7 +388,7 @@ fn append_only_fields_edit_their_tail_by_grapheme() {
         set(&mut state, "one two");
         press(&mut state, Key::Ctrl('u'));
         assert_eq!((field.text)(&mut state), "", "{name}: cleared");
-        // No cursor: Ctrl+A / Ctrl+E / Ctrl+K change nothing and command nothing.
+        // Motion preserves text; the final kill is at EOL. K10 observes query carets.
         set(&mut state, "keep");
         for key in ['a', 'e', 'k'] {
             let action = press(&mut state, Key::Ctrl(key));

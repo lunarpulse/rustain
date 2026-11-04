@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::adapters::agent_registry::AgentRegistry;
 use crate::adapters::skill_registry::SkillRegistry;
+use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::refresh_tracker::RefreshTracker;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::adapters::tui::widgets::tool_block::ToolBlockState;
@@ -710,7 +711,7 @@ impl Default for InputHistory {
 /// State for reverse search overlay (Ctrl+R).
 // Covers: UX-DR74 (reverse search)
 pub struct ReverseSearchState {
-    pub query: String,
+    pub query: TextField,
     pub matches: Vec<(usize, String)>,
     /// None closes the routed Input popup; Some owns its selected row.
     pub selected_match: Option<usize>,
@@ -719,7 +720,7 @@ pub struct ReverseSearchState {
 impl ReverseSearchState {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
+            query: TextField::default(),
             matches: Vec::new(),
             selected_match: None,
         }
@@ -778,7 +779,7 @@ pub struct PeekHighlight {
 /// content string, not a lowercased copy — see `domain::services::search`.
 // Covers: UX-DR86, Story 4-4 AC1-AC7
 pub struct SearchState {
-    pub query: String,
+    pub query: TextField,
     pub matches: Vec<SearchMatch>,
     /// Index into `matches` of the currently focused match.
     pub focused_match_index: usize,
@@ -804,7 +805,7 @@ pub struct SearchState {
 impl SearchState {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
+            query: TextField::default(),
             matches: Vec::new(),
             focused_match_index: 0,
             substate: SearchSubstate::Typing,
@@ -2314,7 +2315,7 @@ pub struct LeaderFeedback {
 /// State for the command palette overlay (Ctrl+P).
 // Covers: UX-DR18
 pub struct CommandPaletteState {
-    pub filter_text: String,
+    pub filter_text: TextField,
     pub filtered_entries: Vec<PaletteEntry>,
     pub selected_index: usize,
     pub scroll_offset: usize,
@@ -2328,7 +2329,7 @@ pub struct CommandPaletteState {
 impl CommandPaletteState {
     pub fn new() -> Self {
         Self {
-            filter_text: String::new(),
+            filter_text: TextField::default(),
             filtered_entries: Vec::new(),
             selected_index: 0,
             scroll_offset: 0,
@@ -2384,7 +2385,7 @@ impl CommandPaletteState {
     /// Update filter text and refresh filtered entries from the registry.
     #[allow(dead_code)]
     pub fn update_filter(&mut self, filter: String, entries: Vec<PaletteEntry>) {
-        self.filter_text = filter;
+        self.filter_text = filter.into();
         self.filtered_entries = entries;
         self.selected_index = 0;
         self.scroll_offset = 0;

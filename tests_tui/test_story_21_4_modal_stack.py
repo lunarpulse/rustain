@@ -1,4 +1,4 @@
-"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a and local Bb1b-i/ii; debug binary.
+"""21.4 smoke legs A1/A2a/A2b/Ba/Bb1a/Bb2a and local Bb1b-i/ii; debug binary.
 
 No API/new marker, sleeps, imported driving helpers or canonical receipts. A
 held loopback model turn crosses a tiny budget over scrolled Help. Unknown local
@@ -15,6 +15,8 @@ The generic lane is not a dedicated attempt. Parent permits one dedicated
 attempt, plus one correction only for a byte-identically quarantined design failure.
 Bb1b-ii independently consumes RUSTAIN_MODAL_STACK_BB1B_II_FRAMES offline;
 its native leg uses one real local turn, supported History, then live resize.
+Bb2a extends the main node: palette caret/paste in both hosts, local Search and
+ReverseSearch. Its 102 real-frame controls use RUSTAIN_MODAL_STACK_BB2A_FRAMES.
 """
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -148,9 +150,9 @@ def _bb1a_base(screen, draft):
     return tuple(shell[0][:shell[1]])
 
 
-def _bb1a_reverse(screen, query, selected, cursor, hidden, draft=DRAFT):
+def _bb1a_reverse(screen, query, selected, caret_cells, hidden, draft=DRAFT, position=None):
     shell = _bb1a_shell(screen, draft)
-    if not shell or hidden:
+    if not shell or not hidden:
         return None
     rows, status = shell
     box = _bottom_box(screen, "Reverse Search", len(rows[0]), status)
@@ -158,7 +160,8 @@ def _bb1a_reverse(screen, query, selected, cursor, hidden, draft=DRAFT):
     if not box or box[1][1:-1].strip() != ("(reverse-search): "+query).rstrip():
         return None
     top = status-len(box)
-    if tuple(cursor) != (19+len(query), top+1):
+    position = len(query) if position is None else position
+    if {(x, y) for x, y in caret_cells if y == top+1} != {(19+position, top+1)}:
         return None
     selected_rows = [row[1:-1].strip() for row in box[2:-1] if "▸ " in row]
     if selected is None:
@@ -166,6 +169,11 @@ def _bb1a_reverse(screen, query, selected, cursor, hidden, draft=DRAFT):
     # Prefix and closing quote survive ellipsis; never require a long entry tail.
     return box if (len(selected_rows) == 1 and selected_rows[0].startswith('▸ "'+selected)
                    and selected_rows[0].endswith('"')) else None
+
+
+def _reversed_cells(tui):
+    return [(x, y) for y in range(tui.screen.lines) for x in range(tui.screen.columns)
+            if tui.screen.buffer[y][x].reverse]
 
 
 def _deskcheck_bb1a_frames(directory):
@@ -215,7 +223,7 @@ def _deskcheck_bb1a_frames(directory):
             for stage, query, selected in [("reverse-open", "", None), ("reverse-filtered", "a1-", "/a1-third-invalid"),
                                             ("reverse-cycled", "a1-", "/a1-second-invalid")]:
                 r = record(stage)
-                predicate = lambda s: _bb1a_reverse(s, query, selected, r["cursor"], r["cursor_hidden"], r["draft"])
+                predicate = lambda s: _bb1a_reverse(s, query, selected, r["reversed_cells"], r["cursor_hidden"], r["draft"])
                 box = predicate(r["screen"])
                 assert box, r
                 assert not predicate(before["screen"]), "independent no-popup control"
@@ -225,9 +233,9 @@ def _deskcheck_bb1a_frames(directory):
                     assert not predicate("\n".join(torn)), (stage, y)
                 if selected:
                     assert not predicate(r["screen"].replace('▸ "'+selected, '  "'+selected))
-                assert not _bb1a_reverse(r["screen"], query, selected, r["cursor"], True, r["draft"])
+                assert not _bb1a_reverse(r["screen"], query, selected, r["reversed_cells"], False, r["draft"])
                 assert not _bb1a_base(r["screen"], r["draft"])
-                assert not _bb1a_reverse(r["screen"], query, selected, (0, 0), False, r["draft"])
+                assert not _bb1a_reverse(r["screen"], query, selected, [(0, 0)], True, r["draft"])
             accepted, rollback = record("reverse-accepted"), record("reverse-restored")
             assert _bb1a_base(accepted["screen"], "/a1-second-invalid") and not accepted["cursor_hidden"]
             assert _bb1a_base(rollback["screen"], rollback["draft"]) and not rollback["cursor_hidden"]
@@ -269,7 +277,7 @@ def _model_box(screen, title="Select Model"):
 def _palette_unfiltered(screen):
     body = _box(screen, HELP+" › Command Palette", "Up/Down move  Enter run  Esc close", closing="1/")
     count = re.search(r"(?m)^ *└ 1/([1-9]\d*) ─+┘ *$", screen)
-    return body if (body and count and body[0][1:-1].strip() == "> _"
+    return body if (body and count and body[0][1:-1].strip() == ">"
                     and 3 < sum(bool(row[1:-1].strip()) for row in body) <= int(count[1])+2) else None
 
 
@@ -278,7 +286,7 @@ def _palette_models(screen):
     if not body:
         return None
     content = [row[1:-1].strip() for row in body if row[1:-1].strip()]
-    return body if (len(content) == 3 and content[0] == "> /models_"
+    return body if (len(content) == 3 and content[0] == "> /models"
                     and content[1].split()[0] == "/models"
                     and all(key in content[-1] for key in ("Enter", "run", "Esc", "close"))) else None
 
@@ -401,6 +409,9 @@ def _deskcheck():
     _deskcheck_a2b_frames()
     _deskcheck_ba_frames()
     _deskcheck_saved_frames()
+    directory = os.environ["RUSTAIN_MODAL_STACK_BB2A_FRAMES"]
+    _deskcheck_bb1a_frames(directory)
+    _deskcheck_bb2a_frames(directory)
 
 
 def _deskcheck_help_frames():
@@ -525,7 +536,7 @@ def _deskcheck_ba_frames():
                 assert _model_box("\n".join(torn), title) is None
         palette = frame("palette-models")
         assert _palette_models(palette), palette
-        for before, after in [("> /models_", "> /model _"), ("/models ", "/model  "), ("Enter", "     ")]:
+        for before, after in [("> /models", "> /model "), ("/models ", "/model  "), ("Enter", "     ")]:
             assert _palette_models(palette.replace(before, after)) is None
         rows = palette.split("\n")
         bottom = next(y for y, row in enumerate(rows[:-4]) if "┘" in row)
@@ -599,6 +610,10 @@ class _Terminal:
 
     def capture(self, label, screen):
         (self.evidence / f"{self.tag}-{label}.screen.txt").write_text(screen+"\n")
+        (self.evidence / f"{self.tag}-{label}.frame.json").write_text(json.dumps({
+            "screen": screen, "cursor_hidden": self.screen.cursor.hidden,
+            "cursor": [self.screen.cursor.x, self.screen.cursor.y],
+            "reversed_cells": _reversed_cells(self)}, sort_keys=True)+"\n")
 
     def resize(self, width, height):
         before = [self.screen.columns, self.screen.lines]
@@ -712,6 +727,7 @@ def _leg(tui, held, release):
     if not attached:
         _ba_leg(tui)
         _bb1a_leg(tui)
+    _bb2a_leg(tui)
     tui.exit()
 
 
@@ -898,17 +914,17 @@ def _bb1a_leg(tui):
         tui.capture("30-bb1a-enter-kept" if keep else "28-bb1a-esc-restored", screen)
     tui.send("Bb1a restore original retained draft", DRAFT.encode())
     tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb1a draft restored")
-    cursor = lambda: (tui.screen.cursor.x, tui.screen.cursor.y)
+    carets = lambda: _reversed_cells(tui)
     tui.send("Bb1a routed Ctrl+R", b"\x12")
-    screen = tui.wait(lambda s: _bb1a_reverse(s, "", None, cursor(), tui.screen.cursor.hidden),
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "", None, carets(), tui.screen.cursor.hidden),
                       "Bb1a complete Input popup, unchanged composer, query cursor")
     tui.capture("31-bb1a-reverse-open", screen)
     tui.send("Bb1a history filter", b"a1-")
-    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", cursor(), tui.screen.cursor.hidden),
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", carets(), tui.screen.cursor.hidden),
                       "Bb1a filtered newest history selected")
     tui.capture("32-bb1a-reverse-filtered", screen)
     tui.send("Bb1a cycle real history selection", b"\x12")
-    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-second-invalid", cursor(), tui.screen.cursor.hidden),
+    screen = tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-second-invalid", carets(), tui.screen.cursor.hidden),
                       "Bb1a older history selection settled")
     tui.capture("33-bb1a-reverse-cycled", screen)
     tui.send("Bb1a accept selected history into composer only", b"\r")
@@ -920,9 +936,9 @@ def _bb1a_leg(tui):
     tui.send("Bb1a replace accepted text with retained draft", b"\x7f"*len("/a1-second-invalid ")+DRAFT.encode())
     tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb1a draft before popup cancel")
     tui.send("Bb1a reopen history", b"\x12")
-    tui.wait(lambda s: _bb1a_reverse(s, "", None, cursor(), tui.screen.cursor.hidden), "Bb1a popup reopened")
+    tui.wait(lambda s: _bb1a_reverse(s, "", None, carets(), tui.screen.cursor.hidden), "Bb1a popup reopened")
     tui.send("Bb1a refilter before Esc", b"a1-")
-    tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", cursor(), tui.screen.cursor.hidden),
+    tui.wait(lambda s: _bb1a_reverse(s, "a1-", "/a1-third-invalid", carets(), tui.screen.cursor.hidden),
              "Bb1a popup query settled before cancel")
     tui.send("Bb1a Esc dismisses popup only", b"\x1b")
     screen = tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden
@@ -930,7 +946,7 @@ def _bb1a_leg(tui):
     tui.capture("35-bb1a-final-draft", screen)
 
 
-def _bb1b_frame(screen, hidden, draft, title):
+def _bb1b_frame(screen, hidden, draft, title, palette=False):
     """The same Stage geometry at all sizes, including the full composer."""
     shell = _bb1a_shell(screen, draft)
     if not shell or not hidden:
@@ -943,10 +959,175 @@ def _bb1b_frame(screen, hidden, draft, title):
     box = tuple(row[left:left+w] for row in rows[top:top+h])
     prefix = "┌ "+title+" "
     if (len(box) < 5 or box[0] != prefix+"─"*(w-len(prefix)-1)+"┐"
-            or box[-1] != "└"+"─"*(w-2)+"┘"
+            or not (box[-1] == "└"+"─"*(w-2)+"┘" or
+                    (palette and re.fullmatch(r"└ [1-9]\d*/[1-9]\d* ─+┘", box[-1])))
             or any(not (r.startswith("│") and r.endswith("│")) for r in box[1:-1])):
         return None
     return box
+
+
+def _bb2a_palette(screen, query, position, mode, caret_cells, hidden, draft=DRAFT):
+    title = "Commands /" if query.startswith("/") and mode != "empty" else "Command Palette"
+    box = _bb1b_frame(screen, hidden, draft, title, palette=True)
+    if not box:
+        return None
+    content = [row[1:-1].strip() for row in box[1:-1] if row[1:-1].strip()]
+    if (len(content) < 3 or content[0] != ("> "+query).rstrip()
+            or not all(key in content[-1] for key in ("Up/Down", "Enter", "Esc"))):
+        return None
+    results = content[1:-1]
+    if mode == "empty":
+        if results != ["No matches"]:
+            return None
+    elif (not results or results[0] == "No matches" or len(results[0].split()) < 2 or
+          (mode == "filtered" and results[0].split()[0] != "/ml")):
+        return None
+    rows, region = _bb1a_shell(screen, draft)
+    top, left = (region-len(box))//2, (len(rows[0])-len(box[0]))//2
+    if {(x, y) for x, y in caret_cells if y == top+1} != {(left+3+position, top+1)}:
+        return None
+    return box
+
+
+def _bb2a_search(screen, query, position, count, caret_cells, hidden, draft=""):
+    stage = _bb1a_search(screen, query, count, hidden, draft)
+    return stage if (stage and {(x, y) for x, y in caret_cells if y == 0}
+                     == {(8+position, 0)}) else None
+
+
+def _deskcheck_bb2a_frames(directory):
+    """Real same-manager exports, styled-caret controls and torn complete frames."""
+    cases = {
+        "search-unfiltered": ("", 0, "0/0"), "search-empty": ("zzzz", 4, "No matches found"),
+        "search-filtered": ("A2b", 3, "1/2"), "search-caret": ("A2b", 1, "1/2"),
+        "search-pasted": ("Ax2b", 2, "No matches found"), "search-refiltered": ("A2b", 1, "1/2"),
+        "reverse-unfiltered": ("", 0, None), "reverse-filtered": ("a1-", 3, "/a1-third-invalid"),
+        "reverse-caret": ("a1-", 1, "/a1-third-invalid"), "reverse-pasted": ("ax1-", 2, None),
+        "reverse-refiltered": ("a1-", 1, "/a1-third-invalid"),
+        "palette-unfiltered": ("", 0, "some"), "palette-filtered": ("/ml", 3, "filtered"),
+        "palette-caret": ("/ml", 1, "filtered"), "palette-pasted": ("/~ml", 2, "empty"),
+        "palette-killed": ("/~", 2, "empty"), "palette-cleared": ("", 0, "some"),
+    }
+    records = [json.loads(path.read_text()) for path in Path(directory).glob("bb2a-*.json")]
+    frames = {(r["width"], r["height"], r["full"], r["stage"]): r for r in records}
+    assert len(records) == len(frames) == 6*len(cases), frames.keys()
+    old = {(r["width"], r["height"], r["full"], r["stage"]): r
+           for path in Path(directory).glob("bb1a-*.json") for r in [json.loads(path.read_text())]}
+    counted = False
+    for width, height in [(60, 16), (80, 24), (130, 30)]:
+        for full in (False, True):
+            for kind in ("palette", "search", "reverse"):
+                filtered, moved = (frames[width, height, full, f"{kind}-{name}"]
+                                   for name in ("filtered", "caret"))
+                assert filtered["screen"] == moved["screen"], "motion changes styles, not field text or Stage"
+                assert filtered["reversed_cells"] != moved["reversed_cells"], "observable caret-motion control"
+            for label, (query, position, mode) in cases.items():
+                r = frames[width, height, full, label]
+                kind = label.split("-")[0]
+                def predicate(screen, cells=r["reversed_cells"], hidden=r["cursor_hidden"]):
+                    if kind == "palette":
+                        return _bb2a_palette(screen, query, position, mode, cells, hidden, r["draft"])
+                    if kind == "search":
+                        return _bb2a_search(screen, query, position, mode, cells, hidden, r["draft"])
+                    return _bb1a_reverse(screen, query, mode, cells, hidden, r["draft"], position)
+                box = predicate(r["screen"])
+                assert box, (label, r)
+                assert not predicate(r["screen"], cells=[]), (label, "missing actual caret style")
+                assert not predicate(r["screen"], cells=[(0, 0)]), (label, "wrong caret cell")
+                assert not predicate(r["screen"], hidden=False), (label, "second hardware cursor")
+                base = old[width, height, full, "before" if kind == "search" else "reverse-restored"]
+                assert base["draft"] == r["draft"]
+                assert not predicate(base["screen"]), (label, "independent no-owner control")
+                rows, region = _bb1a_shell(r["screen"], r["draft"])
+                if kind == "search":
+                    edges = [0, region, height-1]
+                else:
+                    top = (region-len(box))//2 if kind == "palette" else region-len(box)
+                    edges = [top, top+1, top+len(box)-1, region, height-1]
+                    if kind == "palette":
+                        edges += [next(y for y in range(top+1, top+len(box)-1)
+                                       if all(key in rows[y] for key in ("Up/Down", "Enter", "Esc")))]
+                        counted |= bool(re.fullmatch(r"└ [1-9]\d*/[1-9]\d* ─+┘", box[-1]))
+                for y in set(edges):
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn)), (label, width, full, y)
+    assert counted, "the real unfiltered palette exercises its counted lower rail"
+    return len(frames)
+
+
+def _bb2a_leg(tui):
+    """Both real palette hosts; local Search calm jumps/Back and history editing."""
+    def palette(query, position, mode):
+        return lambda s: _bb2a_palette(s, query, position, mode, _reversed_cells(tui), tui.screen.cursor.hidden)
+    tui.send("Bb2a palette", b"\x10")
+    screen = tui.wait(palette("", 0, "some"), "Bb2a complete unfiltered palette with in-widget caret")
+    tui.capture("36-bb2a-palette-unfiltered", screen)
+    for label, data, query, position, mode in [
+        ("filtered", b"\x1b[200~/ml\x1b[201~", "/ml", 3, "filtered"),
+        ("caret", b"\x01\x1b[C", "/ml", 1, "filtered"),
+        ("pasted", b"\x1b[200~~\x1b[201~", "/~ml", 2, "empty"),
+        ("killed", b"\x0b", "/~", 2, "empty"),
+        ("cleared", b"\x15", "", 0, "some"),
+    ]:
+        tui.send("Bb2a palette "+label, data)
+        screen = tui.wait(palette(query, position, mode), "Bb2a settled palette "+label+" and actual rows")
+        tui.capture("37-bb2a-palette-"+label, screen)
+    tui.send("Bb2a palette close", b"\x1b")
+    tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb2a exact palette draft")
+    if tui.tag == "attached":
+        return
+    tui.send("Bb2a empty composer for Search's legacy opener", b"\x15")
+    before = tui.wait(lambda s: _bb1a_base(s, "") and not tui.screen.cursor.hidden, "Bb2a pre-search Stage")
+    before_stage = _bb1a_base(before, "")
+    tui.capture("38-bb2a-before-search", before)
+    def search(query, position, count):
+        return lambda s: _bb2a_search(s, query, position, count, _reversed_cells(tui), tui.screen.cursor.hidden)
+    tui.send("Bb2a real Search", b"\x06")
+    tui.wait(search("", 0, "0/0"), "Bb2a Search Typing's actual caret")
+    tui.send("Bb2a pasted Search content", b"\x1b[200~A2b\x1b[201~")
+    filtered = tui.wait(search("A2b", 3, "1/2"), "Bb2a pasted content keeps the calm jump")
+    filtered_stage = _bb1a_search(filtered, "A2b", "1/2", True)
+    assert filtered_stage[1:] != before_stage[1:], "content really changes the rendered owning Stage"
+    tui.capture("39-bb2a-search-content", filtered)
+    for label, data, query, position, count in [
+        ("caret", b"\x01\x1b[C", "A2b", 1, "1/2"),
+        ("pasted", b"\x1b[200~x\x1b[201~", "Ax2b", 2, "No matches found"),
+        ("refiltered", b"\x08", "A2b", 1, "1/2"),
+    ]:
+        tui.send("Bb2a Search "+label, data)
+        screen = tui.wait(search(query, position, count), "Bb2a Search "+label+" caret and counter")
+        assert _bb1a_search(screen, query, count, True)[1:] == filtered_stage[1:]
+        tui.capture("40-bb2a-search-"+label, screen)
+    tui.send("Bb2a commit and navigate", b"\x05\rn")
+    navigated = tui.wait(lambda s: _bb1a_match(s, tui.screen.cursor.hidden), "Bb2a actual second match")
+    tui.send("Bb2a Navigating caret-only returns to Typing without navigation", b"\x01")
+    screen = tui.wait(search("A2b", 0, "2/2"), "Bb2a caret-only edit does not rescan")
+    assert _bb1a_search(screen, "A2b", "2/2", True)[1:] == _bb1a_match(navigated, True)[1:]
+    tui.capture("41-bb2a-search-navigating-caret", screen)
+    tui.send("Bb2a exact Search Back", b"\x1b")
+    screen = tui.wait(lambda s: _bb1a_base(s, "") == before_stage and not tui.screen.cursor.hidden,
+                      "Bb2a Esc restores exact pre-search rows")
+    tui.capture("42-bb2a-search-restored", screen)
+    tui.send("Bb2a restore interrupted draft", DRAFT.encode())
+    tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden, "Bb2a unchanged draft")
+    def reverse(query, position, selected):
+        return lambda s: _bb1a_reverse(s, query, selected, _reversed_cells(tui),
+                                      tui.screen.cursor.hidden, position=position)
+    tui.send("Bb2a real ReverseSearch", b"\x12")
+    tui.wait(reverse("", 0, None), "Bb2a ReverseSearch owns the sole visible caret")
+    for label, data, query, position, selected in [
+        ("filtered", b"\x1b[200~a1-\x1b[201~", "a1-", 3, "/a1-third-invalid"),
+        ("caret", b"\x01\x1b[C", "a1-", 1, "/a1-third-invalid"),
+        ("pasted", b"\x1b[200~x\x1b[201~", "ax1-", 2, None),
+        ("refiltered", b"\x08", "a1-", 1, "/a1-third-invalid"),
+    ]:
+        tui.send("Bb2a ReverseSearch "+label, data)
+        screen = tui.wait(reverse(query, position, selected), "Bb2a settled ReverseSearch "+label)
+        tui.capture("43-bb2a-reverse-"+label, screen)
+    tui.send("Bb2a ReverseSearch Back", b"\x1b")
+    screen = tui.wait(lambda s: _bb1a_base(s, DRAFT) and not tui.screen.cursor.hidden,
+                      "Bb2a history field closes without modifying the composer")
+    tui.capture("44-bb2a-final-draft", screen)
 
 
 def _bb1b_book(screen, hidden, draft, count, index, payload):
@@ -1518,7 +1699,7 @@ def _run_modal_stack_smoke(part):
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size, "viewport": [80, 24],
                 "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING",
-                "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a"]}
+                "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a", "Bb2a"]}
     if local_only:
         surface = "Bookmark/Wave" if part == "bb1b-i" else "CrossSearch"
         manifest.update(legs=["local"], story_parts=[part_name],

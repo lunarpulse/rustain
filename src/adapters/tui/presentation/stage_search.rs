@@ -1,8 +1,8 @@
 //! Within-conversation Stage-top search renderer (Ctrl+F).
 //!
 //! The compositor owns presence and placement; this pure renderer distinguishes
-//! Typing from Navigating through the counter style. Hardware cursor placement
-//! is optional for renderer-level width tests; frames suppress it under A7.
+//! Typing from Navigating through the counter style. The query caret is painted
+//! only for the active Typing owner; this renderer never places a hardware cursor.
 // Covers: Story 4-4 AC1, AC2, AC3, AC7 (UX-DR86)
 
 use ratatui::prelude::*;
@@ -15,35 +15,33 @@ use crate::adapters::tui::theme::Theme;
 /// Render a search line into the supplied Stage-top row.
 ///
 /// `label` includes any ancestor breadcrumb and the trailing query separator.
-/// `show_cursor` controls only hardware cursor placement, not painted cells.
+/// `show_caret` enables the painted query caret only in Typing.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &SearchState,
     theme: &Theme,
     label: &str,
-    show_cursor: bool,
+    show_caret: bool,
 ) {
     frame.render_widget(Clear, area);
 
     // Build the visible line: "Search: <query>                  <counter>"
     //
-    // The counter floats right and is reserved FIRST (with one gap cell). The
-    // query gets whatever display cells remain; when it is longer it scrolls
-    // so its tail (where the caret sits) stays visible, cut on a whole
-    // grapheme boundary. All widths are display cells, not scalars.
+    // Reserve the counter first. The field's EOL caret supplies the separator
+    // gap instead of consuming an extra query cell; interior carets leave a gap.
     let label_cells = geom::cells(label);
 
     let counter_text = counter_text(state);
     let counter_cells = geom::cells(&counter_text);
 
-    let query_budget = (area.width as usize).saturating_sub(label_cells + 1 + counter_cells);
-    let shown_query = geom::clip_tail(&state.query, query_budget);
-    let shown_cells = geom::cells(shown_query);
+    let query_budget = (area.width as usize).saturating_sub(label_cells + counter_cells);
+    let view = state.query.view_with_gap(query_budget, 1);
+    let shown_cells = geom::cells(view.before) + geom::cells(view.caret) + geom::cells(view.after);
 
     // Horizontal padding between the visible query and the counter.
     let total_content = label_cells + shown_cells + counter_cells;
-    let padding_cols = (area.width as usize).saturating_sub(total_content).max(1);
+    let padding_cols = (area.width as usize).saturating_sub(total_content);
 
     let (query_style, counter_style) = styles_for_substate(state, theme);
     let (ancestors, current_label) = label
@@ -63,7 +61,16 @@ pub fn render(
                 })
                 .add_modifier(Modifier::ITALIC),
         ),
-        Span::styled(shown_query.to_string(), query_style),
+        Span::styled(view.before, query_style),
+        Span::styled(
+            view.caret,
+            if show_caret && state.substate == SearchSubstate::Typing {
+                query_style.add_modifier(Modifier::REVERSED)
+            } else {
+                query_style
+            },
+        ),
+        Span::styled(view.after, query_style),
         Span::raw(" ".repeat(padding_cols)),
         Span::styled(counter_text, counter_style),
     ];
@@ -74,15 +81,6 @@ pub fn render(
             .bg(theme.colors.bg_secondary),
     );
     frame.render_widget(bar, area);
-
-    // Place the text cursor at end of query ONLY in Typing sub-state.
-    // In Navigating, the cursor is hidden to signal the mode change — `n`/`N`
-    // are now live for navigation and typed characters return to Typing.
-    if show_cursor && state.substate == SearchSubstate::Typing {
-        let cursor_col = area.x + (label_cells + shown_cells) as u16;
-        let cursor_col = cursor_col.min(area.x + area.width.saturating_sub(1));
-        frame.set_cursor_position((cursor_col, area.y));
-    }
 }
 
 /// Right-side counter text per AC2 and AC7:
@@ -125,7 +123,7 @@ mod tests {
 
     fn state_with(query: &str, matches: Vec<SearchMatch>, substate: SearchSubstate) -> SearchState {
         SearchState {
-            query: query.to_string(),
+            query: query.into(),
             matches,
             focused_match_index: 0,
             substate,
@@ -231,14 +229,13 @@ mod tests {
     }
 
     /// Paint the real search bar; return the painted row (continuations
-    /// dropped), the buffer and the backend cursor column.
-    fn draw(width: u16, state: &SearchState) -> (String, ratatui::buffer::Buffer, u16) {
+    /// dropped) and the painted buffer.
+    fn draw(width: u16, state: &SearchState) -> (String, ratatui::buffer::Buffer) {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         let theme = Theme::dark();
         terminal
             .draw(|frame| render(frame, frame.area(), state, &theme, "Search: ", true))
             .unwrap();
-        let cursor = terminal.get_cursor_position().unwrap();
         let buffer = terminal.backend().buffer().clone();
         let mut row = String::new();
         let mut x = 0u16;
@@ -247,16 +244,129 @@ mod tests {
             row.push_str(symbol);
             x += u16::try_from(geom::cells(symbol).max(1)).unwrap();
         }
-        (row, buffer, cursor.x)
+        (row, buffer)
     }
 
     #[test]
     fn display_width_search_short_query_is_untouched() {
         let query = format!("{C}{G}{A}");
         let state = state_with(&query, one_match(), SearchSubstate::Typing);
-        let (row, _buffer, cursor_x) = draw(40, &state);
+        let (row, buffer) = draw(40, &state);
         assert!(row.starts_with(&format!("Search: {C}{G}{A} ")), "{row:?}");
         assert!(row.trim_end().ends_with("1/1"), "{row:?}");
-        assert_eq!(cursor_x, 8 + 5);
+        let caret = &buffer[(8 + 5, 0)];
+        assert_eq!(caret.symbol(), " ");
+        assert!(caret.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn search_query_paints_interior_grapheme_caret_only_for_the_typing_owner() {
+        use crate::adapters::tui::keymap::table_input::FieldCmd;
+
+        for grapheme in [C, G, A] {
+            for substate in [SearchSubstate::Typing, SearchSubstate::Navigating] {
+                let mut state = state_with(&format!("x{grapheme}z"), one_match(), substate);
+                state.query.edit(FieldCmd::LineStart);
+                state.query.edit(FieldCmd::CursorRight);
+                for show_caret in [false, true] {
+                    let mut terminal = Terminal::new(TestBackend::new(40, 1)).unwrap();
+                    terminal
+                        .draw(|frame| {
+                            render(
+                                frame,
+                                frame.area(),
+                                &state,
+                                &Theme::dark(),
+                                "Search: ",
+                                show_caret,
+                            );
+                        })
+                        .unwrap();
+                    let buffer = terminal.backend().buffer();
+                    assert_eq!(buffer[(8, 0)].symbol(), "x");
+                    assert_eq!(buffer[(9, 0)].symbol(), grapheme);
+                    assert_eq!(
+                        buffer[(9, 0)].modifier.contains(Modifier::REVERSED),
+                        show_caret && substate == SearchSubstate::Typing,
+                    );
+                    assert_eq!(buffer[(9 + geom::cells(grapheme) as u16, 0)].symbol(), "z");
+                    assert!(!buffer[(8, 0)].modifier.contains(Modifier::REVERSED));
+                    assert_eq!(buffer[(37, 0)].symbol(), "1");
+                    assert_eq!(buffer[(38, 0)].symbol(), "/");
+                    assert_eq!(buffer[(39, 0)].symbol(), "1");
+                    assert_eq!(
+                        buffer[(37, 0)].modifier.contains(Modifier::BOLD),
+                        substate == SearchSubstate::Navigating,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn search_query_view_keeps_whole_grapheme_tail_and_counter_on_narrow_rows() {
+        for (width, query, shown) in [
+            (20, C.repeat(5), C.repeat(4)),
+            (20, G.repeat(5), G.repeat(4)),
+            (20, A.repeat(10), A.repeat(8)),
+            (20, format!("abc{C}{G}{A}"), format!("abc{C}{G}{A}")),
+            (15, C.repeat(5), C.to_string()),
+            (14, C.repeat(5), C.to_string()),
+            (13, C.repeat(5), String::new()),
+        ] {
+            let state = state_with(&query, one_match(), SearchSubstate::Typing);
+            let (row, buffer) = draw(width, &state);
+            assert!(row.starts_with(&format!("Search: {shown} ")), "{row:?}");
+            assert!(row.ends_with(" 1/1"), "{row:?}");
+            assert_eq!(geom::cells(&row), usize::from(width));
+            let caret_x = 8 + geom::cells(&shown) as u16;
+            assert_eq!(buffer[(caret_x, 0)].symbol(), " ");
+            assert!(buffer[(caret_x, 0)].modifier.contains(Modifier::REVERSED));
+            assert!(
+                caret_x < width - 3,
+                "the caret gap remains before the counter"
+            );
+        }
+        let state = state_with(C, one_match(), SearchSubstate::Typing);
+        let (row, buffer) = draw(12, &state);
+        assert_eq!(row, "Search:  1/1");
+        assert!(buffer[(8, 0)].modifier.contains(Modifier::REVERSED));
+        let (row, buffer) = draw(11, &state);
+        assert_eq!(row, "Search: 1/1");
+        assert!((0..11).all(|x| !buffer[(x, 0)].modifier.contains(Modifier::REVERSED)));
+    }
+
+    #[test]
+    fn search_ancestor_label_and_inert_counters_keep_their_painted_content() {
+        for (query, counter) in [("", "0/0"), ("missing", "No matches found")] {
+            let state = state_with(query, vec![], SearchSubstate::Typing);
+            let mut terminal = Terminal::new(TestBackend::new(60, 1)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &Theme::dark(),
+                        "Parent › Search: ",
+                        true,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let row = (0..60).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
+            assert!(row.starts_with(&format!("Parent › Search: {query} ")));
+            assert!(row.ends_with(counter));
+            let caret_x = geom::cells("Parent › Search: ") + geom::cells(query);
+            assert_eq!(buffer[(caret_x as u16, 0)].symbol(), " ");
+            assert!(
+                buffer[(caret_x as u16, 0)]
+                    .modifier
+                    .contains(Modifier::REVERSED)
+            );
+            assert_eq!(buffer[(0, 0)].fg, Theme::dark().colors.fg_secondary);
+            assert_eq!(buffer[(9, 0)].fg, Theme::dark().colors.fg_primary);
+            assert!(buffer[(59, 0)].modifier.contains(Modifier::DIM));
+        }
     }
 }

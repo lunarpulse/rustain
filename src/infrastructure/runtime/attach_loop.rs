@@ -2260,22 +2260,6 @@ fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
     crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
 }
 
-/// The accepted bracketed-paste front door; composition never changes focus here.
-fn handle_attached_paste(state: &mut TuiState, input: &mut String, text: &str, card_pending: bool) {
-    if crate::adapters::tui::presentation::route::blocks_paste(state) {
-        return;
-    }
-    if !card_pending
-        && state.recipient_surface.is_none()
-        && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
-        && state.pending_team_retract.is_none()
-    {
-        append_attached_paste(input, text);
-        state.autocomplete.dismiss();
-        state.needs_redraw = true;
-    }
-}
-
 /// FR-21-3-c: an approval, consent or consolidation card arrived. A writer with an empty
 /// composer takes Chat focus (where the card answers); a read-only client cannot answer
 /// and keeps its focus.
@@ -3221,10 +3205,6 @@ fn apply_attached_team_refusal(
     }
     true
 }
-fn append_attached_paste(input: &mut String, pasted: &str) {
-    input.push_str(pasted);
-}
-
 fn attached_team_line(text: &str) -> AttachedTeamLine {
     attached_team_line_for_request(text, "test-request".to_owned())
 }
@@ -3725,7 +3705,7 @@ pub async fn run_attached(
                     Some(Ok(Event::Paste(text))) => {
                         let pending = attached_card_pending(&approvals, &pending_consent_approvals,
                             &pending_consolidation_token, &retract_confirm);
-                        handle_attached_paste(&mut state, &mut input, &text, pending);
+                        attached_chrome.paste(&mut state, &mut input, &text, pending, workspace).await;
                     }
                     Some(Ok(event @ Event::Mouse(_))) => {
                         let _ = attach_keys::route_event(&mut state, &event);
@@ -9271,7 +9251,7 @@ mod tests {
     fn attached_paste_keeps_multiline_team_send_body_intact() {
         let mut input = "/team send --type story_assignment --subject sprint-7 jun-dev ".to_owned();
         let body = "line one\n  indented line\n\nfinal line";
-        append_attached_paste(&mut input, body);
+        attach_keys::handle_attached_paste(&mut TuiState::new(80, 24), &mut input, body, false);
         let AttachedTeamLine::Frame(ClientFrame::TeamSend {
             request,
             recipients,
@@ -10787,7 +10767,7 @@ mod display_width_tests {
     fn display_width_attached_paste_then_backspace_keeps_source_bytes_of_the_rest() {
         let mut state = TuiState::new(80, 24);
         let mut input = String::new();
-        append_attached_paste(&mut input, &format!("a{A}{G}"));
+        attach_keys::handle_attached_paste(&mut state, &mut input, &format!("a{A}{G}"), false);
         assert_eq!(
             input,
             format!("a{A}{G}"),

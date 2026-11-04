@@ -488,7 +488,7 @@ mod tests {
             state.modal_stack.top().unwrap().surface,
             Surface::CommandPalette
         );
-        assert_eq!(state.command_palette.filter_text, "mo");
+        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
         reducer::back(&mut state);
         assert_eq!(state.focus, crate::domain::models::FocusState::Chat);
         // Story 21.1: the result is a Login-source Success notice in the store.

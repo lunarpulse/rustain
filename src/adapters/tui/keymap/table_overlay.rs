@@ -27,7 +27,7 @@ pub enum OverlayCmd {
     // Help.
     HelpDown, HelpUp, HelpBottom, HelpTop, HelpClose, QuitRequest,
     // Command palette.
-    PaletteUp, PaletteDown, PaletteRun, PaletteClose, PaletteBackspace,
+    PaletteUp, PaletteDown, PaletteRun, PaletteClose,
     // Model selector.
     ModelProviderPrev, ModelProviderNext, ModelPrev, ModelNext, ModelSelect, ModelBack,
     ModelBackspace, ModelSearch, ModelWarnYes, ModelWarnNo,
@@ -38,7 +38,7 @@ pub enum OverlayCmd {
     // Cross-search.
     CrossClose, CrossOpen, CrossBackspace, CrossPrev, CrossNext,
     // Reverse search.
-    RevAccept, RevClose, RevOlder, RevNewer, RevBackspace, RevPalette, RevLeader,
+    RevAccept, RevClose, RevOlder, RevNewer, RevPalette, RevLeader,
     // Autocomplete popup.
     AutoPrev, AutoNext, AutoAccept, AutoCancel, AutoBackspace,
     // Notification log.
@@ -144,13 +144,12 @@ pub const ROWS: &[Binding] = &[
     h(&[Key::Esc], OverlayCmd::HelpClose).does("Close the help"),
     h(&[Key::Ctrl('c')], OverlayCmd::HelpClose).does("Close the help (back one frame); it never stops a turn or quits"),
     h(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit without closing help"),
-    // ── Command palette (the filter is an append-only field: FieldEdit rows apply) ──
+    // ── Command palette (shared caret-field editing rows) ──
     p(&[Key::Up], OverlayCmd::PaletteUp).does("Select the previous entry"),
     p(&[Key::Down], OverlayCmd::PaletteDown).does("Select the next entry"),
     p(&[Key::Enter], OverlayCmd::PaletteRun).does("Run the selected entry"),
     p(&[Key::Esc], OverlayCmd::PaletteClose).does("Close the palette"),
     p(&[Key::Ctrl('c')], OverlayCmd::PaletteClose).does("Close the palette (back one frame)"),
-    p(&[Key::Backspace], OverlayCmd::PaletteBackspace).does("Delete the last filter character"),
     p(&[Key::Ctrl('q')], OverlayCmd::QuitRequest).does("Ask to quit without closing the palette"),
     // ── Model selector ──
     m(&[Key::Left], OverlayCmd::ModelProviderPrev).does("Select the previous provider column"),
@@ -197,7 +196,6 @@ pub const ROWS: &[Binding] = &[
     r(&[Key::Up], OverlayCmd::RevOlder).does("Select the next older match"),
     r(&[Key::Ctrl('r')], OverlayCmd::RevOlder).does("Select the next older match"),
     r(&[Key::Down], OverlayCmd::RevNewer).does("Select the next newer match"),
-    r(&[Key::Backspace], OverlayCmd::RevBackspace).does("Delete the last query character"),
     r(&[Key::Ctrl('p')], OverlayCmd::RevPalette).does("Close the history search and open the command palette"),
     r(&[Key::Ctrl('x')], OverlayCmd::RevLeader).does("Close the history search and open the Ctrl+X menu"),
     // ── Autocomplete popup (any other key dismisses it and then acts normally) ──

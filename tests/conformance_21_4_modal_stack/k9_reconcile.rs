@@ -409,7 +409,7 @@ fn a_reset_can_search_again_before_the_switch_time_conversation_mirror_is_saved(
         Some(&frame),
         "the current Stage's Search must not close against a stale switch-time model mirror"
     );
-    assert_eq!(state.search_state.query, "z");
+    assert_eq!(state.search_state.query.as_str(), "z");
 }
 
 #[test]

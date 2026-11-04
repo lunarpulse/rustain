@@ -49,12 +49,6 @@ pub enum SearchCmd {
     Close,
     /// `Enter`: commit a typed query, or keep the position and close navigation.
     Commit,
-    /// Typing `Backspace`: pop the last query character and re-scan.
-    DeleteBack,
-    /// Navigating `Backspace`: return to typing and pop a character.
-    DeleteBackToTyping,
-    /// `Ctrl+U` (both sub-states): clear the query, back to typing.
-    ClearQuery,
     /// Navigating `n`: next match.
     NextMatch,
     /// Navigating `N`: previous match.
@@ -115,11 +109,8 @@ const SB: HelpCat = HelpCat::Search;
 /// order (Enter, n / N, Ctrl+U, Esc) so the generated Search category reads as
 /// it did before; Chat's `m` and `'` follow in `table_chat`.
 ///
-/// Search, typing sub-state: every printable appends to the query (a text
-/// context, no command); the rows are the non-printable keys that act.
-/// Search, navigating sub-state: `n`/`N` move between matches; any other
-/// printable returns to typing and appends itself (not a row: it is the whole
-/// printable range).
+/// Search Typing is a caret field; Navigating keeps `n`/`N` match navigation.
+/// Other printables and editing motions return to Typing through the shared field.
 #[rustfmt::skip]
 pub const ROWS: &[Binding] = &[
     // ── Search ──
@@ -127,14 +118,11 @@ pub const ROWS: &[Binding] = &[
     n(&[Key::Enter], SearchCmd::Commit, "").local().help(SB, "Enter (navigating)", "Keep position and close search"),
     n(&[Key::Char('n')], SearchCmd::NextMatch, "").local().help(SB, "n / N", "Next / previous match (Navigating mode)"),
     n(&[Key::Char('N')], SearchCmd::PrevMatch, "").local().does("Jump to the previous match"),
-    t(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().help(SB, "Ctrl+U", "Clear search query"),
+    bind(Context::SearchTyping, &[Key::Ctrl('u')], CommandId::Field(super::table_input::FieldCmd::Clear), "").local().help(SB, "Ctrl+U", "Delete search query to the caret"),
     t(&[Key::Esc], SearchCmd::Close, "").local().help(SB, "Esc (search)", "Close search, restore pre-search view"),
     t(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and restore the pre-search view (back one frame)"),
-    t(&[Key::Backspace], SearchCmd::DeleteBack, "").local().does("Delete the last query character and search again"),
     n(&[Key::Esc], SearchCmd::Close, "").local().does("Close search and restore the pre-search view"),
     n(&[Key::Ctrl('c')], SearchCmd::Close, "").local().does("Close search and restore the pre-search view (back one frame)"),
-    n(&[Key::Backspace], SearchCmd::DeleteBackToTyping, "").local().does("Return to typing and delete the last query character"),
-    n(&[Key::Ctrl('u')], SearchCmd::ClearQuery, "").local().does("Clear the query and return to typing"),
     // ── BookmarkList ──
     b(&[Key::Char('d')], BookmarkCmd::Delete, "").local().help(SB, "d / Del / Backspace", "Delete selected bookmark (in list)"),
     b(&[Key::Delete], BookmarkCmd::Delete, "").local().does("Delete the selected bookmark"),

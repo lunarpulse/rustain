@@ -15,11 +15,11 @@
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::table::GlobalCmd;
-use rustain::adapters::tui::keymap::table_input::InputCmd;
+use rustain::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
 use rustain::adapters::tui::keymap::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use rustain::adapters::tui::keymap::table_overlay::OverlayCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
-use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
+use rustain::adapters::tui::presentation::{Surface, is_open, reducer, text_field::TextField};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::PanelType;
@@ -55,7 +55,7 @@ fn search_state(navigating: bool) -> TuiState {
             InputAction::SearchQueryChanged
         );
     }
-    assert_eq!(state.search_state.query, "foo");
+    assert_eq!(state.search_state.query.as_str(), "foo");
     if navigating {
         state.search_state.substate = SearchSubstate::Navigating;
     }
@@ -263,7 +263,7 @@ fn keys_without_a_sidebar_row_do_nothing_in_the_history_panel() {
 #[derive(Debug, PartialEq)]
 struct SearchSalient {
     focus: FocusState,
-    query: String,
+    query: TextField,
     substate: SearchSubstate,
     active: bool,
     input: String,
@@ -292,37 +292,21 @@ fn search_witness(context: Context, cmd: SearchCmd, keys: &[Key]) {
         SearchCmd::Close => {
             assert_eq!(press(&mut state, key), InputAction::CloseSearch);
             assert_eq!(
-                state.search_state.query, "foo",
+                state.search_state.query.as_str(),
+                "foo",
                 "the production effect seam applies close/restore after dispatch"
             );
         }
         SearchCmd::Commit => {
             assert_eq!(press(&mut state, key), InputAction::SearchCommit);
-            assert_eq!(state.search_state.query, "foo");
-        }
-        SearchCmd::DeleteBack => {
-            assert!(!navigating);
-            assert_eq!(press(&mut state, key), InputAction::SearchQueryChanged);
-            assert_eq!(state.search_state.query, "fo");
-            assert_eq!(state.search_state.substate, SearchSubstate::Typing);
-        }
-        SearchCmd::DeleteBackToTyping => {
-            assert!(navigating);
-            assert_eq!(press(&mut state, key), InputAction::SearchReturnToTyping);
-            assert_eq!(state.search_state.query, "fo");
-            assert_eq!(state.search_state.substate, SearchSubstate::Typing);
-        }
-        SearchCmd::ClearQuery => {
-            assert_eq!(press(&mut state, key), InputAction::SearchClear);
-            assert_eq!(state.search_state.query, "");
-            assert_eq!(state.search_state.substate, SearchSubstate::Typing);
-            assert!(state.search_state.matches.is_empty());
+            assert_eq!(state.search_state.query.as_str(), "foo");
         }
         SearchCmd::NextMatch => {
             assert!(navigating, "n navigates only after the query is committed");
             assert_eq!(press(&mut state, key), InputAction::SearchNext);
             assert_eq!(
-                state.search_state.query, "foo",
+                state.search_state.query.as_str(),
+                "foo",
                 "n is a command, never text"
             );
             assert_eq!(state.search_state.substate, sub);
@@ -330,7 +314,7 @@ fn search_witness(context: Context, cmd: SearchCmd, keys: &[Key]) {
         SearchCmd::PrevMatch => {
             assert!(navigating);
             assert_eq!(press(&mut state, key), InputAction::SearchPrev);
-            assert_eq!(state.search_state.query, "foo");
+            assert_eq!(state.search_state.query.as_str(), "foo");
             assert_eq!(state.search_state.substate, sub);
         }
     }
@@ -350,6 +334,20 @@ fn every_search_row_resolves_to_its_command_by_value() {
             assert_resolves(context, row);
             match row.command {
                 CommandId::Search(cmd) => search_witness(context, cmd, row.keys),
+                CommandId::Field(FieldCmd::Clear) => {
+                    let navigating = context == Context::SearchNavigating;
+                    let mut state = search_state(navigating);
+                    assert_eq!(
+                        press(&mut state, row.keys[0]),
+                        if navigating {
+                            InputAction::SearchReturnToTyping
+                        } else {
+                            InputAction::SearchQueryChanged
+                        }
+                    );
+                    assert!(state.search_state.query.is_empty());
+                    assert_eq!(state.search_state.substate, SearchSubstate::Typing);
+                }
                 CommandId::Overlay(OverlayCmd::QuitRequest) => {
                     let mut state = search_state(context == Context::SearchNavigating);
                     let before = search_salient(&state);
@@ -415,7 +413,7 @@ fn sweep_search(context: Context, navigating: bool) -> (usize, usize) {
             assert_eq!(action, expected, "{context:?} {key:?}");
             assert_eq!(state.search_state.substate, SearchSubstate::Typing);
             assert_eq!(
-                state.search_state.query,
+                state.search_state.query.as_str(),
                 format!("foo{c}"),
                 "{key:?} inserts itself"
             );

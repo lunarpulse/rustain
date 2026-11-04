@@ -1062,7 +1062,15 @@ pub async fn run(
             Some(event_result) = terminal_events.next() => {
                 match event_result {
                     Ok(event) => {
-                        if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
+                        if let crossterm::event::Event::Paste(text) = &event
+                            && handlers::search::handle_query_paste(&mut tab_manager, &mut state, &conversation, text).is_some()
+                        {
+                            if state.pending_leader.is_none() && !presentation::too_small(&state)
+                                && state.modal_stack.top().is_some_and(|frame| frame.surface == presentation::Surface::CommandPalette)
+                            {
+                                palette_gate.sync(&mut state, &mut command_registry, &mut palette_registry, &workspace_path).await;
+                            }
+                        } else if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
                             let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog)
                                 || presentation::is_open(&state, presentation::Surface::DecisionPane) {
                                 notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
@@ -3736,7 +3744,6 @@ pub async fn run(
                                 search_action @ (InputAction::OpenSearch
                                 | InputAction::CloseSearch
                                 | InputAction::SearchQueryChanged
-                                | InputAction::SearchClear
                                 | InputAction::SearchReturnToTyping
                                 | InputAction::SearchCommit
                                 | InputAction::SearchNext
@@ -7074,19 +7081,6 @@ pub async fn run(
     Ok(())
 }
 
-/// Save the active-tab proxy state into TabManager before switching tabs.
-/// Re-scan the active conversation for search matches and apply the calm-jump
-/// rule (Story 4-4 AC2 amendment). Called from event-loop arms that mutate
-/// `state.search_state.query` (keystrokes in Typing sub-state, Ctrl+U clear,
-/// and return-from-Navigating transitions).
-///
-/// Calm-jump rule:
-///   1. Jump to match 0 only if match count transitioned 0 → ≥1
-///   2. Jump to match 0 only if the previously focused match no longer exists
-///   3. Otherwise preserve the viewport (no yo-yo)
-// `apply_search_rescan` extracted to `crate::adapters::tui::handlers::search`
-// per Story 8.0a Phase 4 Task 9 (search sub-task).
-
 // Cross-search query change guard, results guard, export confirm/cancel/apply,
 // and find_available_numbered_path extracted to
 // `crate::adapters::tui::handlers::export` per Story 8.5 line-budget
@@ -7288,7 +7282,7 @@ pub async fn apply_open_cross_search_result(
         }
     }
     // Keep the query for a later Ctrl+F without opening Search or copying it.
-    state.search_state.query = preserved_query;
+    state.search_state.query = preserved_query.into();
     state.needs_redraw = true;
 }
 
@@ -8699,7 +8693,7 @@ pub fn render(
                     app_layout.input_area,
                     input_buffer,
                     cursor_position,
-                    if state.modal_stack.is_empty() && state.pending_leader.is_none() { focus.clone() } else { FocusState::Chat },
+                    if state.modal_stack.is_empty() && state.pending_leader.is_none() && !state.reverse_search.is_open() { focus.clone() } else { FocusState::Chat },
                     theme,
                     multiline_mode,
                     input_scroll_offset,

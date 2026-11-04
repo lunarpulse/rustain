@@ -12,8 +12,15 @@ use crate::domain::models::palette::PaletteScope;
 const MAX_VISIBLE_ITEMS: usize = 12;
 
 /// Render the palette into the frame rectangle supplied by compose.
+/// `show_caret` controls the painted query caret; no hardware cursor is placed.
 // Covers: UX-DR18 (command palette overlay)
-pub fn render(frame: &mut Frame, area: Rect, state: &CommandPaletteState, theme: &Theme) {
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &CommandPaletteState,
+    theme: &Theme,
+    show_caret: bool,
+) {
     // Build title based on scope; suppress scope header when scope has no entries (AC8, Task 4.7)
     let scope_has_entries = state.current_scope.is_none() || !state.filtered_entries.is_empty();
     let title = if scope_has_entries {
@@ -49,13 +56,22 @@ pub fn render(frame: &mut Frame, area: Rect, state: &CommandPaletteState, theme:
             state.filtered_entries.len()
         ));
     }
+    let query_style = Style::default().fg(theme.colors.fg_primary);
+    let view = state
+        .filter_text
+        .view(usize::from(inner.width).saturating_sub(2));
     let mut query = Some(Line::from(vec![
         Span::styled("> ", Style::default().fg(theme.colors.accent)),
+        Span::styled(view.before, query_style),
         Span::styled(
-            state.filter_text.as_str(),
-            Style::default().fg(theme.colors.fg_primary),
+            view.caret,
+            if show_caret {
+                query_style.add_modifier(Modifier::REVERSED)
+            } else {
+                query_style
+            },
         ),
-        Span::styled("_", Style::default().fg(theme.colors.fg_muted)),
+        Span::styled(view.after, query_style),
     ]));
     let rows = if state.filtered_entries.is_empty() {
         vec![Line::from(Span::styled(
@@ -205,7 +221,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
         let area = Rect::new(7, 3, 80, 20);
         terminal
-            .draw(|frame| render(frame, area, &CommandPaletteState::new(), &Theme::dark()))
+            .draw(|frame| {
+                render(
+                    frame,
+                    area,
+                    &CommandPaletteState::new(),
+                    &Theme::dark(),
+                    true,
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(area.x, area.y)].symbol(), "┌");
@@ -232,7 +256,7 @@ mod tests {
                 }
                 let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
                 terminal
-                    .draw(|frame| render(frame, frame.area(), &state, &Theme::dark()))
+                    .draw(|frame| render(frame, frame.area(), &state, &Theme::dark(), true))
                     .unwrap();
                 let buffer = terminal.backend().buffer();
                 let top = (0..80).map(|x| buffer[(x, 0)].symbol()).collect::<String>();
@@ -247,7 +271,7 @@ mod tests {
 
         let area = geometry::frame_rect(region);
         let mut state = CommandPaletteState::new();
-        state.filter_text = "needle".to_owned();
+        state.filter_text = "needle".into();
         state.filtered_entries = (0..20)
             .map(|index| model_entry(&format!("model-{index}")))
             .collect();
@@ -255,7 +279,7 @@ mod tests {
         state.scroll_offset = 4;
         let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
         terminal
-            .draw(|frame| render(frame, area, &state, &Theme::dark()))
+            .draw(|frame| render(frame, area, &state, &Theme::dark(), true))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row = |y| {
@@ -264,7 +288,10 @@ mod tests {
                 .collect::<String>()
         };
         assert!(row(area.y).contains("Command Palette"));
-        assert!(row(area.y + 1).contains("> needle_"));
+        assert!(row(area.y + 1).contains("> needle "));
+        let caret = &buffer[(area.x + 9, area.y + 1)];
+        assert_eq!(caret.symbol(), " ");
+        assert!(caret.modifier.contains(Modifier::REVERSED));
         let text = (area.y + 2..area.bottom() - 1)
             .map(row)
             .collect::<Vec<_>>()
@@ -330,7 +357,7 @@ mod tests {
         let theme = Theme::dark();
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|frame| render(frame, Rect::new(20, 8, 60, 15), &state, &theme))
+            .draw(|frame| render(frame, Rect::new(20, 8, 60, 15), &state, &theme, true))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let mut glyphs: Vec<(u16, String)> = Vec::new();
@@ -373,5 +400,85 @@ mod tests {
             let (found, row) = shortcut_column(model_entry(&name));
             assert_eq!(found, column, "name {name:?}: {row:?}");
         }
+    }
+
+    #[test]
+    fn palette_query_paints_the_owned_interior_grapheme_caret() {
+        use crate::adapters::tui::keymap::table_input::FieldCmd;
+
+        for grapheme in [C, G, A] {
+            let mut state = CommandPaletteState::new();
+            state.filter_text = format!("x{grapheme}z").into();
+            state.filter_text.edit(FieldCmd::LineStart);
+            state.filter_text.edit(FieldCmd::CursorRight);
+            for show_caret in [false, true] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render(frame, frame.area(), &state, &Theme::dark(), show_caret);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(3, 1)].symbol(), "x");
+                let caret = &buffer[(4, 1)];
+                assert_eq!(caret.symbol(), grapheme);
+                assert_eq!(caret.modifier.contains(Modifier::REVERSED), show_caret);
+                assert_eq!(buffer[(4 + geom::cells(grapheme) as u16, 1)].symbol(), "z");
+                assert!(!buffer[(3, 1)].modifier.contains(Modifier::REVERSED));
+                assert_eq!(buffer[(39, 1)].symbol(), "│");
+            }
+        }
+    }
+
+    #[test]
+    fn palette_query_view_keeps_whole_grapheme_tail_and_caret_inside_narrow_border() {
+        let cases = [
+            (12, C.repeat(5), C.repeat(3)),
+            (12, G.repeat(5), G.repeat(3)),
+            (12, A.repeat(10), A.repeat(7)),
+            (12, format!("abc{C}{G}{A}"), format!("bc{C}{G}{A}")),
+            (7, C.repeat(5), C.to_string()),
+            (6, C.repeat(5), String::new()),
+            (5, C.repeat(5), String::new()),
+        ];
+        for (width, query, shown) in cases {
+            let mut state = CommandPaletteState::new();
+            state.filter_text = query.into();
+            let mut terminal = Terminal::new(TestBackend::new(width, 6)).unwrap();
+            terminal
+                .draw(|frame| render(frame, frame.area(), &state, &Theme::dark(), true))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let caret_x = 3 + geom::cells(&shown) as u16;
+            let mut x = 3;
+            let mut painted = String::new();
+            while x < caret_x {
+                let symbol = buffer[(x, 1)].symbol();
+                painted.push_str(symbol);
+                x += geom::cells(symbol).max(1) as u16;
+            }
+            assert_eq!(painted, shown);
+            assert_eq!(x, caret_x);
+            assert_eq!(buffer[(caret_x, 1)].symbol(), " ");
+            assert!(buffer[(caret_x, 1)].modifier.contains(Modifier::REVERSED));
+            assert!(caret_x < width - 1);
+            assert_eq!(buffer[(width - 1, 1)].symbol(), "│");
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(4, 6)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &CommandPaletteState::new(),
+                    &Theme::dark(),
+                    true,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(3, 1)].symbol(), "│");
+        assert!((0..4).all(|x| !buffer[(x, 1)].modifier.contains(Modifier::REVERSED)));
     }
 }

@@ -1121,7 +1121,9 @@ fn test_handler_naming_reflection() {
     // and three transcript_target fork/rewind handlers; naming/spawn rules still apply.
     // Story 21.4 Bb1a consolidates the two Search handlers into one actual-tab
     // action handler: 34 - 2 + 1 = 33. Keep the inventory exact, not a floor.
-    const EXPECTED_HANDLE_COUNT: usize = 33;
+    // Story 21.4 Bb2a adds the borrowed query-paste ingress, including the
+    // actual-tab Search effects: 33 + 1 = 34. The same extraction/spawn bans apply.
+    const EXPECTED_HANDLE_COUNT: usize = 34;
     let handle_re =
         regex::Regex::new(r"(?m)^\s*pub(\(crate\))?\s+(async\s+)?fn\s+handle_[a-z_]+\(").unwrap();
     let mut total_handles = 0usize;

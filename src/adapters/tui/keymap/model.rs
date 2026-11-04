@@ -357,6 +357,8 @@ pub enum Context {
     /// Rows shared by every append-only text field (A4): `Ctrl+W/U/H` act,
     /// `Ctrl+A/E/K` are `(n/a)`. Parent of those fields' contexts.
     FieldEdit,
+    /// Caret-editing query fields, isolated from the legacy attached composer.
+    CaretField,
     /// The task-panel drill-down (focus Chat): its own keys plus only the
     /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
     ChatDrill,
@@ -412,7 +414,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 52] = [
+    pub const ALL: [Context; 53] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -425,6 +427,7 @@ impl Context {
         Context::BookmarkList,
         Context::Permission,
         Context::FieldEdit,
+        Context::CaretField,
         Context::ChatDrill,
         Context::ChatWave,
         Context::ChatReorder,
@@ -482,6 +485,7 @@ impl Context {
             Context::BookmarkList => "Bookmarks",
             Context::Permission => "Permission",
             Context::FieldEdit => "Append-only text field",
+            Context::CaretField => "Caret text field",
             Context::ChatDrill => "Task drill-down",
             Context::ChatWave => "Chat (wave)",
             Context::ChatReorder => "Chat (reorder)",
@@ -564,6 +568,7 @@ impl Context {
             Context::Question => &[Context::Card, Context::FieldEdit],
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
+            Context::CaretField => &[Context::TextEntry],
             Context::SidebarHistory
             | Context::SidebarAgents
             | Context::SidebarAgentInspector
@@ -574,13 +579,12 @@ impl Context {
             Context::TasksReorder => &[Context::SidebarTasks],
             // Only the non-character keys of Chat are inherited (see `resolve_in`).
             Context::ChatDrill | Context::ChatWave | Context::ChatReorder => &[Context::Chat],
-            // Fields that edit append-only text inherit the shared edit rows.
             Context::CommandPalette
-            | Context::ModelSelector
             | Context::SearchTyping
             | Context::SearchNavigating
-            | Context::CrossSearch
-            | Context::ReverseSearch => &[Context::FieldEdit],
+            | Context::ReverseSearch => &[Context::CaretField],
+            // The remaining fields retain their append-only editor.
+            Context::ModelSelector | Context::CrossSearch => &[Context::FieldEdit],
         }
     }
 

@@ -9,6 +9,7 @@ pub mod reducer;
 pub mod route;
 mod stack;
 pub mod stage_search;
+pub mod text_field;
 
 pub use compose::{Shell, compose, paint_too_small};
 pub use route::{RouteEffect, route, too_small};

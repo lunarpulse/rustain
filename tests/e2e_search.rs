@@ -266,7 +266,7 @@ fn test_e2e_search_enter_commits_query_transitions_substate() {
     handle_input(&mut state, &DomainInputEvent::KeyPress('f'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('o'));
     handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
-    assert_eq!(state.search_state.query, "fox");
+    assert_eq!(state.search_state.query.as_str(), "fox");
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
@@ -293,7 +293,7 @@ fn test_e2e_search_enter_on_zero_matches_stays_in_typing() {
         &conversation,
         &InputAction::OpenSearch,
     );
-    state.search_state.query = "xyzzy".to_string();
+    state.search_state.query = "xyzzy".into();
     state.search_state.matches = vec![]; // no matches
 
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
@@ -316,7 +316,7 @@ fn test_e2e_search_n_in_query_stays_in_typing_critical_regression() {
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         assert_eq!(action, InputAction::SearchQueryChanged);
     }
-    assert_eq!(state.search_state.query, "nginx");
+    assert_eq!(state.search_state.query.as_str(), "nginx");
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
 }
 
@@ -335,12 +335,12 @@ fn test_e2e_search_n_key_in_navigating_navigates() {
 fn test_e2e_search_return_to_typing_from_navigating() {
     let mut state = TuiState::new(80, 24);
     reducer::open(&mut state, Surface::Search);
-    state.search_state.query = "foo".to_string();
+    state.search_state.query = "foo".into();
     state.search_state.substate = SearchSubstate::Navigating;
     // Typing 'x' in Navigating returns to Typing AND appends the char.
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('x'));
     assert_eq!(action, InputAction::SearchReturnToTyping);
-    assert_eq!(state.search_state.query, "foox");
+    assert_eq!(state.search_state.query.as_str(), "foox");
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
 }
 
@@ -350,7 +350,7 @@ fn test_e2e_search_return_to_typing_from_navigating() {
 fn test_e2e_search_esc_closes_overlay() {
     let mut state = TuiState::new(80, 24);
     reducer::open(&mut state, Surface::Search);
-    state.search_state.query = "test".to_string();
+    state.search_state.query = "test".into();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(action, InputAction::CloseSearch);
 }
@@ -361,11 +361,11 @@ fn test_e2e_search_esc_closes_overlay() {
 fn test_e2e_search_ctrl_u_clears_query() {
     let mut state = TuiState::new(80, 24);
     reducer::open(&mut state, Surface::Search);
-    state.search_state.query = "something long".to_string();
+    state.search_state.query = "something long".into();
     state.search_state.substate = SearchSubstate::Navigating;
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlU));
-    assert_eq!(action, InputAction::SearchClear);
-    assert_eq!(state.search_state.query, "");
+    assert_eq!(action, InputAction::SearchReturnToTyping);
+    assert_eq!(state.search_state.query.as_str(), "");
     assert_eq!(state.search_state.substate, SearchSubstate::Typing);
 }
 
@@ -392,7 +392,7 @@ fn test_e2e_find_matches_against_live_conversation() {
 fn test_e2e_search_bar_renders_counter_when_matches_exist() {
     let mut state = TuiState::new(80, 24);
     reducer::open(&mut state, Surface::Search);
-    state.search_state.query = "test".to_string();
+    state.search_state.query = "test".into();
     state.search_state.matches = vec![
         SearchMatch {
             message_index: 0,
@@ -417,7 +417,7 @@ fn test_e2e_search_bar_renders_counter_when_matches_exist() {
 fn test_e2e_search_bar_shows_no_matches_found_when_query_has_zero_matches() {
     let mut state = TuiState::new(80, 24);
     reducer::open(&mut state, Surface::Search);
-    state.search_state.query = "xyzzy".to_string();
+    state.search_state.query = "xyzzy".into();
     // matches intentionally empty
     let terminal = render_search_frame(&state);
     let text = common::buffer_text(&terminal);

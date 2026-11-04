@@ -50,7 +50,7 @@ use crate::adapters::tui::keymap::render::{PendingPrefix, StatusTail};
 use crate::adapters::tui::keymap::resolve::no_binding_text;
 use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, GlobalCmd, LeaderCmd};
 use crate::adapters::tui::keymap::table_chat::ChatCmd;
-use crate::adapters::tui::keymap::table_input::{FieldCmd, InputCmd};
+use crate::adapters::tui::keymap::table_input::InputCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{
@@ -176,6 +176,20 @@ impl AttachedChrome {
                 .saturating_sub(1);
             state.command_palette.selected_index = state.command_palette.selected_index.min(max);
             state.command_palette.scroll_offset = state.command_palette.scroll_offset.min(max);
+        }
+    }
+
+    /// The real bracketed-paste effect settles ownership and populates before paint.
+    pub(super) async fn paste(
+        &mut self,
+        state: &mut TuiState,
+        input: &mut String,
+        text: &str,
+        card_pending: bool,
+        workspace: &Path,
+    ) {
+        if handle_attached_paste(state, input, text, card_pending) {
+            self.sync_palette(state, workspace).await;
         }
     }
 
@@ -388,6 +402,36 @@ pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEf
         Some(event) => presentation::route(state, &event, Host::Attached, &LogFacts::default()),
         None => presentation::route::blocks_paste(state).then_some(RouteEffect::Consumed),
     }
+}
+
+/// Borrowed paste edits an offered field before considering the base composer.
+pub(super) fn handle_attached_paste(
+    state: &mut TuiState,
+    input: &mut String,
+    text: &str,
+    card_pending: bool,
+) -> bool {
+    if presentation::route::paste(state, text, Host::Attached).is_some() {
+        return !presentation::too_small(state)
+            && state.pending_leader.is_none()
+            && state
+                .modal_stack
+                .top()
+                .is_some_and(|frame| frame.surface == Surface::CommandPalette);
+    }
+    if presentation::route::blocks_paste(state) {
+        return false;
+    }
+    if !card_pending
+        && state.recipient_surface.is_none()
+        && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
+        && state.pending_team_retract.is_none()
+    {
+        input.push_str(text);
+        state.autocomplete.dismiss();
+        state.needs_redraw = true;
+    }
+    false
 }
 
 /// The attached key front door. Called by `run_attached` for every key event.
@@ -873,12 +917,9 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             presentation::reducer::close(ctx.state, Surface::CommandPalette);
         }
         CommandId::Overlay(
-            OverlayCmd::PaletteUp
-            | OverlayCmd::PaletteDown
-            | OverlayCmd::PaletteRun
-            | OverlayCmd::PaletteBackspace,
+            OverlayCmd::PaletteUp | OverlayCmd::PaletteDown | OverlayCmd::PaletteRun,
         )
-        | CommandId::Field(FieldCmd::DeleteWordBack | FieldCmd::Clear | FieldCmd::DeleteBack) => {
+        | CommandId::Field(_) => {
             return palette_delegate(ctx, key).await;
         }
         CommandId::Overlay(OverlayCmd::AutoCancel) => {
@@ -2187,6 +2228,309 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn story21_4_bb2a_attached_paste_populates_before_paint_and_keeps_the_draft() {
+        use ratatui::style::Modifier;
+        for read_only in [false, true] {
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                let mut rig = Rig::new(read_only);
+                rig.input = ["retained draft"; 8].join("\n");
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                let draft = rig.input.clone();
+                let allocation = (rig.input.as_ptr(), rig.input.capacity());
+                let stage = (rig.scroll_offset, rig.auto_scroll);
+                rig.ctrl('p').await;
+                let frame = rig.state.modal_stack.top().unwrap().clone();
+                let all = rig.palette_names();
+                assert!(all.len() > 1 && all.iter().any(|name| name == "/ml"));
+                let refreshes = rig.chrome.gate.refresh_count();
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        "/ml",
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                assert_eq!(rig.state.command_palette.filter_text.as_str(), "/ml");
+                assert_eq!(
+                    rig.palette_names(),
+                    ["/ml"],
+                    "actual populate effect, before any paint/key"
+                );
+                assert_eq!(rig.chrome.gate.refresh_count(), refreshes + 1);
+                rig.key(Key::Home).await;
+                rig.key(Key::Right).await;
+                assert_eq!(
+                    rig.chrome.gate.refresh_count(),
+                    refreshes + 1,
+                    "caret motion is not filtering"
+                );
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        "界",
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                assert_eq!(rig.state.command_palette.filter_text.as_str(), "/界ml");
+                assert!(
+                    rig.palette_names().is_empty(),
+                    "pasted query updates the rows, not just text"
+                );
+                rig.key(Key::Left).await;
+                let snapshot = rig.state.command_palette.filter_text.clone();
+                let caret_count = |rig: &Rig| {
+                    paint_buffer_at(&rig.state, width, height, &rig.input)
+                        .content
+                        .iter()
+                        .filter(|cell| {
+                            cell.symbol() == "界" && cell.modifier.contains(Modifier::REVERSED)
+                        })
+                        .count()
+                };
+                assert_eq!(
+                    caret_count(&rig),
+                    1,
+                    "{read_only} {width}x{height}: fitted actual query caret"
+                );
+                rig.ctrl('x').await;
+                assert!(rig.state.pending_leader.is_some());
+                assert_eq!(
+                    caret_count(&rig),
+                    0,
+                    "the leader owns input, not the covered field"
+                );
+                let refreshes = rig.chrome.gate.refresh_count();
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        "blocked",
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                assert_eq!(rig.state.command_palette.filter_text, snapshot);
+                assert_eq!(rig.chrome.gate.refresh_count(), refreshes);
+                rig.esc().await;
+                assert_eq!(caret_count(&rig), 1);
+                rig.key(Key::Home).await;
+                rig.ctrl('k').await;
+                assert_eq!(
+                    rig.palette_names(),
+                    all,
+                    "kill-line restores the unfiltered list through the real gate"
+                );
+                assert_eq!(rig.state.modal_stack.top(), Some(&frame));
+                assert_eq!(rig.input, draft);
+                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
+                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
+                assert!(
+                    rig.frames().is_empty(),
+                    "no pasted key commands or submissions"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_bb2a_attached_every_printable_inserts_at_the_palette_caret() {
+        for read_only in [false, true] {
+            let mut rig = Rig::new(read_only);
+            rig.input = "draft".into();
+            rig.ctrl('p').await;
+            for ch in (0x20u8..0x7f).map(char::from) {
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        "ab",
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                rig.key(Key::Home).await;
+                rig.key(Key::Right).await;
+                let frame = rig.state.modal_stack.top().unwrap().clone();
+                rig.ch(ch).await;
+                assert_eq!(
+                    rig.state.command_palette.filter_text.as_str(),
+                    format!("a{ch}b"),
+                    "{read_only}: {ch:?}"
+                );
+                assert_eq!(rig.state.modal_stack.top(), Some(&frame));
+                assert_eq!(rig.input, "draft");
+                assert!(rig.frames().is_empty());
+                rig.key(Key::Home).await;
+                rig.ctrl('k').await;
+                assert!(rig.state.command_palette.filter_text.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_bb2a_attached_readline_keys_edit_graphemes_at_the_caret() {
+        const SEED: &str = "a界e\u{301} z";
+        const FAMILY: &str = "a👩‍👩‍👧‍👦b";
+        let cases: &[(Key, &str, &[Key], &str, usize)] = &[
+            (Key::Ctrl('a'), SEED, &[], SEED, 0),
+            (Key::Home, SEED, &[], SEED, 0),
+            (Key::Ctrl('e'), SEED, &[Key::Home], SEED, 6),
+            (Key::End, SEED, &[Key::Home], SEED, 6),
+            (Key::Left, SEED, &[], SEED, 5),
+            (Key::Right, SEED, &[Key::Home], SEED, 1),
+            (
+                Key::Delete,
+                SEED,
+                &[Key::Home, Key::Right],
+                "ae\u{301} z",
+                1,
+            ),
+            (
+                Key::Backspace,
+                SEED,
+                &[Key::Home, Key::Right, Key::Right],
+                "ae\u{301} z",
+                1,
+            ),
+            (
+                Key::Ctrl('h'),
+                SEED,
+                &[Key::Home, Key::Right, Key::Right],
+                "ae\u{301} z",
+                1,
+            ),
+            (Key::Ctrl('w'), SEED, &[], "a界e\u{301} ", 5),
+            (
+                Key::Ctrl('u'),
+                SEED,
+                &[Key::Home, Key::Right, Key::Right],
+                "e\u{301} z",
+                0,
+            ),
+            (
+                Key::Ctrl('k'),
+                SEED,
+                &[Key::Home, Key::Right, Key::Right],
+                "a界",
+                2,
+            ),
+            (Key::Delete, FAMILY, &[Key::Home, Key::Right], "ab", 1),
+            (
+                Key::Backspace,
+                FAMILY,
+                &[Key::Home, Key::Right, Key::Right],
+                "ab",
+                1,
+            ),
+            (
+                Key::Ctrl('h'),
+                SEED,
+                &[Key::Home, Key::Right, Key::Right, Key::Right],
+                "a界 z",
+                2,
+            ),
+            (
+                Key::Ctrl('k'),
+                "a\r\nb",
+                &[Key::Home, Key::Left],
+                "a\r\nb",
+                1,
+            ),
+            (
+                Key::Ctrl('k'),
+                "a\r\nb",
+                &[Key::Home, Key::Left, Key::Home],
+                "\r\nb",
+                0,
+            ),
+            (Key::Ctrl('k'), "a\r\nb", &[Key::Home], "a\r\n", 3),
+            (Key::Ctrl('k'), "a\r\nb", &[], "a\r\nb", 4),
+            (
+                Key::Ctrl('u'),
+                "a\r\nb",
+                &[Key::Home, Key::Left],
+                "\r\nb",
+                0,
+            ),
+            (Key::Ctrl('u'), "a\r\nb", &[Key::Home], "a\r\nb", 3),
+            (Key::Ctrl('u'), "a\r\nb", &[], "a\r\n", 3),
+            (
+                Key::Ctrl('w'),
+                "a\r\nb",
+                &[Key::Home, Key::Left],
+                "\r\nb",
+                0,
+            ),
+            (Key::Ctrl('w'), "a\r\nb", &[Key::Home], "b", 0),
+            (Key::Ctrl('w'), "a\r\nb", &[], "a\r\n", 3),
+            (Key::Backspace, "a\r\nb", &[Key::Home], "ab", 1),
+            (
+                Key::Backspace,
+                "a\r\nb",
+                &[Key::Home, Key::Left],
+                "\r\nb",
+                0,
+            ),
+            (Key::Ctrl('h'), "a\r\nb", &[Key::Home], "ab", 1),
+            (Key::Delete, "a\r\nb", &[Key::Home, Key::Left], "ab", 1),
+            (
+                Key::Delete,
+                "a\r\nb",
+                &[Key::Home, Key::Left, Key::Home],
+                "\r\nb",
+                0,
+            ),
+            (Key::Delete, "a\r\nb", &[], "a\r\nb", 4),
+        ];
+        for read_only in [false, true] {
+            for &(edit, seed, prefix, expected, cursor) in cases {
+                let mut rig = Rig::new(read_only);
+                rig.input = "untouched draft".into();
+                rig.ctrl('p').await;
+                let frame = rig.state.modal_stack.top().unwrap().clone();
+                let stage = (rig.scroll_offset, rig.auto_scroll);
+                rig.chrome
+                    .paste(
+                        &mut rig.state,
+                        &mut rig.input,
+                        seed,
+                        false,
+                        rig.workspace.path(),
+                    )
+                    .await;
+                assert_eq!(
+                    rig.state.command_palette.filter_text.as_str(),
+                    seed,
+                    "actual paste control"
+                );
+                for &key in prefix {
+                    rig.key(key).await;
+                }
+                assert_eq!(rig.key(edit).await, KeyFlow::Continue);
+                assert_eq!(
+                    rig.state.command_palette.filter_text.as_str(),
+                    expected,
+                    "{read_only}: {edit:?} {seed}"
+                );
+                assert_eq!(
+                    rig.state.command_palette.filter_text.cursor(),
+                    cursor,
+                    "{read_only}: {edit:?} {seed}"
+                );
+                assert_eq!(rig.state.modal_stack.top(), Some(&frame));
+                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
+                assert_eq!(rig.input, "untouched draft");
+                assert!(rig.frames().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn story21_2_attached_palette_runs_commands_without_touching_the_draft() {
         let mut rig = Rig::new(false);
         rig.type_text("half-written").await;
@@ -2662,7 +3006,7 @@ mod tests {
             &rig.consolidation_token,
             &rig.retract_confirm,
         );
-        super::super::handle_attached_paste(
+        super::handle_attached_paste(
             &mut rig.state,
             &mut rig.input,
             "first line\nsecond line",
@@ -3082,7 +3426,15 @@ mod tests {
     // ── draw: the attached overlays at 60 / 80 / 130 columns ─────────────────
 
     fn paint_buffer(state: &TuiState, width: u16) -> ratatui::buffer::Buffer {
-        let height = 24;
+        paint_buffer_at(state, width, 24, &state.input_buffer)
+    }
+
+    fn paint_buffer_at(
+        state: &TuiState,
+        width: u16,
+        height: u16,
+        input: &str,
+    ) -> ratatui::buffer::Buffer {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal
@@ -3091,7 +3443,7 @@ mod tests {
                 let layout = crate::adapters::tui::layout::compute_layout(
                     area,
                     &state.theme,
-                    &state.input_buffer,
+                    input,
                     1,
                     false,
                     crate::domain::models::visual::DensityMode::Focus,
@@ -4204,40 +4556,49 @@ mod tests {
     #[rustfmt::skip]
     fn palette_digest(rig: &Rig) -> String {
         let p = &rig.state.command_palette;
-        format!("palette={} sel={} filter={} ml={} {}", presentation::is_open(&rig.state, Surface::CommandPalette), p.selected_index, p.filter_text, rig.state.multiline_mode, open_surface(rig))
+        format!("palette={} sel={} filter={} ml={} {}", presentation::is_open(&rig.state, Surface::CommandPalette), p.selected_index, p.filter_text.as_str(), rig.state.multiline_mode, open_surface(rig))
     }
 
     /// Catches a palette row that runs the wrong entry, keeps the palette open, edits the filter wrongly or swallows Ctrl+Q.
     #[rustfmt::skip]
     #[tokio::test]
     async fn story21_3_attached_witness_command_palette() {
+        use crate::adapters::tui::keymap::table_input::FieldCmd;
         let open = |sel: u8, filter: &str, ml: bool| format!("Continue | palette=true sel={sel} filter={filter} ml={ml} quit=false focus=Input input=draft");
         let closed = |ml: bool, quit: bool| format!("Continue | palette=false sel=0 filter= ml={ml} quit={quit} focus=Input input=draft");
         let cases = [
             (Key::Up, open(0, "", false)), (Key::Down, open(2, "", false)),
             (Key::Enter, closed(true, false)), // "ml" is the first entry: toggles multiline, draft untouched
             (Key::Esc, closed(false, false)), (Key::Ctrl('c'), closed(false, false)),
-            (Key::Backspace, open(0, "m", false)),
             // AC2/A18: selection and filter survive underneath Quit.
             (Key::Ctrl('q'), "Continue | palette=true sel=1 filter= ml=false quit=true focus=Input input=draft".to_owned()),
             (Key::Ctrl('x'), open(1, "", false)), (Key::Ctrl('p'), open(1, "", false)),
         ];
         witness_rows(Context::CommandPalette, palette_rig, palette_digest, &cases).await;
-        // Plain printable keys type into the filter (allowed); Tab and every modified key are inert.
-        witness_inert(Context::CommandPalette, palette_rig, palette_digest, |k| matches!(k, Key::Char(_))).await;
-        // The inherited FIELD rows edit the filter like the local palette: Ctrl+W a word, Ctrl+U all, Ctrl+H one grapheme.
+        // Backspace moved from an overlay row to the shared caret-field ancestor.
+        assert!(matches!(keymap::resolve(Context::CommandPalette, Host::Attached, &[Key::Backspace]),
+            Resolved::Hit(row) if row.context == Context::CaretField && row.command == CommandId::Field(FieldCmd::DeleteBack)));
+        let mut backspace = palette_rig(Key::Backspace).await;
+        let flow = backspace.key(Key::Backspace).await;
+        assert_eq!(format!("{flow:?} | {}", palette_digest(&backspace)), open(0, "m", false));
+        assert!(backspace.frames().is_empty());
+        // Non-row keys stay inert; shared field rows have exhaustive edit witnesses above.
+        witness_inert(Context::CommandPalette, palette_rig, palette_digest, |key| matches!(key, Key::Char(_)) ||
+            matches!(keymap::resolve(Context::CommandPalette, Host::Attached, &[key]), Resolved::Hit(row)
+                if matches!(row.command, CommandId::Field(_)))).await;
+        // The inherited caret rows retain the old end-of-query edit behavior.
         for (key, want) in [(Key::Ctrl('w'), "ab "), (Key::Ctrl('u'), ""), (Key::Ctrl('h'), "ab c")] {
             let mut rig = Rig::at(FocusState::Input, "draft");
             rig.ctrl('p').await;
             rig.type_text("ab cd").await;
             assert_eq!(rig.key(key).await, KeyFlow::Continue);
-            assert_eq!(rig.state.command_palette.filter_text, want, "{key:?}");
+            assert_eq!(rig.state.command_palette.filter_text.as_str(), want, "{key:?}");
             assert!(presentation::is_open(&rig.state, Surface::CommandPalette) && rig.input == "draft" && rig.frames().is_empty());
         }
         let mut typing = Rig::at(FocusState::Input, "draft");
         typing.ctrl('p').await;
         typing.ch('z').await;
-        assert_eq!(typing.state.command_palette.filter_text, "z");
+        assert_eq!(typing.state.command_palette.filter_text.as_str(), "z");
         assert!(presentation::is_open(&typing.state, Surface::CommandPalette));
         assert_eq!(typing.input, "draft", "the palette filter never touches the composer");
         assert!(typing.frames().is_empty());
@@ -4749,7 +5110,7 @@ mod tests {
                 "{key:?}: no response or interrupt below minimum"
             );
         }
-        super::super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
+        super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
         assert!(rig.input.is_empty());
         assert_eq!(rig.approvals.pending.len(), 1);
         rig.state.terminal_width = 80;
@@ -4839,18 +5200,13 @@ mod tests {
                     assert!(rig.frames().is_empty());
                 }
                 let allocation = (rig.input.as_ptr(), rig.input.capacity());
-                super::super::handle_attached_paste(
-                    &mut rig.state,
-                    &mut rig.input,
-                    "hidden paste",
-                    false,
-                );
+                super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
                 assert_eq!(salient(&rig), before);
                 assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
             }
         }
         let mut visible = Rig::at(FocusState::Input, "");
-        super::super::handle_attached_paste(
+        super::handle_attached_paste(
             &mut visible.state,
             &mut visible.input,
             "visible paste",
@@ -5275,12 +5631,7 @@ mod tests {
                     rig.ctrl('x').await;
                 }
                 let before = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
-                super::super::handle_attached_paste(
-                    &mut rig.state,
-                    &mut rig.input,
-                    "hidden",
-                    false,
-                );
+                super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden", false);
                 for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
                     assert_eq!(
                         route_event(

@@ -193,12 +193,15 @@ fn test_e2e_reverse_search_filters() {
     assert!(h.state.reverse_search.is_open());
 
     // Set query (filters history matches)
-    h.state.reverse_search.query = "Apple".to_string();
+    h.state.reverse_search.query = "Apple".into();
 
     // Query should be set and match entries
-    assert_eq!(h.state.reverse_search.query, "Apple");
+    assert_eq!(h.state.reverse_search.query.as_str(), "Apple");
     // Matches should contain Apple-related entries
-    assert!(!h.state.reverse_search.matches.is_empty() || h.state.reverse_search.query == "Apple");
+    assert!(
+        !h.state.reverse_search.matches.is_empty()
+            || h.state.reverse_search.query.as_str() == "Apple"
+    );
 }
 
 /// Covers: AC3 — Esc cancels reverse-search

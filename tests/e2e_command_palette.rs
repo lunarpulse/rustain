@@ -54,10 +54,10 @@ fn test_e2e_palette_fuzzy_filtering() {
     h.press_key(DomainKey::CtrlP);
 
     // Type filter
-    h.state.command_palette.filter_text = "new".to_string();
+    h.state.command_palette.filter_text = "new".into();
 
     // Should have filter text
-    assert_eq!(h.state.command_palette.filter_text, "new");
+    assert_eq!(h.state.command_palette.filter_text.as_str(), "new");
 }
 
 /// Covers: AC1 — Each result shows name, shortcut, description
@@ -130,7 +130,13 @@ fn test_e2e_palette_slash_scope() {
     h.type_char('/');
 
     // Should filter to slash command scope
-    assert!(h.state.command_palette.filter_text.starts_with('/'));
+    assert!(
+        h.state
+            .command_palette
+            .filter_text
+            .as_str()
+            .starts_with('/')
+    );
 }
 
 /// Covers: AC2 — `@` prefix filters to files/agents
@@ -142,7 +148,13 @@ fn test_e2e_palette_at_scope() {
     h.type_char('@');
 
     // Should filter to mention scope
-    assert!(h.state.command_palette.filter_text.starts_with('@'));
+    assert!(
+        h.state
+            .command_palette
+            .filter_text
+            .as_str()
+            .starts_with('@')
+    );
 }
 
 /// Covers: AC2 — `:` prefix filters to models/providers
@@ -153,7 +165,13 @@ fn test_e2e_palette_colon_scope() {
     h.press_key(DomainKey::CtrlP);
     h.type_char(':');
 
-    assert!(h.state.command_palette.filter_text.starts_with(':'));
+    assert!(
+        h.state
+            .command_palette
+            .filter_text
+            .as_str()
+            .starts_with(':')
+    );
 }
 
 /// Covers: AC2 — `>` prefix filters to profiles
@@ -164,7 +182,13 @@ fn test_e2e_palette_gt_scope() {
     h.press_key(DomainKey::CtrlP);
     h.type_char('>');
 
-    assert!(h.state.command_palette.filter_text.starts_with('>'));
+    assert!(
+        h.state
+            .command_palette
+            .filter_text
+            .as_str()
+            .starts_with('>')
+    );
 }
 
 /// Covers: AC2 — `!` prefix filters to adapter management
@@ -175,7 +199,13 @@ fn test_e2e_palette_bang_scope() {
     h.press_key(DomainKey::CtrlP);
     h.type_char('!');
 
-    assert!(h.state.command_palette.filter_text.starts_with('!'));
+    assert!(
+        h.state
+            .command_palette
+            .filter_text
+            .as_str()
+            .starts_with('!')
+    );
 }
 
 /// Covers: AC2 — Unscoped search shows all populated scopes

@@ -11,6 +11,25 @@ use crate::domain::services::search::find_matches;
 
 use super::HandlerOutcome;
 
+/// Borrow the real local paste before event conversion can copy its text.
+/// Other query owners have no Stage effect; Search uses its owning manager.
+pub fn handle_query_paste(
+    tabs: &mut TabManager,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    text: &str,
+) -> Option<InputAction> {
+    let action =
+        presentation::route::paste(state, text, crate::adapters::tui::keymap::Host::Local)?;
+    if matches!(
+        action,
+        InputAction::SearchQueryChanged | InputAction::SearchReturnToTyping
+    ) {
+        handle_search_action(tabs, state, conversation, &action);
+    }
+    Some(action)
+}
+
 /// The runtime's Search effect seam. User Back restores only the owning Stage;
 /// reducer close/replacement/discard merely releases the snapshot without restore.
 /// Effects run after input routing, so capture ownership before the actual close
@@ -81,9 +100,9 @@ fn search_action_inner(
             }
             state.needs_redraw = true;
         }
-        InputAction::SearchQueryChanged
-        | InputAction::SearchClear
-        | InputAction::SearchReturnToTyping => rescan(tabs, state, conversation),
+        InputAction::SearchQueryChanged | InputAction::SearchReturnToTyping => {
+            rescan(tabs, state, conversation)
+        }
         InputAction::SearchNext => navigate(tabs, state, 1),
         InputAction::SearchPrev => navigate(tabs, state, -1),
         _ => {}
@@ -118,7 +137,7 @@ fn jump(tabs: &mut TabManager, state: &mut TuiState, message_index: usize) {
 /// Skip rescans within 30 ms when the query's character length is unchanged.
 fn rescan(tabs: &mut TabManager, state: &mut TuiState, conversation: &Conversation) {
     let prev_query_len = state.search_state.last_query_len;
-    let cur_query_len = state.search_state.query.chars().count();
+    let cur_query_len = state.search_state.query.as_str().chars().count();
     if let Some(last) = state.search_state.last_search_instant
         && last.elapsed() < std::time::Duration::from_millis(30)
         && prev_query_len == cur_query_len
@@ -132,7 +151,7 @@ fn rescan(tabs: &mut TabManager, state: &mut TuiState, conversation: &Conversati
         .get(state.search_state.focused_match_index)
         .cloned();
     let prev_was_empty = state.search_state.matches.is_empty();
-    let new_matches = find_matches(conversation, &state.search_state.query);
+    let new_matches = find_matches(conversation, state.search_state.query.as_str());
     let new_is_empty = new_matches.is_empty();
     let prev_focused_still_valid = prev_focused
         .as_ref()

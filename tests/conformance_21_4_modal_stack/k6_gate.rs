@@ -1,4 +1,4 @@
-//! K6 / A19: 4-Bb1b-ii ratchet. Behaviour belongs to K1–K5/K7–K9, not this scanner.
+//! K6 / A19: 4-Bb2a ratchet. Behaviour belongs to K1–K5/K7–K10, not this scanner.
 //! Every retained occurrence has an exact named-site pin and a migration owner.
 //! Removed/changed pins fail stale; new hits never inherit a file exemption.
 use regex::Regex;
@@ -360,6 +360,14 @@ const RULES: &[(&str, &str)] = &[
     ),
     ("a2b-payload-owner", r"\b(?:pub\s+)?(?:active|focused)\s*:"),
     ("legacy-painter", r"\bpaint_legacy\b"),
+    (
+        "field-string",
+        r"\b(?:query|filter_text)\s*:\s*(?:std\s*::\s*string\s*::\s*)?String\b",
+    ),
+    (
+        "field-tail",
+        r"\.\s*(?:command_palette\s*\.\s*filter_text|(?:search_state|reverse_search)\s*\.\s*query)\s*\.\s*(?:push|push_str|pop|truncate|drain|replace_range|insert_str)\s*\(|\bfn\s+(?:palette_edit|search_edit)\b|\b(?:SearchClear|PaletteBackspace|RevBackspace)\b",
+    ),
 ];
 
 // Canonical bytes retain an offset back into the masked source. Rustfmt may wrap
@@ -481,6 +489,14 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 {
                     continue;
                 }
+                if *rule == "field-string"
+                    && !matches!(
+                        scope(&code, m.start()).as_str(),
+                        "CommandPaletteState" | "SearchState" | "ReverseSearchState"
+                    )
+                {
+                    continue;
+                }
                 let start = code[..m.start()].rfind('\n').map_or(0, |n| n + 1);
                 let end = code[m.end()..]
                     .find('\n')
@@ -498,6 +514,8 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "a2b-owner",
                     "a2b-payload-owner",
                     "legacy-painter",
+                    "field-string",
+                    "field-tail",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -1152,7 +1170,7 @@ fn k6_bb1a_legacy_owners_and_relocated_painters_cannot_be_pinned() {
 #[test]
 fn k6_bb1a_payload_edits_and_routed_popup_api_remain_allowed() {
     for path in ["src/x.rs", "src/adapters/tui/presentation/route.rs"] {
-        let source = "fn real() { s.search_state.query.push(c); s.reverse_search.query.clear(); s.reverse_search.is_open(); s.reverse_search.reset(); s.reverse_search.dismiss(); s.reverse_search.selected_match = Some(0); }";
+        let source = "fn real() { s.search_state.query.insert_char(c); s.reverse_search.query.clear(); s.reverse_search.is_open(); s.reverse_search.reset(); s.reverse_search.dismiss(); s.reverse_search.selected_match = Some(0); }";
         assert!(
             scan(&[(path.into(), source.into())], &[]).is_empty(),
             "{path}"
@@ -1166,7 +1184,7 @@ fn k6_bb1a_payload_edits_and_routed_popup_api_remain_allowed() {
         }
     }
     let path = "src/adapters/tui/state.rs";
-    let source = "struct SearchState { query: String } impl SearchState { fn reset(&mut self) { self.query.clear(); } } struct ReverseSearchState { selected_match: Option<usize> } impl ReverseSearchState { fn is_open(&self) -> bool { self.selected_match.is_some() } fn reset(&mut self) { self.selected_match = Some(0); } fn dismiss(&mut self) { self.selected_match = None; } }";
+    let source = "struct SearchState { query: TextField } impl SearchState { fn reset(&mut self) { self.query.clear(); } } struct ReverseSearchState { selected_match: Option<usize> } impl ReverseSearchState { fn is_open(&self) -> bool { self.selected_match.is_some() } fn reset(&mut self) { self.selected_match = Some(0); } fn dismiss(&mut self) { self.selected_match = None; } }";
     assert!(scan(&[(path.into(), source.into())], &[]).is_empty());
     // Confirmation focus is still 4-C-owned; exact named-site pins remain usable.
     let source = "fn real() { s.focus = FocusState::Overlay(OverlayType::Confirmation(kind)); }";
@@ -1437,4 +1455,77 @@ fn k6_paint_legacy_seam_cannot_return_even_inside_presentation() {
             );
         }
     }
+}
+
+#[test]
+fn k6_bb2a_fields_are_typed_and_tail_helpers_cannot_return() {
+    for (kind, field) in [
+        ("CommandPaletteState", "filter_text"),
+        ("SearchState", "query"),
+        ("ReverseSearchState", "query"),
+    ] {
+        let old = format!("struct {kind} {{ {field}: String }}");
+        let site = format!("field-string|{kind}|{old}");
+        let sites = [site.as_str()];
+        let pins = [("src/field.rs", "4-C", sites.as_slice())];
+        let errors = scan(&[("src/field.rs".into(), old.clone())], &pins);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("field-string|") && !error.starts_with("stale pin")),
+            "{kind}: {errors:?}"
+        );
+        assert!(errors.iter().any(|error| error.starts_with("stale pin")));
+        assert!(
+            scan(
+                &[(
+                    "src/field.rs".into(),
+                    old.replace(": String", ": TextField")
+                )],
+                &[]
+            )
+            .is_empty()
+        );
+    }
+    for field in [
+        "command_palette.filter_text",
+        "search_state.query",
+        "reverse_search.query",
+    ] {
+        for method in [
+            "push",
+            "push_str",
+            "pop",
+            "truncate",
+            "drain",
+            "replace_range",
+            "insert_str",
+        ] {
+            let source = format!("fn old() {{ state.{field}.{method}(x); }}");
+            assert!(
+                scan(&[("src/field.rs".into(), source)], &[])
+                    .iter()
+                    .any(|error| error.contains("field-tail|")),
+                "{field}.{method}"
+            );
+        }
+    }
+    for source in [
+        "fn palette_edit() {}",
+        "fn search_edit() {}",
+        "fn old() { let x = InputAction::SearchClear; }",
+        "fn old() { let x = OverlayCmd::PaletteBackspace; }",
+        "fn old() { let x = OverlayCmd::RevBackspace; }",
+    ] {
+        assert!(
+            scan(&[("src/field.rs".into(), source.into())], &[])
+                .iter()
+                .any(|error| error.contains("field-tail|")),
+            "{source}"
+        );
+    }
+    // Independent negative control: CrossSearch's String editor is allocated to 2b.
+    let legacy = "struct CrossSearchState { query: String }
+        fn cross_search_edit() { state.cross_search.query.push(x); }";
+    assert!(scan(&[("src/field.rs".into(), legacy.into())], &[]).is_empty());
 }

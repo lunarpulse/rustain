@@ -288,6 +288,7 @@ pub fn all_rows() -> Vec<Binding> {
         LEADER,
         super::table_input::ROWS,
         super::table_input::FIELD,
+        super::table_input::TEXT,
         super::table_chat::ROWS,
         super::table_nav::ROWS,
         super::table_panels::ROWS,

@@ -56,6 +56,20 @@ pub fn blocks_paste(state: &TuiState) -> bool {
     too_small(state) || !state.modal_stack.is_empty() || state.pending_leader.is_some()
 }
 
+/// Borrowed text goes to the current editable owner, never its covered composer.
+pub fn paste(state: &mut TuiState, text: &str, host: Host) -> Option<InputAction> {
+    if too_small(state)
+        || state.pending_leader.is_some()
+        || state
+            .modal_stack
+            .top()
+            .is_some_and(|frame| frame.surface == Surface::QuitConfirm)
+    {
+        return Some(InputAction::Consumed);
+    }
+    app::try_with_card_focus_reconcile(state, |state| app::paste_query(state, text, host))
+}
+
 /// `None` lets the host's existing base/legacy dispatcher run. Only system events
 /// may pass a live frame, and no user event acts below the minimum terminal size.
 pub fn route(
@@ -127,6 +141,11 @@ pub fn route(
         } else {
             RouteEffect::Leader
         });
+    }
+    if let DomainInputEvent::Paste(text) = event
+        && let Some(action) = paste(state, text, host)
+    {
+        return Some(RouteEffect::Action(action));
     }
     let surface = state.modal_stack.top()?.surface;
     if surface == Surface::DecisionPane && decision_pane::current(state, facts).is_none() {

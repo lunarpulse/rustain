@@ -9,14 +9,14 @@ use crate::adapters::tui::theme::Theme;
 const MAX_VISIBLE_MATCHES: usize = 5;
 
 /// Render the reverse search popup above the input box.
-/// `show_cursor` controls only hardware cursor placement, not painted cells.
+/// `show_caret` controls the painted query caret; no hardware cursor is placed.
 // Covers: UX-DR74 (reverse search popup)
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     state: &ReverseSearchState,
     theme: &Theme,
-    show_cursor: bool,
+    show_caret: bool,
 ) {
     if !state.is_open() {
         return;
@@ -31,11 +31,12 @@ pub fn render(
     let query_prefix = "(reverse-search): ";
     let query_prefix_cells = geom::cells(query_prefix);
     let inner_width = usize::from(area.width).saturating_sub(2); // borders
-    // One cell stays free after the query for the caret (never on the border).
-    let shown_query = geom::clip_tail(
-        &state.query,
-        inner_width.saturating_sub(query_prefix_cells + 1),
-    );
+    let view = state
+        .query
+        .view(inner_width.saturating_sub(query_prefix_cells));
+    let query_style = Style::default()
+        .fg(theme.colors.fg_primary)
+        .add_modifier(Modifier::BOLD);
     lines.push(Line::from(vec![
         Span::styled(
             query_prefix,
@@ -43,12 +44,16 @@ pub fn render(
                 .fg(theme.colors.fg_muted)
                 .add_modifier(Modifier::ITALIC),
         ),
+        Span::styled(view.before, query_style),
         Span::styled(
-            shown_query.to_string(),
-            Style::default()
-                .fg(theme.colors.fg_primary)
-                .add_modifier(Modifier::BOLD),
+            view.caret,
+            if show_caret {
+                query_style.add_modifier(Modifier::REVERSED)
+            } else {
+                query_style
+            },
         ),
+        Span::styled(view.after, query_style),
     ]));
 
     // Match lines
@@ -112,18 +117,6 @@ pub fn render(
 
     frame.render_widget(Clear, overlay_area);
     frame.render_widget(widget, overlay_area);
-
-    // Show cursor at end of query on the query line (row 1 inside border)
-    // Covers: UX-DR74 (AC4 filter input cursor)
-    // The query scrolls so its tail stays visible; the caret follows the
-    // display cells actually painted (whole graphemes, never a scalar count).
-    if show_cursor {
-        let cursor_col = (query_prefix_cells + geom::cells(shown_query)) as u16 + 1; // +1 for left border
-        let cursor_x = (overlay_area.x + cursor_col)
-            .min(overlay_area.x + overlay_area.width.saturating_sub(2));
-        let cursor_y = overlay_area.y + 1; // +1 for top border
-        frame.set_cursor_position((cursor_x, cursor_y));
-    }
 }
 
 #[cfg(test)]
@@ -140,7 +133,7 @@ mod tests {
 
     fn state(query: &str, matches: &[&str]) -> ReverseSearchState {
         ReverseSearchState {
-            query: query.to_string(),
+            query: query.into(),
             matches: matches
                 .iter()
                 .enumerate()
@@ -152,18 +145,14 @@ mod tests {
 
     /// Paint the real popup in a terminal exactly as tall as the popup
     /// (1 query row, `matches` rows, 2 borders). Returns glyph rows (wide
-    /// glyph continuations dropped), the buffer and the backend caret.
-    fn draw(
-        width: u16,
-        state: &ReverseSearchState,
-    ) -> (Vec<String>, ratatui::buffer::Buffer, (u16, u16)) {
+    /// glyph continuations dropped) and the painted buffer.
+    fn draw(width: u16, state: &ReverseSearchState) -> (Vec<String>, ratatui::buffer::Buffer) {
         let rows = 1 + state.matches.len().max(1) as u16 + 2;
         let mut terminal = Terminal::new(TestBackend::new(width, rows)).unwrap();
         let theme = Theme::dark();
         terminal
             .draw(|frame| render(frame, frame.area(), state, &theme, true))
             .unwrap();
-        let cursor = terminal.get_cursor_position().unwrap();
         let buffer = terminal.backend().buffer().clone();
         let glyph_rows = (0..rows)
             .map(|y| {
@@ -177,7 +166,7 @@ mod tests {
                 row
             })
             .collect();
-        (glyph_rows, buffer, (cursor.x, cursor.y))
+        (glyph_rows, buffer)
     }
 
     #[test]
@@ -198,7 +187,7 @@ mod tests {
             (format!("{C}{G}{A}"), format!("{C}{G}{A}")),
         ];
         for (entry, shown) in cases {
-            let (rows, buffer, _cursor) = draw(40, &state("q", &[entry.as_str()]));
+            let (rows, buffer) = draw(40, &state("q", &[entry.as_str()]));
             assert!(
                 rows[2].starts_with(&format!("│ ▸ \"{shown}\"")),
                 "entry {entry:?}: {:?}",
@@ -206,6 +195,64 @@ mod tests {
             );
             assert_eq!(buffer.cell((39, 2)).unwrap().symbol(), "│", "{entry:?}");
             assert_eq!(geom::cells(&rows[2]), 40, "{:?}", rows[2]);
+            assert!(rows[1].starts_with("│(reverse-search): q "));
+            assert_eq!(buffer[(20, 1)].symbol(), " ");
+            assert!(buffer[(20, 1)].modifier.contains(Modifier::REVERSED));
         }
+    }
+
+    #[test]
+    fn reverse_search_query_paints_only_the_owned_interior_grapheme_caret() {
+        use crate::adapters::tui::keymap::table_input::FieldCmd;
+
+        for grapheme in [C, G, A] {
+            let mut state = state(&format!("x{grapheme}z"), &["hit"]);
+            state.query.edit(FieldCmd::LineStart);
+            state.query.edit(FieldCmd::CursorRight);
+            for show_caret in [false, true] {
+                let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render(frame, frame.area(), &state, &Theme::dark(), show_caret);
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(buffer[(19, 1)].symbol(), "x");
+                assert_eq!(buffer[(20, 1)].symbol(), grapheme);
+                assert_eq!(
+                    buffer[(20, 1)].modifier.contains(Modifier::REVERSED),
+                    show_caret,
+                );
+                assert_eq!(buffer[(20 + geom::cells(grapheme) as u16, 1)].symbol(), "z");
+                assert!(!buffer[(19, 1)].modifier.contains(Modifier::REVERSED));
+                assert_eq!(buffer[(39, 1)].symbol(), "│");
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_search_query_view_keeps_whole_grapheme_tail_inside_narrow_border() {
+        for (width, query, shown) in [
+            (28, C.repeat(5), C.repeat(3)),
+            (28, G.repeat(5), G.repeat(3)),
+            (28, A.repeat(10), A.repeat(7)),
+            (28, format!("abc{C}{G}{A}"), format!("bc{C}{G}{A}")),
+            (23, C.repeat(5), C.to_string()),
+            (22, C.repeat(5), String::new()),
+            (21, C.repeat(5), String::new()),
+        ] {
+            let (rows, buffer) = draw(width, &state(&query, &["hit"]));
+            assert!(rows[1].starts_with(&format!("│(reverse-search): {shown} ")));
+            assert_eq!(geom::cells(&rows[1]), usize::from(width));
+            let caret_x = 19 + geom::cells(&shown) as u16;
+            assert_eq!(buffer[(caret_x, 1)].symbol(), " ");
+            assert!(buffer[(caret_x, 1)].modifier.contains(Modifier::REVERSED));
+            assert!(caret_x < width - 1);
+            assert_eq!(buffer[(width - 1, 1)].symbol(), "│");
+        }
+        let (rows, buffer) = draw(20, &state(C, &["hit"]));
+        assert_eq!(geom::cells(&rows[1]), 20);
+        assert_eq!(buffer[(19, 1)].symbol(), "│");
+        assert!((0..20).all(|x| !buffer[(x, 1)].modifier.contains(Modifier::REVERSED)));
     }
 }
