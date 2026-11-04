@@ -539,7 +539,6 @@ fn test_help_overlay_small_terminal_no_crash() {
                     Host::Local,
                     &LogFacts::default(),
                     |_| {},
-                    |_| {},
                 );
             })
             .unwrap();

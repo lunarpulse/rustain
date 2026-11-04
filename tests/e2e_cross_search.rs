@@ -10,18 +10,19 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::{CrossSearchState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::cross_search;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{OverlayType, PanelType};
+use rustain::domain::models::visual::PanelType;
 use rustain::domain::services::cross_search::CrossSearchResult;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn sidebar_focus_state() -> TuiState {
-    let mut s = TuiState::new(120, 30);
+    let mut s = TuiState::new(130, 30);
     s.focus = FocusState::Sidebar {
         panel: PanelType::History,
         selected: 0,
@@ -29,12 +30,47 @@ fn sidebar_focus_state() -> TuiState {
     s
 }
 
-fn cross_search_overlay_state() -> TuiState {
-    let mut s = TuiState::new(120, 30);
-    s.focus = FocusState::Overlay(OverlayType::CrossSearch);
-    s.cross_search = CrossSearchState::new();
-    s.cross_search.active = true;
+fn cross_search_state() -> TuiState {
+    let mut s = sidebar_focus_state();
+    assert_eq!(
+        handle_input(&mut s, &DomainInputEvent::KeyPress('/')),
+        InputAction::OpenCrossSearch
+    );
+    assert_cross_search_frame(&s);
     s
+}
+
+fn assert_cross_search_frame(state: &TuiState) {
+    assert_eq!(
+        state.focus,
+        FocusState::Sidebar {
+            panel: PanelType::History,
+            selected: 0,
+        }
+    );
+    assert!(is_open(state, Surface::CrossSearch));
+    assert_eq!(state.modal_stack.len(), 1);
+    let frame = state.modal_stack.top().expect("CrossSearch owns a frame");
+    assert_eq!(frame.surface, Surface::CrossSearch);
+    assert_eq!(frame.conversation_id, None);
+}
+
+fn claim_scan(state: &mut TuiState) -> (u64, u64, String) {
+    use rustain::infrastructure::runtime::event_loop::{
+        CrossSearchScanAction, apply_cross_search_query_change,
+    };
+    let CrossSearchScanAction::Spawn {
+        query,
+        frame_id,
+        revision,
+    } = apply_cross_search_query_change(state)
+    else {
+        panic!("the owned query must claim a real scan");
+    };
+    assert_cross_search_frame(state);
+    assert_eq!(frame_id, state.modal_stack.top().unwrap().id);
+    assert_eq!(revision, state.cross_search.request_revision);
+    (frame_id, revision, query)
 }
 
 fn stub_result(id: &str, title: &str, excerpt: &str, msg_idx: usize) -> CrossSearchResult {
@@ -54,36 +90,37 @@ fn test_e2e_slash_in_sidebar_opens_cross_search() {
     let mut state = sidebar_focus_state();
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
     assert_eq!(action, InputAction::OpenCrossSearch);
-    assert_eq!(state.focus, FocusState::Overlay(OverlayType::CrossSearch));
-    assert!(state.cross_search.active);
+    assert_cross_search_frame(&state);
     assert_eq!(state.cross_search.query, "");
 }
 
 #[test]
 fn test_e2e_slash_outside_sidebar_does_not_open_cross_search() {
-    let mut state = TuiState::new(120, 30);
+    let mut state = TuiState::new(130, 30);
     state.focus = FocusState::Chat;
     handle_input(&mut state, &DomainInputEvent::KeyPress('/'));
-    assert_ne!(state.focus, FocusState::Overlay(OverlayType::CrossSearch));
-    assert!(!state.cross_search.active);
+    assert_eq!(state.focus, FocusState::Chat);
+    assert!(!is_open(&state, Surface::CrossSearch));
+    assert!(state.modal_stack.is_empty());
 }
 
 // ── AC5: Typing extends query ──────────────────────────────────────────────
 
 #[test]
 fn test_e2e_cross_search_typing_extends_query() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     for c in "deploy".chars() {
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         // Each char emits CrossSearchQueryChanged (event loop runs the scan).
         assert_eq!(action, InputAction::CrossSearchQueryChanged);
     }
     assert_eq!(state.cross_search.query, "deploy");
+    assert_cross_search_frame(&state);
 }
 
 #[test]
 fn test_e2e_cross_search_backspace_pops_query() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.query = "deploy".to_string();
     let action = handle_input(
         &mut state,
@@ -91,13 +128,14 @@ fn test_e2e_cross_search_backspace_pops_query() {
     );
     assert_eq!(action, InputAction::CrossSearchQueryChanged);
     assert_eq!(state.cross_search.query, "deplo");
+    assert_cross_search_frame(&state);
 }
 
 // ── AC5: j/k navigate results ──────────────────────────────────────────────
 
 #[test]
 fn test_e2e_cross_search_j_advances_selection_with_results() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.results = vec![
         stub_result("a", "alpha", "one", 0),
         stub_result("b", "beta", "two", 0),
@@ -112,11 +150,12 @@ fn test_e2e_cross_search_j_advances_selection_with_results() {
     assert_eq!(state.cross_search.selected, 2);
     handle_input(&mut state, &DomainInputEvent::KeyPress('k'));
     assert_eq!(state.cross_search.selected, 1);
+    assert_cross_search_frame(&state);
 }
 
 #[test]
 fn test_e2e_cross_search_arrow_key_navigation() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.results = vec![
         stub_result("a", "alpha", "one", 0),
         stub_result("b", "beta", "two", 0),
@@ -125,6 +164,7 @@ fn test_e2e_cross_search_arrow_key_navigation() {
     assert_eq!(state.cross_search.selected, 1);
     handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Up));
     assert_eq!(state.cross_search.selected, 0);
+    assert_cross_search_frame(&state);
 }
 
 #[test]
@@ -132,37 +172,45 @@ fn test_e2e_cross_search_j_with_no_results_is_noop() {
     // Typing 'j' into an empty-results overlay would otherwise extend the
     // query, but our dispatch treats 'j' as a navigation key in CrossSearch
     // overlay — it's consumed, query stays empty.
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     assert!(state.cross_search.results.is_empty());
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('j'));
     assert_eq!(action, InputAction::Consumed);
     assert_eq!(state.cross_search.query, "");
+    assert_cross_search_frame(&state);
 }
 
 // ── AC6: Enter opens result ────────────────────────────────────────────────
 
 #[test]
 fn test_e2e_cross_search_enter_returns_open_result_when_results_exist() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.results = vec![stub_result("a", "alpha", "one", 0)];
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::OpenCrossSearchResult);
+    assert_cross_search_frame(&state);
 }
 
 #[test]
 fn test_e2e_cross_search_enter_with_no_results_is_consumed() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
     assert_eq!(action, InputAction::Consumed);
+    assert_cross_search_frame(&state);
 }
 
 // ── AC5: Esc closes ────────────────────────────────────────────────────────
 
 #[test]
 fn test_e2e_cross_search_esc_returns_close() {
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
     assert_eq!(action, InputAction::CloseCrossSearch);
+    assert_cross_search_frame(&state);
+    rustain::adapters::tui::handlers::export::close_cross_search(&mut state);
+    assert!(!is_open(&state, Surface::CrossSearch));
+    assert!(state.modal_stack.is_empty());
+    assert_eq!(state.focus, sidebar_focus_state().focus);
 }
 
 // ── AC5: Overlay widget render ─────────────────────────────────────────────
@@ -173,7 +221,6 @@ fn test_e2e_cross_search_widget_renders_query_prompt_when_short_query() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = "a".to_string();
     terminal
         .draw(|frame| {
@@ -191,7 +238,6 @@ fn test_e2e_cross_search_widget_renders_results_vertical_stack() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = "hit".to_string();
     state.total = 2;
     state.scanned = 2;
@@ -215,7 +261,6 @@ fn test_e2e_cross_search_widget_shows_no_matches_when_empty_results() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = "xyz".to_string();
     terminal
         .draw(|frame| {
@@ -246,7 +291,7 @@ fn test_e2e_cross_search_below_2_chars_no_scan() {
         CrossSearchScanAction, apply_cross_search_query_change,
     };
 
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     // Pre-seed some stale results from a previous scan.
     state.cross_search.results = vec![
         stub_result("a", "alpha", "one", 0),
@@ -272,6 +317,7 @@ fn test_e2e_cross_search_below_2_chars_no_scan() {
     assert!(!state.cross_search.truncated_by_count);
     assert!(!state.cross_search.truncated_by_time);
     assert!(!state.cross_search.running);
+    assert_cross_search_frame(&state);
 }
 
 #[test]
@@ -282,13 +328,20 @@ fn test_e2e_cross_search_query_at_2_chars_spawns_scan() {
         CrossSearchScanAction, apply_cross_search_query_change,
     };
 
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.query = "ab".to_string();
     let action = apply_cross_search_query_change(&mut state);
 
     match action {
-        CrossSearchScanAction::Spawn { query } => {
+        CrossSearchScanAction::Spawn {
+            query,
+            frame_id,
+            revision,
+        } => {
             assert_eq!(query, "ab");
+            assert_cross_search_frame(&state);
+            assert_eq!(frame_id, state.modal_stack.top().unwrap().id);
+            assert_eq!(revision, state.cross_search.request_revision);
             assert!(
                 state.cross_search.running,
                 "running flag must be set while a scan is in flight"
@@ -310,14 +363,18 @@ fn test_e2e_cross_search_stale_result_discard() {
         CrossSearchResultsOutcome, apply_cross_search_results,
     };
 
-    let mut state = cross_search_overlay_state();
-    // User's current query is "foobar".
+    let mut state = cross_search_state();
+    state.cross_search.query = "foo".to_string();
+    let (frame_id, revision, query) = claim_scan(&mut state);
+    // The real request remains in flight while the current query changes.
     state.cross_search.query = "foobar".to_string();
 
     // Stale scan completes for query "foo".
     let outcome = apply_cross_search_results(
         &mut state,
-        "foo".to_string(),
+        frame_id,
+        revision,
+        query,
         vec![stub_result("stale", "Stale Match", "foo here", 0)],
         false,
         false,
@@ -332,6 +389,7 @@ fn test_e2e_cross_search_stale_result_discard() {
         state.cross_search.results.is_empty(),
         "stale results must not land in state.cross_search.results"
     );
+    assert_cross_search_frame(&state);
 }
 
 #[test]
@@ -342,13 +400,15 @@ fn test_e2e_cross_search_fresh_result_applied() {
         CrossSearchResultsOutcome, apply_cross_search_results,
     };
 
-    let mut state = cross_search_overlay_state();
+    let mut state = cross_search_state();
     state.cross_search.query = "foobar".to_string();
-    state.cross_search.running = true;
+    let (frame_id, revision, query) = claim_scan(&mut state);
 
     let outcome = apply_cross_search_results(
         &mut state,
-        "foobar".to_string(),
+        frame_id,
+        revision,
+        query,
         vec![stub_result("fresh", "Fresh Match", "foobar now", 0)],
         false,
         false,
@@ -361,21 +421,27 @@ fn test_e2e_cross_search_fresh_result_applied() {
         !state.cross_search.running,
         "running flag must clear on apply"
     );
+    assert_cross_search_frame(&state);
 }
 
 #[test]
 fn test_e2e_cross_search_applied_results_clamp_selection() {
     // AC5 Dev Notes: when applying results, `selected` must clamp to
     // `results.len() - 1` so a stale out-of-range selection is recovered.
-    use rustain::infrastructure::runtime::event_loop::apply_cross_search_results;
+    use rustain::infrastructure::runtime::event_loop::{
+        CrossSearchResultsOutcome, apply_cross_search_results,
+    };
 
-    let mut state = cross_search_overlay_state();
-    state.cross_search.query = "q".to_string();
+    let mut state = cross_search_state();
+    state.cross_search.query = "qq".to_string();
+    let (frame_id, revision, query) = claim_scan(&mut state);
     state.cross_search.selected = 15;
 
-    apply_cross_search_results(
+    let outcome = apply_cross_search_results(
         &mut state,
-        "q".to_string(),
+        frame_id,
+        revision,
+        query,
         vec![
             stub_result("a", "alpha", "q", 0),
             stub_result("b", "beta", "q", 0),
@@ -383,14 +449,19 @@ fn test_e2e_cross_search_applied_results_clamp_selection() {
         false,
         false,
     );
+    assert_eq!(outcome, CrossSearchResultsOutcome::Applied);
     assert_eq!(
         state.cross_search.selected, 1,
         "selected must clamp to results.len() - 1"
     );
 
     // Apply empty results — selected resets to 0.
-    apply_cross_search_results(&mut state, "q".to_string(), vec![], false, false);
+    let (frame_id, revision, query) = claim_scan(&mut state);
+    let outcome =
+        apply_cross_search_results(&mut state, frame_id, revision, query, vec![], false, false);
+    assert_eq!(outcome, CrossSearchResultsOutcome::Applied);
     assert_eq!(state.cross_search.selected, 0);
+    assert_cross_search_frame(&state);
 }
 
 #[test]
@@ -399,7 +470,6 @@ fn test_e2e_cross_search_widget_shows_truncation_by_count_hint() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = "hit".to_string();
     state.truncated_by_count = true;
     state.total = 40;
@@ -421,7 +491,6 @@ fn test_e2e_cross_search_widget_shows_truncation_by_time_hint() {
     let mut terminal = Terminal::new(backend).unwrap();
     let theme = Theme::dark();
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = "hit".to_string();
     state.truncated_by_time = true;
     state.total = 100;

@@ -1,4 +1,4 @@
-//! The common paint boundary: toasts, unchanged legacy surfaces, frames, status.
+//! The common paint boundary: toasts, frames, routed popups, status.
 
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
@@ -49,19 +49,17 @@ impl<'a> Shell<'a> {
 }
 
 /// Hosts paint the base first and suppress its cursor whenever the stack owns
-/// presence. Legacy surfaces keep their current geometry in `paint_legacy`.
+/// presence. Frame and popup painting belongs to this shared boundary.
 pub fn compose(
     frame: &mut Frame,
     state: &TuiState,
     shell: &Shell<'_>,
     host: Host,
     facts: &LogFacts,
-    paint_legacy: impl FnOnce(&mut Frame),
     paint_status: impl FnOnce(&mut Frame),
 ) -> bool {
     let theme = &state.theme;
     toast_layer::render(frame, shell.chat_pane, &state.notifications, theme, facts);
-    paint_legacy(frame);
 
     let standard_rect = geometry::frame_rect(shell.region);
     let mut pane_painted = false;
@@ -98,6 +96,13 @@ pub fn compose(
                 };
                 stage_search::render(frame, rect, &state.search_state, theme, label, false);
             }
+            Surface::CrossSearch => crate::adapters::tui::widgets::cross_search::render(
+                frame,
+                rect,
+                &state.cross_search,
+                theme,
+                false,
+            ),
             Surface::BookmarkList => {
                 let (conversation, bookmarks) =
                     shell.stage.expect("Bookmark frame paints its owning tab");
@@ -193,7 +198,9 @@ pub fn compose(
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel
                 | Surface::Login => theme.colors.accent,
-                Surface::BookmarkList | Surface::WaveOverlay => theme.colors.accent,
+                Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
+                    theme.colors.accent
+                }
                 Surface::QuitConfirm => theme.colors.warning,
                 Surface::Search => unreachable!("Search owns its inline breadcrumb"),
             };

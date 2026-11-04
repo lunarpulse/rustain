@@ -100,11 +100,13 @@ pub enum AppEvent {
     },
 
     /// Cross-search results ready from an async scan task (Story 4-4 AC5).
-    /// Carries the original query so the event loop can discard stale results
-    /// if the user has typed more characters in the meantime.
+    /// Carries the owning opening and query revision; equal text alone is not
+    /// proof that a result still belongs to the live view.
     /// No `conversation_id` — this is a view-update event per Amendment 3.
     CrossSearchResultsReady {
         query: String,
+        frame_id: u64,
+        revision: u64,
         results: Vec<CrossSearchResult>,
         truncated_by_count: bool,
         truncated_by_time: bool,

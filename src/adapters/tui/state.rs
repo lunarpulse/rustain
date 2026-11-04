@@ -830,8 +830,9 @@ impl Default for SearchState {
 /// and writes its results back into this struct via a stale-guarded update.
 // Covers: Story 4-4 AC5, AC6, AC7 (UX-DR87)
 pub struct CrossSearchState {
-    pub active: bool,
     pub query: String,
+    /// Every query edit invalidates earlier requests, even a retype to the same text.
+    pub request_revision: u64,
     pub results: Vec<CrossSearchResult>,
     pub selected: usize,
     /// Set when the last scan hit the count cap (20 results).
@@ -845,13 +846,15 @@ pub struct CrossSearchState {
     /// Currently running — shown as a "Searching…" hint while the scan task
     /// is in flight. Mirrors reviewer Fix 5's loading indicator requirement.
     pub running: bool,
+    /// Static in-frame failure feedback; notification toasts paint below sheets.
+    pub load_failed: bool,
 }
 
 impl CrossSearchState {
     pub fn new() -> Self {
         Self {
-            active: false,
             query: String::new(),
+            request_revision: 0,
             results: Vec::new(),
             selected: 0,
             truncated_by_count: false,
@@ -859,6 +862,7 @@ impl CrossSearchState {
             total: 0,
             scanned: 0,
             running: false,
+            load_failed: false,
         }
     }
 }

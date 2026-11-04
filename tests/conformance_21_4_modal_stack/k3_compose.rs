@@ -1,4 +1,4 @@
-//! K3 A1: shared compositor order, legacy Help underneath Quit, and shell invariance.
+//! K3 A1: shared compositor order, covered frames underneath Quit, and shell invariance.
 use super::keymap_support::{press, press_all};
 use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
@@ -100,7 +100,6 @@ pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) ->
                 &shell,
                 Host::Local,
                 &LogFacts::default(),
-                |_| {},
                 |frame| {
                     // M4: observe BEFORE painting status, not just its final unoccluded row.
                     // Correct geometry alone must not let status-before-frames survive.
@@ -379,8 +378,8 @@ fn wide_sidebar_cells_below_the_frame_are_dimmed_without_reflow() {
 }
 
 #[test]
-fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
-    use rustain::adapters::tui::widgets::{cross_search, input_box};
+fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
+    use rustain::adapters::tui::widgets::input_box;
     use rustain::domain::models::{FocusState, visual::PanelType};
     for surface in ["search", "reverse", "cross"] {
         let mut state = TuiState::new(130, 30);
@@ -410,10 +409,27 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
                     panel: PanelType::History,
                     selected: 0,
                 };
-                press(&mut state, Key::Char('/'));
+                let history_focus = state.focus.clone();
+                assert_eq!(
+                    press(&mut state, Key::Char('/')),
+                    InputAction::OpenCrossSearch
+                );
+                assert_eq!(state.focus, history_focus);
+                let owner = state
+                    .modal_stack
+                    .top()
+                    .expect("History slash opens a frame");
+                assert_eq!(owner.surface, Surface::CrossSearch);
+                assert!(owner.conversation_id.is_none(), "Cross-Search is global");
+                press_all(
+                    &mut state,
+                    &[Key::Char('f'), Key::Char('o'), Key::Char('x')],
+                );
             }
         }
         let focus = state.focus.clone();
+        let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
+        assert!(presentation::consistent(&state));
         let paint = |state: &TuiState| {
             let mut terminal = Terminal::new(TestBackend::new(130, 30)).unwrap();
             let show_cursor = state.modal_stack.is_empty();
@@ -452,16 +468,6 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
                         &shell,
                         Host::Local,
                         &LogFacts::default(),
-                        |frame| match surface {
-                            "search" | "reverse" => {}
-                            _ => cross_search::render(
-                                frame,
-                                layout.sidebar.unwrap(),
-                                &state.cross_search,
-                                &state.theme,
-                                show_cursor,
-                            ),
-                        },
                         |_| {},
                     );
                 })
@@ -476,14 +482,32 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
         let before = paint(&state);
         assert_eq!(
             before.1,
-            surface != "search",
-            "{surface}: Search frames hide the hardware cursor under A7; legacy controls show it"
+            surface == "reverse",
+            "{surface}: frames hide the hardware cursor under A7; the routed popup shows it"
         );
         if surface == "search" {
             let stage = layout(&state).chat_pane;
             assert!(
                 row(&before.0, stage, stage.y).starts_with("Search: fox"),
                 "the real Search frame must paint despite its hidden cursor"
+            );
+        }
+        if surface == "cross" {
+            let shell_layout = compute_layout(
+                before.0.area,
+                &state.theme,
+                &state.input_buffer,
+                1,
+                state.sidebar_visible,
+                state.density_mode,
+            )
+            .unwrap();
+            let rect = geometry::frame_rect(geometry::modal_region(&shell_layout, before.0.area));
+            assert_eq!(before.0[(rect.x, rect.y)].symbol(), "┌");
+            assert!(row(&before.0, rect, rect.y).contains("Cross-Search"));
+            assert!(
+                row(&before.0, rect, rect.y + 1).contains("/ fox"),
+                "the real Cross-Search frame paints the edited query"
             );
         }
         let reverse_payload = (
@@ -537,6 +561,19 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
             state.reverse_search.selected_match = reverse_payload.2;
         }
         open_quit(&mut state);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            Surface::QuitConfirm
+        );
+        assert!(
+            state
+                .modal_stack
+                .iter()
+                .take(frames.len())
+                .eq(frames.iter()),
+            "{surface}: Quit covers rather than replaces the original frame owners"
+        );
+        assert!(presentation::consistent(&state));
         let covered = paint(&state);
         assert!(
             !covered.1,
@@ -552,10 +589,15 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
         }
         press(&mut state, Key::Char('n'));
         assert_eq!(state.focus, focus);
+        assert_eq!(
+            state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+            frames
+        );
+        assert!(presentation::consistent(&state));
         let restored = paint(&state);
         assert_eq!(
             restored.1,
-            surface != "search",
+            surface == "reverse",
             "{surface}: cancel restores the original A7 cursor policy"
         );
         assert_eq!(restored.2, before.2, "{surface}: exact cursor is restored");
@@ -565,6 +607,13 @@ fn quit_hides_legacy_search_cursors_and_search_frame_stays_hidden() {
                 row(&restored.0, stage, stage.y),
                 row(&before.0, stage, stage.y),
                 "cancel restores exact Search query and counter cells"
+            );
+        }
+        if surface == "cross" {
+            assert_eq!(state.cross_search.query, "fox");
+            assert_eq!(
+                restored.0, before.0,
+                "cancel restores exact Cross-Search frame cells"
             );
         }
         assert_eq!(
@@ -1028,7 +1077,6 @@ fn a_covered_pane_does_not_start_its_inert_window() {
                     &Shell::new(frame.area(), &layout),
                     Host::Local,
                     &LogFacts::default(),
-                    |_| {},
                     |_| {},
                 );
             })

@@ -108,7 +108,6 @@ fn render_search_frame(state: &TuiState) -> Terminal<TestBackend> {
                 Host::Local,
                 &LogFacts::default(),
                 |_| {},
-                |_| {},
             );
         })
         .unwrap();

@@ -18,6 +18,7 @@ use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use rustain::domain::models::{FocusState, ToolRisk};
 
+use super::k4_overlays::cross_search_state;
 use super::support::{fresh, is_inert, press};
 
 const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
@@ -236,6 +237,20 @@ fn every_printable_types_into_every_text_field() {
             let mut state = fresh();
             (field.open)(&mut state);
             let action = press(&mut state, Key::Char(c));
+            if field.name == "cross-search query" {
+                assert_eq!(state.modal_stack.len(), 1);
+                assert_eq!(
+                    state.modal_stack.top().unwrap().surface,
+                    rustain::adapters::tui::presentation::Surface::CrossSearch
+                );
+                assert_eq!(
+                    state.focus,
+                    FocusState::Sidebar {
+                        panel: rustain::domain::models::visual::PanelType::History,
+                        selected: 0,
+                    }
+                );
+            }
             let text = (field.text)(&mut state).clone();
             let name = field.name;
             if name.starts_with("cross") && matches!(c, 'j' | 'k') {
@@ -293,10 +308,7 @@ const FIELDS: &[Field] = &[
     },
     Field {
         name: "cross-search query",
-        open: |s| {
-            s.cross_search.active = true;
-            s.focus = FocusState::Overlay(OverlayType::CrossSearch);
-        },
+        open: |s| *s = cross_search_state(),
         text: |s| &mut s.cross_search.query,
     },
     Field {

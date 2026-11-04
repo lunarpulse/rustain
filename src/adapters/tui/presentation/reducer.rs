@@ -282,6 +282,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         Surface::CommandPalette => state.command_palette.reset(),
         Surface::Help => state.help_overlay.reset(),
         Surface::Search => state.search_state = Default::default(),
+        Surface::CrossSearch => state.cross_search = Default::default(),
         Surface::BookmarkList => {
             state.bookmark_list_selected = 0;
             state.bookmark_list_count = 0;
@@ -458,6 +459,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::Search => {
             state.search_state = Default::default();
+            None
+        }
+        Surface::CrossSearch => {
+            state.cross_search = Default::default();
             None
         }
         Surface::BookmarkList => {

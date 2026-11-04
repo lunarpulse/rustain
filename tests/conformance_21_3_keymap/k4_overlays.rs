@@ -31,7 +31,7 @@ use rustain::domain::events::LoginTargetRow;
 use rustain::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use rustain::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use rustain::domain::models::provider::ModelDescriptor;
-use rustain::domain::models::visual::OverlayType;
+use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{
     AdapterRef, FocusState, NotificationsConfig, PortDimension, ProfileDescriptor,
     ProfileIdentityColor, ProfileSelection, ProfileSource, SemanticMessageType, VerdictOffer,
@@ -42,10 +42,34 @@ use tokio_util::sync::CancellationToken;
 use super::support::{decode, fresh, is_inert, press};
 use super::witness::{Case, W, local, local_door, printable, run, w, wp};
 
-fn focused(overlay: OverlayType) -> TuiState {
-    let mut s = fresh();
-    s.focus = FocusState::Overlay(overlay);
+pub(super) fn cross_search_state() -> TuiState {
+    let mut s = TuiState::new(130, 24);
+    s.focus = FocusState::Sidebar {
+        panel: PanelType::History,
+        selected: 0,
+    };
+    let base = s.focus.clone();
+    assert_eq!(press(&mut s, Key::Char('/')), InputAction::OpenCrossSearch);
+    assert_eq!(s.focus, base);
+    assert_eq!(s.modal_stack.len(), 1);
+    let frame = s.modal_stack.top().expect("CrossSearch owns a frame");
+    assert_eq!(frame.surface, Surface::CrossSearch);
+    assert_eq!(frame.conversation_id, None);
     s
+}
+
+fn cross_door(s: &mut TuiState, key: Key) -> (String, bool) {
+    let frame = s
+        .modal_stack
+        .top()
+        .expect("CrossSearch fixture frame")
+        .clone();
+    let outcome = ba_door(s, key);
+    assert!(
+        s.modal_stack.iter().any(|live| live == &frame),
+        "local input retains CrossSearch ownership until the host applies its effect"
+    );
+    outcome
 }
 
 /// Ba rows retain their caller frame and base focus, including menu/palette entry.
@@ -409,15 +433,17 @@ fn usage_panel_rows_by_value_and_every_other_key_is_inert() {
 
 #[rustfmt::skip]
 const CROSS: &[W] = &[
-    w(&[Key::Esc], "CloseCrossSearch | q=ab sel=1 focus=Overlay(CrossSearch)"),
-    w(&[Key::Ctrl('c')], "CloseCrossSearch | q=ab sel=1 focus=Overlay(CrossSearch)"),
-    w(&[Key::Enter], "OpenCrossSearchResult | q=ab sel=1 focus=Overlay(CrossSearch)"),
-    w(&[Key::Backspace], "CrossSearchQueryChanged | q=a sel=1 focus=Overlay(CrossSearch)"),
-    w(&[Key::Up], "Consumed | q=ab sel=0 focus=Overlay(CrossSearch)"),
-    w(&[Key::Char('k')], "Consumed | q=ab sel=0 focus=Overlay(CrossSearch)"),
-    w(&[Key::Down], "Consumed | q=ab sel=2 focus=Overlay(CrossSearch)"),
-    w(&[Key::Char('j')], "Consumed | q=ab sel=2 focus=Overlay(CrossSearch)"),
-    w(&[Key::Ctrl('q')], "Quit | q=ab sel=1 focus=Overlay(CrossSearch)"),
+    w(&[Key::Esc], "CloseCrossSearch | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Ctrl('c')], "CloseCrossSearch | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Enter], "OpenCrossSearchResult | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Backspace], "CrossSearchQueryChanged | q=a sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Up], "Consumed | q=ab sel=0 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Char('k')], "Consumed | q=ab sel=0 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Down], "Consumed | q=ab sel=2 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Char('j')], "Consumed | q=ab sel=2 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Ctrl('q')], "Quit | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Ctrl('x')], "Consumed | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
+    w(&[Key::Ctrl('p')], "Consumed | q=ab sel=1 focus=Sidebar { panel: History, selected: 0 }"),
 ];
 
 /// Catches j/k typed into the query, a swapped selection direction, or a close that is not requested.
@@ -431,8 +457,7 @@ fn cross_search_rows_by_value_and_every_other_non_text_key_is_inert() {
             timestamp: 0,
             first_match_message_index: 0,
         };
-        let mut s = focused(OverlayType::CrossSearch);
-        s.cross_search.active = true;
+        let mut s = cross_search_state();
         s.cross_search.query = "ab".into();
         s.cross_search.results = (0..3).map(hit).collect();
         s.cross_search.selected = 1;
@@ -445,6 +470,7 @@ fn cross_search_rows_by_value_and_every_other_non_text_key_is_inert() {
         )
     };
     run(&Case {
+        door: cross_door,
         acts_without_row: printable,
         ..local(Context::CrossSearch, setup, salient, CROSS)
     });

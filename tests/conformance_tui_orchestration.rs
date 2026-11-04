@@ -116,7 +116,7 @@ fn paint_base(
         .collect()
 }
 
-fn render_runtime(
+pub(crate) fn render_runtime(
     h: &mut crate::e2e_harness::TestHarness,
     tabs: &mut TabManager,
     core: &rustain::infrastructure::runtime::agent_core::AgentCore,

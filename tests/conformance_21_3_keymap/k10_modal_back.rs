@@ -11,9 +11,8 @@ use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::OverlayType;
 
-use super::k4_overlays::recipient;
+use super::k4_overlays::{cross_search_state, recipient};
 use super::support::{fresh, press};
 
 /// Everything a surface can leave open, in one comparable string.
@@ -32,10 +31,6 @@ fn open_surfaces(s: &TuiState) -> String {
         s.recipient_surface.is_some(),
         s.modal_stack.iter().collect::<Vec<_>>(),
     )
-}
-
-fn overlay(state: &mut TuiState, kind: OverlayType) {
-    state.focus = FocusState::Overlay(kind);
 }
 
 type Open = fn(&mut TuiState);
@@ -92,10 +87,7 @@ const SURFACES: &[(&str, Open, Option<InputAction>)] = &[
     ),
     (
         "CrossSearch",
-        |s| {
-            s.cross_search.active = true;
-            overlay(s, OverlayType::CrossSearch);
-        },
+        |s| *s = cross_search_state(),
         Some(InputAction::CloseCrossSearch),
     ),
     (
@@ -168,7 +160,20 @@ fn ctrl_c_in_every_overlay_goes_back_one_frame() {
             ),
             Some(action) => assert_eq!(&ctrl_c, action, "{name}: the host closes it"),
         }
-        if *name == "BookmarkList" {
+        if *name == "CrossSearch" {
+            assert!(is_open(&by_ctrl_c, Surface::CrossSearch));
+            assert_eq!(by_ctrl_c.modal_stack.len(), 1);
+            assert_eq!(
+                by_ctrl_c.modal_stack.top().unwrap().surface,
+                Surface::CrossSearch,
+                "the emitted close effect still owns its frame"
+            );
+            let base = by_ctrl_c.focus.clone();
+            rustain::adapters::tui::handlers::export::close_cross_search(&mut by_ctrl_c);
+            assert!(!is_open(&by_ctrl_c, Surface::CrossSearch));
+            assert!(by_ctrl_c.modal_stack.is_empty());
+            assert_eq!(by_ctrl_c.focus, base, "History caller restored");
+        } else if *name == "BookmarkList" {
             assert!(!is_open(&by_ctrl_c, Surface::BookmarkList));
         } else if *name == "WaveOverlay" {
             assert!(

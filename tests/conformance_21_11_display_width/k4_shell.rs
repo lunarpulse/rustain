@@ -521,7 +521,6 @@ fn k4_reverse_search_query_scrolls_and_history_rows_fit_the_border() {
 
 fn cross(width: u16, query: &str, title: &str, excerpt: &str) -> Painted {
     let mut state = CrossSearchState::new();
-    state.active = true;
     state.query = query.to_string();
     state.results = vec![CrossSearchResult {
         conversation_id: "c1".into(),

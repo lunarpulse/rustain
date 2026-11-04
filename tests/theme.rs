@@ -354,11 +354,14 @@ fn test_focus_state_variants() {
 // Covers: FR22 (vim keybindings)
 #[test]
 fn test_overlay_type_variants() {
-    use rustain::domain::models::visual::OverlayType;
+    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
-    // CrossSearch is the only legacy non-Confirmation overlay after Bb1b-i.
-    let variants = [OverlayType::CrossSearch];
+    // Confirmation is the sole legacy overlay; all other surfaces own frames.
+    let variants = [OverlayType::Confirmation(ConfirmationType::Fork)];
     assert_eq!(variants.len(), 1);
+    for overlay in variants {
+        let OverlayType::Confirmation(_) = overlay;
+    }
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::Surface;
     assert_ne!(Surface::Help, Surface::CommandPalette);
@@ -368,6 +371,7 @@ fn test_overlay_type_variants() {
         (Surface::UsagePanel, Context::UsagePanel),
         (Surface::Login, Context::Login),
         (Surface::Search, Context::SearchTyping),
+        (Surface::CrossSearch, Context::CrossSearch),
         (Surface::BookmarkList, Context::BookmarkList),
         (Surface::WaveOverlay, Context::WaveOverlay),
     ] {

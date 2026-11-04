@@ -105,10 +105,10 @@ pub fn route(
     } else if state.pending_leader.is_some() || !state.modal_stack.is_empty() {
         app::focus_context(state)
     } else {
-        app::overlay_focus_context(state).or_else(|| match app::focus_context(state) {
+        match app::focus_context(state) {
             Some(context @ (Context::ReverseSearch | Context::Autocomplete)) => Some(context),
             _ => None,
-        })
+        }
     };
     if let Some(context) = quit_context
         && matches!(keymap::resolve(context, host, &[key]), Resolved::Hit(row)
@@ -191,6 +191,7 @@ pub fn route(
         | Surface::UsagePanel
         | Surface::Search
         | Surface::BookmarkList
+        | Surface::CrossSearch
             if host == Host::Local =>
         {
             RouteEffect::Action(app::dispatch_frame_key(state, context, key, host))
@@ -202,6 +203,7 @@ pub fn route(
         | Surface::UsagePanel
         | Surface::Search
         | Surface::BookmarkList
+        | Surface::CrossSearch
         | Surface::WaveOverlay => RouteEffect::Frame(context),
         Surface::QuitConfirm => unreachable!("Quit handled before the pending leader"),
     })

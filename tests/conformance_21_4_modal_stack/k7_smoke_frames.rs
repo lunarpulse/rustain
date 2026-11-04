@@ -416,3 +416,590 @@ fn bb1b_i_real_frames_for_smoke_predicates() {
         }
     }
 }
+
+fn bb1b_ii_write(
+    h: &mut TestHarness,
+    stage: &str,
+    full: bool,
+    screen: &str,
+    history_title: Option<&str>,
+    dir: &Option<PathBuf>,
+) {
+    if let Some(dir) = dir {
+        use std::io::Write as _;
+        let cursor = h.terminal.get_cursor_position().unwrap();
+        let record = serde_json::json!({
+            "width": h.state.terminal_width, "height": h.state.terminal_height,
+            "stage": stage, "full": full, "screen": screen,
+            "draft": h.state.input_buffer, "cursor": [cursor.x, cursor.y],
+            "cursor_hidden": !h.terminal.backend().cursor_visible(),
+            "conversation_title": h.conversation.title,
+            "history_title": history_title,
+        });
+        let name = format!(
+            "bb1b-ii-{}x{}-{}-{stage}.json",
+            h.state.terminal_width,
+            h.state.terminal_height,
+            if full { "full" } else { "normal" }
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join(name))
+            .expect("CrossSearch export must not overwrite a frame");
+        file.write_all(&serde_json::to_vec(&record).unwrap())
+            .unwrap();
+    }
+}
+
+fn bb1b_ii_capture(
+    h: &mut TestHarness,
+    tabs: &mut TabManager,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+    stage: &str,
+    full: bool,
+    dir: &Option<PathBuf>,
+) {
+    crate::conformance_tui_orchestration::render_runtime(h, tabs, core);
+    let buffer = h.terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let screen = rows.join("\n");
+    let draft = if full {
+        "1\n2\n3\n4\n5\n6\n7\n8"
+    } else {
+        DRAFT
+    };
+    assert_eq!(h.state.input_buffer, draft);
+    assert_eq!(h.state.cursor_position, draft.chars().count());
+    assert_eq!(h.state.active_tab_id, tabs.active_tab_id());
+    assert_eq!(h.conversation.id, tabs.active_tab().conversation.id);
+    assert_eq!(
+        h.conversation.messages.len(),
+        tabs.active_tab().conversation.messages.len()
+    );
+    for (live, owned) in h
+        .conversation
+        .messages
+        .iter()
+        .zip(&tabs.active_tab().conversation.messages)
+    {
+        assert_eq!((&live.id, &live.content), (&owned.id, &owned.content));
+    }
+    assert!(!h.terminal.backend().cursor_visible(), "{stage}: {screen}");
+    assert_eq!(buffer.area.width, h.state.terminal_width);
+    assert_eq!(buffer.area.height, h.state.terminal_height);
+    let layout = rustain::adapters::tui::layout::compute_layout(
+        buffer.area,
+        &h.state.theme,
+        draft,
+        tabs.tab_count(),
+        h.state.sidebar_visible,
+        h.state.density_mode,
+    )
+    .unwrap();
+    assert!(
+        rows[usize::from(layout.status_bar.y)].contains("Ready"),
+        "{screen}"
+    );
+    assert!(rows.last().unwrap().starts_with('└'), "{screen}");
+    if stage == "history-return" {
+        assert_eq!(buffer.area.width, 130);
+        assert!(h.state.modal_stack.is_empty());
+        assert!(matches!(
+            h.state.focus,
+            rustain::domain::models::FocusState::Sidebar {
+                panel: rustain::domain::models::visual::PanelType::History,
+                ..
+            }
+        ));
+        assert!(
+            layout.sidebar.is_some() && screen.contains("History"),
+            "{screen}"
+        );
+        assert!(h.state.cross_search.query.is_empty() && !h.state.cross_search.running);
+    } else {
+        let owner = h.state.modal_stack.top().unwrap();
+        assert_eq!(h.state.modal_stack.len(), 1);
+        assert_eq!(owner.surface, Surface::CrossSearch);
+        assert_eq!(owner.title(), "Cross-Search");
+        assert!(owner.conversation_id.is_none(), "CrossSearch is global");
+        let rect = presentation::geometry::frame_rect(presentation::geometry::modal_region(
+            &layout,
+            buffer.area,
+        ));
+        assert!(rect.bottom() <= layout.status_bar.y && rect.bottom() <= layout.input_area.y);
+        if full && buffer.area.width == 60 {
+            assert_eq!(rect.height, 5, "exercise the minimum fitted body");
+        }
+        assert!(
+            rows[usize::from(rect.y)].contains("Cross-Search"),
+            "{screen}"
+        );
+        assert!(
+            rows[usize::from(rect.y + 1)].contains(&format!("/ {}", h.state.cross_search.query)),
+            "{screen}"
+        );
+        let primary = match stage {
+            "cross-unfiltered" => "Type at least 2 characters",
+            "cross-filtered" => "1/1 matches",
+            "cross-empty" => "No matches found",
+            "cross-counted" => "20/20 matches",
+            _ => panic!("unknown CrossSearch export stage: {stage}"),
+        };
+        assert!(rows[usize::from(rect.y + 2)].contains(primary), "{screen}");
+        assert!(
+            rows[usize::from(rect.bottom() - 1)].contains("[Enter] open  [Esc] close"),
+            "{screen}"
+        );
+        assert!(!h.state.cross_search.running && !h.state.cross_search.load_failed);
+        if matches!(stage, "cross-filtered" | "cross-counted") {
+            assert!(
+                rows[usize::from(rect.y + 3)..usize::from(rect.bottom() - 1)]
+                    .iter()
+                    .any(|row| row.contains(&format!("▸ {TURN}"))),
+                "{screen}"
+            );
+        }
+        if stage == "cross-counted" {
+            assert_eq!(h.state.cross_search.selected, 19);
+            assert!(h.state.cross_search.truncated_by_count);
+            assert!(
+                !screen.contains("Earlier result 00"),
+                "selection must be windowed: {screen}"
+            );
+            assert!(
+                !screen.contains(&h.state.cross_search.results[19].title),
+                "the long selected title must actually truncate: {screen}"
+            );
+        }
+    }
+    bb1b_ii_write(h, stage, full, &screen, None, dir);
+}
+
+fn bb1b_ii_results(h: &mut TestHarness, query: &str, count: usize) {
+    use rustain::adapters::tui::{
+        app::InputAction,
+        handlers::export::{self, CrossSearchResultsOutcome, CrossSearchScanAction},
+    };
+    use rustain::domain::services::cross_search::CrossSearchResult;
+    assert_eq!(
+        press(&mut h.state, Key::Ctrl('u')),
+        InputAction::CrossSearchQueryChanged
+    );
+    assert_eq!(
+        export::apply_cross_search_query_change(&mut h.state),
+        CrossSearchScanAction::Cleared
+    );
+    let mut pending = CrossSearchScanAction::Cleared;
+    for ch in query.chars() {
+        assert_eq!(
+            press(&mut h.state, Key::Char(ch)),
+            InputAction::CrossSearchQueryChanged
+        );
+        pending = export::apply_cross_search_query_change(&mut h.state);
+    }
+    let CrossSearchScanAction::Spawn {
+        query: claimed,
+        frame_id,
+        revision,
+    } = pending
+    else {
+        panic!("the real query guard must claim the completion");
+    };
+    assert_eq!(claimed, query);
+    assert_eq!(frame_id, h.state.modal_stack.top().unwrap().id);
+    assert_eq!(revision, h.state.cross_search.request_revision);
+    let results = (0..count)
+        .map(|index| CrossSearchResult {
+            conversation_id: h.conversation.id.clone(),
+            title: if count == 1 {
+                TURN.into()
+            } else if index == 19 {
+                format!("{TURN}-last-selected {}", "long trailing title ".repeat(16))
+            } else {
+                format!("Earlier result {index:02}")
+            },
+            excerpt: "Bb1a-row-00".into(),
+            timestamp: h.conversation.updated_at,
+            first_match_message_index: 1,
+        })
+        .collect();
+    assert_eq!(
+        export::apply_cross_search_results(
+            &mut h.state,
+            frame_id,
+            revision,
+            claimed,
+            results,
+            count == 20,
+            false,
+        ),
+        CrossSearchResultsOutcome::Applied
+    );
+    assert_eq!(h.state.cross_search.query, query);
+    assert_eq!(h.state.cross_search.results.len(), count);
+}
+
+fn bb1b_ii_open_fixture(
+    width: u16,
+    height: u16,
+    draft: &str,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+) -> (TestHarness, TabManager, u64) {
+    let mut h = TestHarness::with_size(130, 30);
+    let reply = (0..60)
+        .map(|row| format!("Bb1a-row-{row:02}  \n"))
+        .collect::<String>()
+        + REPLY;
+    h.complete_turn(
+        TURN,
+        vec![
+            StreamChunk::Text {
+                content: reply,
+                parent_tool_use_id: None,
+            },
+            StreamChunk::TurnComplete {
+                stop_reason: StopReason::EndTurn,
+            },
+        ],
+    );
+    let mut tabs = TabManager::new(CancellationToken::new());
+    tabs.active_tab_mut().conversation = h.conversation.clone();
+    h.state = super::k7_cross_search::history();
+    h.state.active_tab_id = tabs.active_tab_id();
+    h.state.input_buffer = draft.into();
+    h.state.cursor_position = draft.chars().count();
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, core);
+    assert!(
+        h.screen_text().contains("History"),
+        "paint supported History before slash"
+    );
+    super::k7_cross_search::open(&mut h.state);
+    let owner = h.state.modal_stack.top().unwrap().id;
+    crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, core);
+    assert!(h.screen_text().contains("Cross-Search"));
+    h.terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    rustain::adapters::tui::app::handle_input(
+        &mut h.state,
+        &rustain::domain::events::DomainInputEvent::Resize(width, height),
+    );
+    (h, tabs, owner)
+}
+
+#[test]
+fn bb1b_ii_real_frames_for_smoke_predicates() {
+    use rustain::adapters::tui::{app::InputAction, handlers::export};
+    use rustain::infrastructure::runtime::agent_core::AgentCore;
+    let core = AgentCore::test_noop();
+    let dir = output_dir();
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for full in [false, true] {
+            let draft = if full {
+                "1\n2\n3\n4\n5\n6\n7\n8"
+            } else {
+                DRAFT
+            };
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
+            bb1b_ii_capture(&mut h, &mut tabs, &core, "cross-unfiltered", full, &dir);
+            for (query, count, stage) in [
+                ("Bb1a", 1, "cross-filtered"),
+                ("zzzz", 0, "cross-empty"),
+                ("Bb1a", 20, "cross-counted"),
+            ] {
+                bb1b_ii_results(&mut h, query, count);
+                if count == 20 {
+                    for _ in 0..19 {
+                        assert_eq!(press(&mut h.state, Key::Char('j')), InputAction::Consumed);
+                    }
+                }
+                assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
+                bb1b_ii_capture(&mut h, &mut tabs, &core, stage, full, &dir);
+            }
+            assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
+            export::close_cross_search(&mut h.state);
+            assert!(h.state.modal_stack.is_empty());
+            assert_eq!(h.state.input_buffer, draft);
+            assert_eq!(h.state.cursor_position, draft.chars().count());
+            if width == 130 {
+                bb1b_ii_capture(&mut h, &mut tabs, &core, "history-return", full, &dir);
+            }
+        }
+    }
+}
+
+fn bb1b_ii_aux_capture(
+    h: &mut TestHarness,
+    tabs: &mut TabManager,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+    index: &rustain::domain::services::session_index::SessionIndex,
+    stage: &str,
+    full: bool,
+    dir: &Option<PathBuf>,
+) {
+    rustain::infrastructure::runtime::event_loop::render(
+        &mut h.terminal,
+        &mut h.state,
+        &h.conversation,
+        &h.streaming,
+        "fixture-model",
+        "fixture-provider",
+        &rustain::adapters::noop::NoOpSecurity,
+        1,
+        0,
+        Some(&mut *tabs),
+        index,
+        128_000,
+        core,
+    )
+    .unwrap();
+    let buffer = h.terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let screen = rows.join("\n");
+    let draft = if full {
+        "1\n2\n3\n4\n5\n6\n7\n8"
+    } else {
+        DRAFT
+    };
+    assert_eq!(h.state.input_buffer, draft);
+    assert_eq!(h.state.cursor_position, draft.chars().count());
+    assert_eq!(h.state.active_tab_id, tabs.active_tab_id());
+    assert!(!h.terminal.backend().cursor_visible());
+    let layout = rustain::adapters::tui::layout::compute_layout(
+        buffer.area,
+        &h.state.theme,
+        draft,
+        tabs.tab_count(),
+        h.state.sidebar_visible,
+        h.state.density_mode,
+    )
+    .unwrap();
+    assert!(
+        rows[layout.status_bar.y as usize].contains("Ready"),
+        "{screen}"
+    );
+    match stage {
+        "cross-quit" | "base-quit" => {
+            assert_eq!(
+                h.state.modal_stack.top().unwrap().surface,
+                Surface::QuitConfirm
+            );
+            assert_eq!(
+                presentation::is_open(&h.state, Surface::CrossSearch),
+                stage == "cross-quit"
+            );
+            for primary in [
+                "Quit rustain?",
+                "Your unsent draft will be lost.",
+                "[y] Quit",
+                "[n/Esc/Enter] Stay",
+            ] {
+                assert!(screen.contains(primary), "{stage}: {screen}");
+            }
+        }
+        "cross-untitled" => {
+            assert_eq!(
+                h.state.modal_stack.top().unwrap().surface,
+                Surface::CrossSearch
+            );
+            assert_eq!(h.state.cross_search.results.len(), 1);
+            assert_eq!(h.state.cross_search.results[0].title, "(untitled)");
+            assert!(
+                screen.contains("(untitled)") && screen.contains("1/1 matches"),
+                "{screen}"
+            );
+        }
+        "accepted-base" => {
+            assert!(h.state.modal_stack.is_empty());
+            assert_eq!(h.state.focus, rustain::domain::models::FocusState::Chat);
+            assert!(
+                screen.contains("Bb1a-row-0") && !screen.contains(REPLY),
+                "{screen}"
+            );
+            assert!(h.state.search_state.peek_highlight.is_some());
+        }
+        "history-populated" => {
+            assert_eq!(index.entries().len(), 1);
+            assert_eq!(index.entries()[0].message_count, 2);
+            assert!(
+                layout.sidebar.is_some()
+                    && screen.contains(&index.entries()[0].title)
+                    && screen.contains("[2]"),
+                "{screen}"
+            );
+            assert!(h.state.modal_stack.is_empty());
+        }
+        _ => panic!("unknown auxiliary frame {stage}"),
+    }
+    bb1b_ii_write(
+        h,
+        stage,
+        full,
+        &screen,
+        index.entries().first().map(|entry| entry.title.as_str()),
+        dir,
+    );
+}
+
+fn bb1b_ii_request_quit(state: &mut rustain::adapters::tui::state::TuiState) {
+    use rustain::adapters::tui::{
+        app::InputAction,
+        quit_confirm::{self, QuitFacts, QuitHost, QuitRequest},
+    };
+    assert_eq!(press(state, Key::Ctrl('q')), InputAction::Quit);
+    let facts = QuitFacts {
+        composer_draft: !state.input_buffer.is_empty(),
+        ..QuitFacts::idle(QuitHost::Local)
+    };
+    assert_eq!(quit_confirm::request(state, facts), QuitRequest::Confirming);
+}
+
+#[tokio::test]
+async fn bb1b_ii_native_predicates_have_real_runtime_positive_controls() {
+    use rustain::adapters::tui::{app::InputAction, handlers::export};
+    use rustain::domain::{
+        models::session::{SessionManager, SessionState},
+        ports::StoragePort,
+        services::session_index::SessionIndex,
+    };
+    use rustain::infrastructure::runtime::{agent_core::AgentCore, event_loop};
+    let core = AgentCore::test_noop();
+    let dir = output_dir();
+    let tmp = tempfile::tempdir().unwrap();
+    let storage =
+        rustain::adapters::filesystem::FileSystemStorage::new(tmp.path().join("sessions"));
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        for full in [false, true] {
+            let draft = if full {
+                "1\n2\n3\n4\n5\n6\n7\n8"
+            } else {
+                DRAFT
+            };
+            let (mut h, mut tabs, owner) = bb1b_ii_open_fixture(width, height, draft, &core);
+            bb1b_ii_results(&mut h, "Bb1a", 1);
+            let mut index = SessionIndex::new();
+            assert!(
+                h.conversation.title.is_empty(),
+                "exercise the actual untitled model"
+            );
+            index.touch(
+                &h.conversation.id,
+                None,
+                Some(h.conversation.messages.len()),
+            );
+            index.set_open(&h.conversation.id, true);
+            index.set_active(Some(&h.conversation.id));
+            storage.save_conversation(&h.conversation).await.unwrap();
+            let export::CrossSearchScanAction::Spawn {
+                query,
+                frame_id,
+                revision,
+            } = export::apply_cross_search_query_change(&mut h.state)
+            else {
+                panic!("the actual query must claim a scan");
+            };
+            let outcome = rustain::domain::services::cross_search::run_cross_search(
+                &storage,
+                &index,
+                &query,
+                Default::default(),
+            )
+            .await;
+            assert_eq!(
+                (outcome.scanned, outcome.total, outcome.results.len()),
+                (1, 1, 1)
+            );
+            assert_eq!(
+                export::apply_cross_search_results(
+                    &mut h.state,
+                    frame_id,
+                    revision,
+                    query,
+                    outcome.results,
+                    outcome.truncated_by_count,
+                    outcome.truncated_by_time,
+                ),
+                export::CrossSearchResultsOutcome::Applied
+            );
+            bb1b_ii_aux_capture(
+                &mut h,
+                &mut tabs,
+                &core,
+                &index,
+                "cross-untitled",
+                full,
+                &dir,
+            );
+            bb1b_ii_request_quit(&mut h.state);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "cross-quit", full, &dir);
+            press(&mut h.state, Key::Char('n'));
+            assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
+            assert_eq!(h.state.cross_search.query, "Bb1a");
+            if width < 100 {
+                assert_eq!(
+                    press(&mut h.state, Key::Enter),
+                    InputAction::OpenCrossSearchResult
+                );
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+                event_loop::apply_open_cross_search_result(
+                    &mut tabs,
+                    &mut h.conversation,
+                    &mut h.streaming,
+                    &mut SessionManager::new(SessionState::Empty),
+                    &mut h.state,
+                    &mut h.turn_queue,
+                    &storage,
+                    &storage,
+                    &mut index,
+                    &tx,
+                )
+                .await;
+                bb1b_ii_aux_capture(
+                    &mut h,
+                    &mut tabs,
+                    &core,
+                    &index,
+                    "accepted-base",
+                    full,
+                    &dir,
+                );
+            } else {
+                assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
+                export::close_cross_search(&mut h.state);
+                bb1b_ii_aux_capture(
+                    &mut h,
+                    &mut tabs,
+                    &core,
+                    &index,
+                    "history-populated",
+                    full,
+                    &dir,
+                );
+                if full && let Some(dir) = &dir {
+                    let persisted = &h.conversation;
+                    assert_eq!(persisted.messages.len(), 2);
+                    assert_eq!(persisted.messages[0].content, TURN);
+                    let store = rustain::adapters::filesystem::FileSystemStorage::new(
+                        dir.join("persisted-control/.claude/sessions"),
+                    );
+                    store.save_conversation(persisted).await.unwrap();
+                }
+            }
+            bb1b_ii_request_quit(&mut h.state);
+            bb1b_ii_aux_capture(&mut h, &mut tabs, &core, &index, "base-quit", full, &dir);
+            press(&mut h.state, Key::Char('n'));
+            assert!(h.state.modal_stack.is_empty());
+        }
+    }
+}

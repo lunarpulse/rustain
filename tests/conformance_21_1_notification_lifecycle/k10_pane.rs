@@ -110,7 +110,6 @@ fn draw_pane(state: &TuiState, f: &LogFacts, width: u16, height: u16, with_pane:
                     &shell,
                     Host::Local,
                     f,
-                    |_| {},
                     |frame| {
                         frame.render_widget(
                             Paragraph::new("status-row-sentinel"),

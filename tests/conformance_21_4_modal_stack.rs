@@ -7,6 +7,8 @@ mod k3_compose;
 mod k4_geometry;
 #[path = "conformance_21_4_modal_stack/k6_gate.rs"]
 mod k6_gate;
+#[path = "conformance_21_4_modal_stack/k7_cross_search.rs"]
+mod k7_cross_search;
 #[path = "conformance_21_4_modal_stack/k7_smoke_frames.rs"]
 mod k7_smoke_frames;
 #[path = "conformance_21_4_modal_stack/k9_reconcile.rs"]
@@ -368,7 +370,6 @@ mod k5_restore {
                     &Shell::new(frame.area(), &layout),
                     Host::Local,
                     &LogFacts::default(),
-                    |_| {},
                     |_| {},
                 );
             })

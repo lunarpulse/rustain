@@ -122,6 +122,57 @@ fn tab_switch_pops_stage_bound_frames_only() {
         &InputAction::CloseSearch,
     );
     assert_eq!(format!("{:?}", tabs.active_tab().view_state), destination);
+
+    // Extend this same real-tab witness without replacing its Ctrl-F path above.
+    // History slash is dispatched at its supported width before FrameAPI setup;
+    // this does not offer History through an already-owned frame.
+    state = super::k7_cross_search::history();
+    state.active_tab_id = tabs.active_tab_id();
+    super::k7_cross_search::open(&mut state);
+    let cross = populate_global_cross(&mut state);
+    let payload = cross_payload(&state);
+    presentation::reducer::open(&mut state, Surface::Search);
+    search::handle_search_action(
+        &mut tabs,
+        &mut state,
+        &conversation,
+        &InputAction::OpenSearch,
+    );
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Search);
+    assert_eq!(
+        state.modal_stack.top().unwrap().conversation_id.as_deref(),
+        Some(conversation.id.as_str())
+    );
+    for key in ['?', 'n'] {
+        press(&mut state, Key::Ctrl('x'));
+        press(&mut state, Key::Char(key));
+    }
+    let globals: Vec<_> = state
+        .modal_stack
+        .iter()
+        .filter(|frame| frame.surface != Surface::Search)
+        .cloned()
+        .collect();
+    assert_eq!(globals.len(), 3);
+    assert_eq!(globals[0], cross);
+    tabs.switch_to_index(1);
+    let destination = format!("{:?}", tabs.active_tab().view_state);
+    load_active_tab(
+        &tabs,
+        &mut conversation,
+        &mut streaming,
+        &mut session,
+        &mut state,
+        &mut queue,
+    );
+    assert!(!presentation::is_open(&state, Surface::Search));
+    assert!(state.search_state.pre_search_view.is_none());
+    assert_eq!(
+        state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+        globals
+    );
+    assert_eq!(cross_payload(&state), payload);
+    assert_eq!(format!("{:?}", tabs.active_tab().view_state), destination);
 }
 
 #[test]
@@ -1010,8 +1061,8 @@ fn readonly_first_tab_return_does_not_wrap() {
     assert_eq!(state.scroll_offset(), 41);
 }
 
-// These are the existing production post-storage/load assignments, not command
-// parsing or storage-success witnesses. CrossSearch remains a legacy producer.
+// These are the production post-storage/load assignments, not command parsing
+// or storage-success witnesses. CrossSearch is a global frame across replacement.
 fn replace_bookmark_wave_stage(
     reason: &str,
     tabs: &mut TabManager,
@@ -1032,8 +1083,8 @@ fn replace_bookmark_wave_stage(
             return;
         }
         "CrossSearch direct" => {
-            // Like the legacy direct branch, this replaces the live proxy,
-            // not the switch-time conversation mirror in the owning manager.
+            // The direct branch replaces the live proxy, not the switch-time
+            // conversation mirror in the owning manager.
             replace_stage_conversation(conversation, state, replacement);
             position_cross_search_result(tabs, state, 1);
             return;
@@ -1316,6 +1367,294 @@ fn bookmark_wave_replacements_discard_live_covered_and_continued_stage_payloads(
                 state.wave_cancel.as_ref().unwrap().cancel();
                 assert!(child.is_cancelled());
             }
+        }
+    }
+}
+
+fn populate_global_cross(state: &mut TuiState) -> presentation::Frame {
+    use rustain::adapters::tui::handlers::export::{self, CrossSearchScanAction};
+    use rustain::domain::services::cross_search::CrossSearchResult;
+    let frame = state.modal_stack.top().unwrap().clone();
+    assert_eq!(frame.surface, Surface::CrossSearch);
+    assert!(frame.conversation_id.is_none());
+    let mut scan = CrossSearchScanAction::Cleared;
+    for ch in "ab".chars() {
+        assert_eq!(
+            press(state, Key::Char(ch)),
+            InputAction::CrossSearchQueryChanged
+        );
+        scan = export::apply_cross_search_query_change(state);
+    }
+    let CrossSearchScanAction::Spawn {
+        query,
+        frame_id,
+        revision,
+    } = scan
+    else {
+        panic!("the real query effect must claim a generation");
+    };
+    assert_eq!(frame_id, frame.id);
+    assert!(revision > 0 && state.cross_search.running);
+    assert_eq!(
+        export::apply_cross_search_results(
+            state,
+            frame_id,
+            revision,
+            query,
+            (0..2)
+                .map(|index| CrossSearchResult {
+                    conversation_id: format!("stored-{index}"),
+                    title: format!("global result {index}"),
+                    excerpt: format!("ab excerpt {index}"),
+                    timestamp: 1_700_000_000 + index,
+                    first_match_message_index: index as usize,
+                })
+                .collect(),
+            true,
+            false,
+        ),
+        export::CrossSearchResultsOutcome::Applied
+    );
+    press(state, Key::Down);
+    assert_eq!(state.cross_search.selected, 1);
+    assert_eq!(state.cross_search.query, "ab");
+    frame
+}
+
+fn cross_payload(state: &TuiState) -> String {
+    let cross = &state.cross_search;
+    format!(
+        "{:?}",
+        (
+            &cross.query,
+            cross.request_revision,
+            &cross.results,
+            cross.selected,
+            cross.truncated_by_count,
+            cross.truncated_by_time,
+            cross.total,
+            cross.scanned,
+            cross.running,
+        )
+    )
+}
+
+#[test]
+fn global_cross_survives_all_stage_reasons_with_mixed_continuations() {
+    use rustain::adapters::tui::{
+        handlers::{bookmark, export, wave_overlay},
+        presentation::reducer,
+    };
+    let stages = [Surface::Search, Surface::BookmarkList, Surface::WaveOverlay];
+    for reason in [
+        "switch",
+        "/new",
+        "/clear",
+        "fork",
+        "rewind",
+        "CrossSearch direct",
+    ] {
+        for placement in ["live", "covered", "continued", "cross-suspended"] {
+            let (mut h, mut tabs) = super::stage_support::stage(130, 30);
+            let mut conversation = tabs.active_tab().conversation.clone();
+            h.state = super::k7_cross_search::history();
+            let state = &mut h.state;
+            state.active_tab_id = tabs.active_tab_id();
+            paint_active_stage(&tabs, state, &conversation, 130);
+            super::k7_cross_search::open(state);
+            if placement == "cross-suspended" {
+                // Reducer-unit reachability only: reorder the four owners so
+                // Cross can be displaced. No History opener inside Frames.
+                reducer::close(state, Surface::CrossSearch);
+            } else {
+                populate_global_cross(state);
+            }
+            // Handler/FrameAPI setup deliberately bypasses key availability
+            // under globals; each production handler binds the actual manager.
+            reducer::open(state, Surface::Search);
+            search::handle_search_action(&mut tabs, state, &conversation, &InputAction::OpenSearch);
+            let action = press(state, Key::Char('s'));
+            search::handle_search_action(&mut tabs, state, &conversation, &action);
+            assert!(!state.search_state.matches.is_empty());
+            assert!(state.search_state.pre_search_view.is_some());
+            let search_frame = state.modal_stack.top().unwrap().clone();
+            bookmark::handle_apply_open_bookmark_list(&tabs, state, &conversation);
+            press(state, Key::Char('j'));
+            assert_eq!(
+                (state.bookmark_list_selected, state.bookmark_list_count),
+                (1, 2)
+            );
+            let bookmark_frame = state.modal_stack.top().unwrap().clone();
+            state.wave_run = Some(std::sync::Arc::new(super::keymap_support::StubWave(3)));
+            assert!(wave_overlay::apply(
+                state,
+                &conversation.id,
+                &InputAction::OpenWaveOverlay
+            ));
+            press(state, Key::Char('j'));
+            assert_eq!(state.wave_overlay_selected, 1);
+            let wave_frame = state.modal_stack.top().unwrap().clone();
+            for (frame, surface) in [search_frame, bookmark_frame, wave_frame]
+                .iter()
+                .zip(stages)
+            {
+                assert_eq!(frame.surface, surface);
+                assert_eq!(
+                    frame.conversation_id.as_deref(),
+                    Some(conversation.id.as_str())
+                );
+                assert!(
+                    state.modal_stack.iter().any(|live| live == frame),
+                    "{reason}/{placement}: actual live Stage owner before displacement"
+                );
+            }
+            let cross = if placement == "cross-suspended" {
+                reducer::open(state, Surface::CrossSearch);
+                populate_global_cross(state)
+            } else {
+                state
+                    .modal_stack
+                    .iter()
+                    .find(|frame| frame.surface == Surface::CrossSearch)
+                    .unwrap()
+                    .clone()
+            };
+            let payload = cross_payload(state);
+            let mut retained = vec![cross.clone()];
+            if placement != "live" {
+                reducer::open(state, Surface::Help);
+                retained.push(state.modal_stack.top().unwrap().clone());
+                let suspended = if placement == "cross-suspended" {
+                    Surface::CrossSearch
+                } else {
+                    Surface::WaveOverlay
+                };
+                assert!(
+                    !state
+                        .modal_stack
+                        .iter()
+                        .any(|frame| frame.surface == suspended)
+                );
+                assert!(
+                    presentation::is_open(state, suspended),
+                    "owned suspended payload"
+                );
+                if matches!(placement, "continued" | "cross-suspended") {
+                    reducer::open(state, Surface::Login);
+                    retained.push(state.modal_stack.top().unwrap().clone());
+                    assert!(
+                        !state
+                            .modal_stack
+                            .iter()
+                            .any(|frame| frame.surface == Surface::Help)
+                    );
+                    assert!(
+                        presentation::is_open(state, Surface::Help),
+                        "nested continuation"
+                    );
+                    assert!(
+                        presentation::is_open(state, suspended),
+                        "suspended descendant"
+                    );
+                }
+            }
+            let globals: Vec<_> = state
+                .modal_stack
+                .iter()
+                .filter(|frame| frame.conversation_id.is_none())
+                .cloned()
+                .collect();
+            let old_tab = tabs.active_tab_id();
+            let old_id = conversation.id.clone();
+            tabs.active_tab_mut().view_state.scroll_offset = 7;
+            let expected_offset = match reason {
+                "/new" | "/clear" => 0,
+                "CrossSearch direct" => state
+                    .total_content_height
+                    .saturating_sub(state.viewport_height as usize)
+                    .saturating_sub(state.message_boundaries[1]),
+                _ => 7,
+            };
+            replace_bookmark_wave_stage(reason, &mut tabs, state, &mut conversation);
+            let destination = super::stage_support::view(&tabs);
+            assert_eq!(
+                tabs.active_tab_id() != old_tab,
+                matches!(reason, "switch" | "fork")
+            );
+            assert_eq!(
+                conversation.id == old_id,
+                matches!(reason, "switch" | "rewind")
+            );
+            assert_eq!(
+                tabs.active_tab().view_state.scroll_offset,
+                expected_offset,
+                "{reason}"
+            );
+            assert_eq!(
+                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
+                globals
+            );
+            assert_eq!(cross_payload(state), payload, "{reason}/{placement}");
+            assert!(state.search_state.pre_search_view.is_none());
+            assert_eq!(
+                (state.bookmark_list_selected, state.bookmark_list_count),
+                (0, 0)
+            );
+            assert_eq!(state.wave_overlay_selected, 0);
+            loop {
+                for surface in stages {
+                    assert!(
+                        !presentation::is_open(state, surface),
+                        "{reason}/{placement}: no live or suspended Stage resurrection"
+                    );
+                }
+                assert!(presentation::consistent(state));
+                let top = state.modal_stack.top().unwrap();
+                assert_eq!(
+                    Some(top),
+                    retained.last(),
+                    "exact global return order and identity, including continuations"
+                );
+                assert_eq!(cross_payload(state), payload);
+                if top.surface == Surface::CrossSearch {
+                    assert_eq!(top, &cross);
+                    assert!(top.conversation_id.is_none());
+                    break;
+                }
+                reducer::back(state);
+                retained.pop();
+            }
+            // Reconciliation retained Cross; explicit user close must not.
+            let revision = state.cross_search.request_revision;
+            assert_eq!(press(state, Key::Esc), InputAction::CloseCrossSearch);
+            export::close_cross_search(state);
+            assert!(!presentation::is_open(state, Surface::CrossSearch));
+            assert!(state.cross_search.query.is_empty() && state.cross_search.results.is_empty());
+            assert_eq!(
+                export::apply_cross_search_results(
+                    state,
+                    cross.id,
+                    revision,
+                    "ab".into(),
+                    vec![],
+                    false,
+                    false,
+                ),
+                export::CrossSearchResultsOutcome::DiscardedStale
+            );
+            search::handle_search_action(
+                &mut tabs,
+                state,
+                &conversation,
+                &InputAction::CloseSearch,
+            );
+            bookmark::close(state);
+            wave_overlay::apply(state, &conversation.id, &InputAction::CloseWaveOverlay);
+            assert_eq!(
+                super::stage_support::view(&tabs),
+                destination,
+                "late Back/close cannot restore the old Stage into its destination"
+            );
         }
     }
 }

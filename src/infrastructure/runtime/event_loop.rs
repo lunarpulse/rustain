@@ -3799,37 +3799,9 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 InputAction::CrossSearchQueryChanged => {
-                                    // Story 4-4 AC5 — delegate the guard to
-                                    // `apply_cross_search_query_change` so tests exercise the
-                                    // same code path (third-audit Fix R4). If the helper
-                                    // returns Spawn, kick off the async scan; Cleared is a
-                                    // no-op aside from the needs_redraw below.
-                                    match apply_cross_search_query_change(&mut state) {
-                                        CrossSearchScanAction::Spawn { query } => {
-                                            let storage_ref = storage.clone();
-                                            let index_clone = session_index.clone();
-                                            let tx = domain_tx.clone();
-                                            tokio::spawn(async move {
-                                                use crate::domain::services::cross_search::{
-                                                    CrossSearchBudget, run_cross_search,
-                                                };
-                                                let outcome = run_cross_search(
-                                                    &*storage_ref,
-                                                    &index_clone,
-                                                    &query,
-                                                    CrossSearchBudget::default(),
-                                                )
-                                                .await;
-                                                let _ = tx.send(AppEvent::CrossSearchResultsReady {
-                                                    query,
-                                                    results: outcome.results,
-                                                    truncated_by_count: outcome.truncated_by_count,
-                                                    truncated_by_time: outcome.truncated_by_time,
-                                                });
-                                            });
-                                        }
-                                        CrossSearchScanAction::Cleared => {}
-                                    }
+                                    let _ = start_cross_search_scan(
+                                        &mut state, &storage, &session_index, &domain_tx,
+                                    );
                                     state.needs_redraw = true;
                                 }
                                 InputAction::OpenCrossSearchResult => {
@@ -3848,13 +3820,7 @@ pub async fn run(
                                     .await;
                                 }
                                 InputAction::CloseCrossSearch => {
-                                    state.cross_search =
-                                        crate::adapters::tui::state::CrossSearchState::new();
-                                    state.focus = FocusState::Sidebar {
-                                        panel: crate::domain::models::visual::PanelType::History,
-                                        selected: state.sidebar_selected,
-                                    };
-                                    state.needs_redraw = true;
+                                    handlers::export::close_cross_search(&mut state);
                                 }
                                 InputAction::ConfirmExportOverwrite => {
                                     // Third-audit Fix R6 — delegate to the `pub` helper so
@@ -6116,6 +6082,8 @@ pub async fn run(
                     }
                     AppEvent::CrossSearchResultsReady {
                         query,
+                        frame_id,
+                        revision,
                         results,
                         truncated_by_count,
                         truncated_by_time,
@@ -6126,6 +6094,8 @@ pub async fn run(
                         // (third-audit Fix R4).
                         let outcome = apply_cross_search_results(
                             &mut state,
+                            frame_id,
+                            revision,
                             query,
                             results,
                             truncated_by_count,
@@ -7127,6 +7097,40 @@ pub use crate::adapters::tui::handlers::export::{
     apply_export_command,
 };
 
+/// Claim and publish one scan through the same path used by query dispatch.
+#[doc(hidden)]
+pub fn start_cross_search_scan(
+    state: &mut TuiState,
+    storage: &Arc<dyn StoragePort>,
+    index: &SessionIndex,
+    tx: &mpsc::UnboundedSender<AppEvent>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let CrossSearchScanAction::Spawn {
+        query,
+        frame_id,
+        revision,
+    } = apply_cross_search_query_change(state)
+    else {
+        return None;
+    };
+    let storage = storage.clone();
+    let index = index.clone();
+    let tx = tx.clone();
+    Some(tokio::spawn(async move {
+        use crate::domain::services::cross_search::{CrossSearchBudget, run_cross_search};
+        let outcome =
+            run_cross_search(&*storage, &index, &query, CrossSearchBudget::default()).await;
+        let _ = tx.send(AppEvent::CrossSearchResultsReady {
+            query,
+            frame_id,
+            revision,
+            results: outcome.results,
+            truncated_by_count: outcome.truncated_by_count,
+            truncated_by_time: outcome.truncated_by_time,
+        });
+    }))
+}
+
 /// Story 4-4 AC6 (amended): open the selected cross-search result in a new
 /// tab (or switch to its existing tab), scroll to the target message, and
 /// apply a transient peek highlight for 1500 ms.
@@ -7134,8 +7138,9 @@ pub use crate::adapters::tui::handlers::export::{
 /// Does NOT auto-open the inline search bar — the reviewer's Fix 5 synthesis
 /// replaces the original auto-open with a peek highlight, eliminating
 /// cognitive whiplash.
+#[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
-async fn apply_open_cross_search_result(
+pub async fn apply_open_cross_search_result(
     tab_manager: &mut TabManager,
     conversation: &mut Conversation,
     streaming: &mut StreamingState,
@@ -7147,6 +7152,13 @@ async fn apply_open_cross_search_result(
     session_index: &mut SessionIndex,
     domain_tx: &mpsc::UnboundedSender<AppEvent>,
 ) {
+    if !state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == presentation::Surface::CrossSearch)
+    {
+        return;
+    }
     // Resolve the selected result.
     let Some(result) = state
         .cross_search
@@ -7207,6 +7219,8 @@ async fn apply_open_cross_search_result(
                     "cross-search: conversation {} not found at open time",
                     result.conversation_id
                 );
+                state.cross_search.load_failed = true;
+                state.needs_redraw = true;
                 return;
             }
             Err(e) => {
@@ -7220,31 +7234,21 @@ async fn apply_open_cross_search_result(
                     NoticeSource::Session,
                     format!("Failed to open conversation: {}", e),
                 );
+                state.cross_search.load_failed = true;
                 state.needs_redraw = true;
                 return;
             }
         }
     }
 
-    // Stash the cross-search query before resetting the overlay, so we can
-    // pre-populate the inline search bar on the next Ctrl+F press (AC6
-    // amendment: we do NOT auto-open the bar, but we DO preserve the query
-    // in case the user wants to jump to other matches in the same
-    // conversation).
-    let preserved_query = state.cross_search.query.clone();
-
-    // Close the cross-search overlay.
-    state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
-
-    // Scroll to the target message. `message_boundaries` for the newly
-    // activated tab will be computed on the next render tick, so this scroll
-    // may be briefly off until the first repaint — acceptable for v1.
-    position_cross_search_result(tab_manager, state, result.first_match_message_index);
-    state.focus = FocusState::Chat;
-
-    // Preserve the query on state.search_state.query (inactive) so Ctrl+F
-    // opens the bar pre-populated. AC6 amendment: no auto-open.
-    state.search_state.query = preserved_query.clone();
+    // Successful navigation transfers the query to the selected Stage, not
+    // to another CrossSearch opening. Failed loads above retain their owner.
+    let preserved_query = std::mem::take(&mut state.cross_search.query);
+    app::with_card_focus_reconcile(state, |state| {
+        presentation::reducer::close(state, presentation::Surface::CrossSearch);
+        position_cross_search_result(tab_manager, state, result.first_match_message_index);
+        presentation::reducer::settle_stage_base(state, FocusState::Chat);
+    });
 
     // Set a 1500 ms peek highlight on the cross-search flagged match in the
     // newly loaded conversation (AC6 — replaces the v1 status flash).
@@ -7283,6 +7287,8 @@ async fn apply_open_cross_search_result(
             });
         }
     }
+    // Keep the query for a later Ctrl+F without opening Search or copying it.
+    state.search_state.query = preserved_query;
     state.needs_redraw = true;
 }
 
@@ -8410,18 +8416,6 @@ pub fn render(
                     );
                 }
 
-                // Story 4-4 AC5: render cross-search overlay inside the sidebar column.
-                if state.cross_search.active {
-                    if let Some(sidebar_area) = app_layout.sidebar {
-                        crate::adapters::tui::widgets::cross_search::render(
-                            frame,
-                            sidebar_area,
-                            &state.cross_search,
-                            theme,
-                            state.modal_stack.is_empty(),
-                        );
-                    }
-                }
 
 
                 // Render peek overlay if any tool block has peek_active (AC5)
@@ -8715,7 +8709,7 @@ pub fn render(
                 shell.chat_pane = app_layout.chat_pane;
                 decision_painted = presentation::compose(
                     frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
-                    |_| {}, paint_status,
+                    paint_status,
                 );
 
             }

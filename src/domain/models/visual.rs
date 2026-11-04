@@ -186,9 +186,6 @@ pub enum ConfirmationType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OverlayType {
     Confirmation(ConfirmationType),
-    /// Cross-conversation search overlay (/ in sidebar).
-    // Covers: UX-DR87, Story 4-4 AC5-AC7
-    CrossSearch,
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

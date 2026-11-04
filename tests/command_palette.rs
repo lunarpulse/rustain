@@ -585,7 +585,6 @@ fn test_command_palette_renders_caller_geometry() {
                     Host::Local,
                     &LogFacts::default(),
                     |_| {},
-                    |_| {},
                 );
             })
             .unwrap();

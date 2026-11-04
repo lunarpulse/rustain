@@ -620,7 +620,6 @@ mod tests {
                             Host::Local,
                             &facts,
                             |_| {},
-                            |_| {},
                         );
                     } else if toasts {
                         toast_layer::render(frame, chat, &f.state.notifications, &theme, &facts);

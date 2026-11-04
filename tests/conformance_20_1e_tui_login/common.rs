@@ -333,7 +333,6 @@ impl Tui {
                     Host::Local,
                     &LogFacts::default(),
                     |_| {},
-                    |_| {},
                 );
             })
             .unwrap();

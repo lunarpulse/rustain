@@ -102,7 +102,6 @@ fn sheet_buffer(login: LoginOverlayState, theme: &Theme) -> Buffer {
                 Host::Local,
                 &LogFacts::default(),
                 |_| {},
-                |_| {},
             );
         })
         .unwrap();

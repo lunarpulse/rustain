@@ -479,6 +479,8 @@ Also inherits: Append-only text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this frame | local | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
 | `Ctrl+Q` | Ask to quit without closing cross-conversation search | local | portable |  |
 | `Esc` | Close the cross-conversation search | local | portable |  |
 | `Ctrl+C` | Close the cross-conversation search (back one frame) | local | portable |  |

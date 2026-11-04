@@ -312,7 +312,6 @@ mod tests {
                         Host::Local,
                         &LogFacts::default(),
                         |_| {},
-                        |_| {},
                     );
                 })
                 .unwrap();

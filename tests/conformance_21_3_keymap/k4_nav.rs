@@ -22,7 +22,7 @@ use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Ke
 use rustain::adapters::tui::presentation::{Surface, is_open, reducer};
 use rustain::adapters::tui::state::{SearchSubstate, TuiState};
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{OverlayType, PanelType};
+use rustain::domain::models::visual::PanelType;
 
 use super::support::{assert_global_effect, fresh, global_owned, is_inert, press};
 
@@ -30,7 +30,7 @@ use super::support::{assert_global_effect, fresh, global_owned, is_inert, press}
 
 /// The History sidebar panel focused, five entries, entry 1 selected.
 fn history_state() -> TuiState {
-    let mut state = fresh();
+    let mut state = TuiState::new(130, 24);
     state.sidebar_entry_count = 5;
     state.sidebar_selected = 1;
     state.focus = FocusState::Sidebar {
@@ -108,7 +108,7 @@ fn sidebar_salient(state: &TuiState) -> SidebarSalient {
         focus: state.focus.clone(),
         selected: state.sidebar_selected,
         input: state.input_buffer.clone(),
-        cross_search: state.cross_search.active,
+        cross_search: is_open(state, Surface::CrossSearch),
         palette: is_open(state, Surface::CommandPalette),
         help: is_open(state, Surface::Help),
     }
@@ -182,9 +182,14 @@ fn sidebar_witness(cmd: SidebarCmd, keys: &[Key]) {
             )
         }
         SidebarCmd::OpenCrossSearch => {
+            let base = state.focus.clone();
             assert_eq!(press(&mut state, key), InputAction::OpenCrossSearch);
-            assert_eq!(state.focus, FocusState::Overlay(OverlayType::CrossSearch));
-            assert!(state.cross_search.active);
+            assert_eq!(state.focus, base);
+            assert!(is_open(&state, Surface::CrossSearch));
+            assert_eq!(state.modal_stack.len(), 1);
+            let frame = state.modal_stack.top().unwrap();
+            assert_eq!(frame.surface, Surface::CrossSearch);
+            assert_eq!(frame.conversation_id, None);
         }
     }
 }

@@ -3105,7 +3105,6 @@ mod tests {
                     Host::Attached,
                     &log_facts("conversation-1"),
                     |_| {},
-                    |_| {},
                 );
             })
             .unwrap();
@@ -4686,6 +4685,7 @@ mod tests {
                     | Surface::Search
                     | Surface::BookmarkList
                     | Surface::WaveOverlay
+                    | Surface::CrossSearch
                     | Surface::Login => unreachable!("surface not offered attached"),
                 }
                 let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
@@ -4991,7 +4991,6 @@ mod tests {
                                     &shell,
                                     Host::Attached,
                                     &log_facts(&rig.conversation.id),
-                                    |_| {},
                                     |frame| {
                                         let buffer = frame.buffer_mut();
                                         assert!(
@@ -5401,7 +5400,6 @@ mod tests {
                                 &shell,
                                 Host::Attached,
                                 &log_facts(&rig.conversation.id),
-                                |_| {},
                                 |frame| {
                                     let buffer = frame.buffer_mut();
                                     let row = |y| {

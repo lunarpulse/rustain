@@ -15,6 +15,7 @@ pub enum Surface {
     Search,
     BookmarkList,
     WaveOverlay,
+    CrossSearch,
 }
 
 impl Surface {
@@ -33,6 +34,7 @@ impl Surface {
             Self::Search => "Search",
             Self::BookmarkList => "Bookmarks",
             Self::WaveOverlay => "Wave",
+            Self::CrossSearch => "Cross-Search",
         }
     }
 
@@ -51,6 +53,7 @@ impl Surface {
             Self::Search => Context::SearchTyping,
             Self::BookmarkList => Context::BookmarkList,
             Self::WaveOverlay => Context::WaveOverlay,
+            Self::CrossSearch => Context::CrossSearch,
         }
     }
 
@@ -65,6 +68,7 @@ impl Surface {
                 | Self::Search
                 | Self::BookmarkList
                 | Self::WaveOverlay
+                | Self::CrossSearch
         )
     }
 }

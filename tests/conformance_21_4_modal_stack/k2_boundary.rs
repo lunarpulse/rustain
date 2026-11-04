@@ -21,7 +21,7 @@ fn log() -> TuiState {
     state
 }
 
-fn request_permission(state: &mut TuiState) -> RequestId {
+pub(super) fn request_permission(state: &mut TuiState) -> RequestId {
     let id = RequestId::new();
     approval_bridge::apply(
         state,
@@ -1247,5 +1247,144 @@ fn stage_reconcile_releases_the_last_owner_without_clobbering_its_promoted_card(
             }
             assert_permission_painted(&mut h, &tabs, &id);
         }
+    }
+}
+
+pub(super) fn assert_runtime_permission_painted(
+    h: &mut crate::e2e_harness::TestHarness,
+    tabs: &mut TabManager,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+    id: &RequestId,
+) {
+    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
+    assert!(
+        h.state.permission_queue.is_empty(),
+        "promotion precedes paint or another key"
+    );
+    let screen = crate::conformance_tui_orchestration::render_runtime(h, tabs, core);
+    assert!(screen.contains("real permission admission"), "{screen}");
+    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
+    assert_eq!(
+        press(&mut h.state, Key::Char('y')),
+        InputAction::PermissionAllow
+    );
+}
+
+#[test]
+fn cross_search_closing_paths_settle_real_queued_permissions_and_covering_does_not() {
+    use rustain::adapters::tui::{app, handlers::export};
+    use rustain::infrastructure::runtime::agent_core::AgentCore;
+    let core = AgentCore::test_noop();
+    for path in ["Esc", "Ctrl+C", "back", "close", "replacement", "covered"] {
+        let mut h = crate::e2e_harness::TestHarness::with_size(130, 30);
+        let mut tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
+        tabs.active_tab_mut().conversation = h.conversation.clone();
+        h.state = super::k7_cross_search::history();
+        h.state.active_tab_id = tabs.active_tab_id();
+        super::k7_cross_search::open(&mut h.state);
+        if path == "replacement" {
+            export::close_cross_search(&mut h.state);
+            // Reducer-unit depth-cap fixture, not an unavailable History chord
+            // claimed reachable inside another frame.
+            for surface in [
+                Surface::Help,
+                Surface::ModelSelector,
+                Surface::ProfileSwitcher,
+                Surface::CrossSearch,
+            ] {
+                presentation::reducer::open(&mut h.state, surface);
+            }
+            assert_eq!(h.state.modal_stack.len(), 4);
+        }
+        for ch in "ab".chars() {
+            assert_eq!(
+                press(&mut h.state, Key::Char(ch)),
+                InputAction::CrossSearchQueryChanged
+            );
+        }
+        let pending = export::apply_cross_search_query_change(&mut h.state);
+        let owner = h.state.modal_stack.top().unwrap().id;
+        let id = request_permission(&mut h.state);
+        assert_permission_deferred(&h.state, &id);
+        match path {
+            "Esc" | "Ctrl+C" => {
+                let key = if path == "Esc" {
+                    Key::Esc
+                } else {
+                    Key::Ctrl('c')
+                };
+                assert_eq!(press(&mut h.state, key), InputAction::CloseCrossSearch);
+                assert_permission_deferred(&h.state, &id);
+                export::close_cross_search(&mut h.state);
+            }
+            "back" => {
+                app::with_card_focus_reconcile(&mut h.state, |s| {
+                    presentation::reducer::back(s);
+                });
+            }
+            "close" => {
+                app::with_card_focus_reconcile(&mut h.state, |s| {
+                    presentation::reducer::close(s, Surface::CrossSearch)
+                });
+            }
+            "replacement" => {
+                press(&mut h.state, Key::Ctrl('p'));
+                assert_eq!(
+                    h.state.modal_stack.top().unwrap().surface,
+                    Surface::CommandPalette
+                );
+                assert!(!presentation::is_open(&h.state, Surface::CrossSearch));
+                assert!(h.state.cross_search.query.is_empty());
+                assert_permission_deferred(&h.state, &id);
+                while !h.state.modal_stack.is_empty() {
+                    app::with_card_focus_reconcile(&mut h.state, |s| {
+                        presentation::reducer::back(s);
+                    });
+                }
+            }
+            "covered" => {
+                press(&mut h.state, Key::Ctrl('p'));
+                assert_eq!(
+                    h.state.modal_stack.top().unwrap().surface,
+                    Surface::CommandPalette
+                );
+                export::close_cross_search(&mut h.state);
+                assert!(h.state.modal_stack.iter().any(|f| f.id == owner));
+                assert_eq!(h.state.cross_search.query, "ab");
+                assert!(h.state.cross_search.running);
+                assert_permission_deferred(&h.state, &id);
+                press(&mut h.state, Key::Esc);
+                assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
+                assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
+                export::close_cross_search(&mut h.state);
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            !presentation::is_open(&h.state, Surface::CrossSearch),
+            "{path}"
+        );
+        let export::CrossSearchScanAction::Spawn {
+            query,
+            frame_id,
+            revision,
+        } = pending
+        else {
+            panic!("real pending request");
+        };
+        assert_eq!(
+            export::apply_cross_search_results(
+                &mut h.state,
+                frame_id,
+                revision,
+                query,
+                vec![],
+                false,
+                false
+            ),
+            export::CrossSearchResultsOutcome::DiscardedStale,
+            "{path}"
+        );
+        assert_runtime_permission_painted(&mut h, &mut tabs, &core, &id);
     }
 }

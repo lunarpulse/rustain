@@ -754,9 +754,7 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
                 state.pending_spawn_gate.is_none()
                     && !matches!(
                         state.focus,
-                        FocusState::Overlay(
-                            OverlayType::CrossSearch | OverlayType::Confirmation(_)
-                        )
+                        FocusState::Overlay(OverlayType::Confirmation(_))
                     )
             }
         }
@@ -1076,17 +1074,6 @@ fn char_overlay_context(state: &TuiState) -> Option<Context> {
         })
 }
 
-/// The overlay context the focus names, if any.
-pub(crate) fn overlay_focus_context(state: &TuiState) -> Option<Context> {
-    let FocusState::Overlay(overlay) = &state.focus else {
-        return None;
-    };
-    Some(match overlay {
-        OverlayType::CrossSearch => Context::CrossSearch,
-        _ => return None,
-    })
-}
-
 /// The context of the key target once no card owns it, top surface first.
 pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
     use crate::domain::models::visual::PanelType;
@@ -1122,7 +1109,7 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
             PanelType::History => Context::SidebarHistory,
             _ => Context::Sidebar,
         },
-        FocusState::Overlay(_) => return overlay_focus_context(state),
+        FocusState::Overlay(_) => return None,
     })
 }
 
@@ -1961,10 +1948,7 @@ fn exec_sidebar(state: &mut TuiState, cmd: SidebarCmd) -> InputAction {
         SidebarCmd::OpenConversation => InputAction::OpenSidebarConversation,
         SidebarCmd::DeleteConversation => InputAction::DeleteSidebarConversation,
         SidebarCmd::OpenCrossSearch => {
-            state.cross_search = crate::adapters::tui::state::CrossSearchState::new();
-            state.cross_search.active = true;
-            state.focus = FocusState::Overlay(OverlayType::CrossSearch);
-            state.needs_redraw = true;
+            presentation::reducer::open(state, Surface::CrossSearch);
             InputAction::OpenCrossSearch
         }
     }
@@ -3028,17 +3012,10 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         }
     }
 
-    // Help, the model selector and the usage panel own every special key (AC10).
-    let overlay = overlay_focus_context(state);
     let k = Key::from_domain_key(key);
 
-    // The remaining legacy search popups own every special key.
-    let early = if matches!(
-        overlay,
-        Some(Context::SearchTyping | Context::SearchNavigating)
-    ) {
-        overlay
-    } else if state.autocomplete.is_open() && state.focus == FocusState::Input {
+    // Routed Input popups retain their legacy key behavior until Bb2.
+    let early = if state.autocomplete.is_open() && state.focus == FocusState::Input {
         Some(Context::Autocomplete)
     } else if state.reverse_search.is_open() {
         Some(Context::ReverseSearch)
@@ -4418,11 +4395,6 @@ mod tests {
                 s.focus = FocusState::Sidebar { panel, selected: 0 };
             })
         }
-        fn overlay(ot: OverlayType) -> Box<dyn Fn(&mut TuiState)> {
-            Box::new(move |s| {
-                s.focus = FocusState::Overlay(ot.clone());
-            })
-        }
         fn confirmation(ct: ConfirmationType) -> Box<dyn Fn(&mut TuiState)> {
             Box::new(move |s| {
                 s.focus = FocusState::Overlay(OverlayType::Confirmation(ct.clone()));
@@ -4583,8 +4555,18 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(CrossSearch)",
-                setup: overlay(OverlayType::CrossSearch),
+                label: "CrossSearch frame",
+                setup: Box::new(|s| {
+                    s.focus = FocusState::Sidebar {
+                        panel: PanelType::History,
+                        selected: 0,
+                    };
+                    assert_eq!(
+                        handle_input(s, &DomainInputEvent::KeyPress('/')),
+                        InputAction::OpenCrossSearch
+                    );
+                    assert_eq!(s.modal_stack.top().unwrap().surface, Surface::CrossSearch);
+                }),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {

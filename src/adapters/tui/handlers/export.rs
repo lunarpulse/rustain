@@ -13,16 +13,36 @@ use crate::domain::models::{Conversation, FocusState};
 #[doc(hidden)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CrossSearchScanAction {
-    Spawn { query: String },
+    Spawn {
+        query: String,
+        frame_id: u64,
+        revision: u64,
+    },
     Cleared,
 }
 
 #[doc(hidden)]
 pub fn apply_cross_search_query_change(state: &mut TuiState) -> CrossSearchScanAction {
+    let Some(frame_id) = state
+        .modal_stack
+        .top()
+        .filter(|frame| frame.surface == crate::adapters::tui::presentation::Surface::CrossSearch)
+        .map(|frame| frame.id)
+    else {
+        return CrossSearchScanAction::Cleared;
+    };
+    state.cross_search.load_failed = false;
+    state.cross_search.request_revision = state
+        .cross_search
+        .request_revision
+        .checked_add(1)
+        .expect("cross-search request revision overflow");
     if state.cross_search.query.chars().count() >= 2 {
         state.cross_search.running = true;
         CrossSearchScanAction::Spawn {
             query: state.cross_search.query.clone(),
+            frame_id,
+            revision: state.cross_search.request_revision,
         }
     } else {
         state.cross_search.results.clear();
@@ -44,12 +64,20 @@ pub enum CrossSearchResultsOutcome {
 #[doc(hidden)]
 pub fn apply_cross_search_results(
     state: &mut TuiState,
+    frame_id: u64,
+    revision: u64,
     query: String,
     results: Vec<crate::domain::services::cross_search::CrossSearchResult>,
     truncated_by_count: bool,
     truncated_by_time: bool,
 ) -> CrossSearchResultsOutcome {
-    if state.cross_search.query != query {
+    if state.cross_search.request_revision != revision
+        || !state.modal_stack.all_frames().any(|frame| {
+            frame.surface == crate::adapters::tui::presentation::Surface::CrossSearch
+                && frame.id == frame_id
+        })
+        || state.cross_search.query != query
+    {
         return CrossSearchResultsOutcome::DiscardedStale;
     }
     state.cross_search.results = results;
@@ -65,6 +93,29 @@ pub fn apply_cross_search_results(
             .min(state.cross_search.results.len() - 1);
     }
     CrossSearchResultsOutcome::Applied
+}
+
+/// Apply the runtime's explicit CrossSearch close effect.
+#[doc(hidden)]
+pub fn close_cross_search(state: &mut TuiState) {
+    crate::adapters::tui::app::with_card_focus_reconcile(state, |state| {
+        use crate::adapters::tui::presentation::{Surface, reducer};
+        if !state
+            .modal_stack
+            .top()
+            .is_some_and(|frame| frame.surface == Surface::CrossSearch)
+        {
+            return;
+        }
+        reducer::close(state, Surface::CrossSearch);
+        reducer::settle_stage_base(
+            state,
+            FocusState::Sidebar {
+                panel: crate::domain::models::visual::PanelType::History,
+                selected: state.sidebar_selected,
+            },
+        );
+    });
 }
 
 #[doc(hidden)]

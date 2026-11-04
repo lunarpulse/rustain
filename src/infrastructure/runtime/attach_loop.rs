@@ -3682,7 +3682,6 @@ pub async fn run_attached(
             crate::adapters::tui::presentation::compose(
                 f, &state, &shell, crate::adapters::tui::keymap::Host::Attached,
                 &attach_keys::log_facts(&conversation.id),
-                |_| {},
                 paint_status,
             );
         });
@@ -9825,7 +9824,6 @@ mod tests {
                         &shell,
                         crate::adapters::tui::keymap::Host::Attached,
                         &LogFacts::default(),
-                        |_| {},
                         |_| {},
                     );
                 })

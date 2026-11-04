@@ -1,10 +1,7 @@
-//! Cross-conversation search overlay widget (Story 4-4 AC5).
+//! Global CrossSearch frame body. The shared compositor supplies its fitted rect.
 //!
-//! Renders **inside the sidebar column** as a 3-row-per-result vertical stack
-//! (title / excerpt / timestamp). The horizontal single-line layout was
-//! rejected in party-mode review — a ~30-column sidebar cannot fit a title +
-//! 60-char excerpt + timestamp, so the vertical stack is the only layout
-//! that honors the "within sidebar column" constraint.
+//! Query, selected result and primary keys fit before optional excerpts,
+//! timestamps and truncation detail; selection stays visible in a bounded window.
 //!
 //! Pure render — no state mutation. Input dispatch lives in `app.rs`.
 // Covers: Story 4-4 AC5 (UX-DR87), amendments 3
@@ -21,8 +18,7 @@ const QUERY_PREFIX: &str = "/ ";
 /// Indent of the excerpt row (its text starts after these cells).
 const EXCERPT_INDENT: &str = "    ";
 
-/// Render the cross-search overlay into `area` (expected to be the sidebar
-/// column). No-op when `state.active == false`.
+/// Render into the frame's fitted rectangle; presence belongs to the stack.
 /// `show_cursor` controls only hardware cursor placement, not painted cells.
 pub fn render(
     frame: &mut Frame,
@@ -31,14 +27,15 @@ pub fn render(
     theme: &Theme,
     show_cursor: bool,
 ) {
-    if !state.active || area.height < 4 {
+    if area.height < 4 {
         return;
     }
 
     frame.render_widget(Clear, area);
 
     let inner_width = area.width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
+    let body_rows = area.height.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(body_rows);
 
     // Row 0: query input with cursor. The query scrolls so its tail (and the
     // caret after it) stays inside the border: `/ ` prefix, one caret cell.
@@ -52,86 +49,93 @@ pub fn render(
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Separator row.
-    lines.push(Line::from(Span::styled(
-        "─".repeat(inner_width),
-        Style::default().fg(theme.colors.fg_muted),
-    )));
-
-    // Loading state (reviewer Fix — no silent delay).
-    if state.running {
+    let muted = Style::default().fg(theme.colors.fg_muted);
+    let show_results = !state.results.is_empty()
+        && state.query.len() >= 2
+        && (!state.running || state.load_failed);
+    let selected = if show_results {
+        state.selected.min(state.results.len() - 1)
+    } else {
+        0
+    };
+    if state.load_failed {
         lines.push(Line::from(Span::styled(
-            "Searching…".to_string(),
-            Style::default()
-                .fg(theme.colors.fg_muted)
-                .add_modifier(Modifier::ITALIC),
+            "Failed to open conversation",
+            Style::default().fg(theme.colors.warning),
+        )));
+    } else if state.running {
+        lines.push(Line::from(Span::styled(
+            "Searching…",
+            muted.add_modifier(Modifier::ITALIC),
         )));
     } else if state.query.len() < 2 {
         lines.push(Line::from(Span::styled(
-            "Type at least 2 characters".to_string(),
-            Style::default()
-                .fg(theme.colors.fg_muted)
-                .add_modifier(Modifier::ITALIC),
+            "Type at least 2 characters",
+            muted.add_modifier(Modifier::ITALIC),
         )));
     } else if state.results.is_empty() {
-        // Story 4-4 AC7 — spec-mandated wording.
-        lines.push(Line::from(Span::styled(
-            "No matches found".to_string(),
-            Style::default().fg(theme.colors.fg_muted),
-        )));
+        lines.push(Line::from(Span::styled("No matches found", muted)));
     } else {
-        // Each result occupies 3 rows + 1 separator row.
-        let selected = state.selected.min(state.results.len() - 1);
-        for (i, r) in state.results.iter().enumerate() {
-            let is_sel = i == selected;
-            let title_prefix = if is_sel { "▸ " } else { "  " };
-            let title_style = if is_sel {
-                Style::default()
-                    .fg(theme.colors.accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(theme.colors.fg_primary)
-                    .add_modifier(Modifier::BOLD)
-            };
-            let title_text = shorten_to_cells(
-                &r.title,
-                inner_width.saturating_sub(geom::cells(title_prefix)),
-            );
-            lines.push(Line::from(vec![
-                Span::styled(title_prefix.to_string(), title_style),
-                Span::styled(title_text, title_style),
-            ]));
-
-            // Row 1: excerpt with matched substring bolded (AC5).
-            let excerpt_text: String = shorten_to_cells(
-                &r.excerpt,
-                inner_width.saturating_sub(geom::cells(EXCERPT_INDENT)),
-            );
-            let excerpt_spans = build_excerpt_spans(&excerpt_text, &state.query, theme);
-            let mut row_spans: Vec<Span<'static>> = vec![Span::raw(EXCERPT_INDENT)];
-            row_spans.extend(excerpt_spans);
-            lines.push(Line::from(row_spans));
-
-            // Row 2: timestamp (muted, relative)
-            lines.push(Line::from(Span::styled(
-                format!("    {}", relative_time(r.timestamp)),
-                Style::default().fg(theme.colors.fg_muted),
-            )));
-        }
-
-        // Truncation hint — spec-mandated wording (AC5).
-        // When both flags are set the count hint wins because it's more actionable.
-        if state.truncated_by_count {
-            lines.push(Line::from(Span::styled(
-                "Showing 20 most recent matches — refine query for more".to_string(),
-                Style::default()
-                    .fg(theme.colors.warning)
-                    .add_modifier(Modifier::ITALIC),
-            )));
+        lines.push(Line::from(Span::styled(
+            format!("{}/{} matches", selected + 1, state.results.len()),
+            muted,
+        )));
+    }
+    if show_results {
+        let hint = if state.truncated_by_count {
+            Some("Showing 20 most recent matches — refine query for more")
         } else if state.truncated_by_time {
+            Some("Scan stopped after 200 ms — refine query for full coverage")
+        } else {
+            None
+        };
+        let available = body_rows.saturating_sub(2);
+        let show_hint = hint.is_some() && available >= 2;
+        let result_rows = available.saturating_sub(usize::from(show_hint));
+        if result_rows > 0 {
+            let rows_per_result = result_rows.min(3);
+            let visible = (result_rows / rows_per_result).min(state.results.len());
+            let start = selected
+                .saturating_sub(visible / 2)
+                .min(state.results.len() - visible);
+            for (i, r) in state.results.iter().enumerate().skip(start).take(visible) {
+                let is_sel = i == selected;
+                let title_prefix = if is_sel { "▸ " } else { "  " };
+                let title_style = Style::default()
+                    .fg(if is_sel {
+                        theme.colors.accent
+                    } else {
+                        theme.colors.fg_primary
+                    })
+                    .add_modifier(Modifier::BOLD);
+                let title_text = shorten_to_cells(
+                    &r.title,
+                    inner_width.saturating_sub(geom::cells(title_prefix)),
+                );
+                lines.push(Line::from(vec![
+                    Span::styled(title_prefix, title_style),
+                    Span::styled(title_text, title_style),
+                ]));
+                if rows_per_result >= 2 {
+                    let excerpt_text = shorten_to_cells(
+                        &r.excerpt,
+                        inner_width.saturating_sub(geom::cells(EXCERPT_INDENT)),
+                    );
+                    let mut row_spans = vec![Span::raw(EXCERPT_INDENT)];
+                    row_spans.extend(build_excerpt_spans(&excerpt_text, &state.query, theme));
+                    lines.push(Line::from(row_spans));
+                }
+                if rows_per_result >= 3 {
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", relative_time(r.timestamp)),
+                        muted,
+                    )));
+                }
+            }
+        }
+        if show_hint {
             lines.push(Line::from(Span::styled(
-                "Scan stopped after 200 ms — refine query for full coverage".to_string(),
+                hint.unwrap(),
                 Style::default()
                     .fg(theme.colors.warning)
                     .add_modifier(Modifier::ITALIC),

@@ -25,6 +25,7 @@ use rustain::adapters::tui::keymap::{Context, Host};
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use unicode_width::UnicodeWidthStr;
 
+use super::k4_overlays::cross_search_state;
 use super::support::{fresh, press};
 
 fn paint(width: u16, height: u16, avail: &AvailCtx) -> String {
@@ -178,7 +179,13 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("ProfileSwitcher", FocusState::Input),
         ("ReverseSearch", FocusState::Input),
         ("Search", FocusState::Input),
-        ("CrossSearch", overlay(OverlayType::CrossSearch)),
+        (
+            "CrossSearch",
+            FocusState::Sidebar {
+                panel: rustain::domain::models::visual::PanelType::History,
+                selected: 0,
+            },
+        ),
         ("BookmarkList", FocusState::Chat),
         ("UsagePanel", FocusState::Input),
         ("WaveOverlay", FocusState::Chat),
@@ -191,8 +198,10 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     let (mut opened, mut blocked) = (0, 0);
     for (name, focus) in foci {
         let mut state = fresh();
-        state.focus = focus;
-        if name == "Help" {
+        state.focus = focus.clone();
+        if name == "CrossSearch" {
+            state = cross_search_state();
+        } else if name == "Help" {
             press(&mut state, Key::Char('?'));
         } else if name == "CommandPalette" {
             press(&mut state, Key::Ctrl('p'));
@@ -213,8 +222,13 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         } {
             reducer::open(&mut state, surface);
         }
+        let cross_frame = (name == "CrossSearch").then(|| state.modal_stack.top().unwrap().clone());
         let offered = status_tail(&state) == StatusTail::Menu;
         press(&mut state, Key::Ctrl('x'));
+        if let Some(frame) = cross_frame {
+            assert_eq!(state.focus, focus);
+            assert_eq!(state.modal_stack.top(), Some(&frame));
+        }
         assert_eq!(
             offered,
             state.pending_leader.is_some(),
@@ -224,8 +238,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     }
     assert_eq!(
         (opened, blocked),
-        (12, 2),
-        "Input, Chat, ReverseSearch popup and migrated frames open; remaining legacy overlays block"
+        (13, 1),
+        "Input, Chat, ReverseSearch popup and migrated frames open; only Confirmation blocks"
     );
 }
 
