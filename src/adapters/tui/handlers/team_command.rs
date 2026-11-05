@@ -14,6 +14,7 @@
 //! Effectful work (the journal read, the export write) happens in the dispatch
 //! arm's shell and arrives here as data.
 
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry as geom;
 use crate::domain::events::AppEvent;
@@ -1229,9 +1230,7 @@ pub fn open_team_retract_card(
         armed: card.armed,
         prior_focus: state.focus.clone(),
     });
-    state.focus = crate::domain::models::FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::TeamRetract,
-    ));
+    reducer::raise_confirmation(state, ConfirmationType::TeamRetract);
     state.needs_redraw = true;
 }
 
@@ -1247,7 +1246,7 @@ pub fn resolve_team_retract_card(
     accept: bool,
 ) -> Option<crate::adapters::tui::state::PendingTeamRetract> {
     let pending = state.pending_team_retract.take()?;
-    state.focus = pending.prior_focus.clone();
+    reducer::set_base(state, pending.prior_focus.clone());
     state.needs_redraw = true;
     (accept && pending.armed).then_some(pending)
 }
@@ -2154,6 +2153,95 @@ mod tests {
             p = p.as_str(),
         );
         assert_eq!(status, expected);
+    }
+
+    #[test]
+    fn story21_4_retract_arrival_and_resolution_preserve_palette_and_base() {
+        use crate::adapters::tui::app::handle_input;
+        use crate::adapters::tui::presentation::{Surface, reducer};
+        use crate::domain::events::{
+            DomainInputEvent, DomainKey, TeamRetractCard, TeamRetractPreview,
+        };
+        use crate::domain::models::FocusState;
+        use crate::domain::models::visual::{ConfirmationType, OverlayType};
+
+        let preview = || {
+            TeamRetractPreview::Card(TeamRetractCard {
+                peer: "jun-dev".to_owned(),
+                item_id: "ri_x".to_owned(),
+                task: Some("task-x".to_owned()),
+                body: "retract the selected item".to_owned(),
+                armed: true,
+            })
+        };
+        let mut state = TuiState::new(80, 24);
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
+        for c in ['m', 'o'] {
+            handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+        }
+        let frame = state.modal_stack.top().expect("palette opened").clone();
+        assert_eq!(frame.surface, Surface::CommandPalette);
+        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
+        let base = state.focus.clone();
+
+        open_team_retract_card(&mut state, "conv", preview());
+        let pending = state
+            .pending_team_retract
+            .as_ref()
+            .expect("real card retained");
+        assert_eq!(pending.conversation_id, "conv");
+        assert_eq!(pending.peer, "jun-dev");
+        assert_eq!(pending.item_id, "ri_x");
+        assert_eq!(pending.card, "retract the selected item");
+        assert!(pending.armed);
+        assert_eq!(state.modal_stack.top(), Some(&frame));
+        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
+        assert_eq!(
+            state.focus, base,
+            "arrival cannot overwrite interrupted base"
+        );
+
+        let resolved = resolve_team_retract_card(&mut state, true).expect("armed dispatch");
+        assert_eq!(resolved.item_id, "ri_x");
+        assert!(state.pending_team_retract.is_none());
+        assert_eq!(state.modal_stack.top(), Some(&frame));
+        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
+        assert_eq!(
+            state.focus, base,
+            "action cannot overwrite interrupted base"
+        );
+        reducer::back(&mut state);
+        assert!(state.modal_stack.is_empty());
+        assert_eq!(state.focus, base);
+
+        let mut empty = TuiState::new(80, 24);
+        assert_eq!(empty.focus, FocusState::Input);
+        open_team_retract_card(&mut empty, "conv", preview());
+        assert_eq!(
+            empty.focus,
+            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
+        );
+        assert!(resolve_team_retract_card(&mut empty, true).is_some());
+        assert_eq!(empty.focus, FocusState::Input);
+        assert!(empty.pending_team_retract.is_none());
+
+        // A frame can cover a card that was already active. Its resolution
+        // must not write the saved Input focus through that frame either.
+        let mut covered = TuiState::new(80, 24);
+        open_team_retract_card(&mut covered, "conv", preview());
+        reducer::open(&mut covered, Surface::CommandPalette);
+        handle_input(&mut covered, &DomainInputEvent::KeyPress('m'));
+        let frame = covered.modal_stack.top().expect("covering palette").clone();
+        let interrupted = covered.focus.clone();
+        assert_ne!(interrupted, FocusState::Input);
+        assert!(resolve_team_retract_card(&mut covered, true).is_some());
+        assert!(covered.pending_team_retract.is_none());
+        assert_eq!(covered.modal_stack.top(), Some(&frame));
+        assert_eq!(covered.command_palette.filter_text.as_str(), "m");
+        assert_eq!(
+            covered.focus, interrupted,
+            "resolution must respect the cover"
+        );
     }
 
     #[test]

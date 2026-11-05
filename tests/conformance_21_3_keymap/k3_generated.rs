@@ -31,7 +31,9 @@ use super::support::{fresh, press};
 fn paint(width: u16, height: u16, avail: &AvailCtx) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
     terminal
-        .draw(|frame| which_key_bar::render(frame, frame.area(), &Theme::dark(), avail, None))
+        .draw(|frame| {
+            let _ = which_key_bar::render(frame, frame.area(), &Theme::dark(), avail, None);
+        })
         .expect("draw");
     let buffer = terminal.backend().buffer().clone();
     (0..height)

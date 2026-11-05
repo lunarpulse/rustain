@@ -331,6 +331,21 @@ toast; an automatically raised one never steals the keyboard while you type
 (one you asked for, such as delete, takes focus at once), and `Ctrl+X q` brings the
 oldest one back (`Needs you (N)` in the status row).
 
+Local sessions and `rustain daemon attach` share the composer, caret editing
+(`Ctrl+A/E/K`, arrows and paste), transcript view state and window compositor.
+Read-only attachments start in Input for local slash commands; ordinary text
+still cannot start a model turn. Help, the palette, notifications and quit
+confirmation share one keyboard-owning stack: `Esc` or `Ctrl+C` backs out one
+window, and cancelling `Ctrl+Q` returns to the exact interrupted window.
+Search `Esc` restores the pre-search position; Enter in navigation keeps the
+match. `/` filters Help and the Notification Log without moving the transcript.
+Windows leave the status row visible, fully covered `team-log` rows are not
+counted as presented, and all input is inert below the 60×16 terminal floor.
+Co-pending prompts retain their payloads, but only the keyboard owner paints
+answer keys. Streaming indicators do not mark overwritten log rows as read.
+Attached pending sends keep the draft's tail and caret visible; implicit resume
+following preserves scroll intent, while an explicit bottom jump resets it.
+
 **Tool execution** — seven-state FSM per tool call (`Validating → Scheduled →
 AwaitingApproval → Executing → Success/Error/Cancelled`). Parallel batching for
 safe tools, sequential fallback otherwise. Per-call cancellation tokens.

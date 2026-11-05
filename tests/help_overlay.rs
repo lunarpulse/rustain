@@ -538,6 +538,9 @@ fn test_help_overlay_small_terminal_no_crash() {
                     &shell,
                     Host::Local,
                     &LogFacts::default(),
+                    &mut rustain::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                        shell.chat_pane,
+                    ),
                     |_| {},
                 );
             })

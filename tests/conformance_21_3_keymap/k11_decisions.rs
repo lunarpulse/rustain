@@ -407,7 +407,11 @@ fn cards() -> Vec<Card> {
         Card {
             name: "export overwrite",
             context: Context::ExportOverwrite,
-            build: || overlay(ConfirmationType::ExportOverwrite("out.md".into())),
+            build: || {
+                let mut s = overlay(ConfirmationType::ExportOverwrite("out.md".into()));
+                s.pending_export = Some(("out.md".into(), String::new()));
+                s
+            },
             pending: |s| {
                 matches!(
                     s.focus,
@@ -665,7 +669,13 @@ fn ctrl_d_skips_the_question_and_esc_never_does() {
 /// Sub-frame backs stay backs (LR-3): the skill inspect view returns to the trust card.
 #[test]
 fn sub_frame_backs_stay_backs() {
-    let mut state = overlay(ConfirmationType::SkillTrustInspect);
+    let skill_trust = cards()
+        .into_iter()
+        .find(|c| c.name == "skill trust")
+        .unwrap();
+    let mut state = (skill_trust.build)();
+    state.focus = confirm(ConfirmationType::SkillTrustInspect);
+    state.skill_trust_inspect_mode = true;
     assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
     assert_eq!(state.focus, confirm(ConfirmationType::SkillTrust));
     assert!(cue_records(&state).is_empty(), "a back posts no cue");

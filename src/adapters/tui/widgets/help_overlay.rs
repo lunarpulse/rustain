@@ -277,6 +277,7 @@ mod tests {
                     &presentation::Shell::new(frame.area(), &layout),
                     Host::Local,
                     &LogFacts::default(),
+                    &mut presentation::occlusion::OpaqueRects::new(layout.chat_pane),
                     |_| {},
                 );
             })

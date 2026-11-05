@@ -138,7 +138,7 @@ pub fn render_permission_surface(
     queue_len: usize,
     reader: &mut PermissionReaderState,
     theme: &Theme,
-) {
+) -> Option<Rect> {
     if let Some(feedback) = feedback {
         let rows = render_feedback_input_lines(&feedback.buffer, theme);
         let height = (rows.len() as u16).min(area.height);
@@ -150,8 +150,11 @@ pub fn render_permission_surface(
         );
         frame.render_widget(ratatui::widgets::Clear, prompt);
         frame.render_widget(ratatui::widgets::Paragraph::new(rows), prompt);
-    } else if let Some(pending) = pending {
-        render_permission_overlay(frame, area, pending, queue_len, reader, theme);
+        Some(prompt)
+    } else {
+        pending.map(|pending| {
+            render_permission_overlay(frame, area, pending, queue_len, reader, theme)
+        })
     }
 }
 
@@ -164,7 +167,7 @@ pub fn render_permission_overlay(
     queue_len: usize,
     reader: &mut PermissionReaderState,
     theme: &Theme,
-) {
+) -> Rect {
     let card = PermissionCard {
         source: &pending.source,
         tool_name: &pending.tool_name,
@@ -228,6 +231,7 @@ pub fn render_permission_overlay(
             &review.footer,
             0,
         );
+        area
     } else {
         let height = cached.card.len().min(area.height as usize);
         let prompt_area = Rect::new(
@@ -247,6 +251,7 @@ pub fn render_permission_overlay(
         reader.scroll = reader.scroll.min(reader.scroll_max);
         frame.render_widget(ratatui::widgets::Clear, prompt_area);
         paint_rows(frame, prompt_area, &cached.card, reader.scroll);
+        prompt_area
     }
 }
 

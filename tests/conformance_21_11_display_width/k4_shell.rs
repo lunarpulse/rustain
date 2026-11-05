@@ -466,7 +466,7 @@ fn reverse(width: u16, query: &str, entry: &str) -> Painted {
     };
     let theme = Theme::dark();
     paint(width, 4, |frame| {
-        reverse_search::render(frame, frame.area(), &state, &theme, true);
+        let _ = reverse_search::render(frame, frame.area(), &state, &theme, true);
     })
 }
 

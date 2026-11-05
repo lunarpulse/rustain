@@ -769,8 +769,11 @@ fn k9_a_toast_painted_over_link_runs_leaves_no_envelope_under_or_around_it() {
                         &StreamingState::default(),
                         // Scrolled off the bottom: the last three rows are
                         // full link rows, not the short last line.
-                        4,
-                        false,
+                        &rustain::domain::models::ViewState {
+                            scroll_offset: 4,
+                            mode: rustain::domain::models::AnchorMode::Reading,
+                            ..Default::default()
+                        },
                         &theme,
                         &mut tab,
                         &HashMap::new(),

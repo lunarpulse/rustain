@@ -55,7 +55,10 @@ use crate::adapters::daemon::protocol::{
 };
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource, NotificationStore};
-use crate::adapters::tui::state::{AttachInfo, RecipientSurfaceTarget, TabRenderState, TuiState};
+use crate::adapters::tui::state::{
+    AttachInfo, AttachedApproval, AttachedApprovalPresentation, AttachedApprovals,
+    PendingConsentApproval, RecipientSurfaceTarget, TabRenderState, TuiState,
+};
 use crate::adapters::tui::terminal;
 use crate::adapters::tui::widgets::recipient_surface::{
     RecipientSurfaceAction, pinned_response, recipient_surface_actions, render_recipient_surface,
@@ -351,13 +354,6 @@ struct PendingPeerResponse<'a> {
     retro_left_out: Option<&'a crate::domain::models::RetroFieldSet>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingConsentApproval {
-    request_id: crate::domain::models::RequestId,
-    tool: String,
-    input_preview: String,
-}
-
 fn pending_peer_response(conversation: &Conversation) -> Option<PendingPeerResponse<'_>> {
     use crate::domain::models::{PeerRowStage, semantic_message_type_metadata};
     let mut pendings = conversation.messages.iter().filter_map(|message| {
@@ -646,9 +642,12 @@ async fn open_response_surface(
                 None
             },
         ),
-        None => (std::mem::replace(&mut state.focus, FocusState::Chat), None),
+        None => (
+            crate::adapters::tui::presentation::reducer::replace_base(state, FocusState::Chat),
+            None,
+        ),
     };
-    state.focus = FocusState::Chat;
+    crate::adapters::tui::presentation::reducer::set_base(state, FocusState::Chat);
     state.recipient_surface = Some(RecipientSurface {
         target: RecipientSurfaceTarget::Node(node.to_owned()),
         access,
@@ -728,7 +727,6 @@ fn recipient_surface_flash(state: &mut TuiState, message: String) {
 
 fn queue_recipient_action(
     state: &mut TuiState,
-    input: &mut String,
     frame: ClientFrame,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
     composed: bool,
@@ -745,15 +743,17 @@ fn queue_recipient_action(
             | ClientFrame::SetRecipientContext { .. }
     );
     if correlated {
-        if !begin_action(state, &frame, composed.then_some(&mut *input)) {
+        if !begin_action(state, &frame, composed) {
             return false;
         }
     } else if composed {
-        input.clear();
+        state.input_buffer.clear();
+        state.cursor_position = 0;
+        state.input_scroll_offset = 0;
     }
     if let Err(error) = frame_tx.send(frame) {
         let message = error.to_string();
-        abort_unsent_action(state, input, error.0, message);
+        abort_unsent_action(state, error.0, message);
         return false;
     }
     true
@@ -765,7 +765,6 @@ async fn dispatch_recipient_surface_key(
     higher_confirmation: bool,
     workspace: &Path,
     conversation: &Conversation,
-    input: &mut String,
     state: &mut TuiState,
     write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
 ) -> bool {
@@ -776,14 +775,13 @@ async fn dispatch_recipient_surface_key(
     {
         return false;
     }
-    recipient_surface_key(key, workspace, conversation, input, state, write_frames).await;
+    recipient_surface_key(key, workspace, conversation, state, write_frames).await;
     true
 }
 async fn recipient_surface_key(
     key: crossterm::event::KeyEvent,
     _workspace: &Path,
     conversation: &Conversation,
-    input: &mut String,
     state: &mut TuiState,
     write_frames: Option<&mpsc::UnboundedSender<ClientFrame>>,
 ) {
@@ -811,7 +809,7 @@ async fn recipient_surface_key(
     match key.code {
         KeyCode::Esc => {
             if let Some(surface) = state.recipient_surface.take() {
-                state.focus = surface.prior_focus;
+                crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);
             }
             crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
             state.needs_redraw = true;
@@ -898,7 +896,7 @@ async fn recipient_surface_key(
         // `/team reply` line.
         | RecipientSurfaceAction::DiscussConcerns
         | RecipientSurfaceAction::Edit => {
-            if !input.is_empty() {
+            if !state.input_buffer.is_empty() {
                 recipient_surface_flash(state,
                     "input already contains text — close this view and finish or clear it before composing a reply".to_owned());
                 return;
@@ -910,7 +908,7 @@ async fn recipient_surface_key(
                 let Some((message, _)) = pinned_response(conversation, node) else {
                     return;
                 };
-                *input = message
+                state.input_buffer = message
                     .content
                     .strip_prefix(crate::adapters::daemon::response_modes::DRAFT_APPROVAL_PREFIX)
                     .unwrap_or(&message.content)
@@ -923,7 +921,7 @@ async fn recipient_surface_key(
                 match &surface.target {
                     RecipientSurfaceTarget::Item(address) => {
                         let item_id = address.item().as_str();
-                        *input = if action == RecipientSurfaceAction::DiscussConcerns {
+                        state.input_buffer = if action == RecipientSurfaceAction::DiscussConcerns {
                             format!("/team reply --discuss {item_id} ")
                         } else {
                             format!("/team reply {item_id} ")
@@ -939,7 +937,9 @@ async fn recipient_surface_key(
                 }
             }
             state.recipient_surface = None;
-            state.focus = FocusState::Input;
+            state.cursor_position = state.input_buffer.chars().count();
+            state.input_scroll_offset = 0;
+            crate::adapters::tui::presentation::reducer::set_base(state, FocusState::Input);
             crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
         }
         // Story 19.22 `AC4(c)` — `[y] Accept` queues the verdict frame
@@ -955,7 +955,7 @@ async fn recipient_surface_key(
                 text: String::new(),
                 verdict: Some(crate::adapters::daemon::protocol::ReplyVerdict::Accept),
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
         RecipientSurfaceAction::Busy | RecipientSurfaceAction::Acknowledge => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
@@ -995,7 +995,7 @@ async fn recipient_surface_key(
             } else {
                 ClientFrame::AcknowledgeRecipientItem { item_id }
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
         RecipientSurfaceAction::ShareStatus | RecipientSurfaceAction::DeclineStatus => {
             let RecipientSurfaceTarget::Item(address) = &surface.target else {
@@ -1005,7 +1005,7 @@ async fn recipient_surface_key(
                 item_id: address.item().as_str().to_owned(),
                 decline: action == RecipientSurfaceAction::DeclineStatus,
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
         // Story 19.25 `AC3` — Share sends the stored overlay as its leave-out
         // list; Decline sends no fields (the daemon refuses decline + fields).
@@ -1029,7 +1029,7 @@ async fn recipient_surface_key(
                 leave_out,
                 decline,
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
         // Story 19.25 `AC3` — a digit toggles one field of this client's
         // overlay; the card and the surface re-render from it.
@@ -1061,7 +1061,7 @@ async fn recipient_surface_key(
                 item_id: address.item().as_str().to_owned(),
                 selected: !surface.context_selected,
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
         RecipientSurfaceAction::Approve
         | RecipientSurfaceAction::Reject
@@ -1078,7 +1078,7 @@ async fn recipient_surface_key(
                 node: node.clone(),
                 action,
             };
-            queue_recipient_action(state, input, frame, frame_tx, false);
+            queue_recipient_action(state, frame, frame_tx, false);
         }
     }
     state.needs_redraw = true;
@@ -1137,40 +1137,8 @@ fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
 /// Story 19.20c: transient writer-only approval state. Consent/consolidation/
 /// retract confirmations keep precedence; generic permissions precede proposals.
 /// The pinned reader and feedback owner are request ids, never FIFO positions.
-#[derive(Default)]
-struct AttachedApprovals {
-    order: std::collections::VecDeque<crate::domain::models::tool_call::RequestId>,
-    pending: HashMap<crate::domain::models::tool_call::RequestId, AttachedApproval>,
-    review: Option<crate::domain::models::tool_call::RequestId>,
-    feedback: Option<(crate::domain::models::tool_call::RequestId, String)>,
-    painted: Option<crate::domain::models::tool_call::RequestId>,
-    scroll: usize,
-    scroll_max: usize,
-    presentation: Option<AttachedApprovalPresentation>,
-    /// `Esc` / `Ctrl+C` answered with a cue (A8): the host posts it, never a decision.
-    cue: bool,
-}
-
-struct AttachedApproval {
-    tool: String,
-    source: crate::domain::models::tool_call::ApprovalSource,
-    risk: crate::domain::models::ToolRisk,
-    summary: String,
-    assembly: Option<crate::adapters::daemon::protocol::ExactInputAssembly>,
-    value: Option<serde_json::Value>,
-}
 
 /// Rewrap only on request/view/width/completion/queue changes, not on ticks.
-struct AttachedApprovalPresentation {
-    id: crate::domain::models::tool_call::RequestId,
-    width: u16,
-    queued: usize,
-    reviewing: bool,
-    ready: bool,
-    header: Vec<ratatui::text::Line<'static>>,
-    body: Vec<ratatui::text::Line<'static>>,
-    footer: Vec<ratatui::text::Line<'static>>,
-}
 
 impl AttachedApproval {
     fn card(
@@ -1310,12 +1278,11 @@ impl AttachedApprovals {
         &mut self,
         key: crossterm::event::KeyEvent,
         blocked: bool,
-        input: &str,
         tx: &mpsc::UnboundedSender<ClientFrame>,
     ) -> bool {
         use crate::domain::models::{ApprovalOutcome, ApprovalScope};
         use crossterm::event::{KeyCode, KeyEventKind};
-        if blocked || !input.is_empty() {
+        if blocked {
             return false;
         }
         let Some(id) = self.shown().cloned() else {
@@ -1417,12 +1384,15 @@ impl AttachedApprovals {
         f: &mut ratatui::Frame<'_>,
         area: ratatui::layout::Rect,
         theme: &crate::adapters::tui::theme::Theme,
-    ) -> Option<crate::domain::models::tool_call::RequestId> {
+    ) -> Option<(
+        crate::domain::models::tool_call::RequestId,
+        ratatui::layout::Rect,
+    )> {
         use crate::adapters::tui::widgets::permission_prompt::{
             paint_rows, permission_review_rows, render_feedback_input_lines,
             render_permission_card_lines, render_permission_review,
         };
-        use ratatui::widgets::{Clear, Paragraph};
+        use ratatui::widgets::Clear;
         let id = self.shown()?.clone();
         let pending = self.pending.get(&id)?;
         if area.width == 0 || area.height == 0 {
@@ -1461,13 +1431,13 @@ impl AttachedApprovals {
             });
         }
         let view = self.presentation.as_ref()?;
-        if let Some((_, buffer)) = self.feedback.as_ref() {
+        let painted_area = if let Some((_, buffer)) = self.feedback.as_ref() {
             crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
                 f.buffer_mut(),
                 render_feedback_input_lines(buffer, theme),
                 theme.colors.accent,
                 area,
-            );
+            )
         } else if reviewing {
             let (header_rows, body_rows, footer_rows) =
                 permission_review_rows(area.height, view.header.len(), view.footer.len());
@@ -1502,6 +1472,7 @@ impl AttachedApprovals {
                 &view.footer,
                 0,
             );
+            area
         } else {
             let height = usize::from(area.height).min(view.body.len());
             self.scroll_max = view.body.len().saturating_sub(height);
@@ -1512,19 +1483,10 @@ impl AttachedApprovals {
                 ..area
             };
             f.render_widget(Clear, card_area);
-            f.render_widget(
-                Paragraph::new(
-                    view.body
-                        .iter()
-                        .skip(self.scroll)
-                        .take(height)
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                card_area,
-            );
-        }
-        Some(id)
+            paint_rows(f, card_area, &view.body, self.scroll);
+            card_area
+        };
+        Some((id, painted_area))
     }
 }
 
@@ -1996,14 +1958,12 @@ enum ComposerOutcome {
 fn attached_composer_key(
     code: crossterm::event::KeyCode,
     read_only: bool,
-    input: &mut String,
     state: &mut TuiState,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
 ) -> ComposerOutcome {
     attached_composer_key_with_team_requests(
         code,
         read_only,
-        input,
         state,
         frame_tx,
         &mut AttachedTeamRequests::default(),
@@ -2031,7 +1991,6 @@ fn attached_account_command(input: &str) -> bool {
 fn attached_composer_key_with_team_requests(
     code: crossterm::event::KeyCode,
     read_only: bool,
-    input: &mut String,
     state: &mut TuiState,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
     team_requests: &mut AttachedTeamRequests,
@@ -2044,14 +2003,19 @@ fn attached_composer_key_with_team_requests(
         return ComposerOutcome::Handled;
     }
     match code {
-        KeyCode::Char(c) => input.push(c),
+        KeyCode::Char(c) => {
+            let _ = crate::adapters::tui::app::type_char(state, c, None);
+        }
         KeyCode::Backspace => {
-            crate::adapters::tui::text_geometry::pop_grapheme(input);
-            if input.is_empty() {
+            state.cursor_position = crate::adapters::tui::keymap::text_edit::delete_back(
+                &mut state.input_buffer,
+                state.cursor_position,
+            );
+            if state.input_buffer.is_empty() {
                 state.pinned_peer_compose = None;
             }
         }
-        KeyCode::Enter if input.trim().is_empty() => {
+        KeyCode::Enter if state.input_buffer.trim().is_empty() => {
             if read_only {
                 // AC6 #3 — inert, never silent.
                 flash(state, "read-only — can't send here".into());
@@ -2059,28 +2023,36 @@ fn attached_composer_key_with_team_requests(
         }
         // An attached client has no local provider layer or picker: answer
         // `/login` and `/models` here, never as a model turn.
-        KeyCode::Enter if attached_sign_in_command(input) => {
-            input.clear();
+        KeyCode::Enter if attached_sign_in_command(&state.input_buffer) => {
+            state.input_buffer.clear();
+            state.cursor_position = 0;
+            state.input_scroll_offset = 0;
             state.pinned_peer_compose = None;
             notifications::info(state, NoticeSource::Login, ATTACHED_SIGN_IN);
         }
         // `/logout` and `/accounts` likewise; a CLI account change reaches the
         // daemon's built providers on their next request.
-        KeyCode::Enter if attached_account_command(input) => {
-            input.clear();
+        KeyCode::Enter if attached_account_command(&state.input_buffer) => {
+            state.input_buffer.clear();
+            state.cursor_position = 0;
+            state.input_scroll_offset = 0;
             state.pinned_peer_compose = None;
             notifications::info(state, NoticeSource::Accounts, ATTACHED_ACCOUNT_CHANGE);
         }
         KeyCode::Enter => {
             let request = team_requests.mint();
-            match attached_team_line_for_request(input, request) {
+            match attached_team_line_for_request(&state.input_buffer, request) {
                 AttachedTeamLine::LocalLog(args) => {
-                    input.clear();
+                    state.input_buffer.clear();
+                    state.cursor_position = 0;
+                    state.input_scroll_offset = 0;
                     state.pinned_peer_compose = None;
                     return ComposerOutcome::LocalLog(args);
                 }
                 AttachedTeamLine::LocalView(item_id) => {
-                    input.clear();
+                    state.input_buffer.clear();
+                    state.cursor_position = 0;
+                    state.input_scroll_offset = 0;
                     state.pinned_peer_compose = None;
                     return ComposerOutcome::LocalView(item_id);
                 }
@@ -2088,7 +2060,6 @@ fn attached_composer_key_with_team_requests(
                     state.pinned_peer_compose = None;
                     if queue_recipient_action(
                         state,
-                        input,
                         ClientFrame::InspectRecipientContext,
                         frame_tx,
                         true,
@@ -2101,7 +2072,9 @@ fn attached_composer_key_with_team_requests(
                 | AttachedTeamLine::Frame(frame @ ClientFrame::TeamStatus { .. }) => {
                     state.pinned_peer_compose = None;
                     if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
-                        input.clear();
+                        state.input_buffer.clear();
+                        state.cursor_position = 0;
+                        state.input_scroll_offset = 0;
                         return ComposerOutcome::FrameSent;
                     }
                 }
@@ -2119,7 +2092,9 @@ fn attached_composer_key_with_team_requests(
                     } else {
                         state.pinned_peer_compose = None;
                         if enqueue_attached_team_frame(state, team_requests, frame, frame_tx) {
-                            input.clear();
+                            state.input_buffer.clear();
+                            state.cursor_position = 0;
+                            state.input_scroll_offset = 0;
                             return ComposerOutcome::FrameSent;
                         }
                     }
@@ -2130,13 +2105,15 @@ fn attached_composer_key_with_team_requests(
                 }
                 AttachedTeamLine::Frame(frame) => {
                     state.pinned_peer_compose = None;
-                    if !queue_recipient_action(state, input, frame, frame_tx, true) {
+                    if !queue_recipient_action(state, frame, frame_tx, true) {
                         return ComposerOutcome::Handled;
                     }
                     return ComposerOutcome::FrameSent;
                 }
                 AttachedTeamLine::Refused(error) => {
-                    input.clear();
+                    state.input_buffer.clear();
+                    state.cursor_position = 0;
+                    state.input_scroll_offset = 0;
                     state.pinned_peer_compose = None;
                     flash(state, error);
                 }
@@ -2144,10 +2121,12 @@ fn attached_composer_key_with_team_requests(
                     if read_only {
                         flash(state, "read-only — can't send here".into());
                     } else {
-                        if is_attached_command(input) {
+                        if is_attached_command(&state.input_buffer) {
                             state.pinned_peer_compose = None;
                         }
-                        return ComposerOutcome::Submit(std::mem::take(input));
+                        state.cursor_position = 0;
+                        state.input_scroll_offset = 0;
+                        return ComposerOutcome::Submit(std::mem::take(&mut state.input_buffer));
                     }
                 }
             }
@@ -2199,9 +2178,13 @@ fn take_current_peer_compose(
 /// Story 19.16g — after the attached draw: only a frame that actually
 /// completed presents the `team-log` block it painted into the chat viewport.
 /// A failed draw, or a layout too small to paint the chat, presents nothing.
-fn after_attached_draw(state: &mut TuiState, drawn: bool, visible_feedback_ids: &[String]) {
+fn after_attached_draw(
+    state: &mut TuiState,
+    drawn: bool,
+    visible_feedback_rows: &[(String, std::ops::Range<u16>)],
+) {
     if drawn {
-        state.log_visits_presented(visible_feedback_ids);
+        state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));
     }
 }
 
@@ -2254,95 +2237,52 @@ fn attached_proposal_pending(
         .and_then(|id| state.pending_team_proposals.get(id))
 }
 
-/// The pending recipient action retains the visible composition after taking
-/// the local buffer. Display and decision guards must consult the same text.
-fn attached_display_input<'a>(state: &'a TuiState, input: &'a str) -> &'a str {
-    crate::adapters::tui::handlers::recipient_actions::pending_composition(state).unwrap_or(input)
-}
-
 /// FR-21-3-c: an approval, consent or consolidation card arrived. A writer with an empty
 /// composer takes Chat focus (where the card answers); a read-only client cannot answer
 /// and keeps its focus.
-fn attached_card_arrived(state: &mut TuiState, input: &str, read_only: bool) {
-    let mid_sentence = !attached_display_input(state, input).is_empty();
-    if !crate::adapters::tui::decision_pane::card_focus_blocked(state)
-        && crate::adapters::tui::decision_pane::take_chat_focus_for_card(
-            &mut state.focus,
-            &mut state.card_focus_borrowed_from,
-            !read_only,
-            mid_sentence,
-        )
-    {
-        state.needs_redraw = true;
-    }
+fn attached_card_arrived(state: &mut TuiState, read_only: bool) {
+    crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, !read_only);
 }
 
 /// Same pending owners for overlay-close arrival reconciliation and settlement.
-fn attached_card_pending(
-    approvals: &AttachedApprovals,
-    consent: &std::collections::VecDeque<PendingConsentApproval>,
-    consolidation: &Option<crate::adapters::daemon::protocol::ProposalToken>,
-    retract: &Option<(String, String)>,
-) -> bool {
-    !approvals.pending.is_empty()
-        || !consent.is_empty()
-        || consolidation.is_some()
-        || retract.is_some()
+fn attached_card_pending(state: &TuiState) -> bool {
+    !state.attached.approvals.pending.is_empty()
+        || !state.attached.consent.is_empty()
+        || state.attached.consolidation_token.is_some()
+        || state.attached.retract_confirm.is_some()
 }
 
-fn settle_attached_card_focus(
-    state: &mut TuiState,
-    read_only: bool,
-    approvals: &AttachedApprovals,
-    consent: &std::collections::VecDeque<PendingConsentApproval>,
-    consolidation: &Option<crate::adapters::daemon::protocol::ProposalToken>,
-    retract: &Option<(String, String)>,
-) {
+fn settle_attached_card_focus(state: &mut TuiState, read_only: bool) {
     if !read_only && state.card_focus_borrowed_from.is_some() {
-        crate::adapters::tui::decision_pane::settle_borrowed_card_focus(
-            state,
-            attached_card_pending(approvals, consent, consolidation, retract),
-        );
+        let pending = attached_card_pending(state);
+        crate::adapters::tui::presentation::reducer::settle_borrowed_card_focus(state, pending);
     }
 }
 
 /// One approval frame (request, input chunk, close, refusal): the card state, its notice and,
 /// when a request arrived, the card's focus (FR-21-3-c).
-fn apply_attached_approval_frame(
-    state: &mut TuiState,
-    approvals: &mut AttachedApprovals,
-    frame: DaemonFrame,
-    input: &str,
-    read_only: bool,
-) {
+fn apply_attached_approval_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
     let arrived = matches!(frame, DaemonFrame::ApprovalRequest { .. });
-    if let Some(notice) = approvals.apply(frame, read_only) {
+    if let Some(notice) = state.attached.approvals.apply(frame, read_only) {
         notifications::warning(state, NoticeSource::Approval, notice);
     }
-    if arrived && !approvals.pending.is_empty() {
-        attached_card_arrived(state, input, read_only);
+    if arrived && !state.attached.approvals.pending.is_empty() {
+        attached_card_arrived(state, read_only);
     }
     state.needs_redraw = true;
 }
 
 fn attached_notice_badges(
     state: &TuiState,
-    approvals: &AttachedApprovals,
 ) -> crate::adapters::tui::widgets::status_bar::NoticeBadges {
     crate::adapters::tui::widgets::status_bar::NoticeBadges {
         unseen: state.notifications.unseen(),
-        decisions: approvals.pending.len(),
+        decisions: state.attached.approvals.pending.len(),
         tail: attach_keys::status_tail(state),
     }
 }
 
-fn apply_attached_consent_frame(
-    state: &mut TuiState,
-    pending: &mut std::collections::VecDeque<PendingConsentApproval>,
-    frame: DaemonFrame,
-    input: &str,
-    read_only: bool,
-) {
+fn apply_attached_consent_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
     if let DaemonFrame::ApprovalRequest {
         request_id,
         tool,
@@ -2350,83 +2290,30 @@ fn apply_attached_consent_frame(
         ..
     } = frame
     {
-        pending.push_back(PendingConsentApproval {
+        state.attached.consent.push_back(PendingConsentApproval {
             request_id,
             tool,
             input_preview: summary,
         });
-        attached_card_arrived(state, input, read_only);
+        attached_card_arrived(state, read_only);
         state.needs_redraw = true;
     }
 }
 
-fn apply_attached_consolidation_frame(
-    state: &mut TuiState,
-    card: &mut Option<crate::adapters::tui::state::PendingConsolidationCard>,
-    token: &mut Option<crate::adapters::daemon::protocol::ProposalToken>,
-    frame: DaemonFrame,
-    input: &str,
-    read_only: bool,
-) {
+fn apply_attached_consolidation_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
     if let DaemonFrame::ConsolidationProposed {
         token: arrived,
         proposals,
     } = frame
     {
-        *card = Some(crate::adapters::tui::state::PendingConsolidationCard {
-            conversation_id: String::new(),
-            proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
-        });
-        *token = Some(arrived);
-        attached_card_arrived(state, input, read_only);
+        state.pending_consolidation_card =
+            Some(crate::adapters::tui::state::PendingConsolidationCard {
+                conversation_id: String::new(),
+                proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
+            });
+        state.attached.consolidation_token = Some(arrived);
+        attached_card_arrived(state, read_only);
         state.needs_redraw = true;
-    }
-}
-
-/// Paint the attached composer. The attached editor appends at the end of its
-/// own source buffer, so the caret is the end of `display_input` and the scroll
-/// window is the visual tail of the width-aware projection; both are derived at
-/// draw time from the real composer rectangle (resize included), never a
-/// literal scroll of 0.
-fn render_attached_composer(
-    frame: &mut ratatui::Frame,
-    area: ratatui::layout::Rect,
-    display_input: &str,
-    focus: crate::domain::models::FocusState,
-    theme: &crate::adapters::tui::theme::Theme,
-    multiline_mode: bool,
-    image_indicator: Option<&str>,
-) {
-    input_box::render(
-        frame,
-        area,
-        display_input,
-        display_input.chars().count(),
-        focus,
-        theme,
-        multiline_mode,
-        input_box::tail_scroll(display_input, area),
-        image_indicator,
-    );
-}
-
-fn scroll_attached_transcript(
-    earlier: bool,
-    rows: u16,
-    streaming: bool,
-    offset: &mut usize,
-    auto_scroll: &mut bool,
-) {
-    let readable = rows.saturating_sub(u16::from(streaming)).max(1);
-    let step = usize::from(readable).min(5);
-    if earlier {
-        *offset = offset.saturating_add(step);
-        *auto_scroll = false;
-    } else {
-        *offset = offset.saturating_sub(step);
-        if *offset == 0 {
-            *auto_scroll = true;
-        }
     }
 }
 
@@ -2437,13 +2324,11 @@ fn attached_proposal_key(
     key: crossterm::event::KeyEvent,
     higher_confirmation: bool,
     read_only: bool,
-    input: &str,
     state: &mut TuiState,
     tab: &mut TabRenderState,
     requests: &mut AttachedTeamRequests,
     frame_tx: &mpsc::UnboundedSender<ClientFrame>,
-    scroll_offset: &mut usize,
-    auto_scroll: &mut bool,
+    view: &mut crate::domain::models::view_state::ViewState,
 ) -> bool {
     use crate::domain::models::TeamProposalDecision;
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
@@ -2466,11 +2351,17 @@ fn attached_proposal_key(
     if key.code == KeyCode::Esc
         || (key.code == KeyCode::Char('c')
             && key.modifiers == KeyModifiers::CONTROL
-            && attached_display_input(state, input).is_empty())
+            && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+                .unwrap_or(&state.input_buffer)
+                .is_empty())
     {
         // Keep pending, rather than detaching the approving surface: never a decision (A8).
         // The cue names `y/r/n`, which are text while the composer holds a draft: no cue then.
-        if key.kind == KeyEventKind::Press && attached_display_input(state, input).is_empty() {
+        if key.kind == KeyEventKind::Press
+            && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+                .unwrap_or(&state.input_buffer)
+                .is_empty()
+        {
             crate::adapters::tui::notifications::info(
                 state,
                 crate::adapters::tui::notifications::NoticeSource::Approval,
@@ -2485,7 +2376,10 @@ fn attached_proposal_key(
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;
     }
-    if !attached_display_input(state, input).is_empty() {
+    if !crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+        .unwrap_or(&state.input_buffer)
+        .is_empty()
+    {
         return false;
     }
     if key.code == KeyCode::Enter {
@@ -2531,10 +2425,13 @@ fn attached_proposal_key(
         state.team_proposal_scroll = 0;
         state.team_proposal_scroll_max = 0;
         state.team_proposal_footer_visible = false;
-        *scroll_offset = 0;
-        *auto_scroll = true;
+        crate::adapters::tui::handlers::scroll::dispatch_scroll(
+            view,
+            state,
+            crate::domain::models::view_state::ScrollDelta::Bottom,
+        );
         if let Some(surface) = state.recipient_surface.take() {
-            state.focus = surface.prior_focus;
+            crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);
             crate::adapters::tui::handlers::recipient_actions::refresh_action_notices(state, false);
         }
         let id = format!("team-proposal-review-{}", proposal.id);
@@ -2594,7 +2491,6 @@ fn attached_proposal_key(
 fn prepare_attached_proposal(
     state: &TuiState,
     tab: &TabRenderState,
-    input: &str,
     higher_confirmation: bool,
     read_only: bool,
     layout: &mut crate::adapters::tui::layout::AppLayout,
@@ -2610,7 +2506,9 @@ fn prepare_attached_proposal(
     });
     crate::adapters::tui::widgets::team_proposal_card::CardView::attached(
         proposal,
-        attached_display_input(state, input).is_empty(),
+        crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+            .unwrap_or(&state.input_buffer)
+            .is_empty(),
         reviewing,
     )
     .with_scroll(state.team_proposal_scroll)
@@ -3310,6 +3208,301 @@ fn attached_team_line_for_request(text: &str, request: String) -> AttachedTeamLi
     }
 }
 
+/// Paint the real attached shell once. Both the socket host and in-file
+/// witnesses use this compositor, authoritative tab view and shared editor.
+#[allow(clippy::too_many_arguments)]
+fn paint_attached(
+    f: &mut ratatui::Frame<'_>,
+    state: &mut TuiState,
+    conversation: &Conversation,
+    streaming: &StreamingState,
+    view: &crate::domain::models::view_state::ViewState,
+    tab_render_state: &mut TabRenderState,
+    tool_block_states: &HashMap<String, crate::adapters::tui::widgets::tool_block::ToolBlockState>,
+    tool_inputs: &HashMap<String, crate::adapters::daemon::protocol::ToolInputWithheld>,
+    permission_mode: PermissionMode,
+    attach_info: &AttachInfo,
+) -> Option<chat_pane::RenderResult> {
+    let read_only = attach_info.read_only;
+    let mut visible_approval = None;
+    let area = f.area();
+    let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
+        area,
+        &state.theme,
+        crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+            .unwrap_or(&state.input_buffer),
+        1,
+        false,
+        DensityMode::Focus,
+    ) else {
+        crate::adapters::tui::presentation::paint_too_small(f, area);
+        return None;
+    };
+    let mut shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
+    state
+        .notifications
+        .set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
+            layout.chat_pane.height,
+        ));
+    let proposal_higher = attached_proposal_higher_confirmation(
+        state,
+        !state.attached.consent.is_empty(),
+        state.pending_consolidation_card.is_some(),
+        state.attached.retract_confirm.is_some(),
+    ) || (!read_only && !state.attached.approvals.pending.is_empty());
+    let proposal_card = prepare_attached_proposal(
+        state,
+        tab_render_state,
+        proposal_higher,
+        read_only,
+        &mut layout,
+        area,
+    );
+    let peer_card = if state.recipient_surface.is_none()
+        && state.attached.retract_confirm.is_none()
+        && state.pending_consolidation_card.is_none()
+        && state.attached.consent.is_empty()
+        && attached_proposal_pending(state).is_none()
+        && state.attached.approvals.pending.is_empty()
+    {
+        pending_peer_card(conversation, &state.retro_left_out).map(|pending| {
+            peer_response_card_lines(
+                &pending,
+                read_only,
+                usize::from(layout.chat_pane.width.saturating_sub(2)),
+            )
+        })
+    } else {
+        None
+    };
+    let mut transcript_area = layout.chat_pane;
+    if let Some(lines) = peer_card.as_ref() {
+        transcript_area.height = transcript_area.height.saturating_sub(
+            u16::try_from(lines.len())
+                .unwrap_or(u16::MAX)
+                .saturating_add(2),
+        );
+    }
+    let mut opaque =
+        crate::adapters::tui::presentation::occlusion::OpaqueRects::new(transcript_area);
+    tab_render_state.osc8_links =
+        crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
+    let mut result = chat_pane::render_attached(
+        f,
+        transcript_area,
+        conversation,
+        streaming,
+        view,
+        &state.theme,
+        tab_render_state,
+        tool_block_states,
+        &state.feedback_blocks,
+        tool_inputs,
+    );
+    let pending_input =
+        crate::adapters::tui::handlers::recipient_actions::pending_composition(state);
+    let display_input = pending_input.unwrap_or(&state.input_buffer);
+    let (display_cursor, display_scroll) = pending_input
+        .map_or((state.cursor_position, state.input_scroll_offset), |text| {
+            (text.chars().count(), usize::MAX)
+        });
+    input_box::render(
+        f,
+        layout.input_area,
+        display_input,
+        display_cursor,
+        if state.modal_stack.is_empty() && state.pending_leader.is_none() {
+            state.focus.clone()
+        } else {
+            FocusState::Chat
+        },
+        &state.theme,
+        state.multiline_mode,
+        display_scroll,
+        if read_only {
+            Some("read-only — can't send here")
+        } else {
+            state
+                .pinned_peer_compose
+                .as_ref()
+                .map(|compose| compose.label.as_str())
+        },
+    );
+    let actions = recipient_surface_actions(state, conversation, read_only);
+    let retro_left_out = &state.retro_left_out;
+    let retro = state
+        .recipient_surface
+        .as_ref()
+        .and_then(|surface| retro_overlay(conversation, surface, retro_left_out));
+    if let Some(surface) = state.recipient_surface.as_mut() {
+        opaque.host(render_recipient_surface(
+            f,
+            layout.chat_pane,
+            surface,
+            &state.recipient_actions,
+            &actions,
+            retro,
+            read_only,
+            &state.theme,
+        ));
+    }
+    // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
+    // bottom-anchored inline grammar the local TUI uses (bordered + accent,
+    // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
+    if let Some(card) = &state.pending_consolidation_card {
+        use crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines;
+        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
+        let card_lines =
+            render_consolidation_card_lines(card, &state.theme, layout.chat_pane.width);
+        opaque.host(Some(render_bottom_anchored_card(
+            f.buffer_mut(),
+            card_lines,
+            state.theme.colors.accent,
+            layout.chat_pane,
+        )));
+    }
+    // Story 18.3c AC3/AC5 — the peer response card (and the retract
+    // confirmation, which takes precedence while open) ride the same
+    // bottom-anchored inline grammar as the consolidation card.
+    use crate::adapters::tui::widgets::inline_card::{
+        render_bottom_anchored_card, render_bottom_anchored_decision_card,
+    };
+    if let Some((_, preview)) = &state.attached.retract_confirm {
+        opaque.host(Some(render_bottom_anchored_card(
+            f.buffer_mut(),
+            retract_confirm_lines(preview),
+            state.theme.colors.auto_sent_border,
+            layout.chat_pane,
+        )));
+    } else if let Some(lines) = peer_card {
+        render_bottom_anchored_card(
+            f.buffer_mut(),
+            lines,
+            state.theme.colors.accent,
+            layout.chat_pane,
+        );
+    }
+    if let Some(pending) = state.attached.consent.front() {
+        opaque.host(Some(render_bottom_anchored_decision_card(
+            f.buffer_mut(),
+            consent_approval_card_lines(
+                pending,
+                state.attached.consent.len().saturating_sub(1),
+                usize::from(layout.chat_pane.width.saturating_sub(2)),
+            ),
+            state.theme.colors.accent,
+            layout.chat_pane,
+        )));
+    }
+    // Story 19.21c: the retract card owns every key while open, so it paints last.
+    if let Some(pending) = &state.pending_team_retract {
+        opaque.host(Some(render_bottom_anchored_decision_card(
+            f.buffer_mut(),
+            crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(
+                pending,
+                &state.theme,
+                layout.chat_pane.width,
+            ),
+            state.theme.colors.accent,
+            layout.chat_pane,
+        )));
+    }
+    state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
+    state.team_proposal_scroll = state
+        .team_proposal_scroll
+        .min(state.team_proposal_scroll_max);
+    state.team_proposal_viewport_rows = proposal_card
+        .as_ref()
+        .map_or(0, |card| card.viewport_rows());
+    state.team_proposal_footer_visible = proposal_card
+        .as_ref()
+        .is_some_and(|card| card.footer_visible());
+    opaque.host(proposal_card.as_ref().map(|card| card.area()));
+    let visible_proposal = crate::adapters::tui::widgets::team_proposal_card::render(
+        proposal_card,
+        f.buffer_mut(),
+        &state.theme,
+    );
+    // Inline cards can leave fewer than five rows; paging must not skip visible content.
+    state.viewport_height = transcript_area.height;
+    let approval_higher = attached_proposal_higher_confirmation(
+        state,
+        !state.attached.consent.is_empty(),
+        state.pending_consolidation_card.is_some(),
+        state.attached.retract_confirm.is_some(),
+    );
+    if !read_only
+        && !approval_higher
+        && matches!(state.focus, FocusState::Chat | FocusState::Input)
+        && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+            .unwrap_or(&state.input_buffer)
+            .is_empty()
+    {
+        if let Some((id, rect)) = state
+            .attached
+            .approvals
+            .paint(f, layout.chat_pane, &state.theme)
+        {
+            visible_approval = Some(id);
+            opaque.host(Some(rect));
+        }
+    }
+    let paint_status = |f: &mut ratatui::Frame<'_>| {
+        status_bar::render(
+            f,
+            layout.status_bar,
+            "(daemon)",
+            None,
+            &state.status,
+            &state.theme,
+            view.scroll_offset,
+            &[],
+            0,
+            layout.chat_pane.height,
+            permission_mode,
+            conversation.usage.as_ref(),
+            0,
+            false,
+            None,
+            false,
+            true,
+            0,
+            attach_keys::status_hint(state).as_deref(),
+            0,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            DensityMode::Focus,
+            false,
+            Some(attach_info),
+            state.log_awareness.display,
+            attached_notice_badges(state),
+        );
+    };
+    shell.chat_pane = layout.chat_pane;
+    crate::adapters::tui::presentation::compose(
+        f,
+        state,
+        &shell,
+        crate::adapters::tui::keymap::Host::Attached,
+        &attach_keys::log_facts(&conversation.id),
+        &mut opaque,
+        paint_status,
+    );
+    result
+        .visible_feedback_rows
+        .retain(|(_, rows)| opaque.presented(rows));
+    state.total_content_height = result.total_content_height;
+    state.scroll_snapshot = view.scroll_offset;
+    state.auto_snapshot = matches!(view.mode, crate::domain::models::AnchorMode::Following);
+    state.team_proposal_visible = visible_proposal;
+    state.attached.approvals.painted = visible_approval;
+    Some(result)
+}
+
 /// Connect to this workspace's daemon and run the rich attach TUI until the user
 /// detaches (`Ctrl+X d` / `/detach`) or quits this client (guarded `q` / `Ctrl+Q` /
 /// idle `Ctrl+C` / `/quit`), or the daemon closes the connection. `Esc`, `Ctrl+D`
@@ -3352,7 +3545,15 @@ pub async fn run_attached(
     let driver = SocketTurnDriver::new(frame_tx.clone());
 
     // ── View state (reuses the local render stack) ──
-    let mut conversation = seed_conversation(&snapshot);
+    let mut attached_tab =
+        crate::domain::models::tab::TabState::from_conversation(0, seed_conversation(&snapshot));
+    let crate::domain::models::tab::TabState {
+        conversation,
+        streaming,
+        reducer,
+        view_state: view,
+        ..
+    } = &mut attached_tab;
     let mut tool_inputs = AttachedToolInputs {
         reasons: snapshot
             .withheld_tool_inputs
@@ -3361,9 +3562,7 @@ pub async fn run_attached(
             .collect(),
         ..Default::default()
     };
-    let mut streaming = StreamingState::default();
     let clock = Arc::new(SystemClock::default());
-    let mut reducer = ReducerState::new(clock.wall_now_ms(), clock.now());
     let mut permission_mode = snapshot.permission_mode;
     let attach_info = AttachInfo {
         read_only,
@@ -3372,21 +3571,7 @@ pub async fn run_attached(
     let mut session_manager = SessionManager::new(SessionState::Empty);
     let mut lifecycle =
         crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
-    let mut input = String::new();
-    let mut scroll_offset = 0usize;
-    let mut auto_scroll = true;
-    // Story 12.2d AC3 — consolidation card view-state (lives in loop locals, not AppState).
-    let mut pending_consolidation_card: Option<
-        crate::adapters::tui::state::PendingConsolidationCard,
-    > = None;
-    let mut pending_consolidation_token: Option<crate::adapters::daemon::protocol::ProposalToken> =
-        None;
-    let mut retract_confirm: Option<(String, String)> = None;
-    // Consent cards are daemon-owned and re-emitted after attach. This FIFO is
-    // only the current socket's rendering order, never the durable truth.
-    let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();
     let mut attached_team_requests = AttachedTeamRequests::default();
-    let mut approvals = AttachedApprovals::default();
     let mut attached_interrupt =
         crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(read_only);
     let mut attached_chrome = attach_keys::AttachedChrome::new();
@@ -3403,9 +3588,6 @@ pub async fn run_attached(
             size.height.saturating_sub(5),
         ));
     state.recipient_context_ids = snapshot.recipient_context_ids.iter().cloned().collect();
-    if read_only {
-        state.focus = FocusState::Chat;
-    }
     // Attach-time notices are store records visible in the first frame (AC6).
     if let Some(notice) = blocked_actions_notice(&snapshot) {
         notifications::warning(&mut state, NoticeSource::Attached, notice);
@@ -3448,449 +3630,255 @@ pub async fn run_attached(
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
     let loop_result: Result<()> = loop {
-        let mut visible_feedback_ids: Vec<String> = Vec::new();
-        let mut visible_proposal = None;
-        let mut visible_approval = None;
         // Story 19.25 `AC3` — a card that left takes its leave-out overlay.
         crate::adapters::tui::handlers::recipient_actions::prune_retro_left_out(
             &mut state,
-            &conversation,
+            conversation,
         );
         // Story 21.1 A4: every frame starts by archiving the toasts whose deadline
         // has been reached, so no frame at or after a deadline paints them.
         notifications::begin_draw(&mut state);
+        let mut rendered = None;
         let drawn = term.draw(|f| {
-            let area = f.area();
-            let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
-                area,
-                &state.theme,
-                attached_display_input(&state, &input),
-                1,
-                false,
-                DensityMode::Focus,
-            ) else {
-                crate::adapters::tui::presentation::paint_too_small(f, area);
-                return;
-            };
-            let mut shell = crate::adapters::tui::presentation::Shell::new(area, &layout);
-            state.notifications.set_capacity(
-                crate::adapters::tui::widgets::toast_layer::capacity_for(layout.chat_pane.height),
-            );
-            let proposal_higher = attached_proposal_higher_confirmation(
-                &state, !pending_consent_approvals.is_empty(),
-                pending_consolidation_card.is_some(), retract_confirm.is_some(),
-            ) || (!read_only && !approvals.pending.is_empty());
-            let proposal_card = prepare_attached_proposal(
-                &state, &tab_render_state, &input, proposal_higher, read_only, &mut layout, area,
-            );
-            let peer_card = if state.recipient_surface.is_none()
-                && retract_confirm.is_none()
-                && pending_consolidation_card.is_none()
-                && pending_consent_approvals.is_empty()
-                && attached_proposal_pending(&state).is_none()
-                && approvals.pending.is_empty()
-            {
-                pending_peer_card(&conversation, &state.retro_left_out).map(|pending| {
-                    peer_response_card_lines(
-                        &pending,
-                        read_only,
-                        usize::from(layout.chat_pane.width.saturating_sub(2)),
-                    )
-                })
-            } else {
-                None
-            };
-            let mut transcript_area = layout.chat_pane;
-            if let Some(lines) = peer_card.as_ref() {
-                transcript_area.height = transcript_area.height.saturating_sub(
-                    u16::try_from(lines.len()).unwrap_or(u16::MAX).saturating_add(2),
-                );
-            }
-            tab_render_state.osc8_links =
-                crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
-            visible_feedback_ids = chat_pane::render_attached(
+            rendered = paint_attached(
                 f,
-                transcript_area,
-                &conversation,
-                &streaming,
-                scroll_offset,
-                auto_scroll,
-                &state.theme,
+                &mut state,
+                conversation,
+                streaming,
+                view,
                 &mut tab_render_state,
                 &tool_block_states,
-                &state.feedback_blocks,
                 &tool_inputs.reasons,
-            )
-            .visible_feedback_ids;
-            let display_input = attached_display_input(&state, &input);
-            render_attached_composer(
-                f,
-                layout.input_area,
-                display_input,
-                if state.modal_stack.is_empty() && state.pending_leader.is_none() {
-                    state.focus.clone()
-                } else {
-                    FocusState::Chat
-                },
-                &state.theme,
-                state.multiline_mode,
-                if read_only {
-                    Some("read-only — can't send here")
-                } else {
-                    state.pinned_peer_compose.as_ref().map(|compose| compose.label.as_str())
-                },
-            );
-            let actions = recipient_surface_actions(&state, &conversation, read_only);
-            let retro_left_out = &state.retro_left_out;
-            let retro = state
-                .recipient_surface
-                .as_ref()
-                .and_then(|surface| retro_overlay(&conversation, surface, retro_left_out));
-            if let Some(surface) = state.recipient_surface.as_mut() {
-                render_recipient_surface(f, layout.chat_pane, surface, &state.recipient_actions,
-                    &actions, retro, read_only, &state.theme);
-            }
-            // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
-            // bottom-anchored inline grammar the local TUI uses (bordered + accent,
-            // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
-            if let Some(ref card) = pending_consolidation_card {
-                use crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines;
-                use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
-                let card_lines = render_consolidation_card_lines(card, &state.theme, layout.chat_pane.width);
-                render_bottom_anchored_card(
-                    f.buffer_mut(),
-                    card_lines,
-                    state.theme.colors.accent,
-                    layout.chat_pane,
-                );
-            }
-            // Story 18.3c AC3/AC5 — the peer response card (and the retract
-            // confirmation, which takes precedence while open) ride the same
-            // bottom-anchored inline grammar as the consolidation card.
-            use crate::adapters::tui::widgets::inline_card::{
-                render_bottom_anchored_card, render_bottom_anchored_decision_card,
-            };
-            if let Some((_, ref preview)) = retract_confirm {
-                render_bottom_anchored_card(
-                    f.buffer_mut(),
-                    retract_confirm_lines(preview),
-                    state.theme.colors.auto_sent_border,
-                    layout.chat_pane,
-                );
-            } else if let Some(lines) = peer_card {
-                render_bottom_anchored_card(
-                    f.buffer_mut(),
-                    lines,
-                    state.theme.colors.accent,
-                    layout.chat_pane,
-                );
-            }
-            if let Some(pending) = pending_consent_approvals.front() {
-                render_bottom_anchored_decision_card(
-                    f.buffer_mut(),
-                    consent_approval_card_lines(
-                        pending,
-                        pending_consent_approvals.len().saturating_sub(1),
-                        usize::from(layout.chat_pane.width.saturating_sub(2)),
-                    ),
-                    state.theme.colors.accent,
-                    layout.chat_pane,
-                );
-            }
-            // Story 19.21c: the retract card owns every key while open, so it paints last.
-            if let Some(pending) = &state.pending_team_retract {
-                render_bottom_anchored_decision_card(f.buffer_mut(),
-                    crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(
-                        pending, &state.theme, layout.chat_pane.width),
-                    state.theme.colors.accent, layout.chat_pane);
-            }
-            state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
-            state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
-            state.team_proposal_viewport_rows = proposal_card.as_ref().map_or(0, |card| card.viewport_rows());
-            state.team_proposal_footer_visible = proposal_card.as_ref().is_some_and(|card| card.footer_visible());
-            visible_proposal = crate::adapters::tui::widgets::team_proposal_card::render(
-                proposal_card, f.buffer_mut(), &state.theme,
-            );
-            // Inline cards can leave fewer than five rows; paging must not skip visible content.
-            state.viewport_height = transcript_area.height;
-            let approval_higher = attached_proposal_higher_confirmation(
-                &state, !pending_consent_approvals.is_empty(),
-                pending_consolidation_card.is_some(), retract_confirm.is_some(),
-            );
-            if !read_only && !approval_higher
-                && matches!(state.focus, FocusState::Chat | FocusState::Input)
-                && attached_display_input(&state, &input).is_empty()
-            {
-                visible_approval = approvals.paint(f, layout.chat_pane, &state.theme);
-            }
-            let paint_status = |f: &mut ratatui::Frame<'_>| {
-            status_bar::render(
-                f,
-                layout.status_bar,
-                "(daemon)",
-                None,
-                &state.status,
-                &state.theme,
-                scroll_offset,
-                &[],
-                0,
-                layout.chat_pane.height,
                 permission_mode,
-                conversation.usage.as_ref(),
-                0,
-                false,
-                None,
-                false,
-                true,
-                0,
-                attach_keys::status_hint(&state).as_deref(),
-                0,
-                None,
-                None,
-                None,
-                false,
-                None,
-                None,
-                DensityMode::Focus,
-                false,
-                Some(&attach_info),
-                state.log_awareness.display,
-                attached_notice_badges(&state, &approvals),
-            );
-            };
-            shell.chat_pane = layout.chat_pane;
-            crate::adapters::tui::presentation::compose(
-                f, &state, &shell, crate::adapters::tui::keymap::Host::Attached,
-                &attach_keys::log_facts(&conversation.id),
-                paint_status,
+                &attach_info,
             );
         });
-        after_attached_draw(&mut state, drawn.is_ok(), &visible_feedback_ids);
-        state.team_proposal_visible = drawn.is_ok().then_some(visible_proposal).flatten();
-        approvals.painted = drawn.is_ok().then_some(visible_approval).flatten();
+        if let Some(result) = rendered {
+            after_attached_draw(&mut state, drawn.is_ok(), &result.visible_feedback_rows);
+        }
+        if drawn.is_err() {
+            state.team_proposal_visible = None;
+            state.attached.approvals.painted = None;
+        }
 
         tokio::select! {
-            maybe_ev = events.next() => {
-                match maybe_ev {
-                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                        let mut key_ctx = attach_keys::KeyCtx {
-                            workspace,
-                            read_only,
-                            state: &mut state,
-                            conversation: &mut conversation,
-                            streaming: &mut streaming,
-                            input: &mut input,
-                            frame_tx: &frame_tx,
-                            team_requests: &mut attached_team_requests,
-                            approvals: &mut approvals,
-                            consent: &mut pending_consent_approvals,
-                            consolidation_card: &mut pending_consolidation_card,
-                            consolidation_token: &mut pending_consolidation_token,
-                            retract_confirm: &mut retract_confirm,
-                            tab: &mut tab_render_state,
-                            scroll_offset: &mut scroll_offset,
-                            auto_scroll: &mut auto_scroll,
-                            interrupt: &attached_interrupt,
-                            driver: &driver,
-                            lifecycle: &mut lifecycle,
-                            session_manager: &mut session_manager,
-                            log_service: &log_service,
-                            chrome: &mut attached_chrome,
-                        };
-                        match attach_keys::handle_attached_key(&mut key_ctx, key).await {
-                            attach_keys::KeyFlow::Continue => {}
-                            attach_keys::KeyFlow::Detach | attach_keys::KeyFlow::Quit => break Ok(()),
-                        }
-                    }
-                    Some(Ok(Event::Paste(text))) => {
-                        let pending = attached_card_pending(&approvals, &pending_consent_approvals,
-                            &pending_consolidation_token, &retract_confirm);
-                        attached_chrome.paste(&mut state, &mut input, &text, pending, workspace).await;
-                    }
-                    Some(Ok(event @ Event::Mouse(_))) => {
-                        let _ = attach_keys::route_event(&mut state, &event);
-                    }
-                    Some(Ok(Event::Resize(w, h))) => {
-                        state.terminal_width = w;
-                        state.terminal_height = h;
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => break Err(anyhow!("terminal input error: {e}")),
-                    None => break Ok(()),
-                }
-            }
-            frame = read_frame::<_, DaemonFrame>(&mut read_half) => {
-                match frame {
-                        Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
-                            let refresh_node = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                let RecipientSurfaceTarget::Node(node) = &surface.target else { return false };
-                                let (row_id, new_control) = match operation.as_ref() {
-                                    crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
-                                        (message.id.as_str(), control.as_ref()),
-                                    crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
-                                        (row_id.as_str(), None),
+                    maybe_ev = events.next() => {
+                        match maybe_ev {
+                            Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                                let mut key_ctx = attach_keys::KeyCtx {
+                                    workspace,
+                                    read_only,
+                                    state: &mut state,
+                                    conversation,
+                                    streaming,
+                                    frame_tx: &frame_tx,
+                                    team_requests: &mut attached_team_requests,
+                                    tab: &mut tab_render_state,
+                                    view,
+                                    interrupt: &attached_interrupt,
+                                    driver: &driver,
+                                    lifecycle: &mut lifecycle,
+                                    session_manager: &mut session_manager,
+                                    log_service: &log_service,
+                                    chrome: &mut attached_chrome,
                                 };
-                                new_control.or_else(|| conversation.peer_row_controls.get(row_id))
-                                    .is_some_and(|control| &control.node_id == node)
-                            });
-                            let refresh_item = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                let RecipientSurfaceTarget::Item(address) = &surface.target else { return false };
-                                let (row_id, new_control) = match operation.as_ref() {
-                                    crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
-                                        (message.id.as_str(), control.as_ref()),
-                                    crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
-                                        (row_id.as_str(), None),
-                                };
-                                new_control
-                                    .or_else(|| conversation.peer_row_controls.get(row_id))
-                                    .is_some_and(|control| control.item_address.as_ref() == Some(address))
-                            });
-                            if apply_peer_row_operation(&mut conversation, Arc::unwrap_or_clone(operation)) {
-                                if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
-                                    && let RecipientSurfaceTarget::Node(node) = &surface.target
-                                {
-                                    if let Some((message, control)) = pinned_response(&conversation, node) {
-                                        surface.content = legacy_response_content(message, control);
-                                        surface.can_toggle_target = control.item_address.is_some();
-                                    } else {
-                                        surface.content = "response already settled — no action applied".to_owned();
-                                        surface.can_toggle_target = false;
-                                    }
-                                    surface.cached_width = 0;
+                                match attach_keys::handle_attached_key(&mut key_ctx, key).await {
+                                    attach_keys::KeyFlow::Continue => {}
+                                    attach_keys::KeyFlow::Detach | attach_keys::KeyFlow::Quit => break Ok(()),
                                 }
-                                if refresh_item {
-                                    super::recipient_surface::reconcile_item_surface(&mut state, &conversation);
-                                }
-                                state.needs_redraw = true;
                             }
+                            Some(Ok(Event::Paste(text))) => {
+                                let pending = attached_card_pending(
+        &state,
+        );
+                                attached_chrome.paste(&mut state, &text, pending, workspace).await;
+                            }
+                            Some(Ok(event @ Event::Mouse(_))) => {
+                                let _ = attach_keys::handle_attached_mouse(&mut state, view, &event);
+                            }
+                            Some(Ok(Event::Resize(w, h))) => {
+                                state.terminal_width = w;
+                                state.terminal_height = h;
+                            }
+                            Some(Ok(_)) => {}
+                            Some(Err(e)) => break Err(anyhow!("terminal input error: {e}")),
+                            None => break Ok(()),
                         }
-                        Ok(Some(DaemonFrame::Event(raw))) => {
-                            tool_inputs.apply(
-                                raw,
-                                None,
-                                &mut conversation,
-                                &mut streaming,
-                                &mut reducer,
-                                &mut state,
-                                &mut permission_mode,
-                                &*clock,
-                            );
-                        }
-                    Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
-                        tool_inputs.apply(
-                            event, Some(withheld), &mut conversation, &mut streaming, &mut reducer,
-                            &mut state, &mut permission_mode, &*clock,
-                        );
                     }
-                    Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
-                        for entry in withheld {
-                            tool_inputs.reasons.insert(entry.tool_call_id, entry.withheld);
-                        }
-                        let existing: std::collections::HashSet<_> =
-                            conversation.messages.iter().map(|row| row.id.clone()).collect();
-                        let mut earlier: Vec<_> = messages.into_iter()
-                            .filter(|row| !existing.contains(&row.id)).collect();
-                        earlier.append(&mut conversation.messages);
-                        conversation.messages = earlier;
-                        state.needs_redraw = true;
-                    }
-                    Ok(Some(frame @ (DaemonFrame::FrameTooLarge { .. }
-                        | DaemonFrame::Error(_)
-                        | DaemonFrame::ActiveTurn { .. }
-                        | DaemonFrame::InterruptResult { .. }))) => {
-                        apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
-                    }
-                    Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. })) if matches!(&frame, DaemonFrame::ApprovalRequest { tool, .. } if tool == "a2a/sender-consent") => {
-                        apply_attached_consent_frame(&mut state, &mut pending_consent_approvals, frame, &input, read_only);
-                    }
-                    Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
-                    | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
-                    | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
-                    | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
-                    | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
-                        apply_attached_approval_frame(&mut state, &mut approvals, frame, &input, read_only);
-                    }
-                    Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
-                        apply_attached_consolidation_frame(&mut state, &mut pending_consolidation_card, &mut pending_consolidation_token, frame, &input, read_only);
-                    }
-                    Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
-                        apply_attached_proposal_frame(
-                            &mut state, &mut tab_render_state, &mut attached_team_requests,
-                            &conversation.id, frame,
-                        );
-                    }
-                    Ok(Some(DaemonFrame::Detached)) => break Ok(()),
-                    Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamViewChunk { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamViewDone { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamRetractPreviewed { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
-                    | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
-                    | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
-                        let confirmation_busy = !pending_consent_approvals.is_empty()
-                            || pending_consolidation_token.is_some() || retract_confirm.is_some()
-                            || attached_proposal_pending(&state).is_some() || !approvals.pending.is_empty();
-                        let _ = apply_attached_team_frame(
-                            &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
-                        );
-                    }
-                    Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
-                        match target {
-                            crate::adapters::daemon::protocol::RecipientActionTarget::Request { request } => {
-                                let _ = apply_attached_team_refusal(
-                                    &mut state, &mut attached_team_requests, action, request, outcome,
+                    frame = read_frame::<_, DaemonFrame>(&mut read_half) => {
+                        match frame {
+                                Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
+                                    let refresh_node = state.recipient_surface.as_ref().is_some_and(|surface| {
+                                        let RecipientSurfaceTarget::Node(node) = &surface.target else { return false };
+                                        let (row_id, new_control) = match operation.as_ref() {
+                                            crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
+                                                (message.id.as_str(), control.as_ref()),
+                                            crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
+                                                (row_id.as_str(), None),
+                                        };
+                                        new_control.or_else(|| conversation.peer_row_controls.get(row_id))
+                                            .is_some_and(|control| &control.node_id == node)
+                                    });
+                                    let refresh_item = state.recipient_surface.as_ref().is_some_and(|surface| {
+                                        let RecipientSurfaceTarget::Item(address) = &surface.target else { return false };
+                                        let (row_id, new_control) = match operation.as_ref() {
+                                            crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
+                                                (message.id.as_str(), control.as_ref()),
+                                            crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
+                                                (row_id.as_str(), None),
+                                        };
+                                        new_control
+                                            .or_else(|| conversation.peer_row_controls.get(row_id))
+                                            .is_some_and(|control| control.item_address.as_ref() == Some(address))
+                                    });
+                                    if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
+                                        if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
+                                            && let RecipientSurfaceTarget::Node(node) = &surface.target
+                                        {
+                                            if let Some((message, control)) = pinned_response(conversation, node) {
+                                                surface.content = legacy_response_content(message, control);
+                                                surface.can_toggle_target = control.item_address.is_some();
+                                            } else {
+                                                surface.content = "response already settled — no action applied".to_owned();
+                                                surface.can_toggle_target = false;
+                                            }
+                                            surface.cached_width = 0;
+                                        }
+                                        if refresh_item {
+                                            super::recipient_surface::reconcile_item_surface(&mut state, conversation);
+                                        }
+                                        state.needs_redraw = true;
+                                    }
+                                }
+                                Ok(Some(DaemonFrame::Event(raw))) => {
+                                    tool_inputs.apply(
+                                        raw,
+                                        None,
+                                        conversation,
+                                        streaming,
+                                        reducer,
+                                        &mut state,
+                                        &mut permission_mode,
+                                        &*clock,
+                                    );
+                                }
+                            Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
+                                tool_inputs.apply(
+                                    event, Some(withheld), conversation, streaming, reducer,
+                                    &mut state, &mut permission_mode, &*clock,
                                 );
                             }
-                            target if matches!(
-                                action,
-                                crate::adapters::daemon::protocol::RecipientAction::TeamSend
-                                    | crate::adapters::daemon::protocol::RecipientAction::TeamBoard
-                                    | crate::adapters::daemon::protocol::RecipientAction::TeamStatus
-                                    | crate::adapters::daemon::protocol::RecipientAction::RevokeSenderConsent
-                            ) => {
-                                tracing::warn!(?action, ?target, "attach: team refusal used a non-request target");
+                            Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
+                                for entry in withheld {
+                                    tool_inputs.reasons.insert(entry.tool_call_id, entry.withheld);
+                                }
+                                let existing: std::collections::HashSet<_> =
+                                    conversation.messages.iter().map(|row| row.id.clone()).collect();
+                                let mut earlier: Vec<_> = messages.into_iter()
+                                    .filter(|row| !existing.contains(&row.id)).collect();
+                                earlier.append(&mut conversation.messages);
+                                conversation.messages = earlier;
+                                state.needs_redraw = true;
                             }
-                            target => crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-                                &mut state, &mut input, action, target, outcome,
-                            ),
+                            Ok(Some(frame @ (DaemonFrame::FrameTooLarge { .. }
+                                | DaemonFrame::Error(_)
+                                | DaemonFrame::ActiveTurn { .. }
+                                | DaemonFrame::InterruptResult { .. }))) => {
+                                apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
+                            }
+                            Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. })) if matches!(&frame, DaemonFrame::ApprovalRequest { tool, .. } if tool == "a2a/sender-consent") => {
+                                apply_attached_consent_frame(&mut state, frame, read_only);
+                            }
+                            Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
+                            | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
+                            | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
+                            | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
+                            | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
+                                apply_attached_approval_frame(&mut state, frame, read_only);
+                            }
+                            Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
+                                apply_attached_consolidation_frame(&mut state, frame, read_only);
+                            }
+                            Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
+                                apply_attached_proposal_frame(
+                                    &mut state, &mut tab_render_state, &mut attached_team_requests,
+                                    &conversation.id, frame,
+                                );
+                            }
+                            Ok(Some(DaemonFrame::Detached)) => break Ok(()),
+                            Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamViewChunk { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamViewDone { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamRetractPreviewed { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
+                            | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
+                            | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
+                                let confirmation_busy = !state.attached.consent.is_empty()
+                                    || state.attached.consolidation_token.is_some() || state.attached.retract_confirm.is_some()
+                                    || attached_proposal_pending(&state).is_some() || !state.attached.approvals.pending.is_empty();
+                                let _ = apply_attached_team_frame(
+                                    &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
+                                );
+                            }
+                            Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
+                                match target {
+                                    crate::adapters::daemon::protocol::RecipientActionTarget::Request { request } => {
+                                        let _ = apply_attached_team_refusal(
+                                            &mut state, &mut attached_team_requests, action, request, outcome,
+                                        );
+                                    }
+                                    target if matches!(
+                                        action,
+                                        crate::adapters::daemon::protocol::RecipientAction::TeamSend
+                                            | crate::adapters::daemon::protocol::RecipientAction::TeamBoard
+                                            | crate::adapters::daemon::protocol::RecipientAction::TeamStatus
+                                            | crate::adapters::daemon::protocol::RecipientAction::RevokeSenderConsent
+                                    ) => {
+                                        tracing::warn!(?action, ?target, "attach: team refusal used a non-request target");
+                                    }
+                                    target => crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                                        &mut state, action, target, outcome,
+                                    ),
+                                }
+                            }
+                            Ok(Some(DaemonFrame::RecipientContextState {
+                                selected_item_ids, inventory, show_inventory,
+                            })) => {
+                                crate::adapters::tui::handlers::recipient_actions::apply_context_state(
+                                    &mut state, selected_item_ids, inventory, show_inventory,
+                                );
+                            }
+                            // AttachAck/History are not expected post-handshake; ignore.
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                notifications::warning(
+                                    &mut state,
+                                    NoticeSource::Daemon,
+                                    "— daemon closed the connection —",
+                                );
+                                break Ok(());
+                            }
+                            // Forward-compat: an undecodable / future-shaped frame body is
+                            // logged and skipped — the stream survives (split insurance).
+                            Err(FrameError::Json(e)) => {
+                                tracing::warn!(error = %e, "attach: skipping undecodable frame (forward-compat)");
+                            }
+                            Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                         }
+                        settle_attached_card_focus(
+        &mut state,
+        read_only,
+        );
                     }
-                    Ok(Some(DaemonFrame::RecipientContextState {
-                        selected_item_ids, inventory, show_inventory,
-                    })) => {
-                        crate::adapters::tui::handlers::recipient_actions::apply_context_state(
-                            &mut state, selected_item_ids, inventory, show_inventory,
-                        );
+                    _ = tick.tick() => {
+                        log_awareness.tick(&mut state.log_awareness);
+                        // Story 21.1 AC6: attached notices expire — the tick requests the
+                        // deadline redraw (the draw's `begin_draw` does the sweep).
+                        notifications::tick(&mut state);
                     }
-                    // AttachAck/History are not expected post-handshake; ignore.
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        notifications::warning(
-                            &mut state,
-                            NoticeSource::Daemon,
-                            "— daemon closed the connection —",
-                        );
-                        break Ok(());
-                    }
-                    // Forward-compat: an undecodable / future-shaped frame body is
-                    // logged and skipped — the stream survives (split insurance).
-                    Err(FrameError::Json(e)) => {
-                        tracing::warn!(error = %e, "attach: skipping undecodable frame (forward-compat)");
-                    }
-                    Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                 }
-                settle_attached_card_focus(&mut state, read_only, &approvals,
-                    &pending_consent_approvals, &pending_consolidation_token, &retract_confirm);
-            }
-            _ = tick.tick() => {
-                log_awareness.tick(&mut state.log_awareness);
-                // Story 21.1 AC6: attached notices expire — the tick requests the
-                // deadline redraw (the draw's `begin_draw` does the sweep).
-                notifications::tick(&mut state);
-            }
-        }
     };
 
     // Clean detach (AC4): tell the daemon, briefly observe `Detached`, restore.
@@ -3911,6 +3899,1006 @@ mod tests {
     use crate::domain::models::{NoticeLevel, StopReason, StreamChunk};
     use std::time::Instant;
     use tokio::net::UnixStream;
+
+    fn attached_screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn attached_frame_record(
+        rig: &mut attach_keys::tests::Rig,
+        stage: &str,
+        read_only: bool,
+    ) -> String {
+        let mut terminal = rig.paint();
+        let screen = attached_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        let layout = crate::adapters::tui::layout::compute_layout(
+            buffer.area,
+            &rig.state.theme,
+            &rig.state.input_buffer,
+            1,
+            false,
+            DensityMode::Focus,
+        )
+        .unwrap();
+        assert!(
+            screen
+                .lines()
+                .nth(usize::from(layout.status_bar.y))
+                .unwrap()
+                .contains("Ready"),
+            "{screen}"
+        );
+        assert_eq!(
+            terminal.backend().cursor_visible(),
+            rig.state.modal_stack.is_empty() && rig.state.pending_leader.is_none()
+        );
+        if terminal.backend().cursor_visible() {
+            let cursor = terminal.get_cursor_position().unwrap();
+            assert_eq!(
+                (cursor.x, cursor.y),
+                (
+                    rig.state.cursor_position as u16 + 1,
+                    rig.state.terminal_height - 2
+                )
+            );
+        }
+        if let Some(path) = std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR") {
+            let path = std::path::PathBuf::from(path);
+            assert!(path.is_absolute());
+            assert!(
+                !path
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+            );
+            std::fs::create_dir_all(&path).unwrap();
+            let path = std::fs::canonicalize(path).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            let reversed_cells: Vec<_> = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.modifier.contains(ratatui::style::Modifier::REVERSED))
+                .map(|(i, _)| {
+                    [
+                        i % usize::from(rig.state.terminal_width),
+                        i / usize::from(rig.state.terminal_width),
+                    ]
+                })
+                .collect();
+            let host = if read_only { "readonly" } else { "attached" };
+            let record = serde_json::json!({
+                "width": rig.state.terminal_width, "height": rig.state.terminal_height,
+                "host": host, "stage": stage, "full": false, "screen": screen,
+                "draft": rig.state.input_buffer, "cursor": [cursor.x, cursor.y],
+                "cursor_visible": terminal.backend().cursor_visible(), "reversed_cells": reversed_cells,
+            });
+            let name = format!(
+                "c-{host}-{}x{}-{stage}.json",
+                rig.state.terminal_width, rig.state.terminal_height
+            );
+            std::fs::write(path.join(name), serde_json::to_vec(&record).unwrap()).unwrap();
+        }
+        screen
+    }
+
+    fn attached_occlusion_rig(
+        width: u16,
+        height: u16,
+        read_only: bool,
+        prefix_rows: usize,
+    ) -> attach_keys::tests::Rig {
+        let mut rig = attach_keys::tests::Rig::new(read_only);
+        rig.state.terminal_width = width;
+        rig.state.terminal_height = height;
+        for row in 0..prefix_rows {
+            rig.domain_tab
+                .conversation
+                .messages
+                .push(system_message(format!("occlusion prefix {row}")));
+        }
+        crate::adapters::tui::views::show_view(
+            &mut rig.state.feedback_blocks,
+            crate::adapters::tui::views::ViewKind::TeamLog,
+            crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID,
+            crate::domain::models::FeedbackLevel::Info,
+            "M12-ATTACHED-VISIBLE",
+        );
+        rig.state.pending_log_visit = Some(crate::domain::models::LogVisitCandidate {
+            seen_through: 41,
+            reset_revision: 0,
+        });
+        rig
+    }
+
+    /// M12: one real feedback row is visible before/after Help, but a successful
+    /// draw of the fully covering shared frame must not commit its pending visit.
+    #[tokio::test]
+    async fn story21_4_attached_fully_occluded_block_is_not_presented() {
+        use crate::adapters::tui::{
+            keymap::Key,
+            presentation::{self, Surface},
+        };
+        for read_only in [false, true] {
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                let mut rig = attached_occlusion_rig(width, height, read_only, 3);
+                let visit = rig.state.pending_log_visit.unwrap();
+                let before = attached_screen(&rig.paint());
+                let rows: Vec<_> = before
+                    .lines()
+                    .enumerate()
+                    .filter_map(|(row, text)| {
+                        text.contains("M12-ATTACHED-VISIBLE").then_some(row as u16)
+                    })
+                    .collect();
+                assert_eq!(
+                    rows.len(),
+                    1,
+                    "independent exactly-one-row visible control: {before}"
+                );
+                assert_eq!(rig.state.log_awareness.presented, [visit]);
+                assert!(rig.state.pending_log_visit.is_none());
+                let layout = crate::adapters::tui::layout::compute_layout(
+                    ratatui::layout::Rect::new(0, 0, width, height),
+                    &rig.state.theme,
+                    &rig.state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                let rect =
+                    presentation::geometry::frame_rect(presentation::geometry::modal_region(
+                        &layout,
+                        ratatui::layout::Rect::new(0, 0, width, height),
+                    ));
+                assert!(
+                    rows[0] >= rect.y && rows[0] < rect.bottom(),
+                    "the observed row must actually lie under the production frame"
+                );
+                rig.state.log_awareness.presented.clear();
+                rig.state.pending_log_visit = Some(visit);
+                rig.key(Key::Ctrl('x')).await;
+                rig.key(Key::Char('?')).await;
+                assert_eq!(rig.state.modal_stack.top().unwrap().surface, Surface::Help);
+                let covered = attached_screen(&rig.paint());
+                assert!(covered.contains("Help"), "{covered}");
+                assert!(!covered.contains("M12-ATTACHED-VISIBLE"), "{covered}");
+                assert_eq!(rig.state.pending_log_visit, Some(visit));
+                assert!(rig.state.log_awareness.presented.is_empty());
+                rig.key(Key::Esc).await;
+                assert!(rig.state.modal_stack.is_empty());
+                let returned = attached_screen(&rig.paint());
+                assert!(returned.contains("M12-ATTACHED-VISIBLE"), "{returned}");
+                assert_eq!(rig.state.log_awareness.presented, [visit]);
+                assert!(rig.state.pending_log_visit.is_none());
+                assert_eq!(rig.domain_tab.view_state.scroll_offset, 0);
+                assert_eq!(
+                    rig.domain_tab.view_state.mode,
+                    crate::domain::models::AnchorMode::Following
+                );
+                assert!(
+                    rig.frames().is_empty(),
+                    "paint and local Help send no wire actions"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn story21_4_r3_attached_indicator_does_not_present_the_replaced_row() {
+        use crate::adapters::tui::{
+            handlers::team_command::TEAM_LOG_BLOCK_ID,
+            views::{self, ViewKind},
+        };
+        use crate::domain::models::{AnchorMode, FeedbackLevel};
+        for read_only in [false, true] {
+            for (streaming, surviving) in [(true, false), (true, true), (false, false)] {
+                let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
+                let pane = crate::adapters::tui::layout::compute_layout(
+                    ratatui::layout::Rect::new(0, 0, 80, 24),
+                    &rig.state.theme,
+                    &rig.state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap()
+                .chat_pane;
+                let keep = if surviving { 2 } else { 1 };
+                views::show_view(
+                    &mut rig.state.feedback_blocks,
+                    ViewKind::TeamLog,
+                    TEAM_LOG_BLOCK_ID,
+                    FeedbackLevel::Info,
+                    "R3-first-feedback-row\nR3-second-feedback-row",
+                );
+                rig.domain_tab.view_state.mode = AnchorMode::Reading;
+                rig.domain_tab.view_state.scroll_offset = usize::MAX;
+                rig.domain_tab.streaming.is_streaming = streaming;
+                let visible = attached_screen(&rig.paint());
+                let origin = visible
+                    .lines()
+                    .position(|row| row.contains("R3-first-feedback-row"))
+                    .expect("uncovered streaming control genuinely presents a feedback row");
+                let target = pane.bottom() - keep;
+                assert!(origin < target as usize, "{visible}");
+                views::show_view(
+                    &mut rig.state.feedback_blocks,
+                    ViewKind::TeamStatus,
+                    "r3-padding",
+                    FeedbackLevel::Info,
+                    vec!["padding"; target as usize - origin].join("\n"),
+                );
+                rig.state.feedback_blocks.remove(TEAM_LOG_BLOCK_ID);
+                views::show_view(
+                    &mut rig.state.feedback_blocks,
+                    ViewKind::TeamLog,
+                    TEAM_LOG_BLOCK_ID,
+                    FeedbackLevel::Info,
+                    "R3-first-feedback-row\nR3-second-feedback-row",
+                );
+                let visit = rig.state.log_awareness.presented[0];
+                rig.state.log_awareness.presented.clear();
+                rig.state.pending_log_visit = Some(visit);
+                let final_paint = attached_screen(&rig.paint());
+                if streaming {
+                    assert!(
+                        final_paint
+                            .lines()
+                            .nth((pane.bottom() - 1) as usize)
+                            .unwrap()
+                            .contains("New content below"),
+                        "{final_paint}"
+                    );
+                }
+                if streaming && !surviving {
+                    assert!(
+                        !final_paint.contains("R3-first-feedback-row"),
+                        "{final_paint}"
+                    );
+                    assert_eq!(
+                        rig.state.pending_log_visit,
+                        Some(visit),
+                        "no genuine feedback row survived"
+                    );
+                    assert!(rig.state.log_awareness.presented.is_empty());
+                    rig.domain_tab.streaming.is_streaming = false;
+                    assert!(attached_screen(&rig.paint()).contains("R3-first-feedback-row"));
+                } else if surviving {
+                    assert!(
+                        final_paint
+                            .lines()
+                            .nth(target as usize)
+                            .unwrap()
+                            .contains("R3-first-feedback-row"),
+                        "{final_paint}"
+                    );
+                }
+                assert!(rig.state.pending_log_visit.is_none());
+                assert_eq!(rig.state.log_awareness.presented, [visit]);
+                assert!(
+                    rig.frames().is_empty(),
+                    "real successful paints do not submit actions"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn story21_4_attached_absent_empty_message_and_minimum_draw_controls() {
+        use crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID;
+        for read_only in [false, true] {
+            let mut rig = attached_occlusion_rig(80, 24, read_only, 0);
+            let visit = rig.state.pending_log_visit.unwrap();
+            let block = rig.state.feedback_blocks.remove(TEAM_LOG_BLOCK_ID).unwrap();
+            rig.paint();
+            assert_eq!(rig.state.pending_log_visit, Some(visit));
+            assert!(rig.state.log_awareness.presented.is_empty());
+            rig.state.feedback_blocks.insert(
+                TEAM_LOG_BLOCK_ID.into(),
+                crate::domain::models::FeedbackBlock {
+                    message: String::new(),
+                    ..block
+                },
+            );
+            rig.paint();
+            // Empty text still paints one bordered row (feedback_block::wrap_text).
+            assert!(rig.state.pending_log_visit.is_none());
+            assert_eq!(rig.state.log_awareness.presented, [visit]);
+            rig.state.log_awareness.presented.clear();
+            rig.state.pending_log_visit = Some(visit);
+            rig.state
+                .feedback_blocks
+                .get_mut(TEAM_LOG_BLOCK_ID)
+                .unwrap()
+                .message = "M12-ATTACHED-VISIBLE".into();
+            rig.state.terminal_width = 59;
+            let too_small = attached_screen(&rig.paint());
+            assert!(too_small.contains("Terminal too small"));
+            assert_eq!(rig.state.pending_log_visit, Some(visit));
+            assert!(rig.state.log_awareness.presented.is_empty());
+            rig.state.terminal_width = 80;
+            assert!(attached_screen(&rig.paint()).contains("M12-ATTACHED-VISIBLE"));
+            assert_eq!(rig.state.log_awareness.presented, [visit]);
+            assert!(rig.state.pending_log_visit.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_card_and_leader_cover_the_only_projected_row() {
+        use crate::adapters::tui::keymap::Key;
+        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+        for read_only in [false, true] {
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                for card in [false, true] {
+                    let mut rig = attached_occlusion_rig(width, height, read_only, 90);
+                    let visit = rig.state.pending_log_visit.unwrap();
+                    let before = attached_screen(&rig.paint());
+                    let layout = crate::adapters::tui::layout::compute_layout(
+                        ratatui::layout::Rect::new(0, 0, width, height),
+                        &rig.state.theme,
+                        &rig.state.input_buffer,
+                        1,
+                        false,
+                        DensityMode::Focus,
+                    )
+                    .unwrap();
+                    let rows: Vec<_> = before
+                        .lines()
+                        .enumerate()
+                        .filter_map(|(row, text)| {
+                            text.contains("M12-ATTACHED-VISIBLE").then_some(row as u16)
+                        })
+                        .collect();
+                    assert_eq!(
+                        rows,
+                        [layout.chat_pane.bottom() - 1],
+                        "one observed tail row must independently acknowledge: {before}"
+                    );
+                    assert_eq!(rig.state.log_awareness.presented, [visit]);
+                    rig.state.log_awareness.presented.clear();
+                    rig.state.pending_log_visit = Some(visit);
+                    if card {
+                        apply_attached_consent_frame(
+                            &mut rig.state,
+                            DaemonFrame::ApprovalRequest {
+                                request_id: RequestId("opaque-consent-control".into()),
+                                tool: "a2a/sender-consent".into(),
+                                source: ApprovalSource::ForegroundTurn {
+                                    conversation_id: rig.domain_tab.conversation.id.clone(),
+                                },
+                                risk: crate::domain::models::ToolRisk::Standard,
+                                summary: "actual opaque sender consent".into(),
+                                input_bytes: None,
+                            },
+                            read_only,
+                        );
+                        assert_eq!(rig.state.attached.consent.len(), 1);
+                    } else {
+                        rig.key(Key::Ctrl('x')).await;
+                        assert!(rig.state.pending_leader.is_some());
+                    }
+                    let covered = rig.paint();
+                    let screen = attached_screen(&covered);
+                    assert_eq!(
+                        covered.backend().buffer()
+                            [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
+                            .symbol(),
+                        if card { "╝" } else { "┘" },
+                        "the actual opaque bottom rail covers the observed row: {screen}"
+                    );
+                    assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
+                    assert_eq!(rig.state.pending_log_visit, Some(visit));
+                    assert!(rig.state.log_awareness.presented.is_empty());
+                    assert!(
+                        rig.frames().is_empty(),
+                        "local paint/leader/admission sends no wire actions"
+                    );
+                }
+            }
+        }
+    }
+
+    /// M10/K11: the owning domain tab is scrolled by real ingress and the
+    /// production painter consumes that exact view, not a default or a mirror.
+    #[tokio::test]
+    async fn story21_4_attached_scroll_is_the_shared_view_state() {
+        use crate::adapters::tui::keymap::Key;
+        use crate::domain::models::AnchorMode;
+        use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
+        for read_only in [false, true] {
+            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+                let mut rig = attach_keys::tests::Rig::new(read_only);
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                assert_eq!(
+                    rig.state.focus,
+                    FocusState::Input,
+                    "every attached mode starts ready to type"
+                );
+                for row in 0..90 {
+                    rig.domain_tab
+                        .conversation
+                        .messages
+                        .push(system_message(format!("Bb1a-row-{row:03}")));
+                }
+                rig.domain_tab
+                    .conversation
+                    .messages
+                    .push(system_message("A2b budget completion"));
+                attached_frame_record(&mut rig, "initial", read_only);
+                rig.type_text("/mode ").await;
+                assert_eq!(rig.state.input_buffer, "/mode ");
+                assert_eq!(rig.state.cursor_position, 6);
+                attached_frame_record(&mut rig, "notice-command", read_only);
+                rig.key(Key::Enter).await;
+                assert!(rig.state.input_buffer.is_empty());
+                attached_frame_record(&mut rig, "notice", read_only);
+                if read_only {
+                    rig.type_text("/notifications ").await;
+                    assert_eq!(rig.state.input_buffer, "/notifications ");
+                    assert_eq!(rig.state.cursor_position, 15);
+                    attached_frame_record(&mut rig, "readonly-command", true);
+                    rig.key(Key::Enter).await;
+                    let log = attached_frame_record(&mut rig, "readonly-log", true);
+                    assert!(log.contains("/mode"));
+                } else {
+                    rig.key(Key::Ctrl('x')).await;
+                    rig.key(Key::Char('n')).await;
+                    attached_frame_record(&mut rig, "notice-log", false);
+                }
+                rig.key(Key::Char('x')).await;
+                rig.key(Key::Esc).await;
+                assert!(rig.state.modal_stack.is_empty());
+                attached_frame_record(&mut rig, "notice-dismiss-return", read_only);
+                rig.type_text("C-kept draft").await;
+                attached_frame_record(&mut rig, "typed", read_only);
+                rig.key(Key::Ctrl('a')).await;
+                assert_eq!(rig.state.cursor_position, 0);
+                attached_frame_record(&mut rig, "readline-home", read_only);
+                rig.key(Key::Ctrl('e')).await;
+                assert_eq!(rig.state.cursor_position, 12);
+                rig.key(Key::Left).await;
+                assert_eq!(rig.state.cursor_position, 11);
+                attached_frame_record(&mut rig, "left", read_only);
+                rig.key(Key::End).await;
+                rig.key(Key::Home).await;
+                rig.key(Key::Right).await;
+                assert_eq!(rig.state.cursor_position, 1);
+                attached_frame_record(&mut rig, "caret", read_only);
+                rig.paste("X").await;
+                assert_eq!(rig.state.input_buffer, "CX-kept draft");
+                assert_eq!(rig.state.cursor_position, 2);
+                attached_frame_record(&mut rig, "paste", read_only);
+                rig.key(Key::Ctrl('k')).await;
+                assert_eq!(rig.state.input_buffer, "CX");
+                attached_frame_record(&mut rig, "kill-tail", read_only);
+                rig.key(Key::Ctrl('u')).await;
+                assert!(rig.state.input_buffer.is_empty());
+                attached_frame_record(&mut rig, "kill-prefix", read_only);
+                rig.type_text("C-kept draft").await;
+                let bottom = attached_frame_record(&mut rig, "bottom", read_only);
+                assert!(bottom.contains("A2b budget completion"), "{bottom}");
+                assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Following);
+                rig.key(Key::PageUp).await;
+                let page_offset = rig.domain_tab.view_state.scroll_offset;
+                assert!(page_offset > 0, "the real key changes the owned view");
+                assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Reading);
+                let wheel = Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: 1,
+                    row: 2,
+                    modifiers: KeyModifiers::NONE,
+                });
+                assert_eq!(
+                    attach_keys::handle_attached_mouse(
+                        &mut rig.state,
+                        &mut rig.domain_tab.view_state,
+                        &wheel
+                    ),
+                    None
+                );
+                assert!(rig.domain_tab.view_state.scroll_offset > page_offset);
+                let scrolled = attached_frame_record(&mut rig, "scrolled", read_only);
+                assert!(scrolled.contains("Bb1a-row-"), "{scrolled}");
+                assert!(
+                    !scrolled.contains("A2b budget completion"),
+                    "earlier rows actually replaced the tail: {scrolled}"
+                );
+                let view = rig.domain_tab.view_state.clone();
+                for (open, shown, returned) in
+                    [('?', "help", "help-return"), ('n', "log", "log-return")]
+                {
+                    rig.key(Key::Ctrl('x')).await;
+                    rig.key(Key::Char(open)).await;
+                    let owner = rig.state.modal_stack.top().unwrap().clone();
+                    assert_eq!(
+                        owner.surface,
+                        if open == '?' {
+                            crate::adapters::tui::presentation::Surface::Help
+                        } else {
+                            crate::adapters::tui::presentation::Surface::NotificationLog
+                        }
+                    );
+                    let painted = attached_frame_record(&mut rig, shown, read_only);
+                    assert!(painted.contains(if open == '?' { "Help" } else { "Notifications" }));
+                    assert_eq!(rig.domain_tab.view_state.scroll_offset, view.scroll_offset);
+                    assert_eq!(rig.domain_tab.view_state.mode, view.mode);
+                    assert_eq!(
+                        attach_keys::handle_attached_mouse(
+                            &mut rig.state,
+                            &mut rig.domain_tab.view_state,
+                            &wheel
+                        ),
+                        Some(crate::adapters::tui::presentation::RouteEffect::Consumed)
+                    );
+                    if open == '?' {
+                        let before = rig.state.help_overlay.scroll_offset;
+                        rig.key(Key::Char('j')).await;
+                        assert_eq!(rig.state.help_overlay.scroll_offset, before + 1);
+                        attached_frame_record(&mut rig, "help-scrolled", read_only);
+                    }
+                    rig.key(Key::Esc).await;
+                    let returned_screen = attached_frame_record(&mut rig, returned, read_only);
+                    let stage_height = usize::from(rig.state.viewport_height);
+                    assert_eq!(
+                        returned_screen
+                            .lines()
+                            .take(stage_height)
+                            .collect::<Vec<_>>(),
+                        scrolled.lines().take(stage_height).collect::<Vec<_>>(),
+                        "the actual scrolled Stage returns byte-for-byte"
+                    );
+                    assert_eq!(rig.domain_tab.view_state.scroll_offset, view.scroll_offset);
+                    assert_eq!(rig.domain_tab.view_state.mode, view.mode);
+                    assert_eq!(rig.domain_tab.view_state.focused_turn, view.focused_turn);
+                    assert_eq!(rig.domain_tab.view_state.collapsed, view.collapsed);
+                    assert_eq!(rig.domain_tab.view_state.summary_tier, view.summary_tier);
+                    assert_eq!(
+                        rig.domain_tab.view_state.pending_append_lines,
+                        view.pending_append_lines
+                    );
+                }
+                assert!(
+                    rig.frames().is_empty(),
+                    "presentation and editing send no wire actions"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_unicode_readline_and_paste_use_the_shared_caret() {
+        use crate::adapters::tui::keymap::Key;
+        for read_only in [false, true] {
+            let mut rig = attach_keys::tests::Rig::new(read_only);
+            rig.paste("甲e\u{301}👩‍💻 tail").await;
+            rig.key(Key::Home).await;
+            rig.key(Key::Right).await;
+            assert_eq!(rig.state.cursor_position, 1);
+            rig.key(Key::Right).await;
+            assert_eq!(
+                rig.state.cursor_position, 3,
+                "combining grapheme is one motion"
+            );
+            rig.key(Key::Right).await;
+            assert_eq!(rig.state.cursor_position, 6, "ZWJ grapheme is one motion");
+            rig.key(Key::Left).await;
+            rig.paste("界").await;
+            assert_eq!(rig.state.input_buffer, "甲e\u{301}界👩‍💻 tail");
+            rig.key(Key::Ctrl('k')).await;
+            assert_eq!(rig.state.input_buffer, "甲e\u{301}界");
+            rig.key(Key::Ctrl('h')).await;
+            assert_eq!(rig.state.input_buffer, "甲e\u{301}");
+            rig.key(Key::Ctrl('w')).await;
+            assert!(rig.state.input_buffer.is_empty());
+            rig.type_text("read only local typing").await;
+            rig.key(Key::Ctrl('a')).await;
+            assert_eq!(rig.state.cursor_position, 0);
+            rig.key(Key::Ctrl('e')).await;
+            assert_eq!(
+                rig.state.cursor_position,
+                rig.state.input_buffer.chars().count()
+            );
+            let terminal = rig.paint();
+            assert!(terminal.backend().cursor_visible());
+            assert!(rig.frames().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_state_owned_card_answers_reach_the_actual_wire() {
+        use crate::adapters::tui::keymap::Key;
+        use crate::adapters::tui::presentation::{self, Surface};
+        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+        use crate::domain::models::{ApprovalOutcome, ToolRisk};
+        for kind in ["consent", "consolidation", "retract", "approval"] {
+            let mut rig = attach_keys::tests::Rig::new(false);
+            rig.key(Key::Ctrl('p')).await;
+            rig.type_text("query").await;
+            let frame = rig.state.modal_stack.top().unwrap().clone();
+            match kind {
+                "consent" => apply_attached_consent_frame(
+                    &mut rig.state,
+                    DaemonFrame::ApprovalRequest {
+                        request_id: RequestId("consent-wire".into()),
+                        tool: "a2a/sender-consent".into(),
+                        source: ApprovalSource::ForegroundTurn {
+                            conversation_id: rig.domain_tab.conversation.id.clone(),
+                        },
+                        risk: ToolRisk::Standard,
+                        summary: "real sender consent".into(),
+                        input_bytes: None,
+                    },
+                    false,
+                ),
+                "consolidation" => apply_attached_consolidation_frame(
+                    &mut rig.state,
+                    DaemonFrame::ConsolidationProposed {
+                        token: crate::adapters::daemon::protocol::ProposalToken(41),
+                        proposals: vec![],
+                    },
+                    false,
+                ),
+                "retract" => {
+                    let mut row = system_message("actual retract target");
+                    row.id = "peer-response-owned-wire".into();
+                    row.send_authorization = crate::domain::models::SendAuthorization::Automatic;
+                    rig.domain_tab.conversation.messages.push(row);
+                    rig.state.attached.retract_confirm = Some((
+                        "peer-response-owned-wire".into(),
+                        "actual retract target".into(),
+                    ));
+                    attached_card_arrived(&mut rig.state, false);
+                }
+                "approval" => apply_attached_approval_frame(
+                    &mut rig.state,
+                    DaemonFrame::ApprovalRequest {
+                        request_id: RequestId("approval-wire".into()),
+                        tool: "Bash".into(),
+                        source: ApprovalSource::ForegroundTurn {
+                            conversation_id: rig.domain_tab.conversation.id.clone(),
+                        },
+                        risk: ToolRisk::Standard,
+                        summary: "real approval request".into(),
+                        input_bytes: Some(2),
+                    },
+                    false,
+                ),
+                _ => unreachable!(),
+            }
+            rig.key(Key::Char('y')).await;
+            assert_eq!(rig.state.modal_stack.top(), Some(&frame));
+            assert_eq!(rig.state.command_palette.filter_text.as_str(), "queryy");
+            assert!(rig.frames().is_empty(), "a covered card cannot answer");
+            rig.key(Key::Esc).await;
+            assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
+            assert_eq!(rig.state.focus, FocusState::Chat);
+            let painted = rig.paint();
+            assert!(attached_screen(&painted).contains(match kind {
+                "consent" => "consent",
+                "consolidation" => "memory",
+                "retract" => "Retract",
+                _ => "Bash",
+            }));
+            rig.key(Key::Char('y')).await;
+            let frames = rig.frames();
+            match (kind, frames.as_slice()) {
+                (
+                    "consent",
+                    [
+                        ClientFrame::ApprovalResponse {
+                            request_id,
+                            outcome: ApprovalOutcome::Once,
+                        },
+                    ],
+                ) => assert_eq!(request_id.0, "consent-wire"),
+                (
+                    "consolidation",
+                    [
+                        ClientFrame::ConsolidationResolve {
+                            token,
+                            accept: true,
+                        },
+                    ],
+                ) => assert_eq!(token.0, 41),
+                (
+                    "retract",
+                    [
+                        ClientFrame::RetractAutoResponse {
+                            message_id,
+                            target_seq: None,
+                        },
+                    ],
+                ) => assert_eq!(message_id, "peer-response-owned-wire"),
+                (
+                    "approval",
+                    [
+                        ClientFrame::ApprovalResponse {
+                            request_id,
+                            outcome: ApprovalOutcome::Once,
+                        },
+                    ],
+                ) => assert_eq!(request_id.0, "approval-wire"),
+                other => {
+                    panic!("state-owned answer must use its actual request identity: {other:?}")
+                }
+            }
+            assert!(!attached_card_pending(&rig.state));
+            assert_eq!(rig.state.focus, FocusState::Input);
+            rig.key(Key::Char('y')).await;
+            assert_eq!(rig.state.input_buffer, "y");
+            assert!(
+                rig.frames().is_empty(),
+                "settled requests never answer twice"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_and_local_shared_frame_scripts_keep_stack_geometry_and_status() {
+        use crate::adapters::tui::{
+            app,
+            keymap::Key,
+            presentation::{self, Shell},
+        };
+        use crossterm::event::Event;
+        let script = [
+            Key::Ctrl('p'),
+            Key::Char('q'),
+            Key::Ctrl('x'),
+            Key::Char('?'),
+            Key::Ctrl('x'),
+            Key::Char('n'),
+            Key::Ctrl('q'),
+            Key::Char('n'),
+            Key::Esc,
+            Key::Esc,
+            Key::Esc,
+        ];
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            let mut attached = attach_keys::tests::Rig::new(false);
+            attached.state.terminal_width = width;
+            attached.state.terminal_height = height;
+            attached.type_text("kept draft").await;
+            let mut local = TuiState::new(width, height);
+            local.input_buffer = "kept draft".into();
+            local.cursor_position = local.input_buffer.chars().count();
+            let first = attached.paint();
+            let mut local_terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            let mut local_tabs = crate::domain::models::TabManager::default();
+            let local_conversation = local_tabs.active_tab().conversation.clone();
+            let local_streaming = StreamingState::default();
+            let core = crate::infrastructure::runtime::agent_core::AgentCore::test_noop();
+            let index = crate::domain::services::session_index::SessionIndex::new();
+            let area = first.backend().buffer().area;
+            let layout = crate::adapters::tui::layout::compute_layout(
+                area,
+                &local.theme,
+                &local.input_buffer,
+                1,
+                false,
+                DensityMode::Focus,
+            )
+            .unwrap();
+            let status = |terminal: &ratatui::Terminal<ratatui::backend::TestBackend>| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, layout.status_bar.y)].symbol())
+                    .collect::<String>()
+            };
+            for key in script {
+                let (code, modifiers) = attach_keys::tests::key_event(key);
+                let raw = Event::Key(crossterm::event::KeyEvent::new(code, modifiers));
+                let domain = app::convert_crossterm_event(
+                    &raw,
+                    &crate::domain::models::MouseConfig::default(),
+                )
+                .unwrap();
+                let action = app::handle_operator_input(&mut local, &raw, &domain).unwrap();
+                if matches!(action, app::InputAction::Quit) {
+                    let mut facts = crate::adapters::tui::quit_confirm::QuitFacts::idle(
+                        crate::adapters::tui::quit_confirm::QuitHost::Local,
+                    );
+                    facts.composer_draft = !local.input_buffer.is_empty();
+                    presentation::reducer::request_quit(&mut local, facts);
+                }
+                attached.key(key).await;
+                let local_stack: Vec<_> = local
+                    .modal_stack
+                    .iter()
+                    .map(|f| (f.id, f.surface))
+                    .collect();
+                let attached_stack: Vec<_> = attached
+                    .state
+                    .modal_stack
+                    .iter()
+                    .map(|f| (f.id, f.surface))
+                    .collect();
+                assert_eq!(attached_stack, local_stack, "{key:?}");
+                assert_eq!(attached.state.pending_leader, local.pending_leader);
+                assert_eq!(attached.state.focus, local.focus);
+                assert_eq!(attached.state.input_buffer, local.input_buffer);
+                crate::infrastructure::runtime::event_loop::render(
+                    &mut local_terminal,
+                    &mut local,
+                    &local_conversation,
+                    &local_streaming,
+                    "fixture-model",
+                    "fixture-provider",
+                    &crate::adapters::noop::NoOpSecurity,
+                    1,
+                    0,
+                    Some(&mut local_tabs),
+                    &index,
+                    128_000,
+                    &core,
+                )
+                .unwrap();
+                let rendered = attached.paint();
+                assert!(
+                    status(&local_terminal).contains("Ready"),
+                    "actual local status remains outside frames"
+                );
+                assert_eq!(
+                    local_terminal.backend().cursor_visible(),
+                    rendered.backend().cursor_visible()
+                );
+                let attached_layout = crate::adapters::tui::layout::compute_layout(
+                    area,
+                    &attached.state.theme,
+                    &attached.state.input_buffer,
+                    1,
+                    false,
+                    DensityMode::Focus,
+                )
+                .unwrap();
+                let local_shell = Shell::new(area, &layout);
+                let attached_shell = Shell::new(area, &attached_layout);
+                assert_eq!(local_shell.region, attached_shell.region);
+                assert_eq!(local_shell.status_bar, attached_shell.status_bar);
+                let rect = presentation::geometry::frame_rect(attached_shell.region);
+                if !attached_stack.is_empty() && attached.state.pending_leader.is_none() {
+                    assert_eq!(rendered.backend().buffer()[(rect.x, rect.y)].symbol(), "┌");
+                    assert_eq!(
+                        rendered.backend().buffer()[(rect.right() - 1, rect.bottom() - 1)].symbol(),
+                        "┘"
+                    );
+                }
+                assert!(status(&rendered).contains("Ready"));
+                assert_eq!(attached_shell.status_bar, layout.status_bar);
+                assert!(attached.frames().is_empty());
+            }
+            assert!(attached.state.modal_stack.is_empty() && local.modal_stack.is_empty());
+            assert_eq!(status(&attached.paint()), status(&first));
+        }
+    }
+
+    #[test]
+    fn story21_4_attached_production_paint_uses_shared_minimum_size() {
+        for read_only in [false, true] {
+            for (width, height) in [(59, 24), (80, 15)] {
+                let mut rig = attach_keys::tests::Rig::new(read_only);
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                let terminal = rig.paint();
+                let screen = attached_screen(&terminal);
+                assert!(screen.contains("Terminal too small (min 60x16)"));
+                assert!(!screen.contains("Message") && !screen.contains("Ready"));
+                assert!(!terminal.backend().cursor_visible());
+                assert_eq!(rig.state.focus, FocusState::Input);
+            }
+        }
+    }
+
+    /// Moved from conformance_18_3d_consent: labels and dispatch are observed
+    /// through the real producer, attached state, painter, front door and wire.
+    #[tokio::test]
+    async fn consent_card_labels_have_guarded_non_test_dispatch_arms() {
+        use crate::adapters::tui::keymap::Key;
+        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope, PolicyPrincipal, ToolRisk};
+        let sender = PolicyPrincipal::Pseudonymous(
+            crate::domain::models::PeerId::from_public_key(&[71; 32]).unwrap(),
+        );
+        let summary =
+            crate::infrastructure::runtime::transparency_bridge::consent_card_text(&sender);
+        for label in ["[y] Allow once", "[a] Always allow", "[n] Decline"] {
+            assert!(
+                summary.contains(label),
+                "actual producer must render its action: {summary}"
+            );
+        }
+        for (key, expected) in [
+            ('y', ApprovalOutcome::Once),
+            (
+                'a',
+                ApprovalOutcome::AlwaysAndSave {
+                    scope: ApprovalScope::Tool("a2a/sender-consent".into()),
+                },
+            ),
+            ('n', ApprovalOutcome::Reject { feedback: None }),
+        ] {
+            let mut rig = attach_keys::tests::Rig::new(false);
+            rig.key(Key::Ctrl('x')).await;
+            rig.key(Key::Char('?')).await;
+            let owner = rig.state.modal_stack.top().unwrap().clone();
+            apply_attached_consent_frame(
+                &mut rig.state,
+                DaemonFrame::ApprovalRequest {
+                    request_id: RequestId("real-consent-dispatch".into()),
+                    tool: "a2a/sender-consent".into(),
+                    source: ApprovalSource::ForegroundTurn {
+                        conversation_id: rig.domain_tab.conversation.id.clone(),
+                    },
+                    risk: ToolRisk::Standard,
+                    summary: summary.clone(),
+                    input_bytes: None,
+                },
+                false,
+            );
+            rig.key(Key::Char(key)).await;
+            assert_eq!(rig.state.modal_stack.top(), Some(&owner));
+            assert_eq!(rig.state.attached.consent.len(), 1);
+            assert!(rig.frames().is_empty(), "covered consent owns no keys");
+            rig.key(Key::Esc).await;
+            assert_eq!(rig.state.focus, FocusState::Chat);
+            let screen = attached_screen(&rig.paint());
+            for label in ["Allow once", "Always allow", "Decline"] {
+                assert!(
+                    screen.contains(label),
+                    "actual attached card is visible: {screen}"
+                );
+            }
+            rig.key(Key::Char(key)).await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse { request_id, outcome }]
+                if request_id.0 == "real-consent-dispatch" && outcome == &expected)
+            );
+            assert!(rig.state.attached.consent.is_empty());
+            assert_eq!(rig.state.focus, FocusState::Input);
+            rig.key(Key::Char(key)).await;
+            assert_eq!(rig.state.input_buffer, key.to_string());
+            assert!(
+                rig.frames().is_empty(),
+                "an empty consent queue never answers"
+            );
+        }
+        let mut reader = attach_keys::tests::Rig::new(true);
+        apply_attached_consent_frame(
+            &mut reader.state,
+            DaemonFrame::ApprovalRequest {
+                request_id: RequestId("reader-consent".into()),
+                tool: "a2a/sender-consent".into(),
+                source: ApprovalSource::ForegroundTurn {
+                    conversation_id: reader.domain_tab.conversation.id.clone(),
+                },
+                risk: ToolRisk::Standard,
+                summary,
+                input_bytes: None,
+            },
+            true,
+        );
+        reader.key(Key::Char('y')).await;
+        assert_eq!(reader.state.focus, FocusState::Input);
+        assert_eq!(reader.state.input_buffer, "y");
+        assert_eq!(reader.state.attached.consent.len(), 1);
+        assert!(
+            reader.frames().is_empty(),
+            "read-only arrival cannot take the composer's typing"
+        );
+    }
 
     // Supporting seams; signed socket/PTY K02 evidence is run after integration.
     mod exact_attached_approval {
@@ -3960,7 +4948,7 @@ mod tests {
             let mut painted = None;
             terminal
                 .draw(|f| {
-                    painted = state.paint(f, f.area(), &theme);
+                    painted = state.paint(f, f.area(), &theme).map(|(id, _)| id);
                 })
                 .unwrap();
             state.painted = painted;
@@ -3988,7 +4976,7 @@ mod tests {
             complete(&mut state, "a", 1);
             let (tx, mut rx) = mpsc::unbounded_channel();
             paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.key(key(KeyCode::Char('r')), false, &tx);
             for (width, height) in [(60, 16), (80, 24), (130, 30)] {
                 paint_at(&mut state, width, height);
                 let cached = state.presentation.as_ref().unwrap().body.as_ptr();
@@ -3999,7 +4987,7 @@ mod tests {
                     assert!(!row.to_string().contains('\u{1b}'));
                 }
                 while state.scroll < state.scroll_max {
-                    state.key(key(KeyCode::PageDown), false, "", &tx);
+                    state.key(key(KeyCode::PageDown), false, &tx);
                 }
                 assert!(paint_at(&mut state, width, height).contains("TAIL-CANARY"));
                 assert!(rx.try_recv().is_err());
@@ -4049,7 +5037,7 @@ mod tests {
                 let card = paint_at(&mut state, width, pane_height);
                 assert!(card.contains("[r] Review"), "{card}");
                 assert!(card.contains("[y] Allow"), "{card}");
-                assert!(state.key(key(KeyCode::Char('r')), false, "", &tx));
+                assert!(state.key(key(KeyCode::Char('r')), false, &tx));
                 let mut painted = String::new();
                 loop {
                     let page = paint_at(&mut state, width, pane_height);
@@ -4061,7 +5049,7 @@ mod tests {
                         break;
                     }
                     let before = state.scroll;
-                    assert!(state.key(key(KeyCode::PageDown), false, "", &tx));
+                    assert!(state.key(key(KeyCode::PageDown), false, &tx));
                     assert!(state.scroll > before);
                 }
                 assert!(painted.contains("METADATA-INPUT-HEAD"));
@@ -4074,7 +5062,7 @@ mod tests {
                 );
                 assert!(rx.try_recv().is_err(), "scrolling is not a decision");
             }
-            assert!(state.key(key(KeyCode::Char('n')), false, "", &tx));
+            assert!(state.key(key(KeyCode::Char('n')), false, &tx));
             assert!(matches!(
                 rx.try_recv().unwrap(),
                 ClientFrame::ApprovalResponse { request_id, outcome: ApprovalOutcome::Reject { feedback: None } }
@@ -4089,7 +5077,7 @@ mod tests {
             state.apply(request("a", data), false);
             let (tx, mut rx) = mpsc::unbounded_channel();
             assert!(paint(&mut state).contains("receiving exact input…"));
-            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.key(key(KeyCode::Char('r')), false, &tx);
             assert!(state.review.is_none());
             chunk(&mut state, "a", 0, data);
             assert!(state.pending[&RequestId("a".into())].value.is_none());
@@ -4100,7 +5088,7 @@ mod tests {
                 Some(serde_json::json!({"command": "unique exact tail"}))
             );
             assert!(paint(&mut state).contains("unique exact tail"));
-            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.key(key(KeyCode::Char('r')), false, &tx);
             assert!(paint(&mut state).contains("Exact tool input (not run yet)"));
             assert!(rx.try_recv().is_err());
         }
@@ -4155,20 +5143,20 @@ mod tests {
             complete(&mut state, "a", 1);
             let (tx, mut rx) = mpsc::unbounded_channel();
             paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.key(key(KeyCode::Char('r')), false, &tx);
             state.apply(request("b", b), false);
             chunk(&mut state, "b", 0, b);
             complete(&mut state, "b", 1);
             state.order.swap(0, 1);
             let text = paint(&mut state);
             assert!(text.contains("first exact input") && !text.contains("second secret input"));
-            state.key(key(KeyCode::Char('y')), false, "", &tx);
+            state.key(key(KeyCode::Char('y')), false, &tx);
             assert!(
                 matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
                 request_id, outcome: ApprovalOutcome::Once,
             } if request_id.0 == "a")
             );
-            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
             assert!(rx.try_recv().is_err());
             assert!(state.pending.contains_key(&RequestId("b".into())));
         }
@@ -4182,9 +5170,9 @@ mod tests {
             complete(&mut state, "a", 1);
             let (tx, mut rx) = mpsc::unbounded_channel();
             paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, "", &tx);
+            state.key(key(KeyCode::Char('r')), false, &tx);
             paint(&mut state);
-            state.key(key(KeyCode::Char('f')), false, "", &tx);
+            state.key(key(KeyCode::Char('f')), false, &tx);
             state.apply(
                 DaemonFrame::ApprovalClosed {
                     request_id: RequestId("a".into()),
@@ -4193,7 +5181,7 @@ mod tests {
             );
             chunk(&mut state, "a", 0, data);
             complete(&mut state, "a", 1);
-            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
             assert!(state.review.is_none() && state.feedback.is_none());
             assert!(state.pending.is_empty() && state.order.is_empty() && state.painted.is_none());
             assert!(rx.try_recv().is_err());
@@ -4205,27 +5193,26 @@ mod tests {
             let mut state = AttachedApprovals::default();
             state.apply(request("a", data), false);
             let (tx, mut rx) = mpsc::unbounded_channel();
-            assert!(!state.key(key(KeyCode::Char('y')), false, "", &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
             paint(&mut state);
-            assert!(!state.key(key(KeyCode::Char('y')), true, "", &tx));
-            assert!(!state.key(key(KeyCode::Char('y')), false, "draft", &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), true, &tx));
+            assert!(!state.key(key(KeyCode::Char('y')), true, &tx));
             for modifiers in [
                 KeyModifiers::SHIFT,
                 KeyModifiers::ALT,
                 KeyModifiers::CONTROL,
             ] {
-                state.key(KeyEvent::new(KeyCode::Char('y'), modifiers), false, "", &tx);
+                state.key(KeyEvent::new(KeyCode::Char('y'), modifiers), false, &tx);
             }
             for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
                 state.key(
                     KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, kind),
                     false,
-                    "",
                     &tx,
                 );
             }
             assert!(rx.try_recv().is_err());
-            state.key(key(KeyCode::Char('s')), false, "", &tx);
+            state.key(key(KeyCode::Char('s')), false, &tx);
             assert!(
                 matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
                 request_id, outcome: ApprovalOutcome::AlwaysTool { tool_name },
@@ -4241,9 +5228,9 @@ mod tests {
             state.apply(request("a", data), false);
             let (tx, mut rx) = mpsc::unbounded_channel();
             paint(&mut state);
-            state.key(key(KeyCode::Char('f')), false, "", &tx);
-            state.key(key(KeyCode::Char('x')), false, "", &tx);
-            state.key(key(KeyCode::Enter), false, "", &tx);
+            state.key(key(KeyCode::Char('f')), false, &tx);
+            state.key(key(KeyCode::Char('x')), false, &tx);
+            state.key(key(KeyCode::Enter), false, &tx);
             assert!(
                 matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
                 outcome: ApprovalOutcome::Reject { feedback: Some(feedback) }, ..
@@ -4252,7 +5239,7 @@ mod tests {
             state.apply(request("b", data), false);
             paint(&mut state);
             drop(rx);
-            state.key(key(KeyCode::Char('y')), false, "", &tx);
+            state.key(key(KeyCode::Char('y')), false, &tx);
             assert!(state.pending.contains_key(&RequestId("b".into())));
         }
 
@@ -4271,10 +5258,7 @@ mod tests {
                 complete(&mut state, "a", 1);
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 paint(&mut state);
-                assert!(
-                    state.key(pressed, false, "", &tx),
-                    "{pressed:?} is consumed"
-                );
+                assert!(state.key(pressed, false, &tx), "{pressed:?} is consumed");
                 assert!(rx.try_recv().is_err(), "{pressed:?} sends no decision");
                 assert!(
                     state.pending.contains_key(&RequestId("a".into())),
@@ -4285,16 +5269,16 @@ mod tests {
                     "{pressed:?} asks for the cue"
                 );
                 // With the review open the same key only goes back: no cue.
-                state.key(key(KeyCode::Char('r')), false, "", &tx);
+                state.key(key(KeyCode::Char('r')), false, &tx);
                 paint(&mut state);
-                state.key(pressed, false, "", &tx);
+                state.key(pressed, false, &tx);
                 assert!(
                     state.review.is_none() && !state.cue,
                     "{pressed:?} backs out of review"
                 );
                 paint(&mut state);
                 // Positive control: `n` rejects, once.
-                state.key(key(KeyCode::Char('n')), false, "", &tx);
+                state.key(key(KeyCode::Char('n')), false, &tx);
                 assert!(matches!(
                     rx.try_recv().unwrap(),
                     ClientFrame::ApprovalResponse { request_id, outcome }
@@ -4327,13 +5311,13 @@ mod tests {
                 complete(&mut state, "a", 1);
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 paint(&mut state);
-                state.key(key(KeyCode::Char('r')), false, "", &tx);
+                state.key(key(KeyCode::Char('r')), false, &tx);
                 paint(&mut state);
-                state.key(key(KeyCode::Esc), false, "", &tx);
+                state.key(key(KeyCode::Esc), false, &tx);
                 assert!(state.review.is_none() && state.pending.len() == 1);
                 assert!(rx.try_recv().is_err());
                 paint(&mut state);
-                state.key(key(code), false, "", &tx);
+                state.key(key(code), false, &tx);
                 assert!(
                     matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
                     request_id, outcome,
@@ -4415,11 +5399,9 @@ mod tests {
             state: TuiState,
             tab: TabRenderState,
             requests: AttachedTeamRequests,
-            input: String,
             tx: mpsc::UnboundedSender<ClientFrame>,
             rx: mpsc::UnboundedReceiver<ClientFrame>,
-            scroll_offset: usize,
-            auto_scroll: bool,
+            domain_tab: crate::domain::models::tab::TabState,
             streaming: StreamingState,
         }
 
@@ -4430,11 +5412,12 @@ mod tests {
                     state: TuiState::new(80, 24),
                     tab: TabRenderState::default(),
                     requests: AttachedTeamRequests::default(),
-                    input: String::new(),
                     tx,
                     rx,
-                    scroll_offset: 0,
-                    auto_scroll: true,
+                    domain_tab: crate::domain::models::tab::TabState::from_conversation(
+                        0,
+                        Conversation::default(),
+                    ),
                     streaming: StreamingState::default(),
                 };
                 surface.frame(DaemonFrame::TeamProposal {
@@ -4461,21 +5444,22 @@ mod tests {
                     KeyEvent::new(code, KeyModifiers::NONE),
                     higher,
                     read_only,
-                    &self.input,
                     &mut self.state,
                     &mut self.tab,
                     &mut self.requests,
                     &self.tx,
-                    &mut self.scroll_offset,
-                    &mut self.auto_scroll,
+                    &mut self.domain_tab.view_state,
                 );
                 if !consumed && matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
-                    scroll_attached_transcript(
-                        code == KeyCode::PageUp,
-                        self.state.viewport_height,
-                        self.streaming.is_streaming,
-                        &mut self.scroll_offset,
-                        &mut self.auto_scroll,
+                    let page = self.state.viewport_height.saturating_sub(1).max(1);
+                    crate::adapters::tui::handlers::scroll::dispatch_scroll(
+                        &mut self.domain_tab.view_state,
+                        &mut self.state,
+                        if code == KeyCode::PageUp {
+                            crate::domain::models::view_state::ScrollDelta::WheelUp(page)
+                        } else {
+                            crate::domain::models::view_state::ScrollDelta::WheelDown(page)
+                        },
                     );
                     return true;
                 }
@@ -4492,7 +5476,7 @@ mod tests {
                             crate::adapters::tui::handlers::recipient_actions::pending_composition(
                                 &self.state,
                             )
-                            .unwrap_or(&self.input);
+                            .unwrap_or(&self.state.input_buffer);
                         let mut layout = crate::adapters::tui::layout::compute_layout(
                             area,
                             &self.state.theme,
@@ -4505,41 +5489,42 @@ mod tests {
                         let card = prepare_attached_proposal(
                             &self.state,
                             &self.tab,
-                            &self.input,
                             higher,
                             read_only,
                             &mut layout,
                             area,
                         );
-                        chat_pane::render_attached(
+                        let rendered = chat_pane::render_attached(
                             frame,
                             layout.chat_pane,
                             &Conversation::default(),
                             &self.streaming,
-                            self.scroll_offset,
-                            self.auto_scroll,
+                            &self.domain_tab.view_state,
                             &self.state.theme,
                             &mut self.tab,
                             &HashMap::new(),
                             &self.state.feedback_blocks,
                             &HashMap::new(),
                         );
-                        render_attached_composer(
+                        input_box::render(
                             frame,
                             layout.input_area,
                             display_input,
+                            self.state.cursor_position,
                             self.state.focus.clone(),
                             &self.state.theme,
                             self.state.multiline_mode,
+                            self.state.input_scroll_offset,
                             None,
                         );
+                        self.state.total_content_height = rendered.total_content_height;
                         let actions = recipient_surface_actions(
                             &self.state,
                             &Conversation::default(),
                             read_only,
                         );
                         if let Some(surface) = self.state.recipient_surface.as_mut() {
-                            render_recipient_surface(
+                            let _ = render_recipient_surface(
                                 frame,
                                 layout.chat_pane,
                                 surface,
@@ -4598,13 +5583,13 @@ mod tests {
             }
 
             fn submit_pending_reply(&mut self, draft: &str, reply: &str) {
-                self.input = draft.to_owned();
+                self.state.input_buffer = draft.to_owned();
+                self.state.cursor_position = self.state.input_buffer.chars().count();
                 assert!(
                     matches!(
                         attached_composer_key_with_team_requests(
                             KeyCode::Enter,
                             false,
-                            &mut self.input,
                             &mut self.state,
                             &self.tx,
                             &mut self.requests,
@@ -4622,7 +5607,7 @@ mod tests {
                     "the recipient reply must retain its target and exact operator-authored body"
                 );
                 assert!(
-                    self.input.is_empty(),
+                    self.state.input_buffer.is_empty(),
                     "begin_action must move the submitted draft out of the local buffer"
                 );
                 assert_eq!(
@@ -4646,7 +5631,6 @@ mod tests {
                 };
                 crate::adapters::tui::handlers::recipient_actions::apply_action_result(
                     &mut self.state,
-                    &mut self.input,
                     RecipientAction::Reply,
                     RecipientActionTarget::Item {
                         item_id: "ri_pending".into(),
@@ -4661,7 +5645,7 @@ mod tests {
                     "the correlated recipient result must end the displayed pending composition"
                 );
                 assert!(
-                    self.input.is_empty(),
+                    self.state.input_buffer.is_empty(),
                     "successful reply settlement must leave the composer genuinely empty"
                 );
             }
@@ -4794,7 +5778,8 @@ mod tests {
             );
             assert!(attached_proposal_pending(&empty.state).is_some());
             let mut drafting = Surface::new("body");
-            drafting.input = "draft".into();
+            drafting.state.input_buffer = "draft".into();
+            drafting.state.cursor_position = drafting.state.input_buffer.chars().count();
             drafting.paint(80, 24, false, false);
             assert!(drafting.key(KeyCode::Esc, false, false));
             assert!(cues(&drafting).is_empty(), "no cue over a draft");
@@ -4804,7 +5789,8 @@ mod tests {
         #[test]
         fn attached_proposal_nonempty_composer_owns_y_r_n_and_t9() {
             let mut surface = Surface::new("body");
-            surface.input = "draft ".into();
+            surface.state.input_buffer = "draft ".into();
+            surface.state.cursor_position = surface.state.input_buffer.chars().count();
             let text = surface.paint(80, 24, false, false);
             assert!(
                 text.contains("Finish or clear your draft to decide."),
@@ -4819,14 +5805,13 @@ mod tests {
                 attached_composer_key_with_team_requests(
                     KeyCode::Char(letter),
                     false,
-                    &mut surface.input,
                     &mut surface.state,
                     &surface.tx,
                     &mut surface.requests,
                 );
             }
             assert_eq!(
-                surface.input, "draft yrn",
+                surface.state.input_buffer, "draft yrn",
                 "attached proposal keys must preserve and edit the draft"
             );
             assert!(
@@ -4834,7 +5819,7 @@ mod tests {
                 "composer letters must not decide an attached proposal"
             );
             assert!(surface.tab.team_proposal_reviews.is_empty());
-            surface.input.clear();
+            surface.state.input_buffer.clear();
             surface.paint(80, 24, false, false);
             surface.assert_send();
         }
@@ -4900,7 +5885,8 @@ mod tests {
             let draft = format!("/team reply ri_pending {reply}");
             let mut surface = Surface::new("proposal body distinct from the operator reply");
             let snapshot = attached_proposal_pending(&surface.state).unwrap().clone();
-            surface.input = draft.clone();
+            surface.state.input_buffer = draft.clone();
+            surface.state.cursor_position = surface.state.input_buffer.chars().count();
             let local_draft = surface.paint(80, 24, false, false);
             let card_rows = |text: &str| {
                 text.lines()
@@ -5009,8 +5995,8 @@ mod tests {
                 message_type: SemanticMessageType::ArchitectureUpdate,
                 body: "CURRENT_REVIEW_FIRST\nCURRENT_REVIEW_LAST".into(),
             });
-            surface.scroll_offset = 100;
-            surface.auto_scroll = false;
+            surface.domain_tab.view_state.scroll_offset = 100;
+            surface.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
             let before = surface.paint(80, 24, false, false);
             assert!(before.contains("OLDER_REVIEW_"), "{before}");
             assert!(surface.key(KeyCode::Char('r'), false, false));
@@ -5053,11 +6039,11 @@ mod tests {
             .await;
             let mut surface = Surface::new("CURRENT_PROPOSAL_FIRST\nCURRENT_PROPOSAL_LAST");
             surface.paint(80, 24, false, false);
-            surface.input = format!("/team view {}", address.item().as_str());
+            surface.state.input_buffer = format!("/team view {}", address.item().as_str());
+            surface.state.cursor_position = surface.state.input_buffer.chars().count();
             let ComposerOutcome::LocalView(item_id) = attached_composer_key_with_team_requests(
                 KeyCode::Enter,
                 false,
-                &mut surface.input,
                 &mut surface.state,
                 &surface.tx,
                 &mut surface.requests,
@@ -5074,7 +6060,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert!(surface.input.is_empty());
+            assert!(surface.state.input_buffer.is_empty());
             surface.paint(80, 24, false, false);
             assert!(surface.state.recipient_surface.is_some());
 
@@ -5360,13 +6346,11 @@ mod tests {
                     key,
                     false,
                     false,
-                    "",
                     &mut surface.state,
                     &mut surface.tab,
                     &mut surface.requests,
                     &surface.tx,
-                    &mut surface.scroll_offset,
-                    &mut surface.auto_scroll,
+                    &mut surface.domain_tab.view_state,
                 ));
             }
             assert!(
@@ -5805,13 +6789,13 @@ mod tests {
             )
             .await
             .unwrap();
-            let mut input = "unfinished operator text".to_owned();
+            state.input_buffer = "unfinished operator text".to_owned();
+            state.cursor_position = state.input_buffer.chars().count();
             let (tx, mut rx) = mpsc::unbounded_channel();
             recipient_surface_key(
                 KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -5846,19 +6830,17 @@ mod tests {
                     KeyEvent::new(KeyCode::Char(duplicate), KeyModifiers::NONE),
                     workspace.path(),
                     &conversation,
-                    &mut input,
                     &mut state,
                     Some(&tx),
                 )
                 .await;
             }
             assert!(rx.try_recv().is_err());
-            assert_eq!(input, "unfinished operator text");
+            assert_eq!(state.input_buffer, "unfinished operator text");
             state.recipient_actions.clear();
             drop(rx);
             assert!(!queue_recipient_action(
                 &mut state,
-                &mut input,
                 ClientFrame::ShareRecipientStatus {
                     item_id: "ri_status_keys".to_owned(),
                     decline
@@ -5871,7 +6853,7 @@ mod tests {
             let actions = recipient_surface_actions(&state, &conversation, false);
             assert!(actions[2] == Some(RecipientSurfaceAction::ShareStatus));
             assert!(actions[4] == Some(RecipientSurfaceAction::DeclineStatus));
-            assert_eq!(input, "unfinished operator text");
+            assert_eq!(state.input_buffer, "unfinished operator text");
         }
     }
 
@@ -5931,7 +6913,6 @@ mod tests {
         key: char,
         workspace: &Path,
         conversation: &Conversation,
-        input: &mut String,
         state: &mut TuiState,
         tx: &mpsc::UnboundedSender<ClientFrame>,
     ) {
@@ -5940,7 +6921,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
             workspace,
             conversation,
-            input,
             state,
             Some(tx),
         )
@@ -6083,7 +7063,8 @@ mod tests {
         let item = "ri_retro_keys";
         let (workspace, mut conversation, mut state) = open_retro_surface(item).await;
         let workspace = workspace.path();
-        let mut input = "unfinished operator text".to_owned();
+        state.input_buffer = "unfinished operator text".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let card = |conversation: &Conversation, state: &TuiState| {
             peer_response_card_lines(
@@ -6107,7 +7088,7 @@ mod tests {
 
         // `[2]` leaves reply times out: no frame, the card and the surface
         // (same width: the overlay bits invalidate its cache) both re-render.
-        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
         assert!(rx.try_recv().is_err());
         assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
         let text = card(&conversation, &state);
@@ -6122,16 +7103,16 @@ mod tests {
         assert!(painted.contains("[s] Share with redactions"), "{painted}");
 
         // Toggling back empties (and drops) the overlay.
-        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
         assert!(!state.retro_left_out.contains_key(item));
         let painted = paint_surface(&mut state, &conversation, 100, 40);
         assert!(!painted.contains("with redactions") && !painted.contains("left out"));
 
         // A field-level change under a non-empty overlay still re-renders.
-        press_surface_key('1', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('1', workspace, &conversation, &mut state, &tx).await;
         let painted = paint_surface(&mut state, &conversation, 100, 40);
         assert!(painted.contains("[1] received items: left out"));
-        press_surface_key('3', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('3', workspace, &conversation, &mut state, &tx).await;
         let painted = paint_surface(&mut state, &conversation, 100, 40);
         assert!(
             painted.contains("[3] acknowledgement times: left out"),
@@ -6139,15 +7120,7 @@ mod tests {
         );
         assert!(painted.contains("[2] reply times: 3 replies, median 25m"));
         for unowned in ['0', '4', '9'] {
-            press_surface_key(
-                unowned,
-                workspace,
-                &conversation,
-                &mut input,
-                &mut state,
-                &tx,
-            )
-            .await;
+            press_surface_key(unowned, workspace, &conversation, &mut state, &tx).await;
         }
         assert_eq!(
             overlay(&state),
@@ -6156,7 +7129,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
 
         // `[s]` sends the overlay as the leave-out list, correlated.
-        press_surface_key('s', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('s', workspace, &conversation, &mut state, &tx).await;
         assert!(matches!(rx.try_recv().unwrap(),
             ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: false }
                 if item_id == item
@@ -6188,27 +7161,18 @@ mod tests {
         assert_eq!(actions[1], Some(RecipientSurfaceAction::Busy));
         assert!(actions[2].is_none() && actions[3].is_none() && actions[4].is_none());
         for duplicate in ['2', 's', 'n'] {
-            press_surface_key(
-                duplicate,
-                workspace,
-                &conversation,
-                &mut input,
-                &mut state,
-                &tx,
-            )
-            .await;
+            press_surface_key(duplicate, workspace, &conversation, &mut state, &tx).await;
         }
         assert!(rx.try_recv().is_err());
         assert_eq!(
             overlay(&state),
             Some(set(&[RetroField::Received, RetroField::AckTimes]))
         );
-        assert_eq!(input, "unfinished operator text");
+        assert_eq!(state.input_buffer, "unfinished operator text");
 
         // Settling releases the overlay and the acts.
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::ShareRetro,
             action_key.1.clone(),
             RecipientActionOutcome::Applied { reply: None },
@@ -6220,14 +7184,13 @@ mod tests {
 
         // `[n]` declines with no fields even over a non-empty overlay, which
         // a refusal keeps for the retry.
-        press_surface_key('2', workspace, &conversation, &mut input, &mut state, &tx).await;
-        press_surface_key('n', workspace, &conversation, &mut input, &mut state, &tx).await;
+        press_surface_key('2', workspace, &conversation, &mut state, &tx).await;
+        press_surface_key('n', workspace, &conversation, &mut state, &tx).await;
         assert!(matches!(rx.try_recv().unwrap(),
             ClientFrame::ShareRecipientRetro { item_id, leave_out, decline: true }
                 if item_id == item && leave_out.is_empty()));
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::ShareRetro,
             action_key.1.clone(),
             RecipientActionOutcome::Refused {
@@ -6240,7 +7203,6 @@ mod tests {
         drop(rx);
         assert!(!queue_recipient_action(
             &mut state,
-            &mut input,
             ClientFrame::ShareRecipientRetro {
                 item_id: item.to_owned(),
                 leave_out: vec![RetroField::ReplyTimes],
@@ -6254,7 +7216,7 @@ mod tests {
         let actions = recipient_surface_actions(&state, &conversation, false);
         assert_eq!(actions[2], Some(RecipientSurfaceAction::RetroShare));
         assert_eq!(overlay(&state), Some(set(&[RetroField::ReplyTimes])));
-        assert_eq!(input, "unfinished operator text");
+        assert_eq!(state.input_buffer, "unfinished operator text");
 
         // The card leaving takes the overlay and the surface preview with it.
         conversation
@@ -6524,7 +7486,8 @@ mod tests {
             ..Default::default()
         };
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let open = async |state: &mut TuiState| {
             crate::infrastructure::runtime::recipient_surface::open_received_surface(
@@ -6545,7 +7508,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
             workspace.path(),
             &conversation,
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -6623,13 +7585,12 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
             workspace.path(),
             &conversation,
-            &mut input,
             &mut state,
             Some(&tx),
         )
         .await;
         assert_eq!(
-            input,
+            state.input_buffer,
             format!("/team reply --discuss {opened_id} "),
             "Discuss concerns prefills the typed verdict form"
         );
@@ -7060,7 +8021,8 @@ mod tests {
         };
         let mut state = TuiState::new(80, 24);
         state.focus = FocusState::Input;
-        let mut input = "unfinished operator text".to_owned();
+        state.input_buffer = "unfinished operator text".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         open_response_surface(
             workspace.path(),
@@ -7090,21 +8052,14 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
         ] {
-            recipient_surface_key(
-                key,
-                workspace.path(),
-                &conversation,
-                &mut input,
-                &mut state,
-                Some(&tx),
-            )
-            .await;
+            recipient_surface_key(key, workspace.path(), &conversation, &mut state, Some(&tx))
+                .await;
         }
         assert!(
             rx.try_recv().is_err(),
             "non-Press and ineligible keys cannot dispatch"
         );
-        assert_eq!(input, "unfinished operator text");
+        assert_eq!(state.input_buffer, "unfinished operator text");
         assert!(
             state.recipient_surface.is_some(),
             "nonempty compose refusal retains focus"
@@ -7120,7 +8075,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
             workspace.path(),
             &conversation,
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -7135,14 +8089,13 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             workspace.path(),
             &conversation,
-            &mut input,
             &mut state,
             Some(&tx),
         )
         .await;
         assert!(state.recipient_surface.is_none());
         assert_eq!(state.focus, FocusState::Input);
-        assert_eq!(input, "unfinished operator text");
+        assert_eq!(state.input_buffer, "unfinished operator text");
     }
 
     #[tokio::test]
@@ -7195,10 +8148,11 @@ mod tests {
         }
 
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         for address in addresses {
-            input.push_str("unfinished operator text");
+            state.input_buffer.push_str("unfinished operator text");
             crate::infrastructure::runtime::recipient_surface::open_received_surface(
                 workspace.path(),
                 Some(&conversation),
@@ -7215,7 +8169,7 @@ mod tests {
                 RecipientSurfaceTarget::Item(opened) if opened == &address
             ));
             assert_eq!(state.focus, FocusState::Chat);
-            assert_eq!(input, "unfinished operator text");
+            assert_eq!(state.input_buffer, "unfinished operator text");
             let actions = recipient_surface_actions(&state, &conversation, false);
             assert!(matches!(actions[0], Some(RecipientSurfaceAction::Respond)));
             assert!(
@@ -7226,7 +8180,6 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -7235,22 +8188,21 @@ mod tests {
                 rx.try_recv().is_err(),
                 "nonempty input must be preserved rather than overwritten"
             );
-            assert_eq!(input, "unfinished operator text");
+            assert_eq!(state.input_buffer, "unfinished operator text");
             assert!(state.recipient_surface.is_some());
             recipient_surface_key(
                 KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
             .await;
             assert!(state.recipient_surface.is_none());
             assert_eq!(state.focus, FocusState::Input);
-            assert_eq!(input, "unfinished operator text");
+            assert_eq!(state.input_buffer, "unfinished operator text");
 
-            input.clear();
+            state.input_buffer.clear();
             crate::infrastructure::runtime::recipient_surface::open_received_surface(
                 workspace.path(),
                 Some(&conversation),
@@ -7267,17 +8219,19 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
             .await;
             assert!(rx.try_recv().is_err());
-            assert_eq!(input, format!("/team reply {} ", address.item().as_str()));
+            assert_eq!(
+                state.input_buffer,
+                format!("/team reply {} ", address.item().as_str())
+            );
             assert!(state.recipient_surface.is_none());
             assert_eq!(state.focus, FocusState::Input);
             assert!(state.pinned_peer_compose.is_none());
-            input.clear();
+            state.input_buffer.clear();
         }
     }
 
@@ -7329,7 +8283,8 @@ mod tests {
                 ..Conversation::default()
             };
             let mut state = TuiState::new(80, 24);
-            let mut input = String::new();
+            state.input_buffer = String::new();
+            state.cursor_position = state.input_buffer.chars().count();
             let (tx, mut rx) = mpsc::unbounded_channel();
 
             crate::infrastructure::runtime::recipient_surface::open_received_surface(
@@ -7348,7 +8303,6 @@ mod tests {
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -7362,7 +8316,6 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -7381,7 +8334,6 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -7395,7 +8347,6 @@ mod tests {
             ));
             crate::adapters::tui::handlers::recipient_actions::apply_action_result(
                 &mut state,
-                &mut input,
                 crate::adapters::daemon::protocol::RecipientAction::ContextSelect,
                 crate::adapters::daemon::protocol::RecipientActionTarget::Item {
                     item_id: address.item().as_str().to_owned(),
@@ -7409,7 +8360,6 @@ mod tests {
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
                 workspace.path(),
                 &conversation,
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -7541,17 +8491,17 @@ mod tests {
                 }
                 assert!(matches!(actions[0], Some(RecipientSurfaceAction::Discuss)));
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                let mut input = String::new();
+                state.input_buffer = String::new();
+                state.cursor_position = state.input_buffer.chars().count();
                 recipient_surface_key(
                     KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
                     workspace.path(),
                     &conversation,
-                    &mut input,
                     &mut state,
                     Some(&tx),
                 )
                 .await;
-                assert_eq!(input, "/team reply ri_bug_discuss ");
+                assert_eq!(state.input_buffer, "/team reply ri_bug_discuss ");
                 assert!(rx.try_recv().is_err(), "Discuss composes, it does not send");
                 assert!(state.recipient_surface.is_none());
             }
@@ -7574,11 +8524,13 @@ mod tests {
             ..Default::default()
         };
         assert!(pending_peer_response(&conversation).is_some());
-        let mut input = "ordinary model question".to_owned();
+
         let mut state = TuiState::new(80, 24);
+        state.input_buffer = "ordinary model question".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx),
             ComposerOutcome::Submit(text) if text == "ordinary model question"
         ));
         assert!(
@@ -7616,7 +8568,7 @@ mod tests {
                     .recipient_surface
                     .as_ref()
                     .and_then(|surface| retro_overlay(conversation, surface, retro_left_out));
-                render_recipient_surface(
+                let _ = render_recipient_surface(
                     frame,
                     area,
                     state.recipient_surface.as_mut().unwrap(),
@@ -7665,7 +8617,8 @@ mod tests {
         )
         .await;
         let mut state = TuiState::new(80, 24);
-        let mut input = "unsent local composition".to_owned();
+        state.input_buffer = "unsent local composition".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         crate::infrastructure::runtime::recipient_surface::open_received_surface(
             workspace.path(),
@@ -7684,7 +8637,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
             workspace.path(),
             &Conversation::default(),
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -7704,14 +8656,13 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             workspace.path(),
             &Conversation::default(),
-            &mut input,
             &mut state,
             Some(&tx),
         )
         .await;
         assert!(state.feedback_blocks.contains_key("recipient-actions"));
         assert_eq!(state.recipient_actions.len(), 1);
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
 
         crate::infrastructure::runtime::recipient_surface::open_received_surface(
             workspace.path(),
@@ -7737,9 +8688,8 @@ mod tests {
                 true,
                 workspace.path(),
                 &Conversation::default(),
-                &mut input,
                 &mut state,
-                Some(&tx)
+                Some(&tx),
             )
             .await,
             "a modal owner keeps the key from the surface"
@@ -7752,7 +8702,7 @@ mod tests {
             &state.recipient_surface.as_ref().unwrap().target,
             RecipientSurfaceTarget::Item(opened) if opened == &address
         ));
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
         assert_eq!(
             surface_action_notices(
                 &state.recipient_actions,
@@ -7769,9 +8719,8 @@ mod tests {
                 false,
                 workspace.path(),
                 &Conversation::default(),
-                &mut input,
                 &mut state,
-                Some(&tx)
+                Some(&tx),
             )
             .await,
             "without a modal owner the surface takes the key"
@@ -7796,11 +8745,10 @@ mod tests {
             None,
         ));
         assert_eq!(state.recipient_actions.len(), 2);
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
 
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::ContextSelect,
             target.clone(),
             RecipientActionOutcome::ContextSelection {
@@ -7819,7 +8767,7 @@ mod tests {
             paint_received_surface(&mut state).contains("peer-tainted"),
             "actual cached header must repaint after correlated selection"
         );
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
         assert!(action_is_pending(
             &state,
             RecipientAction::Defer,
@@ -7831,7 +8779,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
             workspace.path(),
             &Conversation::default(),
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -7845,7 +8792,6 @@ mod tests {
         ));
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::ContextRemove,
             target,
             RecipientActionOutcome::ContextSelection {
@@ -7864,7 +8810,7 @@ mod tests {
             !paint_received_surface(&mut state).contains("peer-tainted"),
             "actual cached header must repaint after correlated removal"
         );
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
         assert!(action_is_pending(
             &state,
             RecipientAction::Defer,
@@ -7885,7 +8831,6 @@ mod tests {
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
             workspace.path(),
             &Conversation::default(),
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -7906,7 +8851,7 @@ mod tests {
             &RecipientSurfaceTarget::Item(address),
             None,
         ));
-        assert_eq!(input, "unsent local composition");
+        assert_eq!(state.input_buffer, "unsent local composition");
     }
 
     #[tokio::test]
@@ -7927,7 +8872,8 @@ mod tests {
             ..Default::default()
         };
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         open_response_surface(
             workspace.path(),
@@ -7943,7 +8889,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
             workspace.path(),
             &conversation,
-            &mut input,
             &mut state,
             Some(&tx),
         )
@@ -7979,8 +8924,9 @@ mod tests {
                 "node-a".to_owned(),
                 crate::adapters::tui::state::PeerComposeAction::Respond,
             ));
-            input = command.to_owned();
-            let outcome = attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx);
+            state.input_buffer = command.to_owned();
+            state.cursor_position = state.input_buffer.chars().count();
+            let outcome = attached_composer_key(KeyCode::Enter, false, &mut state, &tx);
             if let ComposerOutcome::Submit(text) = outcome {
                 assert!(
                     matches!(
@@ -8236,15 +9182,16 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 24)).unwrap();
         let theme = crate::adapters::tui::theme::Theme::dark();
         let mut tab = TabRenderState::default();
+        let domain_tab =
+            crate::domain::models::tab::TabState::from_conversation(0, conversation.clone());
         terminal
             .draw(|frame| {
                 chat_pane::render_attached(
                     frame,
                     frame.area(),
-                    conversation,
+                    &domain_tab.conversation,
                     streaming,
-                    0,
-                    true,
+                    &domain_tab.view_state,
                     &theme,
                     &mut tab,
                     &HashMap::new(),
@@ -9055,19 +10002,19 @@ mod tests {
                 let mut state = TuiState::new(80, 24);
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let mut requests = AttachedTeamRequests::default();
-                let mut input = line.to_owned();
+                state.input_buffer = line.to_owned();
+                state.cursor_position = state.input_buffer.chars().count();
                 assert!(matches!(
                     attached_composer_key_with_team_requests(
                         KeyCode::Enter,
                         read_only,
-                        &mut input,
                         &mut state,
                         &tx,
                         &mut requests,
                     ),
                     ComposerOutcome::Handled
                 ));
-                assert!(input.is_empty());
+                assert!(state.input_buffer.is_empty());
                 assert!(matches!(
                     rx.try_recv(),
                     Err(mpsc::error::TryRecvError::Empty)
@@ -9196,15 +10143,15 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut requests = AttachedTeamRequests::default();
         for command in ["/team board --last", "/team status"] {
-            let mut input = command.to_owned();
+            state.input_buffer = command.to_owned();
+            state.cursor_position = state.input_buffer.chars().count();
             assert!(matches!(
                 attached_composer_key_with_team_requests(
                     KeyCode::Enter,
                     true,
-                    &mut input,
                     &mut state,
                     &tx,
-                    &mut requests
+                    &mut requests,
                 ),
                 ComposerOutcome::FrameSent
             ));
@@ -9212,46 +10159,52 @@ mod tests {
                 rx.try_recv(),
                 Ok(ClientFrame::TeamBoard { .. } | ClientFrame::TeamStatus { .. })
             ));
-            assert!(input.is_empty());
+            assert!(state.input_buffer.is_empty());
         }
         for command in ["/team send a hello", "/team untrust a"] {
-            let mut input = command.to_owned();
+            state.input_buffer = command.to_owned();
+            state.cursor_position = state.input_buffer.chars().count();
             assert!(matches!(
                 attached_composer_key_with_team_requests(
                     KeyCode::Enter,
                     true,
-                    &mut input,
                     &mut state,
                     &tx,
-                    &mut requests
+                    &mut requests,
                 ),
                 ComposerOutcome::Handled
             ));
-            assert_eq!(input, command);
+            assert_eq!(state.input_buffer, command);
             assert!(rx.try_recv().is_err());
         }
         let draft = "ordinary read-only draft";
-        let mut input = draft.to_owned();
+        state.input_buffer = draft.to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         assert!(matches!(
             attached_composer_key_with_team_requests(
                 KeyCode::Enter,
                 true,
-                &mut input,
                 &mut state,
                 &tx,
-                &mut requests
+                &mut requests,
             ),
             ComposerOutcome::Handled
         ));
-        assert_eq!(input, draft, "read-only submission retains the draft");
+        assert_eq!(
+            state.input_buffer, draft,
+            "read-only submission retains the draft"
+        );
         assert!(rx.try_recv().is_err(), "read-only draft is never forwarded");
     }
 
     #[test]
     fn attached_paste_keeps_multiline_team_send_body_intact() {
-        let mut input = "/team send --type story_assignment --subject sprint-7 jun-dev ".to_owned();
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer =
+            "/team send --type story_assignment --subject sprint-7 jun-dev ".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let body = "line one\n  indented line\n\nfinal line";
-        attach_keys::handle_attached_paste(&mut TuiState::new(80, 24), &mut input, body, false);
+        attach_keys::handle_attached_paste(&mut state, body, false);
         let AttachedTeamLine::Frame(ClientFrame::TeamSend {
             request,
             recipients,
@@ -9260,7 +10213,7 @@ mod tests {
             subject,
             stories: None,
             holders_of: None,
-        }) = attached_team_line_for_request(&input, "paste-1".into())
+        }) = attached_team_line_for_request(&state.input_buffer, "paste-1".into())
         else {
             panic!("pasted send command must stay a typed daemon frame");
         };
@@ -9538,7 +10491,7 @@ mod tests {
         let backend = TestBackend::new(80, 20);
         let mut term = Terminal::new(backend).unwrap();
         let theme = Theme::dark();
-        let streaming = StreamingState::default();
+        let domain_tab = crate::domain::models::tab::TabState::from_conversation(0, conv);
         let mut trs = TabRenderState::default();
         let tbs = HashMap::new();
         let fbs = BTreeMap::new();
@@ -9546,10 +10499,9 @@ mod tests {
             chat_pane::render_attached(
                 f,
                 f.area(),
-                &conv,
-                &streaming,
-                0,
-                true,
+                &domain_tab.conversation,
+                &domain_tab.streaming,
+                &domain_tab.view_state,
                 &theme,
                 &mut trs,
                 &tbs,
@@ -9804,6 +10756,9 @@ mod tests {
                         &shell,
                         crate::adapters::tui::keymap::Host::Attached,
                         &LogFacts::default(),
+                        &mut crate::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                            shell.chat_pane,
+                        ),
                         |_| {},
                     );
                 })
@@ -9898,21 +10853,17 @@ mod tests {
                             PeerComposeAction::Respond,
                         ));
                         let (tx, mut rx) = mpsc::unbounded_channel();
-                        let mut input = line.clone();
-                        let outcome = attached_composer_key(
-                            KeyCode::Enter,
-                            read_only,
-                            &mut input,
-                            &mut state,
-                            &tx,
-                        );
+                        state.input_buffer = line.clone();
+                        state.cursor_position = state.input_buffer.chars().count();
+                        let outcome =
+                            attached_composer_key(KeyCode::Enter, read_only, &mut state, &tx);
                         assert!(
                             matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
                             "{context}: zero frames"
                         );
                         if accepted {
                             assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
-                            assert!(input.is_empty(), "{context}");
+                            assert!(state.input_buffer.is_empty(), "{context}");
                             assert!(state.pinned_peer_compose.is_none(), "{context}");
                             assert!(state.feedback_blocks.is_empty(), "{context}");
                             assert_eq!(state.notifications.len(), 1, "{context}");
@@ -9927,7 +10878,7 @@ mod tests {
                             assert!(state.pinned_peer_compose.is_some(), "{context}");
                             if read_only {
                                 assert!(matches!(outcome, ComposerOutcome::Handled), "{context}");
-                                assert_eq!(input, *line, "{context}");
+                                assert_eq!(state.input_buffer, *line, "{context}");
                                 assert_eq!(state.notifications.len(), 1, "{context}");
                                 let record = state.notifications.records().next().unwrap();
                                 assert_eq!(
@@ -9941,7 +10892,7 @@ mod tests {
                                     matches!(outcome, ComposerOutcome::Submit(text) if text == *line),
                                     "{context}"
                                 );
-                                assert!(input.is_empty(), "{context}");
+                                assert!(state.input_buffer.is_empty(), "{context}");
                                 assert!(state.notifications.is_empty(), "{context}");
                             }
                         }
@@ -9985,26 +10936,27 @@ mod tests {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        fn draw_attached(state: &TuiState) -> Vec<String> {
+        fn draw_attached(state: &TuiState) -> Vec<(String, std::ops::Range<u16>)> {
             let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
             let mut tab = TabRenderState::default();
+            let domain_tab =
+                crate::domain::models::tab::TabState::from_conversation(0, Conversation::default());
             let tools = HashMap::new();
             let mut visible = Vec::new();
             term.draw(|f| {
                 visible = chat_pane::render_attached(
                     f,
                     f.area(),
-                    &Conversation::default(),
-                    &StreamingState::default(),
-                    0,
-                    true,
+                    &domain_tab.conversation,
+                    &domain_tab.streaming,
+                    &domain_tab.view_state,
                     &state.theme,
                     &mut tab,
                     &tools,
                     &state.feedback_blocks,
                     &HashMap::new(),
                 )
-                .visible_feedback_ids;
+                .visible_feedback_rows;
             })
             .unwrap();
             visible
@@ -10040,13 +10992,14 @@ mod tests {
         );
 
         // A leading-space `/team log` on the writable rail: local, no frame.
-        let mut input = "  /team log".to_owned();
+        state.input_buffer = "  /team log".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let ComposerOutcome::LocalLog(args) =
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx)
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx)
         else {
             panic!("`/team log` must be a local read on the attached rail");
         };
-        assert!(input.is_empty());
+        assert!(state.input_buffer.is_empty());
         let notices = crate::infrastructure::runtime::transparency_bridge::attached_team_log(
             &service, &mut state, &args,
         )
@@ -10064,7 +11017,7 @@ mod tests {
 
         // Painted, but the draw failed: nothing presented.
         let visible = draw_attached(&state);
-        assert!(visible.iter().any(|id| id == TEAM_LOG_BLOCK_ID));
+        assert!(visible.iter().any(|(id, _)| id == TEAM_LOG_BLOCK_ID));
         after_attached_draw(&mut state, false, &visible);
         assert_eq!(
             poll(&mut observer, &mut state).await,
@@ -10084,9 +11037,10 @@ mod tests {
 
         // A local log error renders as a plain local line, never a
         // turn-fatal notice and never a frame.
-        let mut input = "/team log --filter=bogus=term".to_owned();
+        state.input_buffer = "/team log --filter=bogus=term".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let ComposerOutcome::LocalLog(args) =
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx)
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx)
         else {
             panic!("a parseable log line is local");
         };
@@ -10098,35 +11052,38 @@ mod tests {
         assert!(matches!(state.status, StatusState::Streaming));
 
         // Read-only: the composer edits and the local log works…
-        let mut input = String::new();
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
         for c in "/team logx".chars() {
-            attached_composer_key(KeyCode::Char(c), true, &mut input, &mut state, &tx);
+            attached_composer_key(KeyCode::Char(c), true, &mut state, &tx);
         }
-        attached_composer_key(KeyCode::Backspace, true, &mut input, &mut state, &tx);
-        assert_eq!(input, "/team log");
+        attached_composer_key(KeyCode::Backspace, true, &mut state, &tx);
+        assert_eq!(state.input_buffer, "/team log");
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, true, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, true, &mut state, &tx),
             ComposerOutcome::LocalLog(_)
         ));
         // Read-only attachments may inspect inventory, but item-argument
         // context frames remain writer-only.
-        let mut input = "/team context".to_owned();
+        state.input_buffer = "/team context".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, true, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, true, &mut state, &tx),
             ComposerOutcome::FrameSent
         ));
-        assert!(input.is_empty());
+        assert!(state.input_buffer.is_empty());
         assert!(matches!(
             rx.try_recv(),
             Ok(ClientFrame::InspectRecipientContext)
         ));
         for line in ["/team context ri_x", "/team context off ri_x"] {
-            let mut input = line.to_owned();
+            state.input_buffer = line.to_owned();
+            state.cursor_position = state.input_buffer.chars().count();
             assert!(matches!(
-                attached_composer_key(KeyCode::Enter, true, &mut input, &mut state, &tx),
+                attached_composer_key(KeyCode::Enter, true, &mut state, &tx),
                 ComposerOutcome::Handled
             ));
-            assert_eq!(input, line);
+            assert_eq!(state.input_buffer, line);
             assert!(
                 state
                     .notifications
@@ -10141,14 +11098,16 @@ mod tests {
         assert!(rx.try_recv().is_err(), "item context writes are refused");
 
         // Writable text still submits; an intercepted verb still frames.
-        let mut input = "hello model".to_owned();
+        state.input_buffer = "hello model".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx),
             ComposerOutcome::Submit(text) if text == "hello model"
         ));
-        let mut input = "/team ack ri_x".to_owned();
+        state.input_buffer = "/team ack ri_x".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx),
             ComposerOutcome::FrameSent
         ));
         assert!(matches!(
@@ -10240,10 +11199,11 @@ mod tests {
         use crossterm::event::KeyCode;
 
         let mut state = TuiState::new(80, 24);
-        let mut input = "/team view ri_view_only".to_owned();
+        state.input_buffer = "/team view ri_view_only".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         assert!(matches!(
-            attached_composer_key(KeyCode::Enter, false, &mut input, &mut state, &tx),
+            attached_composer_key(KeyCode::Enter, false, &mut state, &tx),
             ComposerOutcome::LocalView(item_id) if item_id == "ri_view_only"
         ));
         assert!(rx.try_recv().is_err(), "View is local display, not consent");
@@ -10280,7 +11240,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut input = "preserved local input".to_owned();
+        state.input_buffer = "preserved local input".to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let key = |chord| KeyEvent::new(KeyCode::Char(chord), KeyModifiers::CONTROL);
         assert!(
@@ -10289,7 +11250,6 @@ mod tests {
                 false,
                 workspace.path(),
                 &Conversation::default(),
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -10303,7 +11263,6 @@ mod tests {
                 false,
                 workspace.path(),
                 &Conversation::default(),
-                &mut input,
                 &mut state,
                 Some(&tx),
             )
@@ -10314,7 +11273,7 @@ mod tests {
             state.recipient_surface.is_none(),
             "Ctrl+C is back one frame: it closes the surface like Esc"
         );
-        assert_eq!(input, "preserved local input");
+        assert_eq!(state.input_buffer, "preserved local input");
         assert!(rx.try_recv().is_err(), "neither chord is a peer action");
     }
 }
@@ -10332,14 +11291,9 @@ mod attached_parity_tests {
         reader: bool,
         tx: &mpsc::UnboundedSender<ClientFrame>,
     ) -> ComposerOutcome {
-        attached_composer_key_with_team_requests(
-            KeyCode::Enter,
-            reader,
-            &mut line.to_owned(),
-            state,
-            tx,
-            requests,
-        )
+        state.input_buffer = line.to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
+        attached_composer_key_with_team_requests(KeyCode::Enter, reader, state, tx, requests)
     }
     fn preview(
         state: &mut TuiState,
@@ -10685,27 +11639,24 @@ mod display_width_tests {
     const C: &str = "界";
     const A: &str = "e\u{301}";
 
-    fn press(input: &mut String, state: &mut TuiState, code: KeyCode, read_only: bool) {
+    fn press(state: &mut TuiState, code: KeyCode, read_only: bool) {
         let (tx, mut rx) = mpsc::unbounded_channel::<ClientFrame>();
         let mut requests = AttachedTeamRequests::default();
-        attached_composer_key_with_team_requests(code, read_only, input, state, &tx, &mut requests);
+        attached_composer_key_with_team_requests(code, read_only, state, &tx, &mut requests);
         assert!(rx.try_recv().is_err(), "editing never emits a frame");
     }
 
     /// The production-shaped draw: `compute_layout` (Focus, no sidebar) then the
-    /// shared `render_attached_composer` seam. Returns the painted rows, the
+    /// shared `input_box::render` seam. Returns the painted rows, the
     /// caret and the composer rectangle.
-    fn draw(
-        state: &TuiState,
-        input: &str,
-        width: u16,
-        height: u16,
-    ) -> (Vec<String>, Position, Rect) {
+    fn draw(state: &TuiState, width: u16, height: u16) -> (Vec<String>, Position, Rect) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut input_area = Rect::default();
         terminal
             .draw(|frame| {
-                let display_input = attached_display_input(state, input);
+                let display_input =
+                    crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
+                        .unwrap_or(&state.input_buffer);
                 let layout = crate::adapters::tui::layout::compute_layout(
                     frame.area(),
                     &state.theme,
@@ -10716,13 +11667,15 @@ mod display_width_tests {
                 )
                 .unwrap();
                 input_area = layout.input_area;
-                render_attached_composer(
+                input_box::render(
                     frame,
                     layout.input_area,
                     display_input,
+                    state.cursor_position,
                     state.focus.clone(),
                     &state.theme,
                     state.multiline_mode,
+                    state.input_scroll_offset,
                     None,
                 );
             })
@@ -10748,43 +11701,49 @@ mod display_width_tests {
     fn display_width_attached_backspace_removes_one_whole_grapheme() {
         let mut state = TuiState::new(80, 24);
         for (tail, expected) in [(G, "x"), (A, "x"), (C, "x"), ("y", "x")] {
-            let mut input = format!("x{tail}");
-            press(&mut input, &mut state, KeyCode::Backspace, false);
-            assert_eq!(input, expected, "tail {tail:?}");
+            state.input_buffer = format!("x{tail}");
+            state.cursor_position = state.input_buffer.chars().count();
+            press(&mut state, KeyCode::Backspace, false);
+            assert_eq!(state.input_buffer, expected, "tail {tail:?}");
         }
         // Read-only composers edit too; only submission is refused.
-        let mut input = format!("x{G}");
-        press(&mut input, &mut state, KeyCode::Backspace, true);
-        assert_eq!(input, "x");
+        state.input_buffer = format!("x{G}");
+        state.cursor_position = state.input_buffer.chars().count();
+        press(&mut state, KeyCode::Backspace, true);
+        assert_eq!(state.input_buffer, "x");
         // Emptying the draft still drops the pinned peer compose.
-        let mut input = A.to_owned();
-        press(&mut input, &mut state, KeyCode::Backspace, false);
-        assert!(input.is_empty());
+        state.input_buffer = A.to_owned();
+        state.cursor_position = state.input_buffer.chars().count();
+        press(&mut state, KeyCode::Backspace, false);
+        assert!(state.input_buffer.is_empty());
         assert!(state.pinned_peer_compose.is_none());
     }
 
     #[test]
     fn display_width_attached_paste_then_backspace_keeps_source_bytes_of_the_rest() {
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
-        attach_keys::handle_attached_paste(&mut state, &mut input, &format!("a{A}{G}"), false);
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
+        attach_keys::handle_attached_paste(&mut state, &format!("a{A}{G}"), false);
         assert_eq!(
-            input,
+            state.input_buffer,
             format!("a{A}{G}"),
             "paste appends source bytes verbatim"
         );
-        press(&mut input, &mut state, KeyCode::Backspace, false);
-        assert_eq!(input, format!("a{A}"));
-        press(&mut input, &mut state, KeyCode::Backspace, false);
-        assert_eq!(input, "a");
+        press(&mut state, KeyCode::Backspace, false);
+        assert_eq!(state.input_buffer, format!("a{A}"));
+        press(&mut state, KeyCode::Backspace, false);
+        assert_eq!(state.input_buffer, "a");
     }
 
     #[test]
     fn display_width_attached_draw_wraps_and_shows_the_visual_tail_with_end_caret() {
-        let state = TuiState::new(80, 24);
+        let mut state = TuiState::new(80, 24);
         // 60 columns: composer inner width 58; 30 C wrap to a second row.
         let input = C.repeat(30);
-        let (rows, caret, area) = draw(&state, &input, 60, 20);
+        state.input_buffer = input.clone();
+        state.cursor_position = state.input_buffer.chars().count();
+        let (rows, caret, area) = draw(&state, 60, 20);
         assert_eq!(area.height, 4, "two text rows + borders");
         let text_rows = &rows[usize::from(area.y) + 1..usize::from(area.y) + 3];
         assert_eq!(text_rows[0].matches('界').count(), 29, "{rows:?}");
@@ -10797,7 +11756,9 @@ mod display_width_tests {
 
         // More than eight visual rows: the final window is shown, caret at its end.
         let long = format!("{}{G}", "x".repeat(58 * 9));
-        let (rows, caret, area) = draw(&state, &long, 60, 24);
+        state.input_buffer = long;
+        state.cursor_position = state.input_buffer.chars().count();
+        let (rows, caret, area) = draw(&state, 60, 24);
         assert_eq!(area.height, 10, "capped at eight text rows + borders");
         let text = rows[usize::from(area.y) + 1..usize::from(area.y) + 9].concat();
         assert!(
@@ -10812,8 +11773,10 @@ mod display_width_tests {
         assert!(caret.x > area.x && caret.x < area.x + area.width - 1);
 
         // Resize: the same draft re-wraps at the new width (no stale scroll).
-        let (_, _, narrow) = draw(&state, &input, 60, 20);
-        let (_, _, wide) = draw(&state, &input, 130, 20);
+        state.input_buffer = input;
+        state.cursor_position = state.input_buffer.chars().count();
+        let (_, _, narrow) = draw(&state, 60, 20);
+        let (_, _, wide) = draw(&state, 130, 20);
         assert_eq!((narrow.height, wide.height), (4, 3));
     }
 
@@ -10832,9 +11795,10 @@ mod display_width_tests {
                 pinned_compose: None,
             },
         );
-        let mut input = String::new();
-        press(&mut input, &mut state, KeyCode::Backspace, false);
-        assert!(input.is_empty());
+        state.input_buffer = String::new();
+        state.cursor_position = state.input_buffer.chars().count();
+        press(&mut state, KeyCode::Backspace, false);
+        assert!(state.input_buffer.is_empty());
         assert_eq!(
             crate::adapters::tui::handlers::recipient_actions::pending_composition(&state),
             Some(format!("pending {G}").as_str()),

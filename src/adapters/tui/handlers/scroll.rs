@@ -90,6 +90,16 @@ pub(crate) fn dispatch_view_scroll(
     _conversation: &Conversation,
     delta: ScrollDelta,
 ) {
+    dispatch_scroll(&mut tab_manager.active_tab_mut().view_state, state, delta);
+}
+
+/// Reconcile an owned tab view in either host using the render-derived metrics.
+/// The attached host has one domain tab, rather than a second scroll authority.
+pub(crate) fn dispatch_scroll(
+    view: &mut crate::domain::models::view_state::ViewState,
+    state: &mut TuiState,
+    delta: ScrollDelta,
+) {
     let layout = LayoutMetrics {
         viewport_height: state.viewport_height as usize,
         total_content_height: state.total_content_height,
@@ -97,15 +107,9 @@ pub(crate) fn dispatch_view_scroll(
         focused_turn_top: None,
     };
 
-    let resolved = tab_manager
-        .active_tab_mut()
-        .view_state
-        .reconcile(Some(ViewEvent::Scroll(delta)), &layout);
+    let resolved = view.reconcile(Some(ViewEvent::Scroll(delta)), &layout);
 
     state.scroll_snapshot = resolved;
-    state.auto_snapshot = matches!(
-        tab_manager.active_tab().view_state.mode,
-        AnchorMode::Following
-    );
+    state.auto_snapshot = matches!(view.mode, AnchorMode::Following);
     state.needs_redraw = true;
 }

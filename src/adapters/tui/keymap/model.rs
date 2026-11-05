@@ -357,7 +357,7 @@ pub enum Context {
     /// Rows shared by every append-only text field (A4): `Ctrl+W/U/H` act,
     /// `Ctrl+A/E/K` are `(n/a)`. Parent of those fields' contexts.
     FieldEdit,
-    /// Caret-editing query fields, isolated from the legacy attached composer.
+    /// Caret-editing query fields, distinct from the shared composer context.
     CaretField,
     /// In-frame Log/Help filtering; Enter keeps the filter, Esc clears and leaves it.
     InspectorSearch,

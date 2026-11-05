@@ -10,6 +10,7 @@ const MAX_VISIBLE_MATCHES: usize = 5;
 
 /// Render the reverse search popup above the input box.
 /// `show_caret` controls the painted query caret; no hardware cursor is placed.
+/// Returns its painted outer rectangle, or `None` when no cells are painted.
 // Covers: UX-DR74 (reverse search popup)
 pub fn render(
     frame: &mut Frame,
@@ -17,9 +18,9 @@ pub fn render(
     state: &ReverseSearchState,
     theme: &Theme,
     show_caret: bool,
-) {
+) -> Option<Rect> {
     if !state.is_open() {
-        return;
+        return None;
     }
     let selected_match = state
         .selected_match
@@ -117,6 +118,7 @@ pub fn render(
 
     frame.render_widget(Clear, overlay_area);
     frame.render_widget(widget, overlay_area);
+    (!overlay_area.is_empty()).then_some(overlay_area)
 }
 
 #[cfg(test)]
@@ -151,7 +153,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, rows)).unwrap();
         let theme = Theme::dark();
         terminal
-            .draw(|frame| render(frame, frame.area(), state, &theme, true))
+            .draw(|frame| {
+                let _ = render(frame, frame.area(), state, &theme, true);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         let glyph_rows = (0..rows)
@@ -213,7 +217,7 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
                 terminal
                     .draw(|frame| {
-                        render(frame, frame.area(), &state, &Theme::dark(), show_caret);
+                        let _ = render(frame, frame.area(), &state, &Theme::dark(), show_caret);
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();

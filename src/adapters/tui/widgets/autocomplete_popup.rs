@@ -9,11 +9,15 @@ use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggesti
 const MAX_VISIBLE_ITEMS: usize = 8;
 
 /// Render the autocomplete popup above the input box.
+/// Returns its painted outer rectangle, or `None` when no cells are painted.
 // Covers: UX-DR75 (inline autocomplete)
-pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, theme: &Theme) {
-    let Some(kind) = state.kind else {
-        return;
-    };
+pub fn render(
+    frame: &mut Frame,
+    input_area: Rect,
+    state: &AutocompleteState,
+    theme: &Theme,
+) -> Option<Rect> {
+    let kind = state.kind?;
 
     let title = match kind {
         AutocompleteKind::SlashCommand => " Commands ",
@@ -48,7 +52,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
 
         frame.render_widget(Clear, popup_area);
         frame.render_widget(content, popup_area);
-        return;
+        return (!popup_area.is_empty()).then_some(popup_area);
     }
 
     let visible_count = state.suggestions.len().min(MAX_VISIBLE_ITEMS);
@@ -100,6 +104,7 @@ pub fn render(frame: &mut Frame, input_area: Rect, state: &AutocompleteState, th
 
     frame.render_widget(Clear, popup_area);
     frame.render_stateful_widget(list, popup_area, &mut list_state);
+    (!popup_area.is_empty()).then_some(popup_area)
 }
 
 /// Calculate the popup's outer rectangle above the composer.
@@ -295,7 +300,9 @@ mod tests {
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(term_width, 24)).unwrap();
         let theme = Theme::dark();
         terminal
-            .draw(|frame| render(frame, composer, state, &theme))
+            .draw(|frame| {
+                let _ = render(frame, composer, state, &theme);
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let (mut top, mut left, mut right) = (None, None, None);

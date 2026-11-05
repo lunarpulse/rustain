@@ -46,26 +46,48 @@ fn open(h: &mut TestHarness, tabs: &mut TabManager, full: bool) {
 }
 
 fn output_dir() -> Option<PathBuf> {
-    let path = PathBuf::from(std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR")?);
-    // Canonicalize after creation as well: a symlink cannot escape scratch.
-    let scratch = std::fs::canonicalize("/home/lunarpulse/.omp-sessions/21-4")
-        .expect("session scratch exists for explicit frame export");
-    assert!(path.is_absolute() && path.starts_with(&scratch));
+    selected_output_dir(std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR").map(PathBuf::from))
+}
+
+fn selected_output_dir(path: Option<PathBuf>) -> Option<PathBuf> {
+    let path = path?;
+    assert!(path.is_absolute());
     assert!(
         !path
             .components()
             .any(|c| c == std::path::Component::ParentDir)
     );
-    let ancestor = path.ancestors().find(|p| p.exists()).unwrap();
-    assert!(
-        std::fs::canonicalize(ancestor)
-            .unwrap()
-            .starts_with(&scratch)
-    );
     std::fs::create_dir_all(&path).unwrap();
-    let path = std::fs::canonicalize(path).unwrap();
-    assert!(path.starts_with(scratch));
-    Some(path)
+    Some(std::fs::canonicalize(path).unwrap())
+}
+
+#[test]
+fn frame_output_dir_is_portable_and_opt_in() {
+    // Keep this external to a launcher's session-specific TMPDIR.
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let path = root.path().join("external-evidence/frames");
+    assert_eq!(selected_output_dir(None), None);
+    assert!(
+        !path.exists(),
+        "no opt-in must not create an export directory"
+    );
+    let selected = selected_output_dir(Some(path.clone())).unwrap();
+    assert!(selected.is_dir());
+    assert_eq!(selected, std::fs::canonicalize(&path).unwrap());
+    assert_eq!(selected_output_dir(Some(path)), Some(selected));
+}
+
+#[test]
+fn frame_output_dir_rejects_relative_paths_and_parent_traversal() {
+    let root = tempfile::tempdir().unwrap();
+    for path in [
+        PathBuf::from("relative-frame-export"),
+        root.path().join("frames/../escaped"),
+    ] {
+        assert!(std::panic::catch_unwind(|| selected_output_dir(Some(path))).is_err());
+    }
+    assert!(!root.path().join("frames").exists());
+    assert!(!root.path().join("escaped").exists());
 }
 
 fn capture(
@@ -77,6 +99,16 @@ fn capture(
     dir: &Option<PathBuf>,
 ) -> String {
     h.render_active_tab(tabs);
+    export_frame(h, family, stage, full, dir)
+}
+
+fn export_frame(
+    h: &mut TestHarness,
+    family: &str,
+    stage: &str,
+    full: bool,
+    dir: &Option<PathBuf>,
+) -> String {
     let buffer = h.terminal.backend().buffer();
     let rows: Vec<String> = (0..buffer.area.height)
         .map(|y| {
@@ -112,13 +144,16 @@ fn capture(
     );
     if let Some(dir) = dir {
         let cursor = h.terminal.get_cursor_position().unwrap();
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "width": h.state.terminal_width, "height": h.state.terminal_height,
             "stage": stage, "full": full, "screen": screen,
             "draft": h.state.input_buffer, "cursor": [cursor.x, cursor.y],
             "cursor_hidden": !h.terminal.backend().cursor_visible(),
             "reversed_cells": reversed_cells,
         });
+        if let Some(host) = family.strip_prefix("c-") {
+            record["host"] = host.into();
+        }
         let name = format!(
             "{family}-{}x{}-{}-{stage}.json",
             h.state.terminal_width,
@@ -1305,6 +1340,190 @@ async fn bb2b_real_frames_for_smoke_predicates() {
             );
             assert_eq!(h.state.modal_stack.top().unwrap().id, owner);
             assert_eq!(h.state.input_buffer, draft);
+        }
+    }
+}
+
+fn c_capture_local(
+    h: &mut TestHarness,
+    tabs: &mut TabManager,
+    core: &rustain::infrastructure::runtime::agent_core::AgentCore,
+    stage: &str,
+    dir: &Option<PathBuf>,
+) -> String {
+    rustain::infrastructure::runtime::event_loop::render(
+        &mut h.terminal,
+        &mut h.state,
+        &h.conversation,
+        &h.streaming,
+        "fixture-model",
+        "fixture-provider",
+        &rustain::adapters::noop::NoOpSecurity,
+        1,
+        0,
+        Some(tabs),
+        &rustain::domain::services::session_index::SessionIndex::new(),
+        128_000,
+        core,
+    )
+    .unwrap();
+    export_frame(h, "c-local", stage, false, dir)
+}
+
+#[tokio::test]
+async fn c_real_local_frames_for_smoke_predicates() {
+    use rustain::adapters::tui::{
+        app::{InputAction, handle_input},
+        handlers::scroll,
+        notifications::{self, NoticeSeverity, NoticeSource},
+    };
+    use rustain::domain::{
+        events::DomainInputEvent,
+        models::{FocusState, view_state::ScrollDelta},
+    };
+    let dir = output_dir();
+    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
+    for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+        let mut h = TestHarness::with_size(width, height);
+        let reply = (0..60)
+            .map(|row| format!("Bb1a-row-{row:02}  \n"))
+            .collect::<String>()
+            + REPLY;
+        h.complete_turn(
+            TURN,
+            vec![
+                StreamChunk::Text {
+                    content: reply,
+                    parent_tool_use_id: None,
+                },
+                StreamChunk::TurnComplete {
+                    stop_reason: StopReason::EndTurn,
+                },
+            ],
+        );
+        let mut tabs = TabManager::new(CancellationToken::new());
+        // The harness retains the live conversation mirror used by the actual
+        // scroll effect; the same manager owns the view and production paint.
+        tabs.active_tab_mut().conversation = h.conversation.clone();
+        h.state.active_tab_id = tabs.active_tab_id();
+        c_capture_local(&mut h, &mut tabs, &core, "initial", &dir);
+        for c in "/cnotice ".chars() {
+            press(&mut h.state, Key::Char(c));
+        }
+        assert_eq!(h.state.input_buffer, "/cnotice ");
+        assert_eq!(h.state.cursor_position, 9);
+        c_capture_local(&mut h, &mut tabs, &core, "notice-command", &dir);
+        assert!(matches!(
+            press(&mut h.state, Key::Enter),
+            InputAction::SubmitWithContext { command: Some(command), .. } if command == "cnotice"
+        ));
+        notifications::notify(
+            &mut h.state,
+            NoticeSource::System,
+            NoticeSeverity::Warning,
+            "Unknown command: /cnotice",
+        );
+        c_capture_local(&mut h, &mut tabs, &core, "notice", &dir);
+        for k in [Key::Ctrl('x'), Key::Char('n')] {
+            press(&mut h.state, k);
+        }
+        c_capture_local(&mut h, &mut tabs, &core, "notice-log", &dir);
+        for k in [Key::Char('x'), Key::Esc] {
+            press(&mut h.state, k);
+        }
+        c_capture_local(&mut h, &mut tabs, &core, "notice-dismiss-return", &dir);
+        for c in "C-kept draft".chars() {
+            press(&mut h.state, Key::Char(c));
+        }
+        c_capture_local(&mut h, &mut tabs, &core, "typed", &dir);
+        press(&mut h.state, Key::Ctrl('a'));
+        assert_eq!(h.state.cursor_position, 0);
+        c_capture_local(&mut h, &mut tabs, &core, "readline-home", &dir);
+        press(&mut h.state, Key::Ctrl('e'));
+        assert_eq!(h.state.cursor_position, 12);
+        press(&mut h.state, Key::Left);
+        assert_eq!(h.state.cursor_position, 11);
+        c_capture_local(&mut h, &mut tabs, &core, "left", &dir);
+        press(&mut h.state, Key::End);
+        press(&mut h.state, Key::Home);
+        press(&mut h.state, Key::Right);
+        assert_eq!(h.state.cursor_position, 1);
+        c_capture_local(&mut h, &mut tabs, &core, "caret", &dir);
+        handle_input(&mut h.state, &DomainInputEvent::Paste("X".into()));
+        assert_eq!(
+            (&*h.state.input_buffer, h.state.cursor_position),
+            ("CX-kept draft", 2)
+        );
+        c_capture_local(&mut h, &mut tabs, &core, "paste", &dir);
+        press(&mut h.state, Key::Ctrl('k'));
+        assert_eq!((&*h.state.input_buffer, h.state.cursor_position), ("CX", 2));
+        c_capture_local(&mut h, &mut tabs, &core, "kill-tail", &dir);
+        press(&mut h.state, Key::Ctrl('u'));
+        assert!(h.state.input_buffer.is_empty());
+        c_capture_local(&mut h, &mut tabs, &core, "kill-prefix", &dir);
+        for c in "C-kept draft".chars() {
+            press(&mut h.state, Key::Char(c));
+        }
+        let bottom = c_capture_local(&mut h, &mut tabs, &core, "bottom", &dir);
+        assert!(bottom.contains(REPLY));
+        // Local full-page up is Chat Ctrl+B; attached offers Input PgUp.
+        press(&mut h.state, Key::Esc);
+        assert_eq!(h.state.focus, FocusState::Chat);
+        c_capture_local(&mut h, &mut tabs, &core, "chat-before-scroll", &dir);
+        assert_eq!(
+            press(&mut h.state, Key::Ctrl('b')),
+            InputAction::ScrollFullPageUp
+        );
+        scroll::handle_apply_scroll_intent(
+            &mut tabs,
+            &mut h.state,
+            &h.conversation,
+            ScrollDelta::FullPageUp,
+        );
+        c_capture_local(&mut h, &mut tabs, &core, "chat-scrolled", &dir);
+        press(&mut h.state, Key::Char('i'));
+        assert_eq!(h.state.focus, FocusState::Input);
+        let scrolled = c_capture_local(&mut h, &mut tabs, &core, "scrolled", &dir);
+        assert!(scrolled.contains("Bb1a-row-") && !scrolled.contains(REPLY));
+        assert!(
+            tabs.active_tab().view_state.scroll_offset > 0,
+            "observable scroll control"
+        );
+        let view = tabs.active_tab().view_state.clone();
+        for (kind, opener) in [("help", '?'), ("log", 'n')] {
+            press(&mut h.state, Key::Ctrl('x'));
+            press(&mut h.state, Key::Char(opener));
+            assert_eq!(h.state.modal_stack.len(), 1, "cover reached");
+            c_capture_local(&mut h, &mut tabs, &core, kind, &dir);
+            if kind == "help" {
+                let before = h.state.help_overlay.scroll_offset;
+                press(&mut h.state, Key::Char('j'));
+                assert_eq!(h.state.help_overlay.scroll_offset, before + 1);
+                c_capture_local(&mut h, &mut tabs, &core, "help-scrolled", &dir);
+            }
+            press(&mut h.state, Key::Esc);
+            assert!(h.state.modal_stack.is_empty(), "owner actually released");
+            let restored =
+                c_capture_local(&mut h, &mut tabs, &core, &format!("{kind}-return"), &dir);
+            assert_eq!(
+                restored
+                    .lines()
+                    .take(usize::from(height - 4))
+                    .collect::<Vec<_>>(),
+                scrolled
+                    .lines()
+                    .take(usize::from(height - 4))
+                    .collect::<Vec<_>>(),
+                "same production Stage after cover/back",
+            );
+            let current = &tabs.active_tab().view_state;
+            assert_eq!(current.mode, view.mode);
+            assert_eq!(current.scroll_offset, view.scroll_offset);
+            assert_eq!(current.focused_turn, view.focused_turn);
+            assert_eq!(current.collapsed, view.collapsed);
+            assert_eq!(current.summary_tier, view.summary_tier);
+            assert_eq!(current.pending_append_lines, view.pending_append_lines);
+            assert_eq!(h.state.input_buffer, "C-kept draft");
         }
     }
 }

@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 
 /// Apply density mode transition: update mode and reconcile the sidebar.
@@ -21,13 +22,17 @@ pub(crate) fn apply_density_transition(
     state.sidebar_visible = mode.default_sidebar_visible();
     if state.sidebar_visible {
         state.sidebar_panel = Some(crate::domain::models::visual::PanelType::Tasks);
-        state.focus = crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Tasks,
-            selected: state.sidebar_selected,
-        };
+        let selected = state.sidebar_selected;
+        reducer::set_base(
+            state,
+            crate::domain::models::FocusState::Sidebar {
+                panel: crate::domain::models::visual::PanelType::Tasks,
+                selected,
+            },
+        );
     } else {
         state.sidebar_panel = None;
-        state.focus = crate::domain::models::FocusState::Chat;
+        reducer::set_base(state, crate::domain::models::FocusState::Chat);
     }
     let _ = event_bus.emit_domain(crate::domain::events::AppEvent::SystemNotice {
         conversation_id: None,

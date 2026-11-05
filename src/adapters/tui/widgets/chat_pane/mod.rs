@@ -181,10 +181,10 @@ pub struct RenderResult {
     pub user_message_boundaries: Vec<usize>,
     /// Tool block id at the top of the viewport (for focus/keyboard interaction).
     pub focused_tool_id: Option<String>,
-    /// Story 19.16g — ids of the feedback blocks that intersect the rendered
-    /// chat viewport this frame. A block merely inserted, or scrolled wholly
-    /// offscreen, or drawn into a zero-height pane, is absent.
-    pub visible_feedback_ids: Vec<String>,
+    /// Feedback ids and exact clipped screen-row ranges painted by the chat.
+    /// Hosts filter opaque coverage after all overlays, before acknowledging a
+    /// successful draw. Offscreen and zero-height projections are absent.
+    pub visible_feedback_rows: Vec<(String, std::ops::Range<u16>)>,
 }
 
 /// Compute the `scroll_offset` value needed to bring `target_message_idx`
@@ -1768,8 +1768,7 @@ pub fn render_attached(
     area: Rect,
     conversation: &Conversation,
     streaming: &StreamingState,
-    scroll_offset: usize,
-    auto_scroll: bool,
+    view_state: &ViewState,
     theme: &Theme,
     tab_render_state: &mut TabRenderState,
     tool_block_states: &HashMap<String, ToolBlockState>,
@@ -1782,10 +1781,13 @@ pub fn render_attached(
         conversation,
         None,
         streaming,
-        &ViewState::default(),
+        view_state,
         &crate::domain::clock::SystemClock::default(),
-        scroll_offset,
-        auto_scroll,
+        view_state.scroll_offset,
+        matches!(
+            &view_state.mode,
+            crate::domain::models::AnchorMode::Following
+        ),
         theme,
         tab_render_state,
         tool_block_states,
@@ -1911,7 +1913,7 @@ fn render_with_search_impl(
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
         focused_tool_id: None,
-        visible_feedback_ids: Vec::new(),
+        visible_feedback_rows: Vec::new(),
     };
 
     // Empty state: no messages, no open turn, no streaming, no feedback blocks
@@ -2738,7 +2740,7 @@ fn render_with_search_impl(
     }
 
     // Feedback blocks at bottom
-    let mut visible_feedback_ids: Vec<String> = Vec::new();
+    let mut visible_feedback_rows = Vec::new();
     if !feedback_blocks.is_empty() {
         if line_offset > 0 {
             let spacing_end = line_offset + spacing;
@@ -2760,8 +2762,15 @@ fn render_with_search_impl(
             let fb_height = fb_lines.len();
             let fb_end = line_offset + fb_height;
             if fb_end > visible_start && line_offset < visible_end {
-                if fb_height > 0 {
-                    visible_feedback_ids.push(fb.id.clone());
+                let start = area
+                    .y
+                    .saturating_add((line_offset.max(visible_start) - visible_start) as u16);
+                let end = area
+                    .y
+                    .saturating_add((fb_end.min(visible_end) - visible_start) as u16)
+                    .min(area.bottom());
+                if start < end {
+                    visible_feedback_rows.push((fb.id.clone(), start..end));
                 }
                 for (j, line) in fb_lines.into_iter().enumerate() {
                     let abs_line = line_offset + j;
@@ -2801,6 +2810,11 @@ fn render_with_search_impl(
         lines[last] = indicator_line;
         // The indicator replaced that row: any run on it is gone.
         placed_runs.retain(|run| run.line != last);
+        let indicator_row = area.y.saturating_add(last as u16);
+        visible_feedback_rows.retain_mut(|(_, rows)| {
+            rows.end = rows.end.min(indicator_row);
+            rows.start < rows.end
+        });
     }
 
     let widget = Paragraph::new(Text::from(lines));
@@ -2837,7 +2851,7 @@ fn render_with_search_impl(
         message_boundaries,
         user_message_boundaries,
         focused_tool_id,
-        visible_feedback_ids,
+        visible_feedback_rows,
     }
 }
 
@@ -2953,7 +2967,7 @@ mod parts_aware_tests {
     use super::*;
     use crate::domain::clock::MockClock;
     use crate::domain::clock::{BRAILLE_FRAMES, current_braille_frame};
-    use crate::domain::models::ChatMessage;
+    use crate::domain::models::{AnchorMode, ChatMessage};
 
     /// `render_expanded_turn` with no search and no link collection.
     fn render_turn<'a>(
@@ -3097,8 +3111,7 @@ mod parts_aware_tests {
                             area,
                             &conversation,
                             &StreamingState::default(),
-                            0,
-                            true,
+                            &ViewState::default(),
                             &theme,
                             &mut tab,
                             &HashMap::new(),
@@ -4693,8 +4706,7 @@ mod parts_aware_tests {
                         area,
                         conversation,
                         &StreamingState::default(),
-                        0,
-                        true,
+                        &ViewState::default(),
                         &theme,
                         &mut tab,
                         &HashMap::new(),
@@ -4952,5 +4964,101 @@ mod parts_aware_tests {
             .collect();
         assert_eq!(spans, vec![(G.to_owned(), base), (G.to_owned(), focused)]);
         assert_eq!(cursor, 2);
+    }
+
+    fn feedback_projection(
+        area: Rect,
+        view: &ViewState,
+    ) -> (
+        ratatui::Terminal<ratatui::backend::TestBackend>,
+        RenderResult,
+    ) {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut blocks = BTreeMap::new();
+        crate::adapters::tui::views::show_view(
+            &mut blocks,
+            crate::adapters::tui::views::ViewKind::TeamLog,
+            "projection",
+            crate::domain::models::FeedbackLevel::Info,
+            "projection-0\nprojection-1\nprojection-2",
+        );
+        let mut cache = TabRenderState::default();
+        let mut result = None;
+        terminal
+            .draw(|frame| {
+                result = Some(render_attached(
+                    frame,
+                    area,
+                    &Conversation::default(),
+                    &StreamingState::default(),
+                    view,
+                    &Theme::dark(),
+                    &mut cache,
+                    &HashMap::new(),
+                    &blocks,
+                    &HashMap::new(),
+                ));
+            })
+            .unwrap();
+        (terminal, result.expect("the actual painter ran"))
+    }
+
+    #[test]
+    fn story21_4_feedback_ranges_are_clipped_screen_rows_with_visible_controls() {
+        for following in [false, true] {
+            let view = ViewState {
+                mode: if following {
+                    AnchorMode::Following
+                } else {
+                    AnchorMode::Reading
+                },
+                scroll_offset: if following { 0 } else { usize::MAX },
+                ..Default::default()
+            };
+            let (terminal, result) = feedback_projection(Rect::new(3, 4, 20, 2), &view);
+            assert_eq!(result.visible_feedback_rows.len(), 1);
+            assert_eq!(result.visible_feedback_rows[0].0, "projection");
+            assert_eq!(result.visible_feedback_rows[0].1, 4..6);
+            let row = |y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(4).contains(if following {
+                "projection-1"
+            } else {
+                "projection-0"
+            }));
+            assert!(row(5).contains(if following {
+                "projection-2"
+            } else {
+                "projection-1"
+            }));
+            assert!(!row(3).contains("projection"));
+            assert!(!row(6).contains("projection"));
+        }
+    }
+
+    #[test]
+    fn story21_4_zero_height_or_width_never_reports_feedback_rows() {
+        for following in [false, true] {
+            let view = ViewState {
+                mode: if following {
+                    AnchorMode::Following
+                } else {
+                    AnchorMode::Reading
+                },
+                scroll_offset: if following { 0 } else { 1 },
+                ..Default::default()
+            };
+            for area in [Rect::new(3, 4, 20, 0), Rect::new(3, 4, 0, 2)] {
+                let (_, result) = feedback_projection(area, &view);
+                assert!(
+                    result.visible_feedback_rows.is_empty(),
+                    "{following}: {area:?}"
+                );
+            }
+        }
     }
 }

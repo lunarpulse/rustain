@@ -100,6 +100,7 @@ pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) ->
                 &shell,
                 Host::Local,
                 &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                 |frame| {
                     // M4: observe BEFORE painting status, not just its final unoccluded row.
                     // Correct geometry alone must not let status-before-frames survive.
@@ -468,6 +469,7 @@ fn quit_hides_search_cursors_and_restores_frame_and_popup_owners() {
                         &shell,
                         Host::Local,
                         &LogFacts::default(),
+                        &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                         |_| {},
                     );
                 })
@@ -1084,6 +1086,7 @@ fn a_covered_pane_does_not_start_its_inert_window() {
                     &Shell::new(frame.area(), &layout),
                     Host::Local,
                     &LogFacts::default(),
+                    &mut presentation::occlusion::OpaqueRects::new(layout.chat_pane),
                     |_| {},
                 );
             })

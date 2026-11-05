@@ -19,6 +19,7 @@
 //! and nothing reaches the bus or the cached projection.
 
 use crate::adapters::tui::handlers::room_command::{self as handler, RoomCommandArgs};
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
     A2aPeerSpec, AgentId, PeerId, RoomEditDecision, RoomEditKind, RoomEvent, RoomRole,
@@ -102,10 +103,11 @@ fn activate_room_sidebar(state: &mut TuiState) -> Result<(), String> {
     let panel = crate::domain::models::visual::PanelType::Room;
     state.sidebar_visible = true;
     state.sidebar_panel = Some(panel);
-    state.focus = crate::domain::models::FocusState::Sidebar {
-        panel,
-        selected: state.sidebar_selected,
-    };
+    let selected = state.sidebar_selected;
+    reducer::set_base(
+        state,
+        crate::domain::models::FocusState::Sidebar { panel, selected },
+    );
     state.needs_redraw = true;
     Ok(())
 }
@@ -164,10 +166,8 @@ fn finalize_room_panel(state: &mut TuiState) {
             ..
         }
     ) {
-        state.focus = crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Room,
-            selected: state.sidebar_selected,
-        };
+        let selected = state.sidebar_selected;
+        reducer::update_sidebar_selection(state, selected);
     }
 }
 

@@ -226,6 +226,11 @@ fn paint(
     let streaming = StreamingState::default();
     let clock = MockClock::at_wall_ms(1_700_000_005_000);
     let mut result = None;
+    let attached_view = ViewState {
+        scroll_offset: scroll,
+        mode: rustain::domain::models::AnchorMode::Reading,
+        ..Default::default()
+    };
     terminal
         .draw(|frame| {
             let area = Rect::new(0, 0, width, height);
@@ -235,8 +240,7 @@ fn paint(
                     area,
                     conversation,
                     &streaming,
-                    scroll,
-                    false,
+                    &attached_view,
                     &theme,
                     cache,
                     &HashMap::new(),

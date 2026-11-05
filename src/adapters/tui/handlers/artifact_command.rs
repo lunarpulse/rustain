@@ -12,6 +12,7 @@
 //! a `HandlerOutcome`, so the counter stays untouched — the same choice
 //! `handlers/room_command.rs` made.
 
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::artifacts_panel::{
     apply_state_suffix, decision_suffix, id_prefix, kind_label, review_state_label,
@@ -401,7 +402,7 @@ pub fn resolve_apply_card(
     accept: bool,
 ) -> Option<crate::adapters::tui::state::PendingArtifactCard> {
     let card = state.pending_artifact_card.take()?;
-    state.focus = card.prior_focus.clone();
+    reducer::set_base(state, card.prior_focus.clone());
     state.needs_redraw = true;
     accept.then_some(card)
 }

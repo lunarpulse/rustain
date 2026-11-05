@@ -1,4 +1,4 @@
-//! K6 / A19: 4-Bb2a ratchet. Behaviour belongs to K1–K5/K7–K10, not this scanner.
+//! K6 / A19: final 4-C ratchet. Behaviour belongs to the keystones, not this scanner.
 //! Every retained occurrence has an exact named-site pin and a migration owner.
 //! Removed/changed pins fail stale; new hits never inherit a file exemption.
 use regex::Regex;
@@ -9,7 +9,10 @@ use std::sync::LazyLock;
 const PRESENTATION: &str = "src/adapters/tui/presentation/";
 const HOSTS: &[(&str, &str)] = &[
     ("src/infrastructure/runtime/event_loop.rs", "render"),
-    ("src/infrastructure/runtime/attach_loop.rs", "run_attached"),
+    (
+        "src/infrastructure/runtime/attach_loop.rs",
+        "paint_attached",
+    ),
 ];
 const TEST_FILES: &[&str] = &[
     "src/adapters/auth/flows/api_key/tests.rs",
@@ -191,53 +194,20 @@ fn scope(code: &str, at: usize) -> String {
     name
 }
 
-// Exact named-site pins from da41ddae, minus A1/A2a cutovers; whitespace is not ownership.
+// Only the exact prior slots owned by 21-6/21-8 remain after the final 4-C cutover.
 #[rustfmt::skip]
 const PINS: &[Pin<'_>] = &[
-    ("src/adapters/tui/agent_inspector_keys.rs", "4-C", &[
-        r###"focus-write|on_key|state.focus = FocusState::Chat;"###,
-    ]),
-    ("src/adapters/tui/app.rs", "4-C", &[
-        r###"focus-write|advance_deferred_permission|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));"###, r###"focus-write|advance_deferred_permission|state.focus = if state.recipient_surface.is_some() {"###, r###"focus-write|dispatch_input|state.focus = FocusState::Chat;"###,
-        r###"focus-write|card_special_key|state.focus ="###, r###"focus-write|card_special_key|state.focus = FocusState::Input;"###, r###"focus-write|exec_input|state.focus = FocusState::Chat;"###,
-        r###"focus-write|exec_chat|state.focus = FocusState::Input;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Chat;"###, r###"focus-write|exec_sidebar|state.focus = FocusState::Input;"###, r###"focus-write|sidebar_move|state.focus = FocusState::Sidebar {"###,
-        r###"focus-write|exec_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|exec_panel|state.focus = FocusState::Chat;"###, r###"focus-write|exec_recipient|state.focus = surface.prior_focus;"###,
-        r###"focus-write|handle_char|state.focus = FocusState::Input;"###,
-        r###"focus-write|dispatch_palette_action|state.focus = FocusState::Input;"###,
-    ]),
     ("src/adapters/tui/app.rs", "21-8", &[
-        r###"prior|exec_recipient|state.focus = surface.prior_focus;"###,
-    ]),
-    ("src/adapters/tui/decision_pane.rs", "4-C", &[
-        r###"focus-write|settle_borrowed_card_focus|state.focus = state.card_focus_borrowed_from.take().unwrap();"###, r###"focus-borrow|take_chat_focus_for_local_card|&mut state.focus,"###,
-        r###"focus-write|apply_resolved_action|state.focus = FocusState::Input;"###, r###"focus-write|apply_resolved_action|state.focus = if state.sidebar_visible {"###,
-    ]),
-    ("src/adapters/tui/handlers/artifact_command.rs", "4-C", &[
-        r###"focus-write|resolve_apply_card|state.focus = card.prior_focus.clone();"###,
+        r###"prior|exec_recipient|reducer::set_base(state, surface.prior_focus);"###,
     ]),
     ("src/adapters/tui/handlers/artifact_command.rs", "21-6", &[
-        r###"prior|resolve_apply_card|state.focus = card.prior_focus.clone();"###,
-    ]),
-    ("src/adapters/tui/handlers/export.rs", "4-C", &[
-        r###"focus-write|apply_confirm_export_overwrite|state.focus = FocusState::Chat;"###, r###"focus-write|apply_cancel_export_overwrite|state.focus = FocusState::Chat;"###, r###"focus-write|apply_export_command|state.focus ="###,
-    ]),
-    ("src/adapters/tui/handlers/notice.rs", "4-C", &[
-        r###"focus-write|apply_density_transition|state.focus = crate::domain::models::FocusState::Sidebar {"###, r###"focus-write|apply_density_transition|state.focus = crate::domain::models::FocusState::Chat;"###,
-    ]),
-    ("src/adapters/tui/handlers/peer_command.rs", "4-C", &[
-        r###"focus-write|resolve_peer_add_card|state.focus = pending.prior_focus.clone();"###,
+        r###"prior|resolve_apply_card|reducer::set_base(state, card.prior_focus.clone());"###,
     ]),
     ("src/adapters/tui/handlers/peer_command.rs", "21-6", &[
-        r###"prior|resolve_peer_add_card|state.focus = pending.prior_focus.clone();"###,
-    ]),
-    ("src/adapters/tui/handlers/team_command.rs", "4-C", &[
-        r###"focus-write|open_team_retract_card|state.focus = crate::domain::models::FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|resolve_team_retract_card|state.focus = pending.prior_focus.clone();"###,
+        r###"prior|resolve_peer_add_card|reducer::set_base(state, pending.prior_focus.clone());"###,
     ]),
     ("src/adapters/tui/handlers/team_command.rs", "21-6", &[
-        r###"prior|open_team_retract_card|prior_focus: state.focus.clone(),"###, r###"prior|resolve_team_retract_card|state.focus = pending.prior_focus.clone();"###,
-    ]),
-    ("src/adapters/tui/handlers/transparency.rs", "4-C", &[
-        r###"focus-borrow|synchronize_sidebar_selection|} = &mut state.focus"###,
+        r###"prior|open_team_retract_card|prior_focus: state.focus.clone(),"###, r###"prior|resolve_team_retract_card|reducer::set_base(state, pending.prior_focus.clone());"###,
     ]),
     ("src/adapters/tui/state.rs", "21-6", &[
         r###"prior|PendingArtifactCard|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingPeerAdd|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingTeamRetract|pub prior_focus: crate::domain::models::FocusState,"###,
@@ -245,60 +215,17 @@ const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/state.rs", "21-8", &[
         r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
     ]),
-    ("src/infrastructure/runtime/approval_bridge.rs", "4-C", &[
-        r###"focus-write|apply|state.focus ="###, r###"focus-write|handle_action|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|handle_action|state.focus ="###,
-    ]),
-    ("src/infrastructure/runtime/artifact_bridge.rs", "4-C", &[
-        r###"focus-write|activate_artifacts_sidebar|state.focus = crate::domain::models::FocusState::Sidebar {"###, r###"focus-write|finalize_artifacts_panel|state.focus = crate::domain::models::FocusState::Sidebar {"###, r###"focus-write|open_apply_card|state.focus = crate::domain::models::FocusState::Overlay("###, r###"focus-write|open_resolve_card|state.focus = crate::domain::models::FocusState::Overlay("###,
-    ]),
     ("src/infrastructure/runtime/artifact_bridge.rs", "21-6", &[
         r###"prior|open_apply_card|let prior_focus = state.focus.clone();"###, r###"prior|open_apply_card|prior_focus,"###, r###"prior|open_resolve_card|let prior_focus = state.focus.clone();"###, r###"prior|open_resolve_card|prior_focus,"###,
     ]),
-    ("src/infrastructure/runtime/attach_keys.rs", "4-C", &[
-        r###"focus-write|execute_attached|ctx.state.focus = FocusState::Input;"###,
-        r###"focus-write|execute_attached|FocusState::Input => ctx.state.focus = FocusState::Chat,"###, r###"focus-write|execute_attached|FocusState::Chat => ctx.state.focus = FocusState::Input,"###,
-        r###"focus-write|begin_retract|ctx.state.focus = FocusState::Chat;"###, r###"focus-borrow|begin_retract|&mut ctx.state.focus,"###, r###"attached|attached_card_context|fn with_lent_input<R>("###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|execute_attached|with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);"###,
-        r###"attached|popup_delegate|with_lent_input(ctx.state, ctx.input, |state| {"###, r###"attached|palette_delegate|let action = with_lent_input(ctx.state, ctx.input, |state| {"###,
-    ]),
-    ("src/infrastructure/runtime/attach_loop.rs", "4-C", &[
-        r###"focus-write|open_response_surface|state.focus = FocusState::Chat;"###, r###"focus-write|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"focus-write|recipient_surface_key|state.focus = FocusState::Input;"###, r###"focus-write|attached_proposal_key|state.focus = surface.prior_focus;"###, r###"focus-write|run_attached|state.focus = FocusState::Chat;"###, r###"focus-borrow|open_response_surface|None => (std::mem::replace(&mut state.focus, FocusState::Chat), None),"###,
-        r###"focus-borrow|attached_card_arrived|&mut state.focus,"###, r###"focus-mem|open_response_surface|None => (std::mem::replace(&mut state.focus, FocusState::Chat), None),"###, r###"attached|apply_attached_consolidation_frame|fn render_attached_composer("###, r###"attached|run_attached|let mut scroll_offset = 0usize;"###, r###"attached|run_attached|let mut auto_scroll = true;"###, r###"attached|run_attached|let mut pending_consolidation_card: Option<"###,
-        r###"attached|run_attached|let mut retract_confirm: Option<(String, String)> = None;"###, r###"attached|run_attached|let mut pending_consent_approvals = std::collections::VecDeque::<PendingConsentApproval>::new();"###, r###"attached|run_attached|let mut approvals = AttachedApprovals::default();"###, r###"attached|run_attached|render_attached_composer("###,
-    ]),
     ("src/infrastructure/runtime/attach_loop.rs", "21-8", &[
-        r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|state.focus = surface.prior_focus;"###, r###"prior|attached_proposal_key|state.focus = surface.prior_focus;"###,
-    ]),
-    ("src/infrastructure/runtime/event_loop.rs", "4-C", &[
-        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###,
-        r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Overlay("###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###, r###"focus-write|run|state.focus = FocusState::Chat;"###,
-        r###"focus-write|run|state.focus = FocusState::Sidebar {"###,
-        r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
-        r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Input;"###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###, r###"focus-write|run|state.focus = FocusState::Overlay(OverlayType::Confirmation("###,
-        r###"focus-write|restore_focus_after_modal|state.focus = if state.pending_feedback_input.is_some() {"###, r###"focus-write|surface_deferred_modal|state.focus ="###, r###"focus-write|advance_skill_trust_queue|state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));"###,
-    ]),
-    ("src/infrastructure/runtime/panel_bridge.rs", "4-C", &[
-        r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Chat;"###, r###"focus-write|open_panel|state.focus = FocusState::Sidebar {"###,
-    ]),
-    ("src/infrastructure/runtime/peer_bridge.rs", "4-C", &[
-        r###"focus-write|raise_peer_add_card|state.focus = crate::domain::models::FocusState::Overlay("###,
+        r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###, r###"prior|attached_proposal_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###,
     ]),
     ("src/infrastructure/runtime/peer_bridge.rs", "21-6", &[
         r###"prior|raise_peer_add_card|prior_focus: state.focus.clone(),"###,
     ]),
-    ("src/infrastructure/runtime/recipient_surface.rs", "4-C", &[
-        r###"focus-write|open_received_surface|state.focus = FocusState::Chat;"###, r###"focus-borrow|open_received_surface|std::mem::replace(&mut state.focus, FocusState::Chat),"###, r###"focus-mem|open_received_surface|std::mem::replace(&mut state.focus, FocusState::Chat),"###,
-    ]),
     ("src/infrastructure/runtime/recipient_surface.rs", "21-8", &[
         r###"prior|open_received_surface|let (prior_focus, results) = match old {"###, r###"prior|open_received_surface|surface.prior_focus,"###, r###"prior|open_received_surface|prior_focus,"###,
-    ]),
-    ("src/infrastructure/runtime/room_bridge.rs", "4-C", &[
-        r###"focus-write|activate_room_sidebar|state.focus = crate::domain::models::FocusState::Sidebar {"###, r###"focus-write|finalize_room_panel|state.focus = crate::domain::models::FocusState::Sidebar {"###,
-    ]),
-    ("src/infrastructure/runtime/team_proposal_bridge.rs", "4-C", &[
-        r###"focus-write|proposal_action|state.focus = crate::domain::models::FocusState::Chat;"###,
     ]),
     ("src/infrastructure/runtime/transparency_bridge.rs", "21-6", &[
         r###"prior|retract_card|prior_focus: crate::domain::models::FocusState::Chat,"###,
@@ -628,6 +555,7 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
         "compose",
         "geometry",
         "stage_search",
+        "occlusion",
     ] {
         assert_eq!(
             files
@@ -639,12 +567,19 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
     }
     assert_eq!(
         PINS.iter()
-            .filter(|(_, owner, _)| *owner == "4-B")
+            .filter(|(_, owner, _)| matches!(*owner, "4-B" | "4-C"))
             .map(|(_, _, sites)| sites.len())
             .sum::<usize>(),
         0,
-        "Bb1b-ii removes the final six CrossSearch ownership pins"
+        "4-C removes the final 109 slice pins; no 21-4 exemption remains"
     );
+    assert_eq!(
+        PINS.iter().map(|(_, _, sites)| sites.len()).sum::<usize>(),
+        23
+    );
+    assert!(PINS.iter().all(|(_, owner, sites)| {
+        matches!(*owner, "21-6" | "21-8") && sites.iter().all(|site| site.starts_with("prior|"))
+    }));
     for (path, count) in [
         ("src/adapters/tui/app.rs", 0),
         ("src/adapters/tui/state.rs", 0),

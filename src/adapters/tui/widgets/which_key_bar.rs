@@ -22,6 +22,7 @@ pub fn bar_height(avail: &AvailCtx, width: u16) -> u16 {
 /// `area` that ends above the status row so the status row is never covered, and
 /// nothing reserves Stage rows for it. When full labels cannot fit vertically,
 /// a denser grid shortens labels, never the registry keys or entry inventory.
+/// Returns the painted bar rectangle, or `None` when `area` is too small.
 // Covers: UX-DR19, UX-DR60
 pub fn render(
     frame: &mut Frame,
@@ -29,9 +30,9 @@ pub fn render(
     theme: &Theme,
     avail: &AvailCtx,
     feedback: Option<&LeaderFeedback>,
-) {
+) -> Option<Rect> {
     if area.width < 4 || area.height < 3 {
-        return;
+        return None;
     }
 
     let items = render::leader_menu(avail);
@@ -122,6 +123,7 @@ pub fn render(
         );
 
     frame.render_widget(content, bar_area);
+    Some(bar_area)
 }
 
 fn item_spans<'a>(
@@ -185,7 +187,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                render(frame, area, &Theme::dark(), avail, None);
+                let _ = render(frame, area, &Theme::dark(), avail, None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -250,7 +252,7 @@ mod tests {
                 // Status row is the last row; the menu area ends above it.
                 let above = Rect::new(full.x, full.y, full.width, full.height - 1);
                 frame.render_widget(Paragraph::new("STATUS-ROW-CANARY"), Rect::new(0, 11, 80, 1));
-                render(frame, above, &Theme::dark(), &local(80), None);
+                let _ = render(frame, above, &Theme::dark(), &local(80), None);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();

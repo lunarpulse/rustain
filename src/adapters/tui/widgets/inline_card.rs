@@ -12,12 +12,13 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 
 /// Render `lines` as a bordered card anchored to the bottom of `chat_pane`,
 /// clamped to the pane height. `accent` colours the border.
+/// Returns the actual painted card rectangle, including its borders.
 pub fn render_bottom_anchored_card(
     buf: &mut Buffer,
     lines: Vec<Line<'_>>,
     accent: Color,
     chat_pane: Rect,
-) {
+) -> Rect {
     let card_height = (lines.len() as u16 + 2).min(chat_pane.height);
     let card_area = Rect {
         x: chat_pane.x,
@@ -30,18 +31,20 @@ pub fn render_bottom_anchored_card(
         .border_style(Style::default().fg(accent));
     let para = Paragraph::new(lines).block(block);
     Widget::render(para, card_area, buf);
+    card_area
 }
 
 /// Render `lines` as a **double-border** decision card anchored to the bottom
 /// of `chat_pane` (`╔═╗`/`╚═╝` decision tier). Used by the sender-consent card
 /// per the 18-3d preflight ruling (mirror `fork_confirm`'s chrome); the shared
 /// [`render_bottom_anchored_card`] stays single-border for action/inline cards.
+/// Returns the actual painted card rectangle, including its borders.
 pub fn render_bottom_anchored_decision_card(
     buf: &mut Buffer,
     lines: Vec<Line<'_>>,
     accent: Color,
     chat_pane: Rect,
-) {
+) -> Rect {
     let card_height = (lines.len() as u16 + 2).min(chat_pane.height);
     let card_area = Rect {
         x: chat_pane.x,
@@ -60,4 +63,5 @@ pub fn render_bottom_anchored_decision_card(
     let scroll = lines.len().saturating_sub(visible) as u16;
     let para = Paragraph::new(lines).block(block).scroll((scroll, 0));
     Widget::render(para, card_area, buf);
+    card_area
 }

@@ -110,6 +110,7 @@ fn draw_pane(state: &TuiState, f: &LogFacts, width: u16, height: u16, with_pane:
                     &shell,
                     Host::Local,
                     f,
+                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                     |frame| {
                         frame.render_widget(
                             Paragraph::new("status-row-sentinel"),

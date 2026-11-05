@@ -393,11 +393,11 @@ pub(crate) fn render_recipient_surface(
     retro: Option<RetroOverlay<'_>>,
     read_only: bool,
     theme: &crate::adapters::tui::theme::Theme,
-) {
+) -> Option<ratatui::layout::Rect> {
     use crate::adapters::tui::state::RecipientSurfaceTarget;
     use ratatui::widgets::{Block, Borders, Clear};
     if area.width < 3 || area.height < 4 {
-        return;
+        return None;
     }
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -590,6 +590,7 @@ pub(crate) fn render_recipient_surface(
         .len()
         .saturating_sub(usize::from(footer_height));
     paint_recipient_lines(frame, bottom, &surface.cached_footer[footer_start..]);
+    Some(area)
 }
 
 fn wrap_recipient_line(

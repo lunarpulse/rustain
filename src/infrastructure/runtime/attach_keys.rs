@@ -14,16 +14,13 @@
 //!   attached client really handles,
 //! * the guarded S-QUIT decision, and the `/detach` `/ml` `/quit` commands.
 //!
-//! The attached composer is a plain `String` owned by `run_attached`. The
-//! shared palette/popup code edits `TuiState::input_buffer`, so the composer is
-//! *lent* to the state for exactly one shared call ([`with_lent_input`]) and
-//! handed back — one owner at a time, never a per-draw copy.
+//! The shared state owns the draft, caret and attached card presentation.
+//! Socket responders, requests and interruption remain runtime-owned.
 //!
 //! This is a child module of `attach_loop` (declared there with `#[path]`) so
 //! it can reach that module's private team/approval/surface machinery without
 //! widening its visibility.
 
-use std::collections::VecDeque;
 use std::path::Path;
 
 use crate::adapters::tui::app::refuse_leader;
@@ -32,16 +29,15 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use super::{
-    AttachedApprovals, AttachedTeamRequests, ComposerOutcome, PendingConsentApproval,
-    SocketTurnDriver, attached_composer_key_with_team_requests, attached_display_input,
-    attached_proposal_higher_confirmation, attached_proposal_key, attached_proposal_pending,
-    attached_team_retract_key, dispatch_recipient_surface_key, open_response_surface,
-    pending_peer_response, preview_line, recipient_surface_flash, retractable_rows,
-    scroll_attached_transcript, system_message, take_current_peer_compose,
+    AttachedTeamRequests, ComposerOutcome, SocketTurnDriver,
+    attached_composer_key_with_team_requests, attached_proposal_higher_confirmation,
+    attached_proposal_key, attached_proposal_pending, attached_team_retract_key,
+    dispatch_recipient_surface_key, open_response_surface, pending_peer_response, preview_line,
+    recipient_surface_flash, retractable_rows, system_message, take_current_peer_compose,
 };
 use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::command_registry::{CommandRegistry, CommandSource};
-use crate::adapters::daemon::protocol::{ClientFrame, ProposalToken};
+use crate::adapters::daemon::protocol::ClientFrame;
 use crate::adapters::palette_registry::PaletteRegistry;
 use crate::adapters::tui::app::{
     cancel_autocomplete_popup, convert_crossterm_event, handle_input, open_leader,
@@ -52,7 +48,6 @@ use crate::adapters::tui::keymap::table::{ATTACHED_SIGN_IN, GlobalCmd, LeaderCmd
 use crate::adapters::tui::keymap::table_chat::ChatCmd;
 use crate::adapters::tui::keymap::table_input::InputCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
-use crate::adapters::tui::keymap::text_edit;
 use crate::adapters::tui::keymap::{
     self, AvailCtx, CommandId, Context, Host, Key, LeaderStep, Resolved, leader_step,
 };
@@ -61,7 +56,7 @@ use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use crate::adapters::tui::palette_gate::PaletteGate;
 use crate::adapters::tui::presentation::{self, RouteEffect, Surface};
 use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
-use crate::adapters::tui::state::{PendingConsolidationCard, TabRenderState, TuiState};
+use crate::adapters::tui::state::{TabRenderState, TuiState};
 use crate::adapters::tui::widgets::{autocomplete_popup, input_box};
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
@@ -183,12 +178,11 @@ impl AttachedChrome {
     pub(super) async fn paste(
         &mut self,
         state: &mut TuiState,
-        input: &mut String,
         text: &str,
         card_pending: bool,
         workspace: &Path,
     ) {
-        if handle_attached_paste(state, input, text, card_pending) {
+        if handle_attached_paste(state, text, card_pending) {
             self.sync_palette(state, workspace).await;
         }
     }
@@ -284,17 +278,10 @@ pub(super) struct KeyCtx<'a> {
     pub(super) state: &'a mut TuiState,
     pub(super) conversation: &'a mut Conversation,
     pub(super) streaming: &'a mut StreamingState,
-    pub(super) input: &'a mut String,
     pub(super) frame_tx: &'a mpsc::UnboundedSender<ClientFrame>,
     pub(super) team_requests: &'a mut AttachedTeamRequests,
-    pub(super) approvals: &'a mut AttachedApprovals,
-    pub(super) consent: &'a mut VecDeque<PendingConsentApproval>,
-    pub(super) consolidation_card: &'a mut Option<PendingConsolidationCard>,
-    pub(super) consolidation_token: &'a mut Option<ProposalToken>,
-    pub(super) retract_confirm: &'a mut Option<(String, String)>,
     pub(super) tab: &'a mut TabRenderState,
-    pub(super) scroll_offset: &'a mut usize,
-    pub(super) auto_scroll: &'a mut bool,
+    pub(super) view: &'a mut crate::domain::models::view_state::ViewState,
     pub(super) interrupt: &'a AttachedInterrupt,
     pub(super) driver: &'a SocketTurnDriver,
     pub(super) lifecycle: &'a mut TuiTurnLifecycle,
@@ -330,7 +317,7 @@ impl KeyCtx<'_> {
     }
 
     fn decision_cards_pending(&self) -> bool {
-        !self.consent.is_empty() || self.consolidation_token.is_some()
+        !self.state.attached.consent.is_empty() || self.state.attached.consolidation_token.is_some()
     }
 }
 
@@ -338,27 +325,15 @@ impl KeyCtx<'_> {
 /// consolidation card or the retract confirmation (A8; the permission approvals and the
 /// team retract card answer in `attach_loop`).
 fn attached_card_context(ctx: &KeyCtx<'_>) -> Option<Context> {
-    if !ctx.consent.is_empty() {
+    if !ctx.state.attached.consent.is_empty() {
         Some(Context::Consent)
-    } else if ctx.consolidation_token.is_some() || ctx.retract_confirm.is_some() {
+    } else if ctx.state.attached.consolidation_token.is_some()
+        || ctx.state.attached.retract_confirm.is_some()
+    {
         Some(Context::Confirm)
     } else {
         None
     }
-}
-
-/// Lend the attached composer to the shared composer state for one call and
-/// hand it back. The cursor is always at the end of the attached buffer.
-fn with_lent_input<R>(
-    state: &mut TuiState,
-    input: &mut String,
-    call: impl FnOnce(&mut TuiState) -> R,
-) -> R {
-    std::mem::swap(&mut state.input_buffer, input);
-    state.cursor_position = state.input_buffer.chars().count();
-    let result = call(state);
-    std::mem::swap(&mut state.input_buffer, input);
-    result
 }
 
 fn is_ctrl(key: &KeyEvent, c: char) -> bool {
@@ -404,13 +379,30 @@ pub(super) fn route_event(state: &mut TuiState, event: &Event) -> Option<RouteEf
     }
 }
 
-/// Borrowed paste edits an offered field before considering the base composer.
-pub(super) fn handle_attached_paste(
+/// Apply a wheel event only after the shared presentation boundary releases it.
+pub(super) fn handle_attached_mouse(
     state: &mut TuiState,
-    input: &mut String,
-    text: &str,
-    card_pending: bool,
-) -> bool {
+    view: &mut crate::domain::models::view_state::ViewState,
+    event: &Event,
+) -> Option<RouteEffect> {
+    let routed = route_event(state, event);
+    if routed.is_none()
+        && let Some(crate::domain::events::DomainInputEvent::MouseScroll(delta)) =
+            convert_crossterm_event(event, &MouseConfig::default())
+    {
+        use crate::domain::models::view_state::ScrollDelta;
+        let delta = match delta {
+            ScrollDelta::WheelUp(rows) => ScrollDelta::UnboundedRows(rows.max(1) as isize),
+            ScrollDelta::WheelDown(rows) => ScrollDelta::UnboundedRows(-(rows.max(1) as isize)),
+            other => other,
+        };
+        crate::adapters::tui::handlers::scroll::dispatch_scroll(view, state, delta);
+    }
+    routed
+}
+
+/// Borrowed paste edits an offered field before considering the base composer.
+pub(super) fn handle_attached_paste(state: &mut TuiState, text: &str, card_pending: bool) -> bool {
     if presentation::route::paste(state, text, Host::Attached).is_some() {
         return !presentation::too_small(state)
             && state.pending_leader.is_none()
@@ -423,11 +415,19 @@ pub(super) fn handle_attached_paste(
         return false;
     }
     if !card_pending
+        && state.focus == FocusState::Input
         && state.recipient_surface.is_none()
         && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
         && state.pending_team_retract.is_none()
     {
-        input.push_str(text);
+        let cursor = crate::adapters::tui::text_geometry::snap_boundary(
+            &state.input_buffer,
+            state.cursor_position,
+        );
+        let byte = crate::adapters::tui::text_geometry::byte_of_scalar(&state.input_buffer, cursor);
+        state.input_buffer.insert_str(byte, text);
+        state.cursor_position = cursor + text.chars().count();
+        state.autocomplete.slash_rollback = None;
         state.autocomplete.dismiss();
         state.needs_redraw = true;
     }
@@ -475,14 +475,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     {
         reconcile_pending_card_after_overlay_close(ctx);
     }
-    super::settle_attached_card_focus(
-        ctx.state,
-        ctx.read_only,
-        ctx.approvals,
-        ctx.consent,
-        ctx.consolidation_token,
-        ctx.retract_confirm,
-    );
+    super::settle_attached_card_focus(ctx.state, ctx.read_only);
     let owner_after = (
         ctx.state.modal_stack.top().map(|frame| frame.id),
         ctx.state.pending_leader,
@@ -502,13 +495,8 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
 }
 
 fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
-    if super::attached_card_pending(
-        ctx.approvals,
-        ctx.consent,
-        ctx.consolidation_token,
-        ctx.retract_confirm,
-    ) {
-        super::attached_card_arrived(ctx.state, ctx.input, ctx.read_only);
+    if super::attached_card_pending(ctx.state) {
+        super::attached_card_arrived(ctx.state, ctx.read_only);
     }
 }
 
@@ -528,17 +516,23 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     }
     let approval_higher = attached_proposal_higher_confirmation(
         ctx.state,
-        !ctx.consent.is_empty(),
-        ctx.consolidation_card.is_some(),
-        ctx.retract_confirm.is_some(),
+        !ctx.state.attached.consent.is_empty(),
+        ctx.state.pending_consolidation_card.is_some(),
+        ctx.state.attached.retract_confirm.is_some(),
     );
-    if ctx.approvals.key(
-        key,
-        ctx.read_only || approval_higher || ctx.state.focus != FocusState::Chat,
-        attached_display_input(ctx.state, ctx.input),
-        ctx.frame_tx,
-    ) {
-        if std::mem::take(&mut ctx.approvals.cue) {
+    let approval_blocked = ctx.read_only
+        || approval_higher
+        || ctx.state.focus != FocusState::Chat
+        || !crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
+            .unwrap_or(&ctx.state.input_buffer)
+            .is_empty();
+    if ctx
+        .state
+        .attached
+        .approvals
+        .key(key, approval_blocked, ctx.frame_tx)
+    {
+        if std::mem::take(&mut ctx.state.attached.approvals.cue) {
             ctx.info(crate::adapters::tui::keymap::render::card_cue(
                 Context::Permission,
                 Host::Attached,
@@ -547,18 +541,17 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         ctx.state.needs_redraw = true;
         return KeyFlow::Continue;
     }
-    let proposal_higher = approval_higher || (!ctx.read_only && !ctx.approvals.pending.is_empty());
+    let proposal_higher =
+        approval_higher || (!ctx.read_only && !ctx.state.attached.approvals.pending.is_empty());
     if attached_proposal_key(
         key,
         proposal_higher,
         ctx.read_only,
-        ctx.input,
         ctx.state,
         ctx.tab,
         ctx.team_requests,
         ctx.frame_tx,
-        ctx.scroll_offset,
-        ctx.auto_scroll,
+        ctx.view,
     ) {
         return KeyFlow::Continue;
     }
@@ -573,7 +566,6 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         higher_confirmation,
         ctx.workspace,
         ctx.conversation,
-        ctx.input,
         ctx.state,
         (!ctx.read_only).then_some(ctx.frame_tx),
     )
@@ -626,9 +618,11 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         // daemon-derived pending FIFO, so these single-letter keys are inert
         // everywhere else.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && !ctx.state.attached.consent.is_empty() =>
         {
-            if let Some(pending) = ctx.consent.pop_front() {
+            if let Some(pending) = ctx.state.attached.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
                     request_id: pending.request_id,
                     outcome: crate::domain::models::ApprovalOutcome::Once,
@@ -637,9 +631,11 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Char('a'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && !ctx.state.attached.consent.is_empty() =>
         {
-            if let Some(pending) = ctx.consent.pop_front() {
+            if let Some(pending) = ctx.state.attached.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
                     request_id: pending.request_id,
                     outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
@@ -650,9 +646,11 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && !ctx.consent.is_empty() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && !ctx.state.attached.consent.is_empty() =>
         {
-            if let Some(pending) = ctx.consent.pop_front() {
+            if let Some(pending) = ctx.state.attached.consent.pop_front() {
                 let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
                     request_id: pending.request_id,
                     outcome: crate::domain::models::ApprovalOutcome::Reject { feedback: None },
@@ -662,39 +660,45 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         }
         // Story 12.2d AC4/AC5 — consolidation card intercept.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.consolidation_token.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && ctx.state.attached.consolidation_token.is_some() =>
         {
-            if let Some(token) = ctx.consolidation_token.take() {
+            if let Some(token) = ctx.state.attached.consolidation_token.take() {
                 let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
                     token,
                     accept: true,
                 });
             }
-            *ctx.consolidation_card = None;
+            ctx.state.pending_consolidation_card = None;
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.consolidation_token.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && ctx.state.attached.consolidation_token.is_some() =>
         {
             // n while the card is shown → decline.
-            if let Some(token) = ctx.consolidation_token.take() {
+            if let Some(token) = ctx.state.attached.consolidation_token.take() {
                 let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
                     token,
                     accept: false,
                 });
             }
-            *ctx.consolidation_card = None;
+            ctx.state.pending_consolidation_card = None;
             ctx.state.needs_redraw = true;
         }
         // Story 18.3c AC5 — the retract confirmation owns y/n/Esc while open
         // (Approval grammar, never a bare key on a transient surface). It is
         // opened only by the palette's retract route.
         (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.retract_confirm.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && ctx.state.attached.retract_confirm.is_some() =>
         {
             if ctx.read_only {
                 ctx.info("read-only — can't retract here");
-            } else if let Some((message_id, _)) = ctx.retract_confirm.take() {
+            } else if let Some((message_id, _)) = ctx.state.attached.retract_confirm.take() {
                 // Stale-target gate: the row must still be retractable now.
                 if retractable_rows(ctx.conversation).any(|row| row.id == message_id) {
                     let _ = ctx.frame_tx.send(ClientFrame::RetractAutoResponse {
@@ -712,9 +716,11 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
             ctx.state.needs_redraw = true;
         }
         (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL) && chat && ctx.retract_confirm.is_some() =>
+            if !m.contains(KeyModifiers::CONTROL)
+                && chat
+                && ctx.state.attached.retract_confirm.is_some() =>
         {
-            *ctx.retract_confirm = None;
+            ctx.state.attached.retract_confirm = None;
             ctx.state.needs_redraw = true;
         }
         _ => {
@@ -746,19 +752,6 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     KeyFlow::Continue
 }
 
-/// Edit the tail of the attached composer with a shared `text_edit` function.
-fn edit_composer(ctx: &mut KeyCtx<'_>, edit: fn(&mut String, usize) -> usize) {
-    if ctx.state.focus != FocusState::Input || ctx.composer_locked() {
-        return;
-    }
-    let end = ctx.input.chars().count();
-    edit(ctx.input, end);
-    if ctx.input.is_empty() {
-        ctx.state.pinned_peer_compose = None;
-    }
-    ctx.state.needs_redraw = true;
-}
-
 /// The registry key behind a press as an overlay reads it: a navigation key held
 /// with any modifier (Shift+Up, Alt+Enter) is unbound there.
 fn overlay_key(key: &KeyEvent) -> Key {
@@ -780,14 +773,9 @@ fn command_in(context: Context, key: Key) -> Option<CommandId> {
 /// Type one printable character into the composer (Story 19.16g: read-only
 /// composers edit too; only submission is refused).
 fn type_char(ctx: &mut KeyCtx<'_>, c: char) {
-    let _ = attached_composer_key_with_team_requests(
-        KeyCode::Char(c),
-        ctx.read_only,
-        ctx.input,
-        ctx.state,
-        ctx.frame_tx,
-        ctx.team_requests,
-    );
+    if !ctx.composer_locked() {
+        let _ = crate::adapters::tui::app::type_char(ctx.state, c, None);
+    }
 }
 
 /// Run one command the registry resolved for this host. Each arm is the effect
@@ -813,7 +801,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
         }
         CommandId::Chat(ChatCmd::Quit) => return request_quit(ctx),
         CommandId::Chat(ChatCmd::FocusInput) => {
-            ctx.state.focus = FocusState::Input;
+            presentation::reducer::set_base(ctx.state, FocusState::Input);
             ctx.state.needs_redraw = true;
         }
         CommandId::Chat(ChatCmd::OpenHelp) => {
@@ -823,8 +811,8 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
         // moves focus between Input and Chat and preserves the unsent text.
         CommandId::Input(InputCmd::ReturnToChat) | CommandId::Chat(ChatCmd::FocusToggle) => {
             match ctx.state.focus {
-                FocusState::Input => ctx.state.focus = FocusState::Chat,
-                FocusState::Chat => ctx.state.focus = FocusState::Input,
+                FocusState::Input => presentation::reducer::set_base(ctx.state, FocusState::Chat),
+                FocusState::Chat => presentation::reducer::set_base(ctx.state, FocusState::Input),
                 _ => {}
             }
             ctx.state.needs_redraw = true;
@@ -836,33 +824,36 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
         CommandId::Input(
             cmd @ (InputCmd::SubmitOrNewline | InputCmd::InsertNewline | InputCmd::Send),
         ) => return enter_key(ctx, cmd).await,
-        CommandId::Input(InputCmd::DeleteBack) => {
-            if ctx.state.recipient_surface.is_none() {
-                let _ = attached_composer_key_with_team_requests(
-                    KeyCode::Backspace,
-                    ctx.read_only,
-                    ctx.input,
+        CommandId::Input(
+            cmd @ (InputCmd::DeleteBack
+            | InputCmd::DeleteForward
+            | InputCmd::CursorLeft
+            | InputCmd::CursorRight
+            | InputCmd::CursorHome
+            | InputCmd::CursorEnd
+            | InputCmd::LineStart
+            | InputCmd::LineEnd
+            | InputCmd::DeleteWordBack
+            | InputCmd::KillToLineStart
+            | InputCmd::KillToLineEnd),
+        ) => {
+            if !ctx.composer_locked() {
+                let _ = crate::adapters::tui::app::exec_input(
                     ctx.state,
-                    ctx.frame_tx,
-                    ctx.team_requests,
+                    cmd,
+                    Key::from_crossterm(&key),
                 );
+                if ctx.state.input_buffer.is_empty() {
+                    ctx.state.pinned_peer_compose = None;
+                }
             }
         }
-        // TextEntry (Story 21.3 AC11): the attached composer is append-only (its cursor
-        // stays at the end), so Ctrl+W / Ctrl+U edit its tail and Ctrl+H is Backspace;
-        // Ctrl+A / Ctrl+E / Ctrl+K are consumed no-ops.
-        CommandId::Input(InputCmd::DeleteWordBack) => edit_composer(ctx, text_edit::kill_word_back),
-        CommandId::Input(InputCmd::KillToLineStart) => {
-            edit_composer(ctx, text_edit::kill_to_line_start);
-        }
         CommandId::Input(InputCmd::OpenSlashPopup) => {
-            if ctx.input.is_empty() && !ctx.composer_locked() {
+            if ctx.state.input_buffer.is_empty() && !ctx.composer_locked() {
                 // The shared composer owns the slash trigger: it saves the pre-trigger
                 // composer so Esc can restore it exactly.
                 let event = crate::domain::events::DomainInputEvent::KeyPress('/');
-                with_lent_input(ctx.state, ctx.input, |state| {
-                    let _ = handle_input(state, &event);
-                });
+                let _ = handle_input(ctx.state, &event);
                 ctx.chrome.sync_slash(ctx.state, ctx.workspace);
             } else {
                 type_char(ctx, '/');
@@ -888,15 +879,18 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
                 CommandId::Input(InputCmd::TranscriptPageUp)
                     | CommandId::Chat(ChatCmd::ScrollPageUp | ChatCmd::ScrollHalfPageUp)
             );
+            use crate::domain::models::view_state::ScrollDelta;
+            // Preserve Input/Chat's legacy stride, including streaming's reserved row.
             let rows = ctx.state.viewport_height / if half { 2 } else { 1 };
-            scroll_attached_transcript(
-                earlier,
-                rows,
-                ctx.streaming.is_streaming,
-                ctx.scroll_offset,
-                ctx.auto_scroll,
-            );
-            ctx.state.needs_redraw |= half;
+            let page = rows
+                .saturating_sub(u16::from(ctx.streaming.is_streaming))
+                .clamp(1, 5);
+            let delta = if earlier {
+                ScrollDelta::UnboundedRows(page as isize)
+            } else {
+                ScrollDelta::UnboundedRows(-(page as isize))
+            };
+            crate::adapters::tui::handlers::scroll::dispatch_scroll(ctx.view, ctx.state, delta);
         }
         CommandId::Overlay(OverlayCmd::PaletteClose) => {
             presentation::reducer::close(ctx.state, Surface::CommandPalette);
@@ -908,7 +902,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             return palette_delegate(ctx, key).await;
         }
         CommandId::Overlay(OverlayCmd::AutoCancel) => {
-            with_lent_input(ctx.state, ctx.input, cancel_autocomplete_popup);
+            cancel_autocomplete_popup(ctx.state);
             ctx.chrome.sync_slash(ctx.state, ctx.workspace);
             ctx.state.needs_redraw = true;
         }
@@ -918,7 +912,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             | OverlayCmd::AutoAccept
             | OverlayCmd::AutoBackspace,
         ) => popup_delegate(ctx, key),
-        // Ctrl+A / Ctrl+E / Ctrl+K have no cursor to move; local-only rows never resolve here.
+        // Local-only commands never resolve in this host.
         _ => {}
     }
     KeyFlow::Continue
@@ -932,17 +926,27 @@ async fn enter_key(ctx: &mut KeyCtx<'_>, command: InputCmd) -> KeyFlow {
     match command {
         InputCmd::InsertNewline => {
             if !ctx.composer_locked() {
-                ctx.input.push('\n');
+                let _ = handle_input(
+                    ctx.state,
+                    &crate::domain::events::DomainInputEvent::SpecialKey(
+                        crate::domain::events::DomainKey::ShiftEnter,
+                    ),
+                );
                 ctx.state.needs_redraw = true;
             }
             KeyFlow::Continue
         }
         // Ctrl+Enter (where the terminal distinguishes it) sends.
-        InputCmd::Send if ctx.input.is_empty() => KeyFlow::Continue,
+        InputCmd::Send if ctx.state.input_buffer.is_empty() => KeyFlow::Continue,
         InputCmd::Send => submit_enter(ctx).await,
         _ if ctx.state.multiline_mode => {
-            if !ctx.input.is_empty() && !ctx.composer_locked() {
-                ctx.input.push('\n');
+            if !ctx.state.input_buffer.is_empty() && !ctx.composer_locked() {
+                let _ = handle_input(
+                    ctx.state,
+                    &crate::domain::events::DomainInputEvent::SpecialKey(
+                        crate::domain::events::DomainKey::ShiftEnter,
+                    ),
+                );
                 ctx.state.needs_redraw = true;
             }
             KeyFlow::Continue
@@ -985,18 +989,22 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         live_tools: ctx.streaming.active_tool_calls.len(),
         agents: 0,
         queued_turns: 0,
-        composer_draft: !attached_display_input(ctx.state, ctx.input).is_empty(),
+        composer_draft: !crate::adapters::tui::handlers::recipient_actions::pending_composition(
+            ctx.state,
+        )
+        .unwrap_or(&ctx.state.input_buffer)
+        .is_empty(),
         pending_images: 0,
         peer_compose: ctx.state.pinned_peer_compose.is_some()
             || crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
                 .is_some(),
-        pending_decisions: ctx.consent.len()
-            + usize::from(ctx.consolidation_token.is_some())
+        pending_decisions: ctx.state.attached.consent.len()
+            + usize::from(ctx.state.attached.consolidation_token.is_some())
             + usize::from(attached_proposal_pending(ctx.state).is_some())
             + if ctx.read_only {
                 0
             } else {
-                ctx.approvals.pending.len()
+                ctx.state.attached.approvals.pending.len()
             },
     };
     match presentation::reducer::request_quit(ctx.state, facts) {
@@ -1057,7 +1065,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             ctx.state.needs_redraw = true;
         }
         LeaderCmd::Decisions => {
-            if ctx.approvals.pending.is_empty() {
+            if ctx.state.attached.approvals.pending.is_empty() {
                 ctx.info("No decisions waiting in this client");
             } else {
                 ctx.info(format!(
@@ -1086,7 +1094,7 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
         LeaderCmd::QuitRequest => return request_quit(ctx),
         // Portable multiline send: the same path as Enter, exactly once.
         LeaderCmd::Send if origin == Context::Input => {
-            if !ctx.input.is_empty() {
+            if !ctx.state.input_buffer.is_empty() {
                 return submit_enter(ctx).await;
             }
         }
@@ -1150,7 +1158,11 @@ async fn run_team_log(
     {
         ctx.conversation.messages.push(system_message(notice));
     }
-    *ctx.auto_scroll = true;
+    crate::adapters::tui::handlers::scroll::dispatch_scroll(
+        ctx.view,
+        ctx.state,
+        crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
+    );
 }
 
 // ── slash popup ──────────────────────────────────────────────────────────────
@@ -1174,7 +1186,7 @@ async fn popup_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> Option<KeyFlow> {
     }
 }
 
-/// Shared Help/popup dispatch with the real composer lent for viewport geometry.
+/// Shared Help/popup dispatch using the authoritative composer geometry.
 fn popup_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
     let help = ctx
         .state
@@ -1182,18 +1194,16 @@ fn popup_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) {
         .top()
         .is_some_and(|f| f.surface == Surface::Help);
     if let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) {
-        with_lent_input(ctx.state, ctx.input, |state| {
-            let _ = if help {
-                crate::adapters::tui::app::dispatch_frame_key(
-                    state,
-                    Context::Help,
-                    overlay_key(&key),
-                    Host::Attached,
-                )
-            } else {
-                handle_input(state, &event)
-            };
-        });
+        let _ = if help {
+            crate::adapters::tui::app::dispatch_frame_key(
+                ctx.state,
+                Context::Help,
+                overlay_key(&key),
+                Host::Attached,
+            )
+        } else {
+            handle_input(ctx.state, &event)
+        };
     }
     if !help {
         ctx.chrome.sync_slash(ctx.state, ctx.workspace);
@@ -1218,22 +1228,19 @@ async fn palette_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     }
 }
 
-/// Hand a palette key to the shared palette handler (the composer is lent to
-/// it) and run the entry it selected, if any.
+/// Hand a palette key to the shared palette handler and run its selected entry.
 async fn palette_delegate(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crate::adapters::tui::app::InputAction;
     let Some(event) = convert_crossterm_event(&Event::Key(key), &MouseConfig::default()) else {
         return KeyFlow::Continue;
     };
-    let action = with_lent_input(ctx.state, ctx.input, |state| {
-        crate::adapters::tui::app::with_card_focus_reconcile(state, |state| {
-            crate::adapters::tui::app::dispatch_frame_key(
-                state,
-                Context::CommandPalette,
-                Key::from_domain(&event).unwrap_or(Key::Other),
-                Host::Attached,
-            )
-        })
+    let action = crate::adapters::tui::app::with_card_focus_reconcile(ctx.state, |state| {
+        crate::adapters::tui::app::dispatch_frame_key(
+            state,
+            Context::CommandPalette,
+            Key::from_domain(&event).unwrap_or(Key::Other),
+            Host::Attached,
+        )
     });
     ctx.chrome.sync_palette(ctx.state, ctx.workspace).await;
     match action {
@@ -1262,9 +1269,14 @@ async fn run_palette_command(ctx: &mut KeyCtx<'_>, name: String, args: Option<St
         Some(args) => format!("/{name} {args}"),
         None => format!("/{name}"),
     };
-    let draft = std::mem::replace(ctx.input, text);
+    let cursor = ctx.state.cursor_position;
+    let scroll = ctx.state.input_scroll_offset;
+    let draft = std::mem::replace(&mut ctx.state.input_buffer, text);
+    ctx.state.cursor_position = ctx.state.input_buffer.chars().count();
     let flow = submit_enter(ctx).await;
-    *ctx.input = draft;
+    ctx.state.input_buffer = draft;
+    ctx.state.cursor_position = cursor;
+    ctx.state.input_scroll_offset = scroll;
     flow
 }
 
@@ -1283,15 +1295,10 @@ fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
         .map(|row| (row.id.clone(), preview_line(&row.content, 48)));
     match target {
         Some(target) => {
-            *ctx.retract_confirm = Some(target);
+            ctx.state.attached.retract_confirm = Some(target);
             // FR-21-3-c: the operator opened it; the confirm answers only in Chat focus.
-            crate::adapters::tui::decision_pane::take_chat_focus_for_card(
-                &mut ctx.state.focus,
-                &mut ctx.state.card_focus_borrowed_from,
-                !ctx.read_only,
-                false,
-            );
-            ctx.state.focus = FocusState::Chat;
+            presentation::reducer::take_chat_focus_for_card(ctx.state, !ctx.read_only);
+            presentation::reducer::set_base(ctx.state, FocusState::Chat);
         }
         None => ctx.info("that message can no longer be retracted — nothing sent"),
     }
@@ -1331,12 +1338,16 @@ fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
         // The typed `/quit` line is a command, not an unsent draft: consume it, but
         // leave every OTHER unsent fact (a pinned peer reply) untouched so the S-QUIT
         // decision still counts it, and so cancelling loses nothing (RU-14, AC7).
-        ctx.input.clear();
+        ctx.state.input_buffer.clear();
+        ctx.state.cursor_position = 0;
+        ctx.state.input_scroll_offset = 0;
         ctx.state.needs_redraw = true;
         return request_quit(ctx);
     }
     // A command is consumed like the existing refusals: the draft is cleared.
-    ctx.input.clear();
+    ctx.state.input_buffer.clear();
+    ctx.state.cursor_position = 0;
+    ctx.state.input_scroll_offset = 0;
     ctx.state.pinned_peer_compose = None;
     ctx.state.needs_redraw = true;
     match local {
@@ -1369,20 +1380,23 @@ fn run_local_slash(ctx: &mut KeyCtx<'_>, local: LocalSlash) -> KeyFlow {
 /// The one submission path: slash interception, the team router, peer compose
 /// and the model turn. Enter, Ctrl+Enter and `Ctrl+X Enter` all end here.
 async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
-    if let Some(local) = local_slash(ctx.input) {
+    if let Some(local) = local_slash(&ctx.state.input_buffer) {
         return run_local_slash(ctx, local);
     }
     let text = match attached_composer_key_with_team_requests(
         KeyCode::Enter,
         ctx.read_only,
-        ctx.input,
         ctx.state,
         ctx.frame_tx,
         ctx.team_requests,
     ) {
         ComposerOutcome::Handled => return KeyFlow::Continue,
         ComposerOutcome::FrameSent => {
-            *ctx.auto_scroll = true;
+            crate::adapters::tui::handlers::scroll::dispatch_scroll(
+                ctx.view,
+                ctx.state,
+                crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
+            );
             return KeyFlow::Continue;
         }
         // Story 19.16g — a user-initiated log may scroll its own result into view.
@@ -1416,7 +1430,8 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
     let compose = match take_current_peer_compose(ctx.state, ctx.conversation) {
         Ok(compose) => compose,
         Err(()) => {
-            *ctx.input = text;
+            ctx.state.input_buffer = text;
+            ctx.state.cursor_position = ctx.state.input_buffer.chars().count();
             recipient_surface_flash(
                 ctx.state,
                 "response already settled — your text was not sent".to_owned(),
@@ -1425,7 +1440,7 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         }
     };
     if let Some(compose) = compose {
-        ctx.input.clone_from(&text);
+        ctx.state.input_buffer.clone_from(&text);
         let action = match compose.action {
             crate::adapters::tui::state::PeerComposeAction::Respond => {
                 crate::adapters::daemon::protocol::PeerDraftAction::WriteOwn { content: text }
@@ -1437,7 +1452,7 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         let node = compose.node_id.clone();
         ctx.state.pinned_peer_compose = Some(compose);
         let frame = ClientFrame::ResolvePeerDraft { node, action };
-        super::queue_recipient_action(ctx.state, ctx.input, frame, ctx.frame_tx, true);
+        super::queue_recipient_action(ctx.state, frame, ctx.frame_tx, true);
     } else {
         let submission = UserSubmission {
             text,
@@ -1455,15 +1470,21 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
             session_manager: ctx.session_manager,
         };
         ctx.driver.submit(submission, view).await;
-        *ctx.auto_scroll = true;
+        crate::adapters::tui::handlers::scroll::dispatch_scroll(
+            ctx.view,
+            ctx.state,
+            crate::domain::models::view_state::ScrollDelta::ResumeFollowing,
+        );
     }
     KeyFlow::Continue
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use super::super::PendingConsentApproval;
     use super::super::{apply_attached_approval_frame, attached_card_arrived};
     use super::*;
+    use crate::adapters::daemon::protocol::ProposalToken;
     use crate::adapters::daemon::protocol::{DaemonFrame, InterruptRefusal, TurnGeneration};
     use crate::adapters::tui::keymap::render::leader_menu;
     use crate::adapters::tui::keymap::resolve::{Resolved, resolve, rows_of};
@@ -1471,29 +1492,21 @@ mod tests {
     use crate::adapters::tui::keymap::table_chat::ChatCmd;
     use crate::adapters::tui::keymap::table_input::InputCmd;
     use crate::adapters::tui::keymap::{self, Availability, Context};
+    use crate::adapters::tui::state::PendingConsolidationCard;
     use crate::domain::models::SendAuthorization;
     use crate::domain::models::session::SessionState;
     use std::collections::BTreeSet;
 
     /// Every local `run_attached` the helper needs, owned by the test.
-    struct Rig {
+    pub(crate) struct Rig {
         workspace: tempfile::TempDir,
         read_only: bool,
-        state: TuiState,
-        conversation: Conversation,
-        streaming: StreamingState,
-        input: String,
+        pub(crate) state: TuiState,
         tx: mpsc::UnboundedSender<ClientFrame>,
         rx: mpsc::UnboundedReceiver<ClientFrame>,
         team_requests: AttachedTeamRequests,
-        approvals: AttachedApprovals,
-        consent: VecDeque<PendingConsentApproval>,
-        consolidation_card: Option<PendingConsolidationCard>,
-        consolidation_token: Option<ProposalToken>,
-        retract_confirm: Option<(String, String)>,
         tab: TabRenderState,
-        scroll_offset: usize,
-        auto_scroll: bool,
+        pub(crate) domain_tab: crate::domain::models::tab::TabState,
         interrupt: AttachedInterrupt,
         driver: SocketTurnDriver,
         lifecycle: TuiTurnLifecycle,
@@ -1503,7 +1516,7 @@ mod tests {
     }
 
     impl Rig {
-        fn new(read_only: bool) -> Self {
+        pub(crate) fn new(read_only: bool) -> Self {
             let workspace = tempfile::tempdir().unwrap();
             let (tx, rx) = mpsc::unbounded_channel();
             let log_service = crate::infrastructure::transparency::TransparencyService::new(
@@ -1520,21 +1533,15 @@ mod tests {
                 workspace,
                 read_only,
                 state,
-                conversation: Conversation::default(),
-                streaming: StreamingState::default(),
-                input: String::new(),
                 driver: SocketTurnDriver::new(tx.clone()),
                 tx,
                 rx,
                 team_requests: AttachedTeamRequests::default(),
-                approvals: AttachedApprovals::default(),
-                consent: VecDeque::new(),
-                consolidation_card: None,
-                consolidation_token: None,
-                retract_confirm: None,
                 tab: TabRenderState::default(),
-                scroll_offset: 0,
-                auto_scroll: true,
+                domain_tab: crate::domain::models::tab::TabState::from_conversation(
+                    0,
+                    Conversation::default(),
+                ),
                 interrupt: AttachedInterrupt::new(read_only),
                 lifecycle: TuiTurnLifecycle::default(),
                 session_manager: SessionManager::new(SessionState::Empty),
@@ -1548,19 +1555,12 @@ mod tests {
                 workspace: self.workspace.path(),
                 read_only: self.read_only,
                 state: &mut self.state,
-                conversation: &mut self.conversation,
-                streaming: &mut self.streaming,
-                input: &mut self.input,
                 frame_tx: &self.tx,
                 team_requests: &mut self.team_requests,
-                approvals: &mut self.approvals,
-                consent: &mut self.consent,
-                consolidation_card: &mut self.consolidation_card,
-                consolidation_token: &mut self.consolidation_token,
-                retract_confirm: &mut self.retract_confirm,
                 tab: &mut self.tab,
-                scroll_offset: &mut self.scroll_offset,
-                auto_scroll: &mut self.auto_scroll,
+                conversation: &mut self.domain_tab.conversation,
+                streaming: &mut self.domain_tab.streaming,
+                view: &mut self.domain_tab.view_state,
                 interrupt: &self.interrupt,
                 driver: &self.driver,
                 lifecycle: &mut self.lifecycle,
@@ -1592,18 +1592,61 @@ mod tests {
             self.press(KeyCode::Enter, KeyModifiers::NONE).await
         }
 
-        async fn type_text(&mut self, text: &str) {
+        pub(crate) async fn type_text(&mut self, text: &str) {
             for c in text.chars() {
                 assert_eq!(self.ch(c).await, KeyFlow::Continue, "typing {c:?}");
             }
         }
 
-        fn frames(&mut self) -> Vec<ClientFrame> {
+        pub(crate) fn frames(&mut self) -> Vec<ClientFrame> {
             let mut frames = Vec::new();
             while let Ok(frame) = self.rx.try_recv() {
                 frames.push(frame);
             }
             frames
+        }
+
+        pub(crate) async fn paste(&mut self, text: &str) {
+            let pending = super::super::attached_card_pending(&self.state);
+            self.chrome
+                .paste(&mut self.state, text, pending, self.workspace.path())
+                .await;
+        }
+
+        pub(crate) fn paint(&mut self) -> ratatui::Terminal<ratatui::backend::TestBackend> {
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(
+                self.state.terminal_width,
+                self.state.terminal_height,
+            ))
+            .unwrap();
+            let mut rendered = None;
+            terminal
+                .draw(|frame| {
+                    rendered = super::super::paint_attached(
+                        frame,
+                        &mut self.state,
+                        &self.domain_tab.conversation,
+                        &self.domain_tab.streaming,
+                        &self.domain_tab.view_state,
+                        &mut self.tab,
+                        &std::collections::HashMap::new(),
+                        &std::collections::HashMap::new(),
+                        crate::domain::models::PermissionMode::Normal,
+                        &crate::adapters::tui::state::AttachInfo {
+                            read_only: self.read_only,
+                            channel_count: 1,
+                        },
+                    );
+                })
+                .unwrap();
+            if let Some(result) = rendered {
+                super::super::after_attached_draw(
+                    &mut self.state,
+                    true,
+                    &result.visible_feedback_rows,
+                );
+            }
+            terminal
         }
 
         fn feedback(&self, id: &str) -> Option<&str> {
@@ -1628,7 +1671,7 @@ mod tests {
             let mut row = system_message(content);
             row.id = id.to_owned();
             row.send_authorization = SendAuthorization::Automatic;
-            self.conversation.messages.push(row);
+            self.domain_tab.conversation.messages.push(row);
         }
 
         fn palette_names(&self) -> Vec<String> {
@@ -1646,6 +1689,43 @@ mod tests {
             ClientFrame::UserMessage { text, .. } => Some(text),
             _ => None,
         }
+    }
+
+    #[tokio::test]
+    async fn story21_4_attached_draft_and_caret_are_state_owned() {
+        for read_only in [false, true] {
+            let mut rig = Rig::new(read_only);
+            rig.state.input_buffer = "甲e\u{301}tail".to_owned();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            rig.state.cursor_position = 3;
+            rig.ch('界').await;
+            assert_eq!(rig.state.input_buffer, "甲e\u{301}界tail");
+            assert_eq!(rig.state.cursor_position, 4);
+            assert!(rig.frames().is_empty(), "editing never submits");
+            rig.ctrl('a').await;
+            assert_eq!(rig.state.cursor_position, 0);
+            rig.ch('先').await;
+            assert_eq!(rig.state.input_buffer, "先甲e\u{301}界tail");
+            rig.ctrl('e').await;
+            assert_eq!(
+                rig.state.cursor_position,
+                rig.state.input_buffer.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn story21_4_attached_paste_inserts_at_authoritative_caret() {
+        let mut state = TuiState::new(80, 24);
+        state.input_buffer = "甲尾".to_owned();
+        state.cursor_position = 1;
+        handle_attached_paste(&mut state, "e\u{301}👩‍💻", false);
+        assert_eq!(state.input_buffer, "甲e\u{301}👩‍💻尾");
+        assert_eq!(state.cursor_position, 6);
+        assert_eq!(
+            state.cursor_position,
+            state.input_buffer.chars().count() - 1
+        );
     }
 
     // ── AC6 / AC13: the leader and every A5 follow-up ────────────────────────
@@ -1677,7 +1757,7 @@ mod tests {
             assert_eq!(rig.ch(key).await, KeyFlow::Continue, "{key}");
             assert!(rig.state.pending_leader.is_none(), "{key}: leader consumed");
             assert_eq!(rig.state.focus, FocusState::Input, "{key}: origin restored");
-            assert_eq!(rig.input, "draft", "{key}: draft untouched");
+            assert_eq!(rig.state.input_buffer, "draft", "{key}: draft untouched");
             assert!(
                 rig.state.feedback_blocks.is_empty(),
                 "{key}: a notice, never a transcript feedback block"
@@ -1746,7 +1826,7 @@ mod tests {
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert!(!presentation::is_open(&rig.state, Surface::Help));
         assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.input, "keep me");
+        assert_eq!(rig.state.input_buffer, "keep me");
         exercised.insert("?".to_owned());
 
         // `Enter`: portable send — exactly one message through the submit path.
@@ -1764,7 +1844,7 @@ mod tests {
         let frames = rig.frames();
         assert_eq!(frames.len(), 1, "sent exactly once");
         assert_eq!(user_text(&frames[0]), Some("line one\nline two"));
-        assert!(rig.input.is_empty());
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
         exercised.insert("Enter".to_owned());
 
         // `Esc`: cancels and restores the origin.
@@ -1787,7 +1867,7 @@ mod tests {
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert!(rig.state.notification_log.is_none());
         assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.input, "keep me");
+        assert_eq!(rig.state.input_buffer, "keep me");
         exercised.insert("N".to_owned());
 
         // `x`: archives every visible toast; the log keeps the records.
@@ -1833,7 +1913,7 @@ mod tests {
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert!(rig.state.pending_leader.is_none());
         assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.input, "keep");
+        assert_eq!(rig.state.input_buffer, "keep");
 
         // An unknown follow-up is consumed once with the origin restored.
         let mut rig = Rig::new(false);
@@ -1869,24 +1949,25 @@ mod tests {
         // Esc: Input → Chat → Input, text preserved, never an exit.
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert_eq!(rig.state.focus, FocusState::Chat);
-        assert_eq!(rig.input, "unsent");
+        assert_eq!(rig.state.input_buffer, "unsent");
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert_eq!(rig.state.focus, FocusState::Input);
         // Ctrl+D is inert in Input.
         assert_eq!(rig.ctrl('d').await, KeyFlow::Continue);
         assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.input, "unsent");
+        assert_eq!(rig.state.input_buffer, "unsent");
         // Ctrl+D in Chat is a half-page scroll toward newer rows.
         rig.esc().await;
         rig.state.viewport_height = 20;
-        rig.scroll_offset = 12;
-        rig.auto_scroll = false;
+        rig.state.total_content_height = 200;
+        rig.domain_tab.view_state.scroll_offset = 12;
+        rig.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
         assert_eq!(rig.ctrl('d').await, KeyFlow::Continue);
-        assert_eq!(rig.scroll_offset, 7);
+        assert_eq!(rig.domain_tab.view_state.scroll_offset, 7);
         // Ctrl+C with a draft asks first; it never detaches and keeps the draft.
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
         assert!(rig.state.quit_confirm.is_some());
-        assert_eq!(rig.input, "unsent");
+        assert_eq!(rig.state.input_buffer, "unsent");
         assert!(rig.frames().is_empty(), "no frame: nothing is detached");
     }
 
@@ -1894,13 +1975,13 @@ mod tests {
     async fn story21_2_attached_q_is_text_in_input_and_a_quit_request_in_chat() {
         let mut rig = Rig::new(false);
         assert_eq!(rig.ch('q').await, KeyFlow::Continue);
-        assert_eq!(rig.input, "q", "q in Input is plain text");
+        assert_eq!(rig.state.input_buffer, "q", "q in Input is plain text");
         assert!(rig.state.quit_confirm.is_none());
         // Chat: with a draft the guard opens; the draft survives.
         rig.esc().await;
         assert_eq!(rig.ch('q').await, KeyFlow::Continue);
         assert!(rig.state.quit_confirm.is_some());
-        assert_eq!(rig.input, "q");
+        assert_eq!(rig.state.input_buffer, "q");
         rig.esc().await; // cancel the frame
         assert!(rig.state.quit_confirm.is_none());
         assert_eq!(rig.state.focus, FocusState::Chat, "caller focus restored");
@@ -1922,11 +2003,14 @@ mod tests {
     async fn story21_2_attached_quit_frame_owns_keys_and_exits_only_on_y() {
         let mut rig = Rig::new(false);
         rig.type_text("draft").await;
-        rig.consent.push_back(PendingConsentApproval {
-            request_id: crate::domain::models::RequestId::new(),
-            tool: "a2a/sender-consent".to_owned(),
-            input_preview: "consent".to_owned(),
-        });
+        rig.state
+            .attached
+            .consent
+            .push_back(PendingConsentApproval {
+                request_id: crate::domain::models::RequestId::new(),
+                tool: "a2a/sender-consent".to_owned(),
+                input_preview: "consent".to_owned(),
+            });
         rig.ctrl('q').await;
         let facts = rig.state.quit_confirm.as_ref().unwrap().facts.clone();
         assert!(facts.composer_draft);
@@ -1938,8 +2022,8 @@ mod tests {
             assert_eq!(rig.ch(c).await, KeyFlow::Continue);
             assert!(rig.state.quit_confirm.is_some(), "{c} consumed");
         }
-        assert_eq!(rig.input, "draft");
-        assert_eq!(rig.consent.len(), 1);
+        assert_eq!(rig.state.input_buffer, "draft");
+        assert_eq!(rig.state.attached.consent.len(), 1);
         assert!(rig.frames().is_empty());
         // n, Esc, Ctrl+C and Enter each cancel without exiting.
         for cancel in [
@@ -1951,15 +2035,19 @@ mod tests {
             assert!(rig.state.quit_confirm.is_some());
             assert_eq!(rig.press(cancel.0, cancel.1).await, KeyFlow::Continue);
             assert!(rig.state.quit_confirm.is_none(), "{cancel:?} cancels");
-            assert_eq!(rig.input, "draft");
-            assert_eq!(rig.consent.len(), 1, "the card was never answered");
+            assert_eq!(rig.state.input_buffer, "draft");
+            assert_eq!(
+                rig.state.attached.consent.len(),
+                1,
+                "the card was never answered"
+            );
             assert!(rig.frames().is_empty());
             rig.ctrl('q').await;
         }
         // Explicit `y` is the only exit, and it answers no card.
         assert_eq!(rig.ch('y').await, KeyFlow::Quit);
         assert!(rig.state.quit_confirm.is_none());
-        assert_eq!(rig.consent.len(), 1);
+        assert_eq!(rig.state.attached.consent.len(), 1);
         assert!(rig.frames().is_empty());
     }
 
@@ -1970,7 +2058,7 @@ mod tests {
         rig.interrupt.apply(&DaemonFrame::ActiveTurn {
             generation: Some(TurnGeneration(7)),
         });
-        rig.streaming.is_streaming = true;
+        rig.domain_tab.streaming.is_streaming = true;
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
         let frames = rig.frames();
         assert!(matches!(
@@ -2005,7 +2093,7 @@ mod tests {
 
         // Read-only with live work: an explicit refusal, never a detach.
         let mut viewer = Rig::new(true);
-        viewer.streaming.is_streaming = true;
+        viewer.domain_tab.streaming.is_streaming = true;
         assert_eq!(viewer.ctrl('c').await, KeyFlow::Continue);
         // Story 21.1 AC6: the refusal is a store notice (toast + S-LOG), not a
         // transcript row.
@@ -2018,7 +2106,7 @@ mod tests {
                 .map(|r| r.message.clone()),
             Some(InterruptRefusal::ReadOnly.to_string())
         );
-        assert!(viewer.conversation.messages.is_empty());
+        assert!(viewer.domain_tab.conversation.messages.is_empty());
         assert!(viewer.frames().is_empty());
         // Read-only and idle follows the same quit rule as a writer.
         let mut viewer = Rig::new(true);
@@ -2034,21 +2122,24 @@ mod tests {
         assert!(!rig.state.multiline_mode);
         rig.press(KeyCode::Char('m'), KeyModifiers::ALT).await;
         assert!(rig.state.multiline_mode);
-        assert!(rig.input.is_empty(), "Alt+M keeps its modifier");
+        assert!(
+            rig.state.input_buffer.is_empty(),
+            "Alt+M keeps its modifier"
+        );
         rig.type_text("a").await;
         assert_eq!(rig.ctrl('e').await, KeyFlow::Continue);
         assert!(rig.state.multiline_mode, "Ctrl+E is end-of-line, no toggle");
-        assert_eq!(rig.input, "a");
+        assert_eq!(rig.state.input_buffer, "a");
         // Plain Enter in multiline mode inserts a newline and never sends.
         assert_eq!(rig.enter().await, KeyFlow::Continue);
-        assert_eq!(rig.input, "a\n");
+        assert_eq!(rig.state.input_buffer, "a\n");
         assert!(rig.frames().is_empty());
         rig.type_text("b").await;
         // Esc never submits, even with multiline text.
         rig.esc().await;
         rig.esc().await;
         assert!(rig.frames().is_empty());
-        assert_eq!(rig.input, "a\nb");
+        assert_eq!(rig.state.input_buffer, "a\nb");
         // Ctrl+Enter sends exactly once through the submit path.
         assert_eq!(
             rig.press(KeyCode::Enter, KeyModifiers::CONTROL).await,
@@ -2057,7 +2148,7 @@ mod tests {
         let frames = rig.frames();
         assert_eq!(frames.len(), 1);
         assert_eq!(user_text(&frames[0]), Some("a\nb"));
-        assert!(rig.input.is_empty());
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
         // Alt+M again turns it off; plain Enter then sends.
         rig.press(KeyCode::Char('m'), KeyModifiers::ALT).await;
         assert!(!rig.state.multiline_mode);
@@ -2070,7 +2161,7 @@ mod tests {
         rig.type_text("x").await;
         rig.press(KeyCode::Enter, KeyModifiers::ALT).await;
         rig.press(KeyCode::Enter, KeyModifiers::SHIFT).await;
-        assert_eq!(rig.input, "x\n\n");
+        assert_eq!(rig.state.input_buffer, "x\n\n");
         assert!(rig.frames().is_empty());
         // Ctrl+Enter on an empty composer is inert.
         let mut empty = Rig::new(false);
@@ -2091,7 +2182,7 @@ mod tests {
             rig.frames().is_empty(),
             "the key sends no frame; the loop sends Detach"
         );
-        assert!(rig.input.is_empty());
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
 
         let mut rig = Rig::new(false);
         rig.type_text("/ml").await;
@@ -2126,7 +2217,10 @@ mod tests {
                 message.starts_with(&format!("/{name} is not available in an attached session")),
                 "{message}"
             );
-            assert!(rig.input.is_empty(), "the refused command is consumed");
+            assert!(
+                rig.state.input_buffer.is_empty(),
+                "the refused command is consumed"
+            );
         }
         // Typed auth refusals keep their existing result and send nothing.
         let mut rig = Rig::new(false);
@@ -2223,25 +2317,29 @@ mod tests {
         for read_only in [false, true] {
             for (width, height) in [(60, 16), (80, 24), (130, 30)] {
                 let mut rig = Rig::new(read_only);
-                rig.input = ["retained draft"; 8].join("\n");
+                rig.state.input_buffer = ["retained draft"; 8].join("\n");
+                rig.state.cursor_position = rig.state.input_buffer.chars().count();
                 rig.state.terminal_width = width;
                 rig.state.terminal_height = height;
-                let draft = rig.input.clone();
-                let allocation = (rig.input.as_ptr(), rig.input.capacity());
-                let stage = (rig.scroll_offset, rig.auto_scroll);
+                let draft = rig.state.input_buffer.clone();
+                let allocation = (
+                    rig.state.input_buffer.as_ptr(),
+                    rig.state.input_buffer.capacity(),
+                );
+                let stage = (
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    ),
+                );
                 rig.ctrl('p').await;
                 let frame = rig.state.modal_stack.top().unwrap().clone();
                 let all = rig.palette_names();
                 assert!(all.len() > 1 && all.iter().any(|name| name == "/ml"));
                 let refreshes = rig.chrome.gate.refresh_count();
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        "/ml",
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, "/ml", false, rig.workspace.path())
                     .await;
                 assert_eq!(rig.state.command_palette.filter_text.as_str(), "/ml");
                 assert_eq!(
@@ -2258,13 +2356,7 @@ mod tests {
                     "caret motion is not filtering"
                 );
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        "界",
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, "界", false, rig.workspace.path())
                     .await;
                 assert_eq!(rig.state.command_palette.filter_text.as_str(), "/界ml");
                 assert!(
@@ -2274,7 +2366,7 @@ mod tests {
                 rig.key(Key::Left).await;
                 let snapshot = rig.state.command_palette.filter_text.clone();
                 let caret_count = |rig: &Rig| {
-                    paint_buffer_at(&rig.state, width, height, &rig.input)
+                    paint_buffer_at(&rig.state, width, height, &rig.state.input_buffer)
                         .content
                         .iter()
                         .filter(|cell| {
@@ -2296,13 +2388,7 @@ mod tests {
                 );
                 let refreshes = rig.chrome.gate.refresh_count();
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        "blocked",
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, "blocked", false, rig.workspace.path())
                     .await;
                 assert_eq!(rig.state.command_palette.filter_text, snapshot);
                 assert_eq!(rig.chrome.gate.refresh_count(), refreshes);
@@ -2316,9 +2402,24 @@ mod tests {
                     "kill-line restores the unfiltered list through the real gate"
                 );
                 assert_eq!(rig.state.modal_stack.top(), Some(&frame));
-                assert_eq!(rig.input, draft);
-                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
-                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
+                assert_eq!(rig.state.input_buffer, draft);
+                assert_eq!(
+                    (
+                        rig.state.input_buffer.as_ptr(),
+                        rig.state.input_buffer.capacity()
+                    ),
+                    allocation
+                );
+                assert_eq!(
+                    (
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        )
+                    ),
+                    stage
+                );
                 assert!(
                     rig.frames().is_empty(),
                     "no pasted key commands or submissions"
@@ -2338,17 +2439,12 @@ mod tests {
         .flat_map(|surface| [false, true].map(move |read_only| (surface, read_only)))
         {
             let mut rig = Rig::new(read_only);
-            rig.input = "draft".into();
+            rig.state.input_buffer = "draft".into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
             open_shared_query(&mut rig, surface).await;
             for ch in (0x20u8..0x7f).map(char::from) {
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        "ab",
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, "ab", false, rig.workspace.path())
                     .await;
                 rig.key(Key::Home).await;
                 rig.key(Key::Right).await;
@@ -2360,9 +2456,9 @@ mod tests {
                     "{read_only}: {ch:?}"
                 );
                 assert_eq!(rig.state.modal_stack.top(), Some(&frame));
-                assert_eq!(rig.input, "draft");
+                assert_eq!(rig.state.input_buffer, "draft");
                 assert!(rig.frames().is_empty());
-                assert!(rig.state.input_buffer.is_empty());
+                assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
                 rig.key(Key::Home).await;
                 rig.ctrl('k').await;
                 assert!(shared_query(&rig, surface).is_empty());
@@ -2495,18 +2591,19 @@ mod tests {
         {
             for &(edit, seed, prefix, expected, cursor) in cases {
                 let mut rig = Rig::new(read_only);
-                rig.input = "untouched draft".into();
+                rig.state.input_buffer = "untouched draft".into();
+                rig.state.cursor_position = rig.state.input_buffer.chars().count();
                 open_shared_query(&mut rig, surface).await;
                 let frame = rig.state.modal_stack.top().unwrap().clone();
-                let stage = (rig.scroll_offset, rig.auto_scroll);
+                let stage = (
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    ),
+                );
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        seed,
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, seed, false, rig.workspace.path())
                     .await;
                 assert_eq!(
                     shared_query(&rig, surface).as_str(),
@@ -2528,10 +2625,19 @@ mod tests {
                     "{read_only}: {edit:?} {seed}"
                 );
                 assert_eq!(rig.state.modal_stack.top(), Some(&frame));
-                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
-                assert_eq!(rig.input, "untouched draft");
+                assert_eq!(
+                    (
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        )
+                    ),
+                    stage
+                );
+                assert_eq!(rig.state.input_buffer, "untouched draft");
                 assert!(rig.frames().is_empty());
-                assert!(rig.state.input_buffer.is_empty());
+                assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
             }
         }
     }
@@ -2545,7 +2651,10 @@ mod tests {
         assert_eq!(rig.palette_names().first().map(String::as_str), Some("/ml"));
         assert_eq!(rig.enter().await, KeyFlow::Continue);
         assert!(rig.state.multiline_mode, "palette /ml toggles");
-        assert_eq!(rig.input, "half-written", "the draft is never the command");
+        assert_eq!(
+            rig.state.input_buffer, "half-written",
+            "the draft is never the command"
+        );
         assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
         assert_eq!(rig.state.focus, FocusState::Input);
         assert!(rig.frames().is_empty());
@@ -2562,7 +2671,10 @@ mod tests {
             "a draft must raise S-QUIT, never exit"
         );
         assert!(quitting.state.quit_confirm.is_some());
-        assert_eq!(quitting.input, "half written", "the draft survives the ask");
+        assert_eq!(
+            quitting.state.input_buffer, "half written",
+            "the draft survives the ask"
+        );
         assert!(quitting.frames().is_empty());
 
         rig.ctrl('p').await;
@@ -2602,7 +2714,7 @@ mod tests {
         // Ctrl+X is the leader now — never an immediate retract.
         rig.ctrl('x').await;
         assert!(rig.state.pending_leader.is_some());
-        assert!(rig.retract_confirm.is_none());
+        assert!(rig.state.attached.retract_confirm.is_none());
         rig.esc().await;
 
         rig.ctrl('p').await;
@@ -2624,7 +2736,11 @@ mod tests {
         assert_eq!(rig.enter().await, KeyFlow::Continue);
         // Preview + explicit confirmation: nothing was sent yet.
         assert_eq!(
-            rig.retract_confirm.as_ref().map(|(id, _)| id.as_str()),
+            rig.state
+                .attached
+                .retract_confirm
+                .as_ref()
+                .map(|(id, _)| id.as_str()),
             Some("peer-response-node-a")
         );
         assert!(rig.frames().is_empty(), "no immediate effect");
@@ -2635,7 +2751,7 @@ mod tests {
             "the palette route hands the confirm Chat focus, where it answers (AC17)"
         );
         rig.ch('n').await;
-        assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
+        assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
         assert_eq!(
             rig.state.focus,
             FocusState::Input,
@@ -2660,20 +2776,21 @@ mod tests {
         let mut rig = Rig::new(false);
         rig.retractable("peer-response-node-a", "auto reply");
         assert_eq!(rig.state.focus, FocusState::Input);
-        rig.input = "saved retract draft".into();
+        rig.state.input_buffer = "saved retract draft".into();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.ctrl('p').await;
         rig.type_text("retract").await;
         rig.enter().await;
-        assert!(rig.retract_confirm.is_some());
+        assert!(rig.state.attached.retract_confirm.is_some());
         assert_eq!(rig.state.focus, FocusState::Chat);
         rig.ch('i').await;
         assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.input, "saved retract draft");
+        assert_eq!(rig.state.input_buffer, "saved retract draft");
         rig.esc().await;
-        rig.conversation.messages[0].retracted_at_ms = Some(1);
+        rig.domain_tab.conversation.messages[0].retracted_at_ms = Some(1);
         rig.ch('y').await;
         assert!(rig.frames().is_empty(), "stale target never retracts");
-        assert!(rig.retract_confirm.is_none());
+        assert!(rig.state.attached.retract_confirm.is_none());
 
         // Read-only: the entry is labelled unavailable and selecting it refuses.
         let mut rig = Rig::new(true);
@@ -2687,7 +2804,7 @@ mod tests {
                 .contains("read-only")
         );
         rig.enter().await;
-        assert!(rig.retract_confirm.is_none());
+        assert!(rig.state.attached.retract_confirm.is_none());
         assert!(rig.frames().is_empty());
         assert_eq!(
             rig.notice(NoticeSource::Attached),
@@ -2702,7 +2819,7 @@ mod tests {
         let mut rig = Rig::new(false);
         rig.ch('/').await;
         assert!(rig.state.autocomplete.is_open());
-        assert_eq!(rig.input, "/");
+        assert_eq!(rig.state.input_buffer, "/");
         let names: Vec<String> = rig
             .state
             .autocomplete
@@ -2722,7 +2839,7 @@ mod tests {
         // Esc closes the popup and restores the exact pre-trigger composer.
         assert_eq!(rig.esc().await, KeyFlow::Continue);
         assert!(!rig.state.autocomplete.is_open());
-        assert_eq!(rig.input, "");
+        assert_eq!(rig.state.input_buffer, "");
         assert_eq!(
             rig.state.focus,
             FocusState::Input,
@@ -2732,7 +2849,7 @@ mod tests {
         // Tab completes; the completed command then runs through the router.
         rig.type_text("/cl").await;
         rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
-        assert_eq!(rig.input, "/clear");
+        assert_eq!(rig.state.input_buffer, "/clear");
         assert!(!rig.state.autocomplete.is_open());
         rig.enter().await;
         let frames = rig.frames();
@@ -2742,7 +2859,7 @@ mod tests {
         // A slash after other text is plain text — no popup.
         rig.type_text("a/").await;
         assert!(!rig.state.autocomplete.is_open());
-        assert_eq!(rig.input, "a/");
+        assert_eq!(rig.state.input_buffer, "a/");
     }
 
     #[tokio::test]
@@ -2781,13 +2898,15 @@ mod tests {
             }
         }
         let mut rig = Rig::new(false);
-        rig.consent.push_back(consent());
+        rig.state.attached.consent.push_back(consent());
         // Input focus: `y` is text and the card stays pending.
         rig.ch('y').await;
-        assert!(rig.frames().is_empty() && rig.consent.len() == 1);
-        assert_eq!(rig.input, "y");
-        rig.input.clear();
-        attached_card_arrived(&mut rig.state, &rig.input, false);
+        assert!(rig.frames().is_empty() && rig.state.attached.consent.len() == 1);
+        assert_eq!(rig.state.input_buffer, "y");
+        rig.state.input_buffer.clear();
+        rig.state.cursor_position = 0;
+        rig.state.input_scroll_offset = 0;
+        attached_card_arrived(&mut rig.state, false);
         assert_eq!(rig.state.focus, FocusState::Chat);
         let cue = crate::adapters::tui::keymap::render::card_cue(Context::Consent, Host::Attached);
         for pressed_ctrl_c in [false, true] {
@@ -2797,7 +2916,7 @@ mod tests {
                 rig.esc().await;
             }
             assert!(
-                rig.frames().is_empty() && rig.consent.len() == 1,
+                rig.frames().is_empty() && rig.state.attached.consent.len() == 1,
                 "no decision"
             );
             assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
@@ -2830,11 +2949,12 @@ mod tests {
             }]
         ));
         // The retract confirmation: same grammar, same cue.
-        rig.retract_confirm = Some(("peer-response-node-a".to_owned(), "first".to_owned()));
+        rig.state.attached.retract_confirm =
+            Some(("peer-response-node-a".to_owned(), "first".to_owned()));
         assert_eq!(rig.state.focus, FocusState::Input);
-        attached_card_arrived(&mut rig.state, &rig.input, false);
+        attached_card_arrived(&mut rig.state, false);
         rig.esc().await;
-        assert!(rig.retract_confirm.is_some() && rig.frames().is_empty());
+        assert!(rig.state.attached.retract_confirm.is_some() && rig.frames().is_empty());
         assert_eq!(
             rig.notice(NoticeSource::Attached),
             Some(
@@ -2843,7 +2963,7 @@ mod tests {
             )
         );
         rig.ch('n').await;
-        assert!(rig.retract_confirm.is_none());
+        assert!(rig.state.attached.retract_confirm.is_none());
     }
 
     impl Rig {
@@ -2874,34 +2994,14 @@ mod tests {
                     chunks: 1,
                 },
             ] {
-                apply_attached_approval_frame(
-                    &mut self.state,
-                    &mut self.approvals,
-                    frame,
-                    &self.input,
-                    self.read_only,
-                );
+                apply_attached_approval_frame(&mut self.state, frame, self.read_only);
             }
             self.paint_approvals();
         }
 
         /// The loop's own paint rule: a writer in Chat or Input with an empty composer.
         fn paint_approvals(&mut self) {
-            let paints = !self.read_only
-                && matches!(self.state.focus, FocusState::Chat | FocusState::Input)
-                && attached_display_input(&self.state, &self.input).is_empty();
-            let theme = crate::adapters::tui::theme::Theme::dark();
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-            let mut painted = None;
-            terminal
-                .draw(|f| {
-                    if paints {
-                        painted = self.approvals.paint(f, f.area(), &theme);
-                    }
-                })
-                .unwrap();
-            self.approvals.painted = painted;
+            self.paint();
         }
     }
 
@@ -2910,19 +3010,15 @@ mod tests {
             if consolidation {
                 super::super::apply_attached_consolidation_frame(
                     &mut self.state,
-                    &mut self.consolidation_card,
-                    &mut self.consolidation_token,
                     DaemonFrame::ConsolidationProposed {
                         token: ProposalToken(7),
                         proposals: vec![],
                     },
-                    &self.input,
                     self.read_only,
                 );
             } else {
                 super::super::apply_attached_consent_frame(
                     &mut self.state,
-                    &mut self.consent,
                     DaemonFrame::ApprovalRequest {
                         request_id: crate::domain::models::RequestId::new(),
                         tool: "a2a/sender-consent".into(),
@@ -2933,7 +3029,6 @@ mod tests {
                         summary: "consent".into(),
                         input_bytes: None,
                     },
-                    &self.input,
                     self.read_only,
                 );
             }
@@ -2948,7 +3043,8 @@ mod tests {
         ] {
             let mut rig = Rig::new(false);
             rig.state.focus = focus.clone();
-            rig.input = draft.into();
+            rig.state.input_buffer = draft.into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
             if help {
                 rig.ctrl('x').await;
                 rig.ch('?').await;
@@ -2963,7 +3059,7 @@ mod tests {
                     focus.clone()
                 }
             );
-            assert_eq!(rig.input, draft);
+            assert_eq!(rig.state.input_buffer, draft);
             assert!(rig.frames().is_empty());
             if takes {
                 rig.ch('i').await;
@@ -2978,10 +3074,13 @@ mod tests {
                 rig.esc().await;
                 rig.ch('i').await;
                 assert_eq!(rig.state.focus, FocusState::Input);
-                assert_eq!(rig.input, draft);
+                assert_eq!(rig.state.input_buffer, draft);
             }
-            assert_eq!(rig.consolidation_token.is_some(), consolidation);
-            assert_eq!(rig.consent.is_empty(), consolidation);
+            assert_eq!(
+                rig.state.attached.consolidation_token.is_some(),
+                consolidation
+            );
+            assert_eq!(rig.state.attached.consent.is_empty(), consolidation);
         }
     }
 
@@ -3006,18 +3105,8 @@ mod tests {
             rig.frames().as_slice(),
             [ClientFrame::ApprovalResponse { .. }]
         ));
-        let pending = super::super::attached_card_pending(
-            &rig.approvals,
-            &rig.consent,
-            &rig.consolidation_token,
-            &rig.retract_confirm,
-        );
-        super::handle_attached_paste(
-            &mut rig.state,
-            &mut rig.input,
-            "first line\nsecond line",
-            pending,
-        );
+        let pending = super::super::attached_card_pending(&rig.state);
+        super::handle_attached_paste(&mut rig.state, "first line\nsecond line", pending);
         rig.enter().await;
         assert_eq!(
             rig.frames().iter().find_map(user_text),
@@ -3026,8 +3115,8 @@ mod tests {
         // Tab saves this restored focus, not the card's Chat.
         let mut row = system_message("pending response");
         row.id = "peer".into();
-        rig.conversation.messages.push(row);
-        rig.conversation.peer_row_controls.insert(
+        rig.domain_tab.conversation.messages.push(row);
+        rig.domain_tab.conversation.peer_row_controls.insert(
             "peer".into(),
             crate::domain::models::PeerRowControl {
                 node_id: "node".into(),
@@ -3071,7 +3160,7 @@ mod tests {
         rig.retained_arrives(false);
         rig.ch('y').await;
         assert_eq!(rig.state.focus, FocusState::Chat);
-        assert_eq!(rig.approvals.pending.len(), 1);
+        assert_eq!(rig.state.attached.approvals.pending.len(), 1);
         rig.paint_approvals();
         rig.ch('y').await;
         assert_eq!(rig.state.focus, FocusState::Input);
@@ -3084,22 +3173,13 @@ mod tests {
         rig.approval_arrives("withdrawn");
         apply_attached_approval_frame(
             &mut rig.state,
-            &mut rig.approvals,
             DaemonFrame::ApprovalClosed {
                 request_id: crate::domain::models::RequestId("withdrawn".into()),
             },
-            &rig.input,
             false,
         );
-        super::super::settle_attached_card_focus(
-            &mut rig.state,
-            false,
-            &rig.approvals,
-            &rig.consent,
-            &rig.consolidation_token,
-            &rig.retract_confirm,
-        );
-        assert!(rig.approvals.pending.is_empty());
+        super::super::settle_attached_card_focus(&mut rig.state, false);
+        assert!(rig.state.attached.approvals.pending.is_empty());
         assert_eq!(rig.state.focus, FocusState::Input);
         assert!(rig.frames().is_empty());
     }
@@ -3108,21 +3188,23 @@ mod tests {
     async fn story21_3_borrowed_focus_does_not_restore_unborrowed_focus() {
         for (read_only, draft) in [(true, ""), (false, "draft")] {
             let mut rig = Rig::new(read_only);
-            rig.input = draft.into();
+            rig.state.input_buffer = draft.into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
             rig.retained_arrives(false);
             assert_eq!(rig.state.focus, FocusState::Input);
             rig.esc().await;
             rig.ch('y').await;
             assert_eq!(rig.state.focus, FocusState::Chat);
-            assert_eq!(rig.input, draft);
+            assert_eq!(rig.state.input_buffer, draft);
         }
     }
 
     async fn arrival_behind_surface(surface: char) {
         for draft in ["", "saved draft"] {
             let mut rig = Rig::new(false);
-            rig.input = draft.into();
-            rig.streaming.is_streaming = true;
+            rig.state.input_buffer = draft.into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            rig.domain_tab.streaming.is_streaming = true;
             if surface == 'q' {
                 rig.ctrl('q').await;
             } else {
@@ -3134,7 +3216,7 @@ mod tests {
             rig.approval_arrives("behind-surface");
             assert_eq!(rig.state.focus, FocusState::Input, "surface keeps focus");
             rig.ch('d').await;
-            assert_eq!(rig.input, draft, "surface keeps its keys");
+            assert_eq!(rig.state.input_buffer, draft, "surface keeps its keys");
             rig.esc().await;
             assert_eq!(
                 rig.state.focus,
@@ -3144,8 +3226,8 @@ mod tests {
                     FocusState::Input
                 }
             );
-            assert_eq!(rig.approvals.pending.len(), 1);
-            assert_eq!(rig.input, draft);
+            assert_eq!(rig.state.attached.approvals.pending.len(), 1);
+            assert_eq!(rig.state.input_buffer, draft);
             assert!(
                 rig.frames().is_empty(),
                 "dismissal never decides or interrupts"
@@ -3166,7 +3248,8 @@ mod tests {
     async fn story21_3_attached_approval_arriving_behind_help_remains_discoverable() {
         for draft in ["", "saved draft"] {
             let mut rig = Rig::new(false);
-            rig.input = draft.into();
+            rig.state.input_buffer = draft.into();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
             rig.ctrl('x').await;
             rig.ch('?').await;
             assert!(presentation::is_open(&rig.state, Surface::Help));
@@ -3186,10 +3269,13 @@ mod tests {
             rig.paint_approvals();
             if !draft.is_empty() {
                 assert_eq!(
-                    super::super::attached_notice_badges(&rig.state, &rig.approvals).decisions,
+                    super::super::attached_notice_badges(&rig.state).decisions,
                     1
                 );
-                assert!(rig.approvals.painted.is_none(), "draft hides card");
+                assert!(
+                    rig.state.attached.approvals.painted.is_none(),
+                    "draft hides card"
+                );
             }
             rig.ch('y').await;
             if draft.is_empty() {
@@ -3203,9 +3289,9 @@ mod tests {
                 rig.ch('y').await;
                 assert!(rig.frames().is_empty());
             } else {
-                assert_eq!(rig.input, "saved drafty");
+                assert_eq!(rig.state.input_buffer, "saved drafty");
                 assert!(rig.frames().is_empty());
-                assert_eq!(rig.approvals.pending.len(), 1);
+                assert_eq!(rig.state.attached.approvals.pending.len(), 1);
                 rig.ctrl('x').await;
                 rig.ch('q').await;
                 let route = rig.notice(NoticeSource::Attached).unwrap();
@@ -3222,7 +3308,7 @@ mod tests {
                 rig.esc().await;
                 rig.paint_approvals();
                 assert!(
-                    rig.approvals.painted.is_none(),
+                    rig.state.attached.approvals.painted.is_none(),
                     "Esc does not expose a drafted approval"
                 );
             }
@@ -3261,7 +3347,6 @@ mod tests {
                 let card = super::super::prepare_attached_proposal(
                     &rig.state,
                     &rig.tab,
-                    "",
                     false,
                     false,
                     &mut layout,
@@ -3279,7 +3364,7 @@ mod tests {
         rig.interrupt.apply(&DaemonFrame::ActiveTurn {
             generation: Some(TurnGeneration(7)),
         });
-        rig.streaming.is_streaming = true;
+        rig.domain_tab.streaming.is_streaming = true;
         rig.ctrl('c').await;
         assert!(rig.frames().is_empty(), "no interrupt or decision");
         assert_eq!(
@@ -3293,13 +3378,14 @@ mod tests {
             )
         );
         assert!(rig.state.pending_team_proposals.contains_key("c"));
-        rig.input = "saved draft".into();
+        rig.state.input_buffer = "saved draft".into();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.ctrl('c').await;
         assert!(matches!(
             rig.frames().as_slice(),
             [ClientFrame::InterruptTurn { .. }]
         ));
-        assert_eq!(rig.input, "saved draft");
+        assert_eq!(rig.state.input_buffer, "saved draft");
         assert!(rig.state.pending_team_proposals.contains_key("c"));
     }
 
@@ -3321,7 +3407,11 @@ mod tests {
                 rig.esc().await;
             }
             assert!(rig.frames().is_empty(), "no decision");
-            assert_eq!(rig.approvals.pending.len(), 1, "the card stays pending");
+            assert_eq!(
+                rig.state.attached.approvals.pending.len(),
+                1,
+                "the card stays pending"
+            );
             assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
         }
         assert!(
@@ -3331,9 +3421,11 @@ mod tests {
         // Outside Chat the painted card is blocked: `y` is composer text.
         rig.state.focus = FocusState::Input;
         rig.ch('y').await;
-        assert_eq!(rig.input, "y");
-        assert!(rig.frames().is_empty() && rig.approvals.pending.len() == 1);
-        rig.input.clear();
+        assert_eq!(rig.state.input_buffer, "y");
+        assert!(rig.frames().is_empty() && rig.state.attached.approvals.pending.len() == 1);
+        rig.state.input_buffer.clear();
+        rig.state.cursor_position = 0;
+        rig.state.input_scroll_offset = 0;
         rig.state.focus = FocusState::Chat;
         rig.paint_approvals();
         rig.ch('y').await;
@@ -3344,7 +3436,10 @@ mod tests {
                 ..
             }]
         ));
-        assert!(rig.approvals.pending.is_empty(), "decided once");
+        assert!(
+            rig.state.attached.approvals.pending.is_empty(),
+            "decided once"
+        );
         rig.ch('y').await;
         assert!(rig.frames().is_empty(), "a second `y` decides nothing");
     }
@@ -3354,19 +3449,24 @@ mod tests {
     #[tokio::test]
     async fn story21_3_attached_approval_arrival_never_takes_focus_from_a_draft_or_a_reader() {
         let mut rig = Rig::new(false);
-        rig.input = "half a sentence ".to_owned();
+        rig.state.input_buffer = "half a sentence ".to_owned();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.approval_arrives("a");
         assert_eq!(rig.state.focus, FocusState::Input);
         rig.ch('y').await;
-        assert_eq!(rig.input, "half a sentence y");
+        assert_eq!(rig.state.input_buffer, "half a sentence y");
         assert!(rig.frames().is_empty());
-        assert_eq!(rig.approvals.pending.len(), 1, "the card waits");
+        assert_eq!(
+            rig.state.attached.approvals.pending.len(),
+            1,
+            "the card waits"
+        );
 
         let mut reader = Rig::new(true);
         reader.approval_arrives("a");
         assert_eq!(reader.state.focus, FocusState::Input);
         reader.ch('y').await;
-        assert_eq!(reader.input, "y");
+        assert_eq!(reader.state.input_buffer, "y");
         assert!(reader.frames().is_empty());
     }
 
@@ -3382,15 +3482,17 @@ mod tests {
             })
         }
         let mut rig = Rig::new(false);
-        rig.consolidation_card = card();
-        rig.consolidation_token = Some(ProposalToken(7));
+        rig.state.pending_consolidation_card = card();
+        rig.state.attached.consolidation_token = Some(ProposalToken(7));
         // Input focus: `y` / `n` are text.
         rig.ch('y').await;
         rig.ch('n').await;
-        assert_eq!(rig.input, "yn");
-        assert!(rig.frames().is_empty() && rig.consolidation_token.is_some());
-        rig.input.clear();
-        attached_card_arrived(&mut rig.state, &rig.input, false);
+        assert_eq!(rig.state.input_buffer, "yn");
+        assert!(rig.frames().is_empty() && rig.state.attached.consolidation_token.is_some());
+        rig.state.input_buffer.clear();
+        rig.state.cursor_position = 0;
+        rig.state.input_scroll_offset = 0;
+        attached_card_arrived(&mut rig.state, false);
         assert_eq!(rig.state.focus, FocusState::Chat);
         let cue = crate::adapters::tui::keymap::render::card_cue(Context::Confirm, Host::Attached);
         for ctrl_c in [false, true] {
@@ -3399,7 +3501,7 @@ mod tests {
             } else {
                 rig.esc().await;
             }
-            assert!(rig.frames().is_empty() && rig.consolidation_token.is_some());
+            assert!(rig.frames().is_empty() && rig.state.attached.consolidation_token.is_some());
             assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
         }
         rig.ch('n').await;
@@ -3410,15 +3512,18 @@ mod tests {
                 accept: false
             }]
         ));
-        assert!(rig.consolidation_token.is_none() && rig.consolidation_card.is_none());
+        assert!(
+            rig.state.attached.consolidation_token.is_none()
+                && rig.state.pending_consolidation_card.is_none()
+        );
         assert_eq!(
             rig.state.focus,
             FocusState::Input,
             "consolidation returns borrowed focus"
         );
-        rig.consolidation_card = card();
-        rig.consolidation_token = Some(ProposalToken(8));
-        attached_card_arrived(&mut rig.state, &rig.input, false);
+        rig.state.pending_consolidation_card = card();
+        rig.state.attached.consolidation_token = Some(ProposalToken(8));
+        attached_card_arrived(&mut rig.state, false);
         rig.ch('y').await;
         assert!(matches!(
             rig.frames().as_slice(),
@@ -3462,6 +3567,9 @@ mod tests {
                     &shell,
                     Host::Attached,
                     &log_facts("conversation-1"),
+                    &mut crate::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                        shell.chat_pane,
+                    ),
                     |_| {},
                 );
             })
@@ -3502,7 +3610,7 @@ mod tests {
 
             let mut rig = Rig::new(false);
             rig.type_text("draft").await;
-            rig.streaming.is_streaming = true;
+            rig.domain_tab.streaming.is_streaming = true;
             rig.ctrl('q').await;
             let painted = paint(&rig.state, width).join("\n");
             assert!(
@@ -3557,7 +3665,7 @@ mod tests {
         rig.type_text("/notifications").await;
         rig.state.autocomplete.dismiss();
         assert_eq!(rig.enter().await, KeyFlow::Continue);
-        assert!(rig.input.is_empty(), "the command is consumed");
+        assert!(rig.state.input_buffer.is_empty(), "the command is consumed");
         assert!(rig.state.notification_log.is_some());
         assert!(rig.frames().is_empty(), "never sent to the daemon");
         assert_eq!(
@@ -3568,7 +3676,7 @@ mod tests {
         // Every key belongs to S-LOG: text never reaches the composer, and `r`
         // is inert because the attached client has no retry path.
         rig.type_text("rhi").await;
-        assert!(rig.input.is_empty());
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
         assert!(rig.frames().is_empty());
         assert!(rig.state.notification_log.is_some());
         // AC2/A18: even an idle exit leaves the interrupted Log untouched.
@@ -3653,26 +3761,26 @@ mod tests {
         assert_eq!(refusal.source, NoticeSource::Attached);
         assert!(viewer.frames().is_empty(), "nothing reached the daemon");
         assert_eq!(viewer.state.status, StatusState::Idle, "no sticky status");
-        assert!(viewer.conversation.messages.is_empty());
+        assert!(viewer.domain_tab.conversation.messages.is_empty());
 
         let mut rig = Rig::new(false);
         rig.interrupt.apply(&DaemonFrame::ActiveTurn {
             generation: Some(TurnGeneration(7)),
         });
-        rig.streaming.is_streaming = true;
+        rig.domain_tab.streaming.is_streaming = true;
         rig.rx.close();
         assert_eq!(rig.ctrl('c').await, KeyFlow::Continue);
         let dead = rig.state.notifications.visible().next().expect("a toast");
         assert_eq!(dead.message, "attach socket closed — stop request not sent");
         assert_eq!(dead.severity, NoticeSeverity::Error);
         assert_eq!(rig.state.status, StatusState::Idle, "no sticky status");
-        assert!(rig.conversation.messages.is_empty());
+        assert!(rig.domain_tab.conversation.messages.is_empty());
     }
 
     // ── Story 21.3 (3-A): the attached leader and KG-2 truth from the registry ──
 
     /// The crossterm event a terminal sends for one registry `Key`.
-    fn key_event(key: Key) -> (KeyCode, KeyModifiers) {
+    pub(crate) fn key_event(key: Key) -> (KeyCode, KeyModifiers) {
         use KeyModifiers as M;
         match key {
             Key::Char(c) if c.is_ascii_uppercase() => (KeyCode::Char(c), M::SHIFT),
@@ -3714,11 +3822,12 @@ mod tests {
         fn at(focus: FocusState, draft: &str) -> Self {
             let mut rig = Self::new(false);
             rig.state.focus = focus;
-            rig.input = draft.to_owned();
+            rig.state.input_buffer = draft.to_owned();
+            rig.state.cursor_position = rig.state.input_buffer.chars().count();
             rig
         }
 
-        async fn key(&mut self, key: Key) -> KeyFlow {
+        pub(crate) async fn key(&mut self, key: Key) -> KeyFlow {
             let (code, modifiers) = key_event(key);
             self.press(code, modifiers).await
         }
@@ -3726,8 +3835,9 @@ mod tests {
         /// A transcript with room to scroll both ways, so a scroll key moves it.
         fn scrollable(mut self) -> Self {
             self.state.viewport_height = 20;
-            self.scroll_offset = 12;
-            self.auto_scroll = false;
+            self.state.total_content_height = 200;
+            self.domain_tab.view_state.scroll_offset = 12;
+            self.domain_tab.view_state.mode = crate::domain::models::AnchorMode::Reading;
             self
         }
     }
@@ -3749,7 +3859,7 @@ mod tests {
         let state = &rig.state;
         Salient {
             focus: state.focus.clone(),
-            input: rig.input.clone(),
+            input: rig.state.input_buffer.clone(),
             multiline: state.multiline_mode,
             surfaces: [
                 state.pending_leader.is_some(),
@@ -3760,7 +3870,13 @@ mod tests {
                 state.autocomplete.is_open(),
                 state.recipient_surface.is_some(),
             ],
-            scroll: (rig.scroll_offset, rig.auto_scroll),
+            scroll: (
+                rig.domain_tab.view_state.scroll_offset,
+                matches!(
+                    rig.domain_tab.view_state.mode,
+                    crate::domain::models::AnchorMode::Following
+                ),
+            ),
             notices: state.notifications.records().len(),
             feedback: state.feedback_blocks.len(),
         }
@@ -3808,7 +3924,10 @@ mod tests {
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{label}");
             assert!(rig.state.pending_leader.is_none(), "{label}: leader closed");
             assert_eq!(rig.state.focus, FocusState::Input, "{label}: origin");
-            assert_eq!(rig.input, "draft", "{label}: composer unchanged");
+            assert_eq!(
+                rig.state.input_buffer, "draft",
+                "{label}: composer unchanged"
+            );
             assert!(rig.frames().is_empty(), "{label}: nothing forwarded");
             assert_eq!(rig.state.notifications.records().len(), 1, "{label}");
             let expected = format!("No binding for Ctrl+X {label} in Input");
@@ -3820,7 +3939,10 @@ mod tests {
             );
             // Consumed exactly once: the next key is composer text again.
             rig.ch('x').await;
-            assert_eq!(rig.input, "draftx", "{label}: not a second follow-up");
+            assert_eq!(
+                rig.state.input_buffer, "draftx",
+                "{label}: not a second follow-up"
+            );
         }
 
         // Enter is a send only from Input; from Chat it has no binding.
@@ -3833,7 +3955,7 @@ mod tests {
             Some("No binding for Ctrl+X Enter in Chat")
         );
         assert_eq!(rig.state.focus, FocusState::Chat);
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
         assert!(rig.frames().is_empty(), "no send from Chat");
 
         // Positive control: a bound follow-up posts no no-binding record.
@@ -3850,7 +3972,7 @@ mod tests {
             rig.interrupt.apply(&DaemonFrame::ActiveTurn {
                 generation: Some(TurnGeneration(7)),
             });
-            rig.streaming.is_streaming = true;
+            rig.domain_tab.streaming.is_streaming = true;
             rig.ctrl('x').await;
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{key:?}");
             assert!(rig.state.pending_leader.is_none(), "{key:?}: closed");
@@ -3920,13 +4042,13 @@ mod tests {
                     assert_eq!(rig.notice(source), Some(remedy), "{label}");
                     assert_eq!(posted, 1, "{label}: exactly the remedy");
                     assert!(rig.frames().is_empty(), "{label}: sends nothing");
-                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.input_buffer, "draft", "{label}");
                     assert_eq!(rig.state.focus, FocusState::Input, "{label}");
                 }
                 LeaderCmd::A2aLog => {
                     assert!(rig.feedback("team-log").is_some(), "{label}");
                     assert!(rig.frames().is_empty(), "{label}: a local read");
-                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.input_buffer, "draft", "{label}");
                 }
                 LeaderCmd::Detach => {
                     assert!(rig.frames().is_empty(), "{label}: the loop sends Detach");
@@ -3943,7 +4065,7 @@ mod tests {
                 LeaderCmd::Notifications => {
                     assert!(rig.state.notification_log.is_some(), "{label}");
                     assert_eq!(rig.state.focus, FocusState::Input, "{label}: caller");
-                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.input_buffer, "draft", "{label}");
                 }
                 LeaderCmd::ClearToasts => {
                     assert_eq!(rig.state.notifications.visible().count(), 0, "{label}");
@@ -3960,13 +4082,13 @@ mod tests {
                     let frames = rig.frames();
                     assert_eq!(frames.len(), 1, "{label}: one user frame");
                     assert_eq!(user_text(&frames[0]), Some("draft"));
-                    assert!(rig.input.is_empty(), "{label}: composer sent");
+                    assert!(rig.state.input_buffer.is_empty(), "{label}: composer sent");
                     assert_eq!(posted, 0, "{label}");
                 }
                 LeaderCmd::Cancel => {
                     assert_eq!(posted, 0, "{label}: cancels silently");
                     assert!(rig.frames().is_empty(), "{label}");
-                    assert_eq!(rig.input, "draft", "{label}");
+                    assert_eq!(rig.state.input_buffer, "draft", "{label}");
                     assert_eq!(rig.state.focus, FocusState::Input, "{label}");
                 }
                 LeaderCmd::QuitRequest => {
@@ -4004,13 +4126,13 @@ mod tests {
                         assert_eq!(rig.key(key).await, KeyFlow::Continue);
                         assert!(rig.state.pending_leader.is_some(), "{focus:?}");
                         assert_eq!(rig.state.focus, focus);
-                        assert_eq!(rig.input, "draft");
+                        assert_eq!(rig.state.input_buffer, "draft");
                     }
                     GlobalCmd::QuitRequest => {
                         let mut rig = Rig::at(focus.clone(), "draft");
                         assert_eq!(rig.key(key).await, KeyFlow::Continue);
                         assert!(rig.state.quit_confirm.is_some(), "{focus:?}: asks first");
-                        assert_eq!(rig.input, "draft");
+                        assert_eq!(rig.state.input_buffer, "draft");
                         let mut idle = Rig::at(focus.clone(), "");
                         assert_eq!(idle.key(key).await, KeyFlow::Quit, "{focus:?}: idle");
                     }
@@ -4037,60 +4159,77 @@ mod tests {
                 InputCmd::SubmitOrNewline => {
                     assert_eq!(frames.len(), 1, "{row:?}");
                     assert_eq!(user_text(&frames[0]), Some("hi"));
-                    assert!(rig.input.is_empty());
+                    assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
                     let mut multiline = Rig::at(FocusState::Input, "hi");
                     multiline.state.multiline_mode = true;
                     multiline.key(key).await;
-                    assert_eq!(multiline.input, "hi\n", "multi-line: a newline");
+                    assert_eq!(
+                        multiline.state.input_buffer, "hi\n",
+                        "multi-line: a newline"
+                    );
                     assert!(multiline.frames().is_empty());
                 }
                 InputCmd::Send => {
                     assert_eq!(frames.len(), 1, "{row:?}");
                     assert_eq!(user_text(&frames[0]), Some("hi"));
-                    assert!(rig.input.is_empty());
+                    assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
                 }
                 InputCmd::InsertNewline => {
                     no_frames("newline");
-                    assert_eq!(rig.input, "hi\n", "{row:?}");
+                    assert_eq!(rig.state.input_buffer, "hi\n", "{row:?}");
                 }
-                InputCmd::NoCursor => {
-                    no_frames("Ctrl+A/E/K");
-                    assert_eq!(
-                        rig.input, "hi",
-                        "no cursor: nothing moves, nothing is deleted"
-                    );
-                    assert!(!rig.state.multiline_mode);
+                InputCmd::LineStart
+                | InputCmd::LineEnd
+                | InputCmd::CursorLeft
+                | InputCmd::CursorRight
+                | InputCmd::CursorHome
+                | InputCmd::CursorEnd
+                | InputCmd::DeleteForward
+                | InputCmd::KillToLineEnd => {
+                    no_frames("shared caret editor");
+                    let expected = if matches!(cmd, InputCmd::LineStart | InputCmd::CursorHome) {
+                        0
+                    } else if cmd == InputCmd::CursorLeft {
+                        1
+                    } else {
+                        2
+                    };
+                    assert_eq!(rig.state.cursor_position, expected, "{row:?}");
+                    assert_eq!(rig.state.input_buffer, "hi");
                 }
                 InputCmd::DeleteWordBack | InputCmd::KillToLineStart => {
                     no_frames("Ctrl+W/U");
-                    assert_eq!(rig.input, "", "the tail of the one-line draft goes");
+                    assert_eq!(
+                        rig.state.input_buffer, "",
+                        "the tail of the one-line draft goes"
+                    );
                 }
                 InputCmd::ToggleMultiline => {
                     no_frames("Alt+M");
                     assert!(rig.state.multiline_mode);
-                    assert_eq!(rig.input, "hi", "Alt+M is not typed");
+                    assert_eq!(rig.state.input_buffer, "hi", "Alt+M is not typed");
                 }
                 InputCmd::ReturnToChat => {
                     no_frames("Esc");
                     assert_eq!(rig.state.focus, FocusState::Chat);
-                    assert_eq!(rig.input, "hi", "unsent text kept");
+                    assert_eq!(rig.state.input_buffer, "hi", "unsent text kept");
                 }
                 InputCmd::OpenPalette => {
                     assert!(presentation::is_open(&rig.state, Surface::CommandPalette));
-                    assert_eq!(rig.input, "hi");
+                    assert_eq!(rig.state.input_buffer, "hi");
                 }
                 InputCmd::CancelOrQuit => {
                     no_frames("Ctrl+C");
                     assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
-                    assert_eq!(rig.input, "hi");
+                    assert_eq!(rig.state.input_buffer, "hi");
                 }
                 InputCmd::DeleteBack => {
                     no_frames("Backspace");
-                    assert_eq!(rig.input, "h");
+                    assert_eq!(rig.state.input_buffer, "h");
                 }
                 InputCmd::OpenSlashPopup => {
                     no_frames("/");
-                    assert_eq!(rig.input, "/");
+                    assert_eq!(rig.state.input_buffer, "/");
                     assert!(rig.state.autocomplete.is_open());
                     assert_eq!(
                         rig.state.autocomplete.kind,
@@ -4099,11 +4238,30 @@ mod tests {
                 }
                 InputCmd::TranscriptPageUp => {
                     no_frames("PgUp");
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (17, false));
+                    // Legacy bounded page; the owned ViewState, not a scalar, receives it.
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (17, false)
+                    );
                 }
                 InputCmd::TranscriptPageDown => {
                     no_frames("PgDn");
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (7, false));
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (7, false)
+                    );
                 }
                 // Any other command is local-only: it must not be an attached row.
                 _ => panic!("{row:?}: an attached Input row has no witness"),
@@ -4116,7 +4274,7 @@ mod tests {
                 panic!("{row:?}: a Chat row carries a ChatCmd");
             };
             let key = single_key(row);
-            // Viewport 6: a half page is 3 rows and a full page is 6, capped to 5 per step.
+            // Viewport6: half-page3; full-page5 retains one visible overlap row.
             let mut rig = Rig::at(FocusState::Chat, "hi").scrollable();
             rig.state.viewport_height = 6;
             assert_eq!(rig.key(key).await, KeyFlow::Continue, "{row:?}");
@@ -4124,14 +4282,14 @@ mod tests {
             match cmd {
                 ChatCmd::FocusToggle | ChatCmd::FocusInput => {
                     assert_eq!(rig.state.focus, FocusState::Input, "{row:?}");
-                    assert_eq!(rig.input, "hi");
+                    assert_eq!(rig.state.input_buffer, "hi");
                 }
                 ChatCmd::Quit | ChatCmd::CancelOrQuit => {
                     assert!(
                         rig.state.quit_confirm.is_some(),
                         "{row:?}: a draft asks first"
                     );
-                    assert_eq!(rig.input, "hi");
+                    assert_eq!(rig.state.input_buffer, "hi");
                     let mut idle = Rig::at(FocusState::Chat, "");
                     assert_eq!(idle.key(key).await, KeyFlow::Quit, "{row:?}: idle");
                 }
@@ -4143,16 +4301,56 @@ mod tests {
                     assert!(presentation::is_open(&rig.state, Surface::CommandPalette))
                 }
                 ChatCmd::ScrollHalfPageDown => {
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (9, false), "{row:?}");
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (9, false),
+                        "{row:?}"
+                    );
                 }
                 ChatCmd::ScrollPageDown => {
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (7, false), "{row:?}");
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (7, false),
+                        "{row:?}"
+                    );
                 }
                 ChatCmd::ScrollHalfPageUp => {
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (15, false), "{row:?}");
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (15, false),
+                        "{row:?}"
+                    );
                 }
                 ChatCmd::ScrollPageUp => {
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), (17, false), "{row:?}");
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        (17, false),
+                        "{row:?}"
+                    );
                 }
                 // Any other command is local-only: it must not be an attached row.
                 _ => panic!("{row:?}: an attached Chat row has no witness"),
@@ -4243,7 +4441,7 @@ mod tests {
         // Control: the same letter unmodified is typed in Input.
         let mut rig = Rig::at(FocusState::Input, "abc");
         rig.ch('a').await;
-        assert_eq!(rig.input, "abca");
+        assert_eq!(rig.state.input_buffer, "abca");
     }
 
     /// A12 (attached): opening the slash popup runs discovery (`sync_slash`)
@@ -4299,7 +4497,7 @@ mod tests {
         );
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
         assert_eq!(rig.state.notifications.records().len(), 0, "no toast");
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
         assert!(rig.frames().is_empty());
         rig.esc().await;
         assert!(
@@ -4327,7 +4525,7 @@ mod tests {
         rig.interrupt.apply(&DaemonFrame::ActiveTurn {
             generation: Some(TurnGeneration(7)),
         });
-        rig.streaming.is_streaming = true;
+        rig.domain_tab.streaming.is_streaming = true;
         for key in [
             Key::Combo('c', 5),
             Key::Combo('q', 5),
@@ -4343,7 +4541,7 @@ mod tests {
             "Ctrl+Shift+X opens no leader"
         );
         assert!(!rig.state.multiline_mode, "Alt+Shift+M toggles nothing");
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
         // Positive controls: the plain keys still act.
         rig.key(Key::Alt('m')).await;
         assert!(rig.state.multiline_mode);
@@ -4371,7 +4569,7 @@ mod tests {
             rig.interrupt.apply(&DaemonFrame::ActiveTurn {
                 generation: Some(TurnGeneration(7)),
             });
-            rig.streaming.is_streaming = true;
+            rig.domain_tab.streaming.is_streaming = true;
             rig
         }
         // Help (leader `?`), the slash popup, S-LOG (leader `n`), S-QUIT (Ctrl+Q).
@@ -4388,12 +4586,17 @@ mod tests {
         assert!(rig.frames().is_empty(), "Help: no interrupt");
 
         let mut rig = live_rig().await;
-        rig.input.clear();
+        rig.state.input_buffer.clear();
+        rig.state.cursor_position = 0;
+        rig.state.input_scroll_offset = 0;
         rig.ch('/').await;
         assert!(rig.state.autocomplete.is_open());
         rig.ctrl('c').await;
         assert!(!rig.state.autocomplete.is_open(), "popup closed");
-        assert!(rig.input.is_empty(), "the composer is restored");
+        assert!(
+            rig.state.input_buffer.is_empty(),
+            "the composer is restored"
+        );
         assert!(rig.frames().is_empty(), "popup: no interrupt");
 
         let mut rig = live_rig().await;
@@ -4419,31 +4622,47 @@ mod tests {
         ));
     }
 
-    /// K8 (attached leg, AC11): the attached composer is append-only: Ctrl+W, Ctrl+U
-    /// and Ctrl+H edit its tail by grapheme; Ctrl+A / Ctrl+E / Ctrl+K change nothing.
+    /// K8 migrated by AC16: tail deletions remain grapheme-safe and the same
+    /// authoritative composer now supports real Ctrl+A/E/K caret motions.
     #[tokio::test]
     async fn story21_3_attached_composer_edits_its_tail_by_grapheme() {
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
         let mut rig = Rig::at(FocusState::Input, &format!("alpha beta {family}"));
         rig.ctrl('w').await;
-        assert_eq!(rig.input, "alpha beta ", "the family is one word");
+        assert_eq!(
+            rig.state.input_buffer, "alpha beta ",
+            "the family is one word"
+        );
         rig.ctrl('w').await;
-        assert_eq!(rig.input, "alpha ");
-        rig.input = "xe\u{301}".into();
+        assert_eq!(rig.state.input_buffer, "alpha ");
+        rig.state.input_buffer = "xe\u{301}".into();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.ctrl('h').await;
-        assert_eq!(rig.input, "x", "the accent goes with its letter");
-        rig.input = "one\ntwo three".into();
+        assert_eq!(
+            rig.state.input_buffer, "x",
+            "the accent goes with its letter"
+        );
+        rig.state.input_buffer = "one\ntwo three".into();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
         rig.ctrl('u').await;
-        assert_eq!(rig.input, "one\n", "Ctrl+U deletes the last logical line");
-        rig.input = "keep".into();
-        for c in ['a', 'e', 'k'] {
+        assert_eq!(
+            rig.state.input_buffer, "one\n",
+            "Ctrl+U deletes the last logical line"
+        );
+        rig.state.input_buffer = "keep".into();
+        rig.state.cursor_position = rig.state.input_buffer.chars().count();
+        for (c, cursor) in [('a', 0), ('e', 4), ('k', 4)] {
             assert_eq!(rig.ctrl(c).await, KeyFlow::Continue);
-            assert_eq!(rig.input, "keep", "Ctrl+{c} has no cursor to move");
+            assert_eq!(rig.state.input_buffer, "keep");
+            assert_eq!(
+                rig.state.cursor_position, cursor,
+                "Ctrl+{c} moves the real caret"
+            );
         }
         // Chat focus: the keys do not edit the unsent draft.
         let mut rig = Rig::at(FocusState::Chat, "draft");
         rig.ctrl('w').await;
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
     }
 
     // ── Story 21.3 slice 3-B1: attached twins of the K4 overlay witnesses ────
@@ -4510,7 +4729,7 @@ mod tests {
             "quit={} focus={:?} input={}",
             s.quit_confirm.is_some(),
             s.focus,
-            rig.input
+            rig.state.input_buffer
         )
     }
 
@@ -4600,14 +4819,14 @@ mod tests {
             rig.type_text("ab cd").await;
             assert_eq!(rig.key(key).await, KeyFlow::Continue);
             assert_eq!(rig.state.command_palette.filter_text.as_str(), want, "{key:?}");
-            assert!(presentation::is_open(&rig.state, Surface::CommandPalette) && rig.input == "draft" && rig.frames().is_empty());
+            assert!(presentation::is_open(&rig.state, Surface::CommandPalette) && rig.state.input_buffer == "draft" && rig.frames().is_empty());
         }
         let mut typing = Rig::at(FocusState::Input, "draft");
         typing.ctrl('p').await;
         typing.ch('z').await;
         assert_eq!(typing.state.command_palette.filter_text.as_str(), "z");
         assert!(presentation::is_open(&typing.state, Surface::CommandPalette));
-        assert_eq!(typing.input, "draft", "the palette filter never touches the composer");
+        assert_eq!(typing.state.input_buffer, "draft", "the palette filter never touches the composer");
         assert!(typing.frames().is_empty());
     }
 
@@ -4831,7 +5050,7 @@ mod tests {
         let mut rig = Rig::at(FocusState::Chat, "draft");
         assert_eq!(rig.key(Key::Char('q')).await, KeyFlow::Continue);
         assert!(rig.state.quit_confirm.is_some(), "a draft asks first");
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
         let mut idle = Rig::at(FocusState::Chat, "");
         assert_eq!(idle.key(Key::Char('q')).await, KeyFlow::Quit);
 
@@ -4855,10 +5074,31 @@ mod tests {
         let mut rig = Rig::at(FocusState::Chat, "draft").scrollable();
         rig.state.viewport_height = 6;
         assert_eq!(rig.key(Key::Ctrl('u')).await, KeyFlow::Continue);
-        assert_eq!((rig.scroll_offset, rig.auto_scroll), (15, false));
-        assert_eq!(rig.input, "draft", "Ctrl+U in Chat never edits the draft");
+        assert_eq!(
+            (
+                rig.domain_tab.view_state.scroll_offset,
+                matches!(
+                    rig.domain_tab.view_state.mode,
+                    crate::domain::models::AnchorMode::Following
+                )
+            ),
+            (15, false)
+        );
+        assert_eq!(
+            rig.state.input_buffer, "draft",
+            "Ctrl+U in Chat never edits the draft"
+        );
         assert_eq!(rig.key(Key::Ctrl('d')).await, KeyFlow::Continue);
-        assert_eq!((rig.scroll_offset, rig.auto_scroll), (12, false));
+        assert_eq!(
+            (
+                rig.domain_tab.view_state.scroll_offset,
+                matches!(
+                    rig.domain_tab.view_state.mode,
+                    crate::domain::models::AnchorMode::Following
+                )
+            ),
+            (12, false)
+        );
         assert!(rig.frames().is_empty());
     }
 
@@ -4876,32 +5116,32 @@ mod tests {
         ] {
             rig.key(key).await;
         }
-        assert_eq!(rig.input, "hI?@");
+        assert_eq!(rig.state.input_buffer, "hI?@");
         assert!(!rig.state.autocomplete.is_open());
 
         let mut rig = Rig::at(FocusState::Input, "");
         rig.key(Key::Char('/')).await;
         assert!(rig.state.autocomplete.is_open());
-        assert_eq!(rig.input, "/");
+        assert_eq!(rig.state.input_buffer, "/");
         let mut rig = Rig::at(FocusState::Input, "a");
         rig.key(Key::Char('/')).await;
         assert!(
             !rig.state.autocomplete.is_open(),
             "only an empty composer triggers"
         );
-        assert_eq!(rig.input, "a/");
+        assert_eq!(rig.state.input_buffer, "a/");
 
         let mut rig = Rig::at(FocusState::Input, "hi");
         rig.key(Key::Alt('m')).await;
         assert!(rig.state.multiline_mode);
-        assert_eq!(rig.input, "hi", "Alt+M is not typed");
+        assert_eq!(rig.state.input_buffer, "hi", "Alt+M is not typed");
 
         let mut rig = Rig::at(FocusState::Input, "hi");
         assert_eq!(rig.key(Key::CtrlEnter).await, KeyFlow::Continue);
         let frames = rig.frames();
         assert_eq!(frames.len(), 1, "{frames:?}");
         assert_eq!(user_text(&frames[0]), Some("hi"));
-        assert!(rig.input.is_empty());
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
         let mut empty = Rig::at(FocusState::Input, "");
         empty.key(Key::CtrlEnter).await;
         assert!(empty.frames().is_empty(), "an empty composer sends nothing");
@@ -4910,18 +5150,30 @@ mod tests {
             let mut rig = Rig::at(focus.clone(), "hi").scrollable();
             rig.key(Key::PageUp).await;
             assert_eq!(
-                (rig.scroll_offset, rig.auto_scroll),
+                (
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    )
+                ),
                 (17, false),
                 "{focus:?}"
             );
             rig.key(Key::PageDown).await;
             rig.key(Key::PageDown).await;
             assert_eq!(
-                (rig.scroll_offset, rig.auto_scroll),
+                (
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    )
+                ),
                 (7, false),
                 "{focus:?}"
             );
-            assert_eq!(rig.input, "hi");
+            assert_eq!(rig.state.input_buffer, "hi");
         }
     }
 
@@ -4985,7 +5237,7 @@ mod tests {
         let before = (
             format!("{:?}", rig.state.pending_team_retract),
             rig.state.focus.clone(),
-            rig.input.clone(),
+            rig.state.input_buffer.clone(),
         );
         assert_eq!(rig.ctrl('q').await, KeyFlow::Continue);
         assert!(presentation::is_open(
@@ -4997,7 +5249,7 @@ mod tests {
             (
                 format!("{:?}", rig.state.pending_team_retract),
                 rig.state.focus.clone(),
-                rig.input.clone()
+                rig.state.input_buffer.clone()
             ),
             before
         );
@@ -5007,7 +5259,7 @@ mod tests {
             (
                 format!("{:?}", rig.state.pending_team_retract),
                 rig.state.focus.clone(),
-                rig.input.clone()
+                rig.state.input_buffer.clone()
             ),
             before
         );
@@ -5057,10 +5309,24 @@ mod tests {
                     | Surface::CrossSearch
                     | Surface::Login => unreachable!("surface not offered attached"),
                 }
-                let before = (rig.input.clone(), rig.scroll_offset, rig.auto_scroll);
+                let before = (
+                    rig.state.input_buffer.clone(),
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    ),
+                );
                 let flow = rig.key(key).await;
                 assert_eq!(
-                    (rig.input.clone(), rig.scroll_offset, rig.auto_scroll),
+                    (
+                        rig.state.input_buffer.clone(),
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        )
+                    ),
                     before,
                     "{surface:?} key={key:?}: {flow:?}"
                 );
@@ -5074,7 +5340,7 @@ mod tests {
         let mut base = Rig::at(FocusState::Input, "");
         base.ch('y').await;
         assert_eq!(
-            base.input, "y",
+            base.state.input_buffer, "y",
             "positive control: base keys still reach Input"
         );
     }
@@ -5101,7 +5367,7 @@ mod tests {
         assert!(presentation::is_open(&rig.state, Surface::Help));
         assert_eq!(rig.state.help_overlay.scroll_offset, 7);
         assert_eq!(rig.state.focus, focus);
-        assert_eq!(rig.input, "draft");
+        assert_eq!(rig.state.input_buffer, "draft");
         assert!(rig.frames().is_empty());
     }
 
@@ -5118,9 +5384,9 @@ mod tests {
                 "{key:?}: no response or interrupt below minimum"
             );
         }
-        super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
-        assert!(rig.input.is_empty());
-        assert_eq!(rig.approvals.pending.len(), 1);
+        super::handle_attached_paste(&mut rig.state, "hidden paste", false);
+        assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
+        assert_eq!(rig.state.attached.approvals.pending.len(), 1);
         rig.state.terminal_width = 80;
         rig.ch('y').await;
         assert!(
@@ -5165,12 +5431,12 @@ mod tests {
                 "{cancel:?}: exact popup restoration"
             );
             assert_eq!(rig.state.focus, FocusState::Input);
-            assert_eq!(rig.input, "/te");
+            assert_eq!(rig.state.input_buffer, "/te");
             assert!(rig.frames().is_empty());
             rig.esc().await;
             assert!(!rig.state.autocomplete.is_open());
             assert!(
-                rig.input.is_empty(),
+                rig.state.input_buffer.is_empty(),
                 "the original slash rollback still works"
             );
         }
@@ -5207,21 +5473,25 @@ mod tests {
                     assert_eq!(rig.state.notification_log, log);
                     assert!(rig.frames().is_empty());
                 }
-                let allocation = (rig.input.as_ptr(), rig.input.capacity());
-                super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden paste", false);
+                let allocation = (
+                    rig.state.input_buffer.as_ptr(),
+                    rig.state.input_buffer.capacity(),
+                );
+                super::handle_attached_paste(&mut rig.state, "hidden paste", false);
                 assert_eq!(salient(&rig), before);
-                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
+                assert_eq!(
+                    (
+                        rig.state.input_buffer.as_ptr(),
+                        rig.state.input_buffer.capacity()
+                    ),
+                    allocation
+                );
             }
         }
         let mut visible = Rig::at(FocusState::Input, "");
-        super::handle_attached_paste(
-            &mut visible.state,
-            &mut visible.input,
-            "visible paste",
-            false,
-        );
+        super::handle_attached_paste(&mut visible.state, "visible paste", false);
         assert_eq!(
-            visible.input, "visible paste",
+            visible.state.input_buffer, "visible paste",
             "normal-size base paste still edits"
         );
     }
@@ -5303,7 +5573,7 @@ mod tests {
                     let mut rig = Rig::at(FocusState::Input, &draft);
                     rig.state.terminal_width = width;
                     rig.state.terminal_height = height;
-                    rig.streaming.is_streaming = true;
+                    rig.domain_tab.streaming.is_streaming = true;
                     notifications::notify(
                         &mut rig.state,
                         NoticeSource::System,
@@ -5312,7 +5582,11 @@ mod tests {
                     );
                     let draw = |rig: &Rig, title: Option<&str>| {
                         let state = &rig.state;
-                        let display = attached_display_input(state, &rig.input);
+                        let display =
+                            crate::adapters::tui::handlers::recipient_actions::pending_composition(
+                                state,
+                            )
+                            .unwrap_or(&state.input_buffer);
                         let area = Rect::new(0, 0, width, height);
                         let layout = compute_layout(
                             area,
@@ -5330,10 +5604,11 @@ mod tests {
                         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                         terminal
                             .draw(|frame| {
-                                super::super::render_attached_composer(
+                                input_box::render(
                                     frame,
                                     layout.input_area,
                                     display,
+                                    state.cursor_position,
                                     if state.modal_stack.is_empty()
                                         && state.pending_leader.is_none()
                                     {
@@ -5343,6 +5618,7 @@ mod tests {
                                     },
                                     &state.theme,
                                     state.multiline_mode,
+                                    state.input_scroll_offset,
                                     None,
                                 );
                                 frame.render_widget(
@@ -5354,7 +5630,8 @@ mod tests {
                                     state,
                                     &shell,
                                     Host::Attached,
-                                    &log_facts(&rig.conversation.id),
+                                    &log_facts(&rig.domain_tab.conversation.id),
+                                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                                     |frame| {
                                         let buffer = frame.buffer_mut();
                                         assert!(
@@ -5456,7 +5733,7 @@ mod tests {
                         ),
                         legacy
                     );
-                    assert_eq!(rig.input, draft);
+                    assert_eq!(rig.state.input_buffer, draft);
                     let (painted, after) = draw(&rig, Some(title));
                     assert_eq!(
                         (before.chat_pane, before.input_area, before.status_bar),
@@ -5495,8 +5772,11 @@ mod tests {
                             && rig.state.pending_leader.is_none()
                             && !rig.state.autocomplete.is_open()
                     );
-                    assert_eq!(rig.input, draft);
-                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                    assert_eq!(rig.state.input_buffer, draft);
+                    assert!(
+                        rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                            && rig.frames().is_empty()
+                    );
                     assert!(presentation::consistent(&rig.state));
                 }
             }
@@ -5559,7 +5839,7 @@ mod tests {
                 rig.esc().await;
                 assert_eq!(rig.state.modal_stack.len(), depth);
                 assert_eq!(rig.state.focus, base);
-                assert_eq!(rig.input, "attached draft 界");
+                assert_eq!(rig.state.input_buffer, "attached draft 界");
                 assert!(presentation::consistent(&rig.state));
                 if depth == 1 {
                     assert_eq!(
@@ -5569,7 +5849,10 @@ mod tests {
                     );
                 }
             }
-            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+            assert!(
+                rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                    && rig.frames().is_empty()
+            );
         }
     }
 
@@ -5629,7 +5912,10 @@ mod tests {
         rig.ctrl('p').await;
         assert_eq!(rig.state.modal_stack.len(), 1, "palette reopen truncates");
         assert_eq!(palette_digest(&rig), palette);
-        assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+        assert!(
+            rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                && rig.frames().is_empty()
+        );
     }
 
     /// K2: Help/palette/pending leader block paste and wheel without editing Stage.
@@ -5646,14 +5932,23 @@ mod tests {
                 rig.ctrl('p').await;
             }
             assert_eq!(rig.state.current_hint, None);
-            let scroll = (rig.scroll_offset, rig.auto_scroll);
-            let allocation = (rig.input.as_ptr(), rig.input.capacity());
+            let scroll = (
+                rig.domain_tab.view_state.scroll_offset,
+                matches!(
+                    rig.domain_tab.view_state.mode,
+                    crate::domain::models::AnchorMode::Following
+                ),
+            );
+            let allocation = (
+                rig.state.input_buffer.as_ptr(),
+                rig.state.input_buffer.capacity(),
+            );
             for pending in [false, true] {
                 if pending {
                     rig.ctrl('x').await;
                 }
                 let before = rig.state.modal_stack.iter().cloned().collect::<Vec<_>>();
-                super::handle_attached_paste(&mut rig.state, &mut rig.input, "hidden", false);
+                super::handle_attached_paste(&mut rig.state, "hidden", false);
                 for kind in [MouseEventKind::ScrollUp, MouseEventKind::ScrollDown] {
                     assert_eq!(
                         route_event(
@@ -5672,9 +5967,24 @@ mod tests {
                     rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
                     before
                 );
-                assert_eq!((rig.scroll_offset, rig.auto_scroll), scroll);
-                assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
-                assert_eq!(rig.input, "draft");
+                assert_eq!(
+                    (
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        )
+                    ),
+                    scroll
+                );
+                assert_eq!(
+                    (
+                        rig.state.input_buffer.as_ptr(),
+                        rig.state.input_buffer.capacity()
+                    ),
+                    allocation
+                );
+                assert_eq!(rig.state.input_buffer, "draft");
                 if pending {
                     rig.esc().await;
                 }
@@ -5753,10 +6063,11 @@ mod tests {
                     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
                     terminal
                         .draw(|frame| {
-                            super::super::render_attached_composer(
+                            input_box::render(
                                 frame,
                                 layout.input_area,
                                 &draft,
+                                state.cursor_position,
                                 if state.modal_stack.is_empty() && state.pending_leader.is_none() {
                                     state.focus.clone()
                                 } else {
@@ -5764,6 +6075,7 @@ mod tests {
                                 },
                                 &state.theme,
                                 false,
+                                state.input_scroll_offset,
                                 None,
                             );
                             frame.render_widget(Paragraph::new("status-before"), layout.status_bar);
@@ -5772,7 +6084,8 @@ mod tests {
                                 state,
                                 &shell,
                                 Host::Attached,
-                                &log_facts(&rig.conversation.id),
+                                &log_facts(&rig.domain_tab.conversation.id),
+                                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                                 |frame| {
                                     let buffer = frame.buffer_mut();
                                     let row = |y| {
@@ -5823,8 +6136,11 @@ mod tests {
                         .map(|x| buffer[(x, layout.status_bar.y)].symbol())
                         .collect::<String>();
                     assert!(status.starts_with("Ready/status-after"));
-                    assert_eq!(rig.input, draft);
-                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                    assert_eq!(rig.state.input_buffer, draft);
+                    assert!(
+                        rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                            && rig.frames().is_empty()
+                    );
                     assert!(presentation::consistent(&rig.state));
                 }
             }
@@ -5872,20 +6188,27 @@ mod tests {
                 assert_eq!(palette_digest(&rig), palette);
                 assert_eq!(rig.state.help_overlay.scroll_offset, 7);
                 assert_eq!(rig.state.focus, FocusState::Input);
-                assert!(rig.retract_confirm.is_none());
+                assert!(rig.state.attached.retract_confirm.is_none());
                 assert_eq!(rig.state.notifications.records().len(), records + 1);
                 assert_eq!(rig.notice(NoticeSource::Palette), Some(CLOSE_WINDOW_FIRST));
             } else {
                 assert!(rig.state.modal_stack.is_empty());
                 assert_eq!(
-                    rig.retract_confirm.as_ref().map(|(id, _)| id.as_str()),
+                    rig.state
+                        .attached
+                        .retract_confirm
+                        .as_ref()
+                        .map(|(id, _)| id.as_str()),
                     Some("peer-response-auto-b")
                 );
                 assert_eq!(rig.state.focus, FocusState::Chat);
                 assert_eq!(rig.state.notifications.records().len(), records);
             }
-            assert_eq!(rig.input, "retained retract draft");
-            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+            assert_eq!(rig.state.input_buffer, "retained retract draft");
+            assert!(
+                rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                    && rig.frames().is_empty()
+            );
         }
     }
 
@@ -5970,7 +6293,7 @@ mod tests {
                 rig.esc().await;
                 assert_eq!(rig.state.pending_leader, None);
                 assert_eq!(palette_digest(&rig), palette);
-                assert_eq!(rig.input, "leader draft");
+                assert_eq!(rig.state.input_buffer, "leader draft");
                 assert_eq!(rig.state.focus, FocusState::Input);
                 assert!(rig.frames().is_empty());
                 let mut base = Rig::at(FocusState::Input, "base draft");
@@ -5993,7 +6316,7 @@ mod tests {
                         Some("No binding for Ctrl+X z in Input")
                     );
                 }
-                assert_eq!(base.input, "base draft");
+                assert_eq!(base.state.input_buffer, "base draft");
                 assert_eq!(base.state.focus, FocusState::Input);
             }
         }
@@ -6049,7 +6372,7 @@ mod tests {
             };
             let footer = footer_text(&rows);
             assert!(footer.contains(CLOSE_WINDOW_FIRST), "{width}: {rows:?}");
-            assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
+            assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
             rig.press(KeyCode::Left, KeyModifiers::NONE).await;
             assert_eq!(
                 palette_digest(&rig),
@@ -6066,9 +6389,9 @@ mod tests {
                 records + 1,
                 "clearing does not erase history"
             );
-            assert_eq!(rig.input, "palette draft");
+            assert_eq!(rig.state.input_buffer, "palette draft");
             assert_eq!(rig.state.focus, FocusState::Input);
-            assert!(rig.retract_confirm.is_none() && rig.frames().is_empty());
+            assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
         }
     }
 
@@ -6121,8 +6444,11 @@ mod tests {
                     "base palette retains the existing attached auth refusal"
                 );
             }
-            assert_eq!(rig.input, "attached draft");
-            assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+            assert_eq!(rig.state.input_buffer, "attached draft");
+            assert!(
+                rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                    && rig.frames().is_empty()
+            );
         }
     }
 
@@ -6157,7 +6483,7 @@ mod tests {
     async fn story21_4_attached_inspector_paste_caret_cover_and_back_keep_the_owner() {
         use ratatui::style::Modifier;
         let carets = |rig: &Rig, width, height| {
-            paint_buffer_at(&rig.state, width, height, &rig.input)
+            paint_buffer_at(&rig.state, width, height, &rig.state.input_buffer)
                 .content
                 .iter()
                 .filter(|cell| cell.symbol() == "界" && cell.modifier.contains(Modifier::REVERSED))
@@ -6173,8 +6499,17 @@ mod tests {
                     rig.state.terminal_height = height;
                     notifications::info(&mut rig.state, NoticeSource::Attached, "info control");
                     notifications::error(&mut rig.state, NoticeSource::Attached, "error control");
-                    let stage = (rig.scroll_offset, rig.auto_scroll);
-                    let allocation = (rig.input.as_ptr(), rig.input.capacity());
+                    let stage = (
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        ),
+                    );
+                    let allocation = (
+                        rig.state.input_buffer.as_ptr(),
+                        rig.state.input_buffer.capacity(),
+                    );
                     rig.ctrl('x').await;
                     rig.ch(if surface == Surface::Help { '?' } else { 'n' })
                         .await;
@@ -6187,13 +6522,7 @@ mod tests {
                     );
                     rig.ch('/').await;
                     rig.chrome
-                        .paste(
-                            &mut rig.state,
-                            &mut rig.input,
-                            "a界",
-                            false,
-                            rig.workspace.path(),
-                        )
+                        .paste(&mut rig.state, "a界", false, rig.workspace.path())
                         .await;
                     rig.key(Key::Home).await;
                     rig.key(Key::Right).await;
@@ -6227,10 +6556,28 @@ mod tests {
                         rig.state.modal_stack.is_empty(),
                         "second Esc backs the frame"
                     );
-                    assert_eq!(rig.input, draft);
-                    assert_eq!((rig.input.as_ptr(), rig.input.capacity()), allocation);
-                    assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
-                    assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                    assert_eq!(rig.state.input_buffer, draft);
+                    assert_eq!(
+                        (
+                            rig.state.input_buffer.as_ptr(),
+                            rig.state.input_buffer.capacity()
+                        ),
+                        allocation
+                    );
+                    assert_eq!(
+                        (
+                            rig.domain_tab.view_state.scroll_offset,
+                            matches!(
+                                rig.domain_tab.view_state.mode,
+                                crate::domain::models::AnchorMode::Following
+                            )
+                        ),
+                        stage
+                    );
+                    assert!(
+                        rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                            && rig.frames().is_empty()
+                    );
                 }
             }
         }
@@ -6302,7 +6649,7 @@ mod tests {
                 if surface == Surface::Help {
                     rig.state.help_overlay.selected_category = 2;
                 }
-                let original = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                let original = paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer);
                 if surface == Surface::NotificationLog {
                     assert_eq!(
                         rig.state.notification_log.as_ref().unwrap().selected_id,
@@ -6319,7 +6666,13 @@ mod tests {
                         "one available body row must not show the unselected newest record"
                     );
                 }
-                let stage = (rig.scroll_offset, rig.auto_scroll);
+                let stage = (
+                    rig.domain_tab.view_state.scroll_offset,
+                    matches!(
+                        rig.domain_tab.view_state.mode,
+                        crate::domain::models::AnchorMode::Following
+                    ),
+                );
                 let owner = rig.state.modal_stack.top().unwrap().clone();
                 rig.ch('/').await;
                 let needle = if surface == Surface::Help {
@@ -6328,29 +6681,26 @@ mod tests {
                     "eRr"
                 };
                 rig.chrome
-                    .paste(
-                        &mut rig.state,
-                        &mut rig.input,
-                        needle,
-                        false,
-                        rig.workspace.path(),
-                    )
+                    .paste(&mut rig.state, needle, false, rig.workspace.path())
                     .await;
                 rig.enter().await;
                 if surface == Surface::Help {
                     assert!(!rig.state.help_overlay.search.editing);
-                    let filtered = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                    let filtered = paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer);
                     rig.ch('j').await;
                     assert_eq!(rig.state.help_overlay.filtered_scroll_offset, 1);
-                    assert_ne!(paint_buffer_at(&rig.state, 60, 16, &rig.input), filtered);
+                    assert_ne!(
+                        paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer),
+                        filtered
+                    );
                     for up in [Key::Char('k'), Key::Up] {
                         rig.ch('G').await;
-                        let bottom = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                        let bottom = paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer);
                         let end = rig.state.help_overlay.filtered_scroll_offset;
                         assert_ne!(bottom, filtered, "end jump changes actual attached rows");
                         rig.key(up).await;
                         assert_ne!(
-                            paint_buffer_at(&rig.state, 60, 16, &rig.input),
+                            paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer),
                             bottom,
                             "read_only={read_only} {up:?} moves up after the filtered end jump"
                         );
@@ -6360,7 +6710,10 @@ mod tests {
                             rig.ch('j').await;
                         }
                         assert_eq!(rig.state.help_overlay.filtered_scroll_offset, end);
-                        assert_eq!(paint_buffer_at(&rig.state, 60, 16, &rig.input), bottom);
+                        assert_eq!(
+                            paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer),
+                            bottom
+                        );
                     }
                     rig.ch('g').await;
                     rig.ch('j').await;
@@ -6381,15 +6734,9 @@ mod tests {
                     rig.key(Key::Home).await;
                     rig.ctrl('k').await;
                     rig.chrome
-                        .paste(
-                            &mut rig.state,
-                            &mut rig.input,
-                            "no-match",
-                            false,
-                            rig.workspace.path(),
-                        )
+                        .paste(&mut rig.state, "no-match", false, rig.workspace.path())
                         .await;
-                    let empty = paint_buffer_at(&rig.state, 60, 16, &rig.input);
+                    let empty = paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer);
                     let text: String = empty.content.iter().map(|cell| cell.symbol()).collect();
                     assert!(text.contains("No matching notifications."));
                     assert!(
@@ -6407,11 +6754,389 @@ mod tests {
                 }
                 rig.esc().await;
                 assert_eq!(rig.state.modal_stack.top(), Some(&owner));
-                assert_eq!(paint_buffer_at(&rig.state, 60, 16, &rig.input), original);
-                assert_eq!((rig.scroll_offset, rig.auto_scroll), stage);
-                assert_eq!(rig.input, draft);
-                assert!(rig.state.input_buffer.is_empty() && rig.frames().is_empty());
+                assert_eq!(
+                    paint_buffer_at(&rig.state, 60, 16, &rig.state.input_buffer),
+                    original
+                );
+                assert_eq!(
+                    (
+                        rig.domain_tab.view_state.scroll_offset,
+                        matches!(
+                            rig.domain_tab.view_state.mode,
+                            crate::domain::models::AnchorMode::Following
+                        )
+                    ),
+                    stage
+                );
+                assert_eq!(rig.state.input_buffer, draft);
+                assert!(
+                    rig.state.cursor_position <= rig.state.input_buffer.chars().count()
+                        && rig.frames().is_empty()
+                );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn story21_4_native_review_preserves_every_body_row_in_order_at_all_viewports() {
+        use crate::adapters::daemon::protocol::DaemonFrame;
+        use crate::domain::models::SemanticMessageType;
+
+        fn draw(rig: &mut Rig) -> String {
+            let terminal = rig.paint();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            for body_len in [12, 24] {
+                let mut rig = Rig::new(false);
+                rig.state.terminal_width = width;
+                rig.state.terminal_height = height;
+                for row in 0..if body_len == 12 { 8 } else { 60 } {
+                    rig.domain_tab
+                        .conversation
+                        .messages
+                        .push(system_message(format!("prior-transcript-{row:02}")));
+                }
+                let body: Vec<_> = (0..body_len)
+                    .map(|row| {
+                        if matches!(row, 8 | 9) {
+                            "native-review-repeat".to_owned()
+                        } else {
+                            format!("native-review-{row:02}")
+                        }
+                    })
+                    .collect();
+                let conversation = rig.domain_tab.conversation.id.clone();
+                super::super::apply_attached_proposal_frame(
+                    &mut rig.state,
+                    &mut rig.tab,
+                    &mut rig.team_requests,
+                    &conversation,
+                    DaemonFrame::TeamProposal {
+                        proposal: "native-review".into(),
+                        recipients: vec!["lena-po".into(), "jun-dev".into()],
+                        message_type: SemanticMessageType::ArchitectureUpdate,
+                        body: body.join("\n"),
+                    },
+                );
+                draw(&mut rig);
+                assert!(rig.tab.team_proposal_reviews.is_empty());
+                rig.ch('r').await;
+                let opened = draw(&mut rig);
+                assert!(
+                    opened.contains(&format!("│ native-review-{:02}", body_len - 1)),
+                    "{opened}"
+                );
+                assert_eq!(rig.tab.team_proposal_reviews.len(), 1);
+                assert!(rig.frames().is_empty(), "Review never sends or decides");
+
+                for _ in 0..20 {
+                    rig.key(Key::PageUp).await;
+                    draw(&mut rig);
+                }
+                assert!(rig.domain_tab.view_state.scroll_offset > 0);
+                let mut pages = Vec::new();
+                for index in 0..=20 {
+                    pages.push(draw(&mut rig));
+                    if index < 20 {
+                        rig.key(Key::PageDown).await;
+                    }
+                }
+                if let Some(directory) = std::env::var_os("RUSTAIN_STORY_21_4_FRAME_DIR") {
+                    let directory = std::path::PathBuf::from(directory);
+                    let directory = std::fs::canonicalize(directory).unwrap();
+                    let record = serde_json::json!({
+                        "width": width, "height": height, "body": body, "pages": pages,
+                        "source": "real daemon ingress, attached key boundary and paint_attached; same owned tab",
+                    });
+                    std::fs::write(
+                        directory.join(format!("native-review-{width}x{height}-{body_len}.json")),
+                        serde_json::to_vec(&record).unwrap(),
+                    )
+                    .unwrap();
+                }
+
+                // Native Review's long-standing page contract is min(painted rows, 5).
+                // Preserve repeated logical rows; do not deduplicate by string value.
+                let mut merged = Vec::new();
+                let mut previous: Option<Vec<String>> = None;
+                for page in &pages {
+                    let rows: Vec<_> = page.lines().map(|row| row.trim_end().to_owned()).collect();
+                    let boundary = rows.iter().position(|row| row.contains('╔')).unwrap();
+                    let current = rows[..boundary].to_vec();
+                    assert!(
+                        !current.is_empty(),
+                        "Review leaves a real transcript viewport"
+                    );
+                    let mut overlap = 0;
+                    if let Some(prior) = &previous {
+                        assert_eq!(current.len(), prior.len());
+                        overlap = current.len() - current.len().min(5);
+                        if overlap > 0 && prior[prior.len() - overlap..] != current[..overlap] {
+                            overlap = (overlap + 1..=current.len())
+                                .find(|count| prior[prior.len() - count..] == current[..*count])
+                                .expect("native Review page sweep retains ordered overlap");
+                        }
+                    }
+                    merged.extend_from_slice(&current[overlap..]);
+                    previous = Some(current);
+                }
+                let actual: Vec<_> = merged
+                    .iter()
+                    .filter(|row| row.starts_with("│ native-review-"))
+                    .take(body.len())
+                    .cloned()
+                    .collect();
+                let expected: Vec<_> = body.iter().map(|row| format!("│ {row}")).collect();
+                assert_eq!(
+                    actual, expected,
+                    "{width}x{height}: native Review full body is missing, reordered or duplicated"
+                );
+                let start = merged
+                    .iter()
+                    .rposition(|row| row.starts_with("Proposed message (not sent)"))
+                    .expect("real Review title reached by the native sweep");
+                let end = start + 2 + body.len();
+                assert!(
+                    end == merged.len() || !merged[end].starts_with("│ "),
+                    "{width}x{height}/{body_len}: native Review has unexpected extra delimited rows"
+                );
+                assert!(rig.frames().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_4_r4_pending_composition_keeps_the_real_tail_and_caret() {
+        use crate::adapters::daemon::protocol::{
+            PeerDraftAction, ProtocolError, RecipientAction, RecipientActionOutcome,
+            RecipientActionTarget,
+        };
+        use crate::adapters::tui::state::{PeerComposeAction, PinnedPeerCompose};
+        use crate::domain::models::{PeerRowControl, PeerRowStage, SemanticMessageType};
+        fn screen(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+            let buffer = terminal.backend().buffer();
+            buffer.content.iter().map(|cell| cell.symbol()).collect()
+        }
+        for width in [60, 130] {
+            for refused in [false, true] {
+                let mut rig = Rig::new(false);
+                rig.state.terminal_width = width;
+                let mut row = system_message("awaiting operator");
+                row.id = "r4-peer".into();
+                rig.domain_tab.conversation.messages.push(row);
+                rig.domain_tab.conversation.peer_row_controls.insert(
+                    "r4-peer".into(),
+                    PeerRowControl {
+                        node_id: "node-r4".into(),
+                        item_address: None,
+                        stories: None,
+                        status: None,
+                        selected_for: None,
+                        retro: None,
+                        message_type: SemanticMessageType::ArchitectureUpdate,
+                        sender_label: "sender".into(),
+                        stage: PeerRowStage::AwaitingOperator,
+                        node_resolvable: true,
+                    },
+                );
+                rig.state.pinned_peer_compose = Some(PinnedPeerCompose::new(
+                    "node-r4".into(),
+                    PeerComposeAction::Respond,
+                ));
+                let reply = (0..12)
+                    .map(|n| format!("row-{n:02} 界e\u{301} 👩‍💻 tail"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                rig.paste(&reply).await;
+                let mut before = rig.paint();
+                let cursor = before.get_cursor_position().unwrap();
+                let original = screen(&before);
+                assert!(
+                    original.contains("row-11") && !original.contains("row-00"),
+                    "{original}"
+                );
+                assert_eq!(cursor.y, rig.state.terminal_height - 2);
+                assert!(
+                    cursor.x > 10,
+                    "wide/grapheme end caret is genuinely reached"
+                );
+                assert_eq!(rig.enter().await, KeyFlow::Continue);
+                assert!(matches!(rig.frames().as_slice(),
+                    [ClientFrame::ResolvePeerDraft { node, action: PeerDraftAction::WriteOwn { content } }]
+                    if node == "node-r4" && content == &reply));
+                assert!(rig.state.input_buffer.is_empty());
+                assert_eq!(
+                    rig.state.cursor_position, 0,
+                    "the editable buffer relinquished ownership"
+                );
+                let mut pending = rig.paint();
+                let painted = screen(&pending);
+                assert!(
+                    painted.contains("row-11") && !painted.contains("row-00"),
+                    "{painted}"
+                );
+                assert_eq!(
+                    pending.get_cursor_position().unwrap(),
+                    cursor,
+                    "pending text owns the display caret"
+                );
+                rig.ch('x').await;
+                assert!(
+                    rig.frames().is_empty() && rig.state.input_buffer.is_empty(),
+                    "pending edits do not submit or alter the display owner"
+                );
+                crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                    &mut rig.state,
+                    RecipientAction::Response,
+                    RecipientActionTarget::Node {
+                        node_id: "node-r4".into(),
+                    },
+                    if refused {
+                        RecipientActionOutcome::Refused {
+                            error: ProtocolError::ReadOnly,
+                        }
+                    } else {
+                        RecipientActionOutcome::Applied { reply: None }
+                    },
+                );
+                let mut settled = rig.paint();
+                if refused {
+                    assert_eq!(rig.state.input_buffer, reply);
+                    assert!(screen(&settled).contains("row-11"));
+                    assert_eq!(settled.get_cursor_position().unwrap(), cursor);
+                    assert!(rig.state.pinned_peer_compose.is_some());
+                } else {
+                    assert!(
+                        rig.state.input_buffer.is_empty()
+                            && rig.state.pinned_peer_compose.is_none()
+                    );
+                    assert!(!screen(&settled).contains("row-11"));
+                    assert_eq!(settled.get_cursor_position().unwrap().x, 1);
+                    rig.enter().await;
+                    assert!(
+                        rig.frames().is_empty(),
+                        "settled empty composer cannot repeat the operation"
+                    );
+                }
+            }
+        }
+        let mut ordinary = Rig::at(FocusState::Input, "ordinary 界e\u{301} tail");
+        ordinary.state.cursor_position = 1;
+        assert_eq!(
+            ordinary.paint().get_cursor_position().unwrap().x,
+            2,
+            "ordinary editable drafts retain their non-end caret"
+        );
+    }
+
+    #[tokio::test]
+    async fn story21_4_r5_implicit_follow_retains_navigation_intent() {
+        use crate::adapters::tui::keymap::Key;
+        use crate::domain::models::AnchorMode;
+        fn screen(rig: &mut Rig) -> String {
+            let terminal = rig.paint();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect()
+        }
+        let mut reached = 0;
+        for command in ["/team log", "/team status", "r5 model"] {
+            for streaming in [false, true] {
+                for overscroll in [false, true] {
+                    for half in [false, true] {
+                        let mut rig = Rig::new(false);
+                        for row in 0..40 {
+                            rig.domain_tab
+                                .conversation
+                                .messages
+                                .push(system_message(format!("r5-prior-{row:02}")));
+                        }
+                        rig.domain_tab.streaming.is_streaming = streaming;
+                        screen(&mut rig);
+                        for _ in 0..if overscroll { 40 } else { 2 } {
+                            rig.key(Key::PageUp).await;
+                            screen(&mut rig);
+                        }
+                        let retained = rig.domain_tab.view_state.scroll_offset;
+                        assert_eq!(retained, if overscroll { 200 } else { 10 });
+                        if overscroll {
+                            assert!(
+                                retained
+                                    > rig
+                                        .state
+                                        .total_content_height
+                                        .saturating_sub(rig.state.viewport_height as usize)
+                            );
+                        }
+                        let earlier = screen(&mut rig);
+                        assert!(!earlier.contains("r5-prior-39"), "{earlier}");
+                        rig.paste(command).await;
+                        rig.enter().await;
+                        let frames = rig.frames();
+                        if command == "/team log" {
+                            assert!(frames.is_empty(), "local log never sends");
+                        } else if command == "r5 model" {
+                            assert_eq!(
+                                frames.iter().filter_map(user_text).collect::<Vec<_>>(),
+                                ["r5 model"]
+                            );
+                        } else {
+                            assert_eq!(frames.len(), 1, "the command actually reaches FrameSent");
+                            assert!(user_text(&frames[0]).is_none());
+                        }
+                        let followed = screen(&mut rig);
+                        assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Following);
+                        assert!(followed.contains("r5-prior-39"), "{followed}");
+                        assert_eq!(
+                            rig.domain_tab.view_state.scroll_offset, retained,
+                            "{command}: implicit resume is not an explicit Bottom jump"
+                        );
+                        if half {
+                            rig.esc().await;
+                            assert_eq!(rig.state.focus, FocusState::Chat);
+                        }
+                        let rows = rig.state.viewport_height / if half { 2 } else { 1 };
+                        let stride = rows
+                            .saturating_sub(u16::from(rig.domain_tab.streaming.is_streaming))
+                            .clamp(1, 5) as usize;
+                        rig.key(if half { Key::Ctrl('u') } else { Key::PageUp })
+                            .await;
+                        assert_eq!(rig.domain_tab.view_state.scroll_offset, retained + stride);
+                        assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Reading);
+                        let resumed = screen(&mut rig);
+                        assert!(!resumed.contains("r5-prior-39"), "{resumed}");
+                        crate::adapters::tui::handlers::scroll::dispatch_scroll(
+                            &mut rig.domain_tab.view_state,
+                            &mut rig.state,
+                            crate::domain::models::view_state::ScrollDelta::Bottom,
+                        );
+                        assert_eq!(
+                            rig.domain_tab.view_state.scroll_offset, 0,
+                            "independent explicit reset control"
+                        );
+                        assert_eq!(rig.domain_tab.view_state.mode, AnchorMode::Following);
+                        reached += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            reached, 24,
+            "all three production paths and control combinations are reached"
+        );
     }
 }

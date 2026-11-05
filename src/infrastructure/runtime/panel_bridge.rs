@@ -1,6 +1,7 @@
 //! Sidebar and periodic display state mutations; dispatch and rendering stay in run.
 
 use super::room_bridge;
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::{layout, state::TuiState, task_panel_handlers};
 use crate::domain::models::visual::{DensityMode, PanelType};
 use crate::domain::models::{Conversation, FocusState, NoticeLevel, StatusState};
@@ -40,12 +41,16 @@ pub(crate) fn open_panel(
         );
         if outcome.opened {
             reveal_sidebar(state);
-            state.focus = FocusState::Sidebar {
-                panel: panel_type,
-                selected: state.sidebar_selected,
-            };
+            let selected = state.sidebar_selected;
+            reducer::set_base(
+                state,
+                FocusState::Sidebar {
+                    panel: panel_type,
+                    selected,
+                },
+            );
         } else if outcome.closed {
-            state.focus = FocusState::Chat;
+            reducer::set_base(state, FocusState::Chat);
         }
         if let Some(notice) = outcome.notice {
             PanelOpenOutcome::Notice(notice)
@@ -59,7 +64,7 @@ pub(crate) fn open_panel(
         state.sidebar_visible = false;
         state.sidebar_panel = None;
         state.sidebar_entry_count = 0;
-        state.focus = FocusState::Chat;
+        reducer::set_base(state, FocusState::Chat);
         state.needs_redraw = true;
         PanelOpenOutcome::Handled
     } else if state.terminal_width >= layout::SIDEBAR_MIN_WIDTH {
@@ -79,10 +84,14 @@ pub(crate) fn open_panel(
                 state.sidebar_selected = state.sidebar_entry_count - 1;
             }
         }
-        state.focus = FocusState::Sidebar {
-            panel: panel_type,
-            selected: state.sidebar_selected,
-        };
+        let selected = state.sidebar_selected;
+        reducer::set_base(
+            state,
+            FocusState::Sidebar {
+                panel: panel_type,
+                selected,
+            },
+        );
         state.needs_redraw = true;
         PanelOpenOutcome::Opened
     } else {
@@ -186,6 +195,49 @@ mod tests {
     ) -> PanelOpenOutcome {
         assert_eq!(leader(state, key), InputAction::OpenPanel(panel), "{key}");
         open_panel(state, &conversation(), panel)
+    }
+
+    #[test]
+    fn story21_4_panel_effect_preserves_help_frame_and_interrupted_base() {
+        use crate::adapters::tui::presentation::{Surface, reducer};
+
+        let mut state = TuiState::new(130, 30);
+        assert_eq!(leader(&mut state, '?'), InputAction::Consumed);
+        let frame = state.modal_stack.top().expect("Help opened").clone();
+        assert_eq!(frame.surface, Surface::Help);
+        let base = state.focus.clone();
+
+        assert!(matches!(
+            open_panel(&mut state, &conversation(), PanelType::History),
+            PanelOpenOutcome::Opened
+        ));
+        assert!(
+            painted_sidebar(&state),
+            "panel effect still reveals the sidebar"
+        );
+        assert_eq!(state.sidebar_panel, Some(PanelType::History));
+        assert_eq!(state.modal_stack.top(), Some(&frame));
+        assert_eq!(
+            state.focus, base,
+            "panel effect cannot replace interrupted base"
+        );
+        reducer::back(&mut state);
+        assert!(state.modal_stack.is_empty());
+        assert_eq!(state.focus, base);
+
+        let mut empty = TuiState::new(130, 30);
+        assert!(matches!(
+            open_panel(&mut empty, &conversation(), PanelType::History),
+            PanelOpenOutcome::Opened
+        ));
+        assert!(painted_sidebar(&empty));
+        assert_eq!(
+            empty.focus,
+            FocusState::Sidebar {
+                panel: PanelType::History,
+                selected: empty.sidebar_selected,
+            }
+        );
     }
 
     #[test]

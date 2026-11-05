@@ -679,7 +679,7 @@ pub(super) fn assert_permission_painted(
             .unwrap();
             // The active-tab fixture omits legacy cards; use the runtime's real
             // permission painter with the SAME state, reader and chat viewport.
-            rustain::adapters::tui::widgets::permission_prompt::render_permission_surface(
+            let _ = rustain::adapters::tui::widgets::permission_prompt::render_permission_surface(
                 frame,
                 layout.chat_pane,
                 state.pending_permission.as_ref(),

@@ -619,6 +619,7 @@ mod tests {
                             &shell,
                             Host::Local,
                             &facts,
+                            &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                             |_| {},
                         );
                     } else if toasts {

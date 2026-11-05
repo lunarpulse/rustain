@@ -272,7 +272,7 @@ fn test_popup_renders_with_items() {
     terminal
         .draw(|frame| {
             let input_area = Rect::new(0, 16, 60, 4);
-            autocomplete_popup::render(frame, input_area, &ac, &theme);
+            let _ = autocomplete_popup::render(frame, input_area, &ac, &theme);
         })
         .unwrap();
 
@@ -297,7 +297,7 @@ fn test_popup_renders_no_matches() {
     terminal
         .draw(|frame| {
             let input_area = Rect::new(0, 16, 60, 4);
-            autocomplete_popup::render(frame, input_area, &ac, &theme);
+            let _ = autocomplete_popup::render(frame, input_area, &ac, &theme);
         })
         .unwrap();
 
@@ -311,7 +311,7 @@ fn test_popup_renders_no_matches() {
     ac.dismiss();
     terminal
         .draw(|frame| {
-            autocomplete_popup::render(frame, Rect::new(0, 16, 60, 4), &ac, &theme);
+            let _ = autocomplete_popup::render(frame, Rect::new(0, 16, 60, 4), &ac, &theme);
         })
         .unwrap();
     assert_eq!(ac.kind, None);
@@ -349,7 +349,7 @@ fn test_popup_renders_file_paths() {
     terminal
         .draw(|frame| {
             let input_area = Rect::new(0, 16, 60, 4);
-            autocomplete_popup::render(frame, input_area, &ac, &theme);
+            let _ = autocomplete_popup::render(frame, input_area, &ac, &theme);
         })
         .unwrap();
 
@@ -372,7 +372,7 @@ fn test_popup_does_not_render_when_closed() {
     terminal
         .draw(|frame| {
             let input_area = Rect::new(0, 16, 60, 4);
-            autocomplete_popup::render(frame, input_area, &ac, &theme);
+            let _ = autocomplete_popup::render(frame, input_area, &ac, &theme);
         })
         .unwrap();
 
@@ -402,7 +402,7 @@ fn test_popup_long_list_scroll_indicator() {
     terminal
         .draw(|frame| {
             let input_area = Rect::new(0, 16, 60, 4);
-            autocomplete_popup::render(frame, input_area, &ac, &theme);
+            let _ = autocomplete_popup::render(frame, input_area, &ac, &theme);
         })
         .unwrap();
 

@@ -199,7 +199,6 @@ fn witness(cmd: InputCmd, keys: &[Key]) {
                 ("a\ncd", 1)
             );
         }
-        InputCmd::NoCursor => unreachable!("attached-only rows: story21_3_attached_composer_*"),
         InputCmd::DeleteForward => {
             let mut state = composer("abc", 1);
             assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);

@@ -29,6 +29,7 @@
 use crate::adapters::tui::handlers::artifact_command::{
     self as handler, ArtifactCommandArgs, ResolveError,
 };
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard, TuiState};
 use crate::domain::models::{
     AgentId, ArtifactRef, OperatorApplyFinding, OrchestrationRoom, PermissionMode, ReviewVerdict,
@@ -208,10 +209,11 @@ fn activate_artifacts_sidebar(state: &mut TuiState) -> Result<(), String> {
     let panel = crate::domain::models::visual::PanelType::Artifacts;
     state.sidebar_visible = true;
     state.sidebar_panel = Some(panel);
-    state.focus = crate::domain::models::FocusState::Sidebar {
-        panel,
-        selected: state.sidebar_selected,
-    };
+    let selected = state.sidebar_selected;
+    reducer::set_base(
+        state,
+        crate::domain::models::FocusState::Sidebar { panel, selected },
+    );
     state.needs_redraw = true;
     Ok(())
 }
@@ -261,10 +263,8 @@ fn finalize_artifacts_panel(state: &mut TuiState) {
             ..
         }
     ) {
-        state.focus = crate::domain::models::FocusState::Sidebar {
-            panel: crate::domain::models::visual::PanelType::Artifacts,
-            selected: state.sidebar_selected,
-        };
+        let selected = state.sidebar_selected;
+        reducer::update_sidebar_selection(state, selected);
     }
 }
 
@@ -456,10 +456,9 @@ async fn open_apply_card(
         predates_apply_records,
         mode: ArtifactCardMode::Apply,
     });
-    state.focus = crate::domain::models::FocusState::Overlay(
-        crate::domain::models::visual::OverlayType::Confirmation(
-            crate::domain::models::visual::ConfirmationType::ArtifactApply,
-        ),
+    reducer::raise_confirmation(
+        state,
+        crate::domain::models::visual::ConfirmationType::ArtifactApply,
     );
     state.needs_redraw = true;
     Ok(())
@@ -521,10 +520,9 @@ async fn open_resolve_card(
         predates_apply_records,
         mode: ArtifactCardMode::Resolve(finding),
     });
-    state.focus = crate::domain::models::FocusState::Overlay(
-        crate::domain::models::visual::OverlayType::Confirmation(
-            crate::domain::models::visual::ConfirmationType::ArtifactApply,
-        ),
+    reducer::raise_confirmation(
+        state,
+        crate::domain::models::visual::ConfirmationType::ArtifactApply,
     );
     state.needs_redraw = true;
     Ok(())

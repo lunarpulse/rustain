@@ -181,7 +181,7 @@ pub(crate) fn apply_resolved_action(
     match action {
         InputAction::Decision(DecisionEffect::RecoveryContinue) => {
             if state.modal_stack.is_empty() {
-                state.focus = FocusState::Input;
+                presentation::reducer::set_base(state, FocusState::Input);
             }
         }
         InputAction::ImageConfirmAttach => {
@@ -210,7 +210,7 @@ pub(crate) fn apply_resolved_action(
         InputAction::CancelDelete => {
             state.pending_delete = None;
             if state.modal_stack.is_empty() {
-                state.focus = if state.sidebar_visible {
+                let focus = if state.sidebar_visible {
                     FocusState::Sidebar {
                         panel: crate::domain::models::visual::PanelType::History,
                         selected: state.sidebar_selected,
@@ -218,6 +218,7 @@ pub(crate) fn apply_resolved_action(
                 } else {
                     FocusState::Input
                 };
+                presentation::reducer::set_base(state, focus);
             }
         }
         _ => unreachable!("only state-only resolved pane actions enter this seam"),
@@ -585,44 +586,6 @@ pub fn waiting(state: &TuiState) -> usize {
     state.decisions.len()
 }
 
-/// An inline card answers only in Chat focus (Story 21.3 AC17), so a card that arrives while
-/// focus is Input would strand the user: `y` would be composer text. On arrival, an empty
-/// composer hands the card its focus (FR-21-3-c; the local permission card does the same).
-/// A composer with text keeps focus (`user_mid_sentence`): the user is typing and the card
-/// waits behind the paint rule. A client that cannot answer (`can_answer` false: read-only
-/// attach) and every other focus, an overlay included, stay as they are.
-/// Returns whether focus moved; the caller redraws.
-pub fn take_chat_focus_for_card(
-    focus: &mut FocusState,
-    borrowed_from: &mut Option<FocusState>,
-    can_answer: bool,
-    user_mid_sentence: bool,
-) -> bool {
-    let moves = can_answer && !user_mid_sentence && *focus == FocusState::Input;
-    if moves {
-        borrowed_from.get_or_insert(FocusState::Input);
-        *focus = FocusState::Chat;
-    }
-    moves
-}
-
-/// Return arrival-borrowed focus once the host's last card settles. A user focus
-/// change relinquishes the borrow even while cards remain; never overwrite it.
-pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
-    if state.card_focus_borrowed_from.is_none() {
-        return;
-    }
-    if state.focus != FocusState::Chat
-        || card_focus_blocked(state)
-        || state.recipient_surface.is_some()
-    {
-        state.card_focus_borrowed_from = None;
-    } else if !card_pending {
-        state.focus = state.card_focus_borrowed_from.take().unwrap();
-        state.needs_redraw = true;
-    }
-}
-
 /// Key-owning surfaces may keep Input focus; card arrivals must wait for dismissal.
 pub fn card_focus_blocked(state: &TuiState) -> bool {
     matches!(state.focus, FocusState::Overlay(_))
@@ -630,21 +593,6 @@ pub fn card_focus_blocked(state: &TuiState) -> bool {
         || state.pending_leader.is_some()
         || state.autocomplete.is_open()
         || state.reverse_search.is_open()
-}
-
-/// [`take_chat_focus_for_card`] in the local host: the composer is `state.input_buffer`.
-pub fn take_chat_focus_for_local_card(state: &mut TuiState) {
-    let mid_sentence = !state.input_buffer.is_empty();
-    if !card_focus_blocked(state)
-        && take_chat_focus_for_card(
-            &mut state.focus,
-            &mut state.card_focus_borrowed_from,
-            true,
-            mid_sentence,
-        )
-    {
-        state.needs_redraw = true;
-    }
 }
 
 /// The status-row cue while decisions wait.
@@ -1579,35 +1527,42 @@ mod tests {
             (FocusState::Chat, true, false, FocusState::Chat, false),
             (FocusState::Input, false, false, FocusState::Input, false),
         ];
-        for (mut focus, can_answer, typing, want, moved) in cases {
+        for (focus, can_answer, typing, want, moved) in cases {
             let before = focus.clone();
-            let mut borrowed = None;
+            let mut state = TuiState::new(80, 24);
+            state.focus = focus;
+            if typing {
+                state.input_buffer = "draft".into();
+            }
             assert_eq!(
-                take_chat_focus_for_card(&mut focus, &mut borrowed, can_answer, typing),
+                presentation::reducer::take_chat_focus_for_card(&mut state, can_answer),
                 moved,
                 "{before:?} answer={can_answer} typing={typing}"
             );
             assert_eq!(
-                focus, want,
+                state.focus, want,
                 "{before:?} answer={can_answer} typing={typing}"
             );
-            assert_eq!(borrowed, moved.then_some(FocusState::Input));
+            assert_eq!(
+                state.card_focus_borrowed_from,
+                moved.then_some(FocusState::Input)
+            );
         }
         // The local host reads the composer from the state and asks for a redraw.
         let mut state = TuiState::new(80, 24);
         state.needs_redraw = false;
-        take_chat_focus_for_local_card(&mut state);
+        presentation::reducer::take_chat_focus_for_card(&mut state, true);
         assert!(state.focus == FocusState::Chat && state.needs_redraw);
         let mut typing = TuiState::new(80, 24);
         typing.input_buffer = "draft".into();
         typing.needs_redraw = false;
-        take_chat_focus_for_local_card(&mut typing);
+        presentation::reducer::take_chat_focus_for_card(&mut typing, true);
         assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
         for surface in [Surface::ModelSelector, Surface::Search] {
             let mut framed = TuiState::new(80, 24);
             presentation::reducer::open(&mut framed, surface);
             let frame = framed.modal_stack.top().cloned();
-            take_chat_focus_for_local_card(&mut framed);
+            presentation::reducer::take_chat_focus_for_card(&mut framed, true);
             assert_eq!(framed.focus, FocusState::Input);
             assert_eq!(framed.modal_stack.top(), frame.as_ref());
         }

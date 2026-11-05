@@ -1,14 +1,12 @@
 //! Input rows (Story 21.3 AC5, KG-2): the composer, `FocusState::Input` with no
 //! popup, reverse search, palette or leader open.
 //!
-//! Slice 3-A describes TODAY's hand-written arms of `app::handle_char`,
-//! `app::handle_special_key` and `attach_keys::handle_attached_key` exactly; the
-//! registry does not dispatch them yet. Printable characters are typing (no row,
-//! the K4 sweep asserts each inserts exactly itself) except the two documented
-//! popup triggers `/` and `@`. `Esc` and `Enter` are the `TextEntry` keys a text
-//! field inherits (A4); every other row is declared here. `Ctrl+X` and `Ctrl+Q`
-//! come from `Global`. Unbound keys (`Ctrl+A/W/K/U/H`, `Ctrl/Alt` letters) have no
-//! row: they are inert (AC12).
+//! Both hosts resolve these rows before using the shared composer editor.
+//! Printable characters are typing (no row; the K4 sweep asserts insertion)
+//! except the documented `/` trigger and the local-only `@` mention trigger.
+//! `Esc` and `Enter` are the `TextEntry` keys a text field inherits (A4);
+//! every other composer row is declared here. `Ctrl+X` and `Ctrl+Q` come from
+//! `Global`. Keys without a row remain inert (AC12).
 
 use super::model::{AvailCtx, Availability, Binding, CommandId, Context, HelpCat, Key, bind};
 
@@ -41,15 +39,15 @@ pub enum InputCmd {
     LineEnd,
     /// `Backspace`: delete the grapheme before the cursor.
     DeleteBack,
-    /// `Delete`: delete the grapheme at the cursor. Local only.
+    /// `Delete`: delete the grapheme at the cursor.
     DeleteForward,
-    /// `Left`: move the cursor one grapheme left. Local only.
+    /// `Left`: move the cursor one grapheme left.
     CursorLeft,
-    /// `Right`: move the cursor one grapheme right. Local only.
+    /// `Right`: move the cursor one grapheme right.
     CursorRight,
-    /// `Home`: move to the start of the current visual row. Local only.
+    /// `Home`: move to the start of the current visual row.
     CursorHome,
-    /// `End`: move to the end of the current visual row. Local only.
+    /// `End`: move to the end of the current visual row.
     CursorEnd,
     /// `Up`: previous visual row, else the previous history entry. Local only.
     UpOrHistoryPrev,
@@ -65,16 +63,14 @@ pub enum InputCmd {
     TranscriptPageUp,
     /// `PageDown`: scroll the attached transcript one page down. Attached only.
     TranscriptPageDown,
-    /// `Ctrl+A`: move to the start of the current logical line. Local only.
+    /// `Ctrl+A`: move to the start of the current logical line.
     LineStart,
     /// `Ctrl+W`: delete the word before the cursor.
     DeleteWordBack,
     /// `Ctrl+U`: delete from the start of the logical line to the cursor.
     KillToLineStart,
-    /// `Ctrl+K`: delete from the cursor to the end of the logical line. Local only.
+    /// `Ctrl+K`: delete from the cursor to the end of the logical line.
     KillToLineEnd,
-    /// `Ctrl+A/E/K` in the attached composer: it has no cursor, so nothing moves.
-    NoCursor,
 }
 
 /// Commands shared by caret fields and the remaining legacy tail editors.
@@ -120,15 +116,12 @@ const INPUT: &[Binding] = &[
     i(&[Key::Enter], InputCmd::SubmitOrNewline, "Send").te().help(IN, "Enter", "Send message"),
     i(&[Key::ShiftEnter], InputCmd::InsertNewline, "Newline").alt("Enter in multi-line mode (/ml)").help(IN, "Shift+Enter", "New line (multi-line mode)"),
     i(&[Key::AltEnter], InputCmd::InsertNewline, "Newline").alt("Enter in multi-line mode (/ml)").hint().help(IN, "Alt+Enter", "Insert newline (alternative when Shift+Enter is intercepted)"),
-    i(&[Key::Ctrl('e')], InputCmd::LineEnd, "").local().help(IN, "Ctrl+E", "Move to the end of the current line"),
-    i(&[Key::Ctrl('a')], InputCmd::LineStart, "").local().help(IN, "Ctrl+A", "Move to the start of the current line"),
+    i(&[Key::Ctrl('e')], InputCmd::LineEnd, "").help(IN, "Ctrl+E", "Move to the end of the current line"),
+    i(&[Key::Ctrl('a')], InputCmd::LineStart, "").help(IN, "Ctrl+A", "Move to the start of the current line"),
     i(&[Key::Ctrl('w')], InputCmd::DeleteWordBack, "").help(IN, "Ctrl+W", "Delete the word before the cursor"),
     i(&[Key::Ctrl('u')], InputCmd::KillToLineStart, "").help(IN, "Ctrl+U (input)", "Delete to the start of the current line"),
-    i(&[Key::Ctrl('k')], InputCmd::KillToLineEnd, "").local().help(IN, "Ctrl+K", "Delete to the end of the current line"),
+    i(&[Key::Ctrl('k')], InputCmd::KillToLineEnd, "").help(IN, "Ctrl+K", "Delete to the end of the current line"),
     i(&[Key::Ctrl('h')], InputCmd::DeleteBack, "").does("Delete the character before the cursor, like Backspace (legacy terminals send it for Backspace)"),
-    i(&[Key::Ctrl('a')], InputCmd::NoCursor, "").attached().avail(no_cursor).does("Move to the start of the line: the attached composer has no cursor, so nothing moves"),
-    i(&[Key::Ctrl('e')], InputCmd::NoCursor, "").attached().avail(no_cursor).does("Move to the end of the line: the attached composer has no cursor, so nothing moves"),
-    i(&[Key::Ctrl('k')], InputCmd::NoCursor, "").attached().avail(no_cursor).does("Delete to the end of the line: the attached composer has no cursor, so nothing is deleted"),
     i(&[Key::Alt('m')], InputCmd::ToggleMultiline, "Multi-line").slash("/ml").alt("/ml").hint().help(IN, "Alt+M", "Toggle multi-line mode"),
     i(&[Key::CtrlEnter], InputCmd::Send, "Send").alt("Ctrl+X Enter").help(IN, "Ctrl+Enter", "Send (where the terminal distinguishes it from Enter)"),
     i(&[Key::Esc], InputCmd::ReturnToChat, "Chat").te().help(IN, "Esc", "Close popup / return to Chat — never sends; unsent text is kept"),
@@ -144,11 +137,11 @@ const INPUT: &[Binding] = &[
     i(&[Key::Ctrl('t')], InputCmd::NewTab, "New tab").local().does("Open a new tab"),
     i(&[Key::Alt('v')], InputCmd::PasteClipboard, "Paste image").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
     i(&[Key::Backspace], InputCmd::DeleteBack, "").does("Delete the character before the cursor"),
-    i(&[Key::Delete], InputCmd::DeleteForward, "").local().does("Delete the character at the cursor"),
-    i(&[Key::Left], InputCmd::CursorLeft, "").local().does("Move the cursor one character left"),
-    i(&[Key::Right], InputCmd::CursorRight, "").local().does("Move the cursor one character right"),
-    i(&[Key::Home], InputCmd::CursorHome, "").local().does("Move to the start of the current row"),
-    i(&[Key::End], InputCmd::CursorEnd, "").local().does("Move to the end of the current row"),
+    i(&[Key::Delete], InputCmd::DeleteForward, "").does("Delete the character at the cursor"),
+    i(&[Key::Left], InputCmd::CursorLeft, "").does("Move the cursor one character left"),
+    i(&[Key::Right], InputCmd::CursorRight, "").does("Move the cursor one character right"),
+    i(&[Key::Home], InputCmd::CursorHome, "").does("Move to the start of the current row"),
+    i(&[Key::End], InputCmd::CursorEnd, "").does("Move to the end of the current row"),
     i(&[Key::PageUp], InputCmd::TranscriptPageUp, "").attached().does("Scroll the transcript one page up"),
     i(&[Key::PageDown], InputCmd::TranscriptPageDown, "").attached().does("Scroll the transcript one page down"),
 ];

@@ -180,7 +180,15 @@ fn eligible_log_actions_cannot_starve_the_five_row_body() {
         terminal
             .draw(|frame| {
                 let shell = Shell::new(frame.area(), &layout);
-                presentation::compose(frame, &state, &shell, Host::Local, &facts, |_| {});
+                presentation::compose(
+                    frame,
+                    &state,
+                    &shell,
+                    Host::Local,
+                    &facts,
+                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                    |_| {},
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -308,6 +316,7 @@ fn dense_which_key_keeps_every_registry_key_with_a_full_composer() {
                             &shell,
                             host,
                             &LogFacts::default(),
+                            &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                             |frame| {
                                 frame.render_widget(
                                     Paragraph::new("STATUS untouched"),

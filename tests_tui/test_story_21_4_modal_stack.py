@@ -23,6 +23,11 @@ complete Rust exports through RUSTAIN_MODAL_STACK_BB2B_FRAMES before capture.
 Live inspector captures also require Crossterm's complete hidden-cursor draw
 postlude (including split CSI reads), not merely intact borders; each Help
 scroll is independently observed before its exact restoration is compared.
+C is an independent local/writer/read-only leg, captured under smoke-evidence-4c.
+Its zero-spawn DESKCHECK branch requires RUSTAIN_MODAL_STACK_C_FRAMES: c-*.json
+production exports at 60x16/80x24/130x30, indexed by width/height/host/stage.
+Collection is not dedicated evidence; a design failure still quarantines that
+single attempt unchanged. Only the parent runs the scrubbed dedicated capture.
 """
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -75,6 +80,17 @@ if len(os.fsencode(SCRATCH / "r214-12345678/a/data/daemons" / ("0"*16+".sock")))
 def _evidence_parent():
     """Keep the explicit publication override independent of workspace sockets."""
     return Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", DEFAULT_EVIDENCE)).resolve()
+
+
+def _smoke_paths(part):
+    """Select workspace scratch and publication parent without starting a smoke."""
+    parent = _evidence_parent()
+    if part == "bb1b-ii" and "RUSTAIN_CAPTURE_EVIDENCE_DIR" not in os.environ:
+        parent = DEFAULT_EVIDENCE / "smoke-evidence-4bb1b-ii"
+    if part == "c":
+        if parent.name != "smoke-evidence-4c":
+            parent /= "smoke-evidence-4c"
+    return SCRATCH, parent
 
 
 def _box(screen, title, rail, closing=None):
@@ -365,8 +381,9 @@ def _notice_ready(screen, command, attached=False):
         return False
     text = (f"Info {command} is not available" if attached
             else f"Warning Unknown command: {command}")
-    prefix = re.compile(rf"^\s*│?\s*{re.escape(text)}(?:\s|…)")
-    return any(prefix.match(row) for row in harness.toast_rows(screen, rows=3))
+    prefix = re.compile(rf"^{re.escape(text)}(?:\s|…|│|$)")
+    return any(prefix.match(cell.lstrip()) for row in harness.toast_rows(screen, rows=3)
+               for cell in row.split("│"))
 
 
 def _selected(tui, notices=NOTICES):
@@ -1656,7 +1673,8 @@ def _bb1b_ii_leg(tui, ws):
 
 
 
-def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
+@pytest.mark.parametrize("evidence_override", (None, "external-evidence", "smoke-evidence-4c"))
+def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch, evidence_override):
     """Filesystem-only controls: no binary resolution, server, socket or TUI."""
     with tempfile.TemporaryDirectory(prefix="r214-paths-", dir="/tmp") as directory:
         root = Path(directory)
@@ -1681,11 +1699,30 @@ def test_scratch_paths_are_portable_and_socket_bounded(monkeypatch):
                     ws = Path(workspace) / tag
                     (ws / "data/daemons").mkdir(parents=True)
                     assert len(os.fsencode(ws / "data/daemons" / ("0"*16+".sock"))) < 108
-            override = root / "explicit-evidence"
-            monkeypatch.setenv("RUSTAIN_CAPTURE_EVIDENCE_DIR", str(override))
-            assert module["_evidence_parent"]() == override.resolve()
+            if evidence_override is not None:
+                override = root / evidence_override
+                monkeypatch.setenv("RUSTAIN_CAPTURE_EVIDENCE_DIR", str(override))
+                expected_parent = override.resolve()
+            else:
+                expected_parent = evidence.resolve()
+            assert module["_evidence_parent"]() == expected_parent
             assert module["SCRATCH"] == scratch, "evidence override must not relocate sockets"
-            monkeypatch.delenv("RUSTAIN_CAPTURE_EVIDENCE_DIR")
+            assert module["_smoke_paths"]("bb1a") == (scratch, expected_parent)
+            expected_ii = (evidence / "smoke-evidence-4bb1b-ii"
+                           if evidence_override is None else expected_parent)
+            assert module["_smoke_paths"]("bb1b-ii") == (scratch, expected_ii)
+            c_scratch, c_parent = module["_smoke_paths"]("c")
+            assert c_scratch == scratch, "C must use the same socket-bounded workspace scratch"
+            c_expected = (expected_parent if expected_parent.name == "smoke-evidence-4c"
+                          else expected_parent / "smoke-evidence-4c")
+            assert c_parent == c_expected, "C must preserve portable evidence overrides"
+            c_parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="r214-", dir=c_scratch) as workspace:
+                for tag in ("l", "a"):
+                    ws = Path(workspace) / tag
+                    (ws / "data/daemons").mkdir(parents=True)
+                    assert len(os.fsencode(ws / "data/daemons" / ("0"*16+".sock"))) < 108
+            monkeypatch.delenv("RUSTAIN_CAPTURE_EVIDENCE_DIR", raising=False)
 
 
 def _bb2b_box(screen, hidden, draft, kind):
@@ -1958,12 +1995,245 @@ def _bb2b_cross_leg(tui, ws):
          and "Bb1a-row-0" in s and REPLY not in s)
 
 
+def _c_plain_shell(screen):
+    """Validate the real reader's shared-composer bottom title before reuse."""
+    rows = screen.split("\n")
+    if rows and re.fullmatch(r"└ read-only — can't send here ─*┘", rows[-1]):
+        rows[-1] = "└"+"─"*(len(rows[-1])-2)+"┘"
+    return "\n".join(rows)
+
+
+def _c_base(screen, draft, position, cursor, visible):
+    """Shared composer pixels and hardware caret, not just its trimmed text."""
+    # The common shell trims text; exact row/caret checks below retain positions.
+    shell = _bbii_shell(_c_plain_shell(screen), draft.strip())
+    if not shell or not visible:
+        return None
+    rows, status = shell
+    if (rows[-2] != "│"+draft+" "*(len(rows[0])-2-len(draft))+"│"
+            or tuple(cursor) != (position+1, len(rows)-2)):
+        return None
+    return tuple(rows[:status])
+
+
+def _c_view(screen, draft, cursor, visible, earlier):
+    stage = _c_base(screen, draft, len(draft), cursor, visible)
+    if not stage:
+        return None
+    text = "\n".join(stage)
+    return stage if (("Bb1a-row-" in text and REPLY not in text) if earlier else REPLY in text) else None
+
+
+def _c_cover(screen, draft, visible, kind, token):
+    screen = _c_plain_shell(screen)
+    rows = screen.split("\n")
+    if len(rows) < 3 or rows[-2] != "│"+draft+" "*(len(rows[0])-2-len(draft))+"│":
+        return None
+    box = _bb2b_list(screen, not visible, draft, kind, token if kind == "log" else None)
+    if not box:
+        return None
+    if kind == "help" and (not _help_box(screen) or
+                           "Rustain is a composable" not in "\n".join(box[1:-1])):
+        return None
+    return box
+
+
+def _deskcheck_c_frames(directory):
+    """Only saved real production paints are positives; this path never spawns."""
+    cases = {"initial": ("", 0), "notice": ("", 0), "notice-dismiss-return": ("", 0),
+             "typed": ("C-kept draft", 12), "readline-home": ("C-kept draft", 0),
+             "left": ("C-kept draft", 11), "caret": ("C-kept draft", 1),
+             "paste": ("CX-kept draft", 2), "kill-tail": ("CX", 2), "kill-prefix": ("", 0)}
+    common = set(cases) | {"notice-command", "bottom", "scrolled", "help", "help-scrolled",
+                           "help-return", "log", "log-return"}
+    def stages(host):
+        extra = {"readonly-command", "readonly-log"} if host == "readonly" else {"notice-log"}
+        return common | extra | ({"chat-before-scroll", "chat-scrolled"} if host == "local" else set())
+    records = [json.loads(p.read_text()) for p in Path(directory).glob("c-*.json")]
+    frames = {(r["width"], r["height"], r["host"], r["stage"]): r for r in records}
+    required = {(w, h, host, stage) for w, h in ((60, 16), (80, 24), (130, 30))
+                for host in ("local", "attached", "readonly") for stage in stages(host)}
+    assert len(records) == len(frames) and frames.keys() == required, frames.keys() ^ required
+    for width, height in ((60, 16), (80, 24), (130, 30)):
+        for host in ("local", "attached", "readonly"):
+            token = "/cnotice" if host == "local" else "/mode"
+            def record(stage):
+                r = frames[width, height, host, stage]
+                assert r["full"] is False
+                assert len(r["screen"].split("\n")) == height
+                assert all(len(row) == width for row in r["screen"].split("\n"))
+                assert ("read-only — can't send here" in r["screen"].split("\n")[-1]) == (host == "readonly")
+                assert KEY not in json.dumps(r)
+                assert all(0 <= x < width and 0 <= y < height for x, y in r["reversed_cells"])
+                return r
+            def visible(r):
+                return r["cursor_visible"] if "cursor_visible" in r else not r["cursor_hidden"]
+            before = record("initial")
+            for stage in stages(host):
+                r = record(stage)
+                cover = stage in ("help", "help-scrolled", "log", "notice-log", "readonly-log")
+                chat = stage in ("chat-before-scroll", "chat-scrolled")
+                draft, position = cases.get(stage, (
+                    "" if stage in ("notice-log", "readonly-log") else "C-kept draft", 12))
+                if stage == "notice-command":
+                    draft, position = token+" ", len(token)+1
+                elif stage == "readonly-command":
+                    draft, position = "/notifications ", 15
+                assert r["draft"] == draft
+                def predicate(screen, cursor=r["cursor"], shown=visible(r)):
+                    if stage == "help-scrolled":
+                        box = _bb2b_list(_c_plain_shell(screen), not shown, draft, "help")
+                        shifted, prior = _help_box(screen), _help_box(record("help")["screen"])
+                        return box if (box and shifted and prior and shifted != prior
+                                       and shifted[:-1] == prior[1:]) else None
+                    if cover:
+                        return _c_cover(screen, draft, shown, "help" if stage == "help" else "log", token)
+                    if chat:
+                        shell = _bbii_shell(_c_plain_shell(screen), draft)
+                        if not shell or shown:
+                            return None
+                        body = tuple(shell[0][:shell[1]])
+                        earlier = "Bb1a-row-" in "\n".join(body) and REPLY not in "\n".join(body)
+                        return body if (earlier if stage == "chat-scrolled" else REPLY in "\n".join(body)) else None
+                    if stage == "notice" and not _notice_ready(screen, token, host != "local"):
+                        return None
+                    if stage == "notice-dismiss-return" and any(
+                            token in row for row in harness.toast_rows(screen, rows=3)):
+                        return None
+                    if stage in ("bottom", "scrolled", "help-return", "log-return"):
+                        return _c_view(screen, draft, cursor, shown, stage != "bottom")
+                    return _c_base(screen, draft, position, cursor, shown)
+                owned = predicate(r["screen"])
+                assert owned, (host, stage, r)
+                assert not predicate(r["screen"], shown=not visible(r)), (stage, "wrong hardware ownership")
+                if not cover and not chat:
+                    assert not predicate(r["screen"], cursor=[width-1, height-1]), (stage, "wrong caret")
+                    if stage != "initial" and draft:
+                        assert not predicate(before["screen"]), (stage, "independent empty composer")
+                elif cover:
+                    assert not predicate(before["screen"]), (stage, "independent no-owner frame")
+                rows = r["screen"].split("\n")
+                torn_rows = {harness.composer_top(rows), height-4, height-2, height-1}
+                if cover:
+                    top = next(y for y, row in enumerate(rows) if owned[0] in row)
+                    left = rows[top].index(owned[0])
+                    torn_rows |= {top, top+len(owned)-1}
+                    for y in range(top+1, top+len(owned)-1):
+                        for x in (left, left+len(owned[0])-1):
+                            torn = rows.copy(); torn[y] = torn[y][:x]+" "+torn[y][x+1:]
+                            assert not predicate("\n".join(torn)), (stage, "torn side", x, y)
+                    labels = ("j/k scroll", "? close", "[/] Search") if stage.startswith("help") else (
+                        "[Enter]", "Detail", "[c]", "Copy", "[/] Search")
+                    for label in labels:
+                        assert not predicate(r["screen"].replace(label, " "*len(label))), (stage, label)
+                    if stage == "help-scrolled":
+                        assert not predicate(record("help")["screen"]), (stage, "observable real scroll")
+                    else:
+                        marker = "Rustain is a composable" if stage == "help" else token
+                        assert not predicate(r["screen"].replace(marker, " "*len(marker))), (stage, "body-only control")
+                if stage == "notice":
+                    assert not predicate(before["screen"]), (stage, "real toast required")
+                    assert not predicate(r["screen"].replace(token, " "*len(token))), (stage, "notice body")
+                    for corrupt in (token[:-1]+" ", token[:-1]+"x"):
+                        assert not predicate(r["screen"].replace(token, corrupt)), (stage, "complete notice token")
+                if stage in ("notice-command", "readonly-command"):
+                    assert not predicate(r["screen"], cursor=[position, height-2]), (stage, "trailing-space caret")
+                for y in torn_rows:
+                    torn = rows.copy(); torn[y] = " "*width
+                    assert not predicate("\n".join(torn)), (host, stage, "torn row", y)
+                if stage in ("bottom", "scrolled", "help-return", "log-return") or chat:
+                    marker = REPLY if stage in ("bottom", "chat-before-scroll") else "Bb1a-row-"
+                    assert not predicate(r["screen"].replace(marker, " "*len(marker))), (stage, "transcript body")
+            typed, caret = record("typed"), record("caret")
+            assert typed["screen"] == caret["screen"] and typed["cursor"] != caret["cursor"]
+            bottom, scrolled = record("bottom"), record("scrolled")
+            assert not _c_view(bottom["screen"], bottom["draft"], bottom["cursor"], visible(bottom), True)
+            assert not _c_view(scrolled["screen"], scrolled["draft"], scrolled["cursor"], visible(scrolled), False)
+            original = _c_view(scrolled["screen"], scrolled["draft"], scrolled["cursor"], visible(scrolled), True)
+            for stage in ("help-return", "log-return"):
+                r = record(stage)
+                assert _c_view(r["screen"], r["draft"], r["cursor"], visible(r), True) == original
+    print(f"C_DESKCHECK_FRAMES={len(frames)}", flush=True)
+    return len(frames)
+
+
+def _c_leg(tui):
+    """Same editor and authoritative scrolled view in local, writer and reader."""
+    def base(draft, position):
+        return lambda s: _c_base(s, draft, position,
+                                 (tui.screen.cursor.x, tui.screen.cursor.y), not tui.screen.cursor.hidden)
+    def step(stage, data, predicate):
+        tui.send("C "+stage, data)
+        screen = tui.wait(predicate, "C settled "+stage)
+        tui.capture("c-"+stage, screen)
+        return screen
+    screen = tui.wait(base("", 0), "C starts in Input without i")
+    tui.capture("c-initial", screen)
+    attached = tui.tag != "local"
+    command = "/mode" if attached else "/cnotice"
+    step("notice-command", (command+" ").encode(), base(command+" ", len(command)+1))
+    step("notice", b"\r", lambda s: _notice_ready(s, command, attached) and base("", 0)(s))
+    # Dismiss just the toast presentation through the real retained Log record,
+    # removing TTL changes from the later exact transcript-pixel comparison.
+    if tui.tag == "readonly":
+        step("readonly-command", b"/notifications ", base("/notifications ", 15))
+        opener, stage = b"\r", "readonly-log"
+    else:
+        opener, stage = b"\x18n", "notice-log"
+    step(stage, opener, lambda s: tui.hidden_draw_complete and
+         _c_cover(s, "", not tui.screen.cursor.hidden, "log", command))
+    step("notice-dismiss-return", b"x\x1b", lambda s: base("", 0)(s) and
+         not any(command in row for row in harness.toast_rows(s, rows=3)))
+    typed = step("typed", b"C-kept draft", base("C-kept draft", 12))
+    for label, data, position in (("readline-home", b"\x01", 0), ("readline-end", b"\x05", 12),
+                                  ("left", b"\x1b[D", 11), ("end", b"\x1b[F", 12)):
+        assert step(label, data, base("C-kept draft", position)) == typed
+    caret = step("caret", b"\x1b[H\x1b[C", base("C-kept draft", 1))
+    assert typed == caret, "caret motion must not mutate draft or transcript pixels"
+    step("paste", b"\x1b[200~X\x1b[201~", base("CX-kept draft", 2))
+    step("readline-backspace", b"\x08", base("C-kept draft", 1))
+    step("repaste", b"\x1b[200~X\x1b[201~", base("CX-kept draft", 2))
+    step("kill-tail", b"\x0b", base("CX", 2))
+    step("kill-prefix", b"\x15", base("", 0))
+    step("word-fixture", b"CX", base("CX", 2))
+    step("kill-word", b"\x17", base("", 0))
+    draft = "C-kept draft"
+    def view(earlier):
+        return lambda s: _c_view(s, draft, (tui.screen.cursor.x, tui.screen.cursor.y),
+                                 not tui.screen.cursor.hidden, earlier)
+    step("bottom", draft.encode(), view(False))
+    if tui.tag == "local":
+        # Local full-page up is Chat Ctrl+B; attached Input offers PgUp.
+        step("chat-before-scroll", b"\x1b", lambda s: tui.hidden_draw_complete and
+             _bbii_shell(s, draft) and tui.screen.cursor.hidden and REPLY in s)
+        step("chat-scrolled", b"\x02", lambda s: tui.hidden_draw_complete and
+             _bbii_shell(s, draft) and tui.screen.cursor.hidden and
+             "Bb1a-row-" in s and REPLY not in s)
+        original = step("scrolled", b"i", view(True))
+    else:
+        original = step("scrolled", b"\x1b[5~", view(True))
+    original_stage = view(True)(original)
+    for kind, key in (("help", b"?"), ("log", b"n")):
+        covered = step(kind, b"\x18"+key, lambda s: tui.hidden_draw_complete and
+                       _c_cover(s, draft, not tui.screen.cursor.hidden, kind, command))
+        if kind == "help":
+            tui.send("C observable covered Help scroll", b"j")
+            tui.wait(lambda s: tui.hidden_draw_complete and
+                     _bb2b_list(_c_plain_shell(s), tui.screen.cursor.hidden, draft, kind) and
+                     _help_box(s) != _help_box(covered) and _help_box(s)[:-1] == _help_box(covered)[1:],
+                     "C complete changed Help body without transcript movement")
+        step(kind+"-return", b"\x1b", lambda s: view(True)(s) == original_stage)
+
+
 def _run_modal_stack_smoke(part):
-    assert part in ("bb1a", "bb1b-i", "bb1b-ii", "bb2b")
-    local_only = part not in ("bb1a", "bb2b")
-    turns = 3 if part == "bb1b-i" else 1
+    assert part in ("bb1a", "bb1b-i", "bb1b-ii", "bb2b", "c")
+    local_only = part not in ("bb1a", "bb2b", "c")
+    turns = 2 if part == "c" else (3 if part == "bb1b-i" else 1)
     part_name = part.replace("bb", "Bb", 1)
     if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
+        if part == "c":
+            _deskcheck_c_frames(os.environ["RUSTAIN_MODAL_STACK_C_FRAMES"])
+            return
         if part == "bb2b":
             _deskcheck_bb2b_frames(os.environ["RUSTAIN_MODAL_STACK_BB2B_FRAMES"])
             return
@@ -1977,9 +2247,7 @@ def _run_modal_stack_smoke(part):
         return
     binary = harness._resolve_binary()[0].resolve()
     assert binary.is_file() and "debug" in binary.parts and "release" not in binary.parts, binary
-    parent = _evidence_parent()
-    if part == "bb1b-ii" and "RUSTAIN_CAPTURE_EVIDENCE_DIR" not in os.environ:
-        parent = DEFAULT_EVIDENCE / "smoke-evidence-4bb1b-ii"
+    scratch, parent = _smoke_paths(part)
     parent.mkdir(parents=True, exist_ok=True)
     evidence = Path(tempfile.mkdtemp(prefix=f"21-4-{part}-", dir=parent))
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
@@ -1988,6 +2256,9 @@ def _run_modal_stack_smoke(part):
                 "legs": ["local", "attached"], "story_parts": ["A1", "A2a", "A2b", "Ba", "Bb1a", "Bb2a"]}
     if part == "bb2b":
         manifest.update(story_parts=["Bb2b"], cross_search="local only; attached unavailable")
+    if part == "c":
+        manifest.update(story_parts=["C"], legs=["local", "attached", "readonly"],
+                        attached_unavailable="Model/Profile/Login/Usage/Search/Bookmark/Wave/CrossSearch n/a")
     if local_only:
         surface = "Bookmark/Wave" if part == "bb1b-i" else "CrossSearch"
         manifest.update(legs=["local"], story_parts=[part_name],
@@ -2021,7 +2292,7 @@ def _run_modal_stack_smoke(part):
                             return
                         assert body.get("stream") is True and TURN in json.dumps(body.get("messages", []))
                         assert turn <= turns, "unexpected extra real turn"
-                        reply = SEARCH_REPLY if turn == 1 else NOTICES[turn-2]
+                        reply = SEARCH_REPLY if turn == 1 or part == "c" else NOTICES[turn-2]
                         if turn == 1:
                             held.set()
                             assert release.wait(90), "held model turn was never released"
@@ -2049,8 +2320,8 @@ def _run_modal_stack_smoke(part):
                 server.shutdown(); server.server_close(); thread.join(timeout=5)
                 assert not thread.is_alive()
             stack.callback(close_server)
-            SCRATCH.mkdir(parents=True, exist_ok=True)
-            root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="r214-", dir=SCRATCH)))
+            scratch.mkdir(parents=True, exist_ok=True)
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="r214-", dir=scratch)))
             (root / "home").mkdir()
             origin = f"http://127.0.0.1:{server.server_port}"
             def environment(tag, ws):
@@ -2072,6 +2343,24 @@ def _run_modal_stack_smoke(part):
                     daemon_env = {**env, "RUSTAIN_LOG_PATH": str(evidence / "daemon.runtime.log")}
                     _daemon(stack, binary, ws, daemon_env, evidence)
                 tui = _Terminal(stack, binary, ["--new"] if tag == "local" else ["daemon", "attach"], ws, env, evidence, tag, errors)
+                if part == "c":
+                    release.set()
+                    tui.wait(lambda s: _c_base(s, "", 0, (tui.screen.cursor.x, tui.screen.cursor.y),
+                                              not tui.screen.cursor.hidden), "C initial shared Input")
+                    tui.send("C real transcript turn", TURN.encode()+b"\r")
+                    tui.wait(lambda s: _status(s) and REPLY in s and not tui.screen.cursor.hidden,
+                             "C real transcript completion")
+                    _c_leg(tui)
+                    if tag == "attached":
+                        reader_env = {**env, "RUSTAIN_LOG_PATH": str(evidence / "readonly.runtime.log")}
+                        reader = _Terminal(stack, binary, ["daemon", "attach"], ws, reader_env,
+                                           evidence, "readonly", errors)
+                        reader.wait(lambda s: _status(s) and "read-only" in s and REPLY in s,
+                                    "C real daemon-granted read-only snapshot")
+                        _c_leg(reader)
+                        reader.exit()
+                    tui.exit()
+                    continue
                 if local_only:
                     release.set()
                     tui.wait(lambda s: _status(s) and not tui.screen.cursor.hidden, f"{part_name} initial Input")
@@ -2103,6 +2392,8 @@ def _run_modal_stack_smoke(part):
         logs = sorted(evidence.glob("*.runtime.log.*"))
         for tag in (("local",) if local_only else ("local", "attached", "daemon")):
             assert any(p.name.startswith(tag+".runtime.log.") and re.fullmatch(r"\d{4}-\d{2}-\d{2}", p.suffix[1:]) for p in logs), f"missing dated {tag} debug log"
+        if part == "c":
+            assert any(p.name.startswith("readonly.runtime.log.") for p in logs), "missing reader debug log"
         (evidence / "requests.json").write_text(json.dumps(posts, indent=2)+"\n")
         for path in evidence.iterdir():
             assert KEY.encode() not in path.read_bytes(), f"credential leaked to {path.name}"
@@ -2140,3 +2431,15 @@ def test_modal_stack_bb1b_ii_local_cross_search():
 @pytest.mark.timeout(240)
 def test_modal_stack_bb2b_inspector_fields_both_hosts_and_cross_query():
     _run_modal_stack_smoke("bb2b")
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(360)
+def test_modal_stack_c_shared_composer_and_view_both_hosts(monkeypatch):
+    if os.environ.get("RUSTAIN_MODAL_STACK_DESKCHECK") == "1":
+        def forbidden(*_args, **_kwargs):
+            raise AssertionError("C DESKCHECK must not resolve or spawn an app")
+        monkeypatch.setattr(harness, "_resolve_binary", forbidden)
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        monkeypatch.setattr(pexpect, "spawn", forbidden)
+    _run_modal_stack_smoke("c")

@@ -33,6 +33,7 @@ use crate::adapters::p2p_config::{
     load_workspace_p2p_config, pin_peer_in_workspace_config, remove_peer_from_workspace_config,
 };
 use crate::adapters::p2p_reach::record_peer_reach;
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
     P2pConfigState, PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey, RoomEvent,
@@ -1381,10 +1382,9 @@ fn raise_peer_add_card(
         reach_refresh,
         prior_focus: state.focus.clone(),
     });
-    state.focus = crate::domain::models::FocusState::Overlay(
-        crate::domain::models::visual::OverlayType::Confirmation(
-            crate::domain::models::visual::ConfirmationType::PeerAdd,
-        ),
+    reducer::raise_confirmation(
+        state,
+        crate::domain::models::visual::ConfirmationType::PeerAdd,
     );
     state.needs_redraw = true;
 }

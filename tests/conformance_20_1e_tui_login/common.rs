@@ -332,6 +332,7 @@ impl Tui {
                     &shell,
                     Host::Local,
                     &LogFacts::default(),
+                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                     |_| {},
                 );
             })

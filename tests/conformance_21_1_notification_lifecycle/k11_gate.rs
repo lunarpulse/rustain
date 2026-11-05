@@ -280,7 +280,11 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
                 &HashMap::<String, ToolBlockState>::new(),
                 &blocks,
             );
-            visible = result.visible_feedback_ids;
+            visible = result
+                .visible_feedback_rows
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
         })
         .unwrap();
     let buffer = terminal.backend().buffer().clone();

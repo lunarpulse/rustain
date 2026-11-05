@@ -584,6 +584,9 @@ fn test_command_palette_renders_caller_geometry() {
                     &shell,
                     Host::Local,
                     &LogFacts::default(),
+                    &mut rustain::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                        shell.chat_pane,
+                    ),
                     |_| {},
                 );
             })
@@ -670,7 +673,7 @@ fn test_which_key_bar_renders_chord_labels() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            which_key_bar::render(
+            let _ = which_key_bar::render(
                 frame,
                 area,
                 &theme,

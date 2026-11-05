@@ -17,8 +17,10 @@ fn paint(conversation: &Conversation) -> Vec<String> {
                 frame.area(),
                 conversation,
                 &StreamingState::default(),
-                0,
-                false,
+                &rustain::domain::models::ViewState {
+                    mode: rustain::domain::models::AnchorMode::Reading,
+                    ..Default::default()
+                },
                 &Theme::dark(),
                 &mut tab,
                 &HashMap::new(),

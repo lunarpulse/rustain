@@ -96,7 +96,7 @@ fn paint_base(
     let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
     terminal
         .draw(|frame| {
-            rustain::infrastructure::runtime::event_loop::paint_wave_base(
+            let _ = rustain::infrastructure::runtime::event_loop::paint_wave_base(
                 frame,
                 frame.area(),
                 gate,
@@ -104,7 +104,7 @@ fn paint_base(
                 wave,
                 None,
                 frame_open,
-            )
+            );
         })
         .unwrap();
     terminal

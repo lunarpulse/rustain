@@ -6,6 +6,7 @@
 use crate::adapters::tui::keymap::table_inspector::InspectorCmd;
 use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
 use crate::adapters::tui::notifications::{self, NoticeSource};
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::DomainInputEvent;
 use crate::domain::models::conversation::{ChatMessage, generate_message_id};
@@ -179,7 +180,7 @@ pub fn on_key(
         }
         InspectorCmd::Conversation => {
             let conversation = read_only_conversation(state, &agent_id);
-            state.focus = FocusState::Chat;
+            reducer::set_base(state, FocusState::Chat);
             state.needs_redraw = true;
             return InspectorOutcome::OpenConversation(Box::new(conversation));
         }

@@ -7,6 +7,7 @@
 //! - Export confirm/cancel/apply (Story 4-4 AC11/AC12)
 
 use crate::adapters::tui::notifications::{self, NoticeSource};
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{Conversation, FocusState};
 
@@ -159,7 +160,7 @@ pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
             }
         }
     }
-    state.focus = FocusState::Chat;
+    reducer::set_base(state, FocusState::Chat);
     state.needs_redraw = true;
 }
 
@@ -167,7 +168,7 @@ pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
 pub fn apply_cancel_export_overwrite(state: &mut TuiState) {
     state.pending_export = None;
     notifications::info(state, NoticeSource::Export, "Export cancelled");
-    state.focus = FocusState::Chat;
+    reducer::set_base(state, FocusState::Chat);
     state.needs_redraw = true;
 }
 
@@ -289,10 +290,10 @@ pub async fn apply_export_command(
     .unwrap_or(false);
     if arg.is_some() && target_exists {
         state.pending_export = Some((target_path.clone(), content));
-        state.focus =
-            FocusState::Overlay(crate::domain::models::visual::OverlayType::Confirmation(
-                crate::domain::models::visual::ConfirmationType::ExportOverwrite(target_path),
-            ));
+        reducer::raise_confirmation(
+            state,
+            crate::domain::models::visual::ConfirmationType::ExportOverwrite(target_path),
+        );
         state.needs_redraw = true;
         return;
     }

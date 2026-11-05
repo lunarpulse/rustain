@@ -50,8 +50,8 @@ fn availability_note(row: &Binding) -> String {
     if row.hosts.includes(Host::Attached)
         && let Availability::Unavailable(why) = row.availability(&AvailCtx::attached(130, false))
     {
-        // The host is the reason only when the row runs locally; otherwise the
-        // row names its own remedy (`Ctrl+A` in the attached composer: no cursor).
+        // A host-only limitation gets the host remedy; remaining legacy fields
+        // retain their own explicitly declared no-cursor reason.
         let local = row.availability(&AvailCtx::local(130, DensityMode::Monitor));
         notes.push(if row.hosts.includes(Host::Local) && local.is_available() {
             "not available in an attached session"
@@ -90,6 +90,7 @@ pub fn markdown_reference() -> String {
         "Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.\n\
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.\n\
 `Esc` and `Ctrl+C` never decide a decision card: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.\n\
+The attached client starts in Input in both writer and read-only modes. Its shared composer supports caret motions and readline editing, including Ctrl+A, Ctrl+E and Ctrl+K; read-only mode refuses submission, not local typing or local slash commands.\n\
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.\n",
     );
     for context in Context::ALL {

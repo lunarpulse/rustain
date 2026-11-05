@@ -338,6 +338,7 @@ impl TestHarness {
                         active_conversation_id: Some(conversation.id.clone()),
                         ..Default::default()
                     },
+                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                     |frame| {
                         status_bar::render(
                             frame,
@@ -448,45 +449,53 @@ impl TestHarness {
                         None,
                     );
 
-                    presentation::compose(frame, state, &shell, host, &pane_facts, |frame| {
-                        status_bar::render(
-                            frame,
-                            app_layout.status_bar,
-                            "mock-model",
-                            None,
-                            status,
-                            theme,
-                            scroll_offset,
-                            &msg_boundaries,
-                            total_content_height,
-                            app_layout.chat_pane.height,
-                            PermissionMode::Normal,
-                            None, // token_usage
-                            0,    // context_window
-                            has_project_context,
-                            None, // session_title
-                            multiline_mode,
-                            true,
-                            0,    // injected_tokens
-                            None, // current_hint
-                            0,
-                            None,
-                            None,
-                            None,
-                            false,
-                            None, // daily_budget (Story 7.5)
-                            None,
-                            DensityMode::Focus,
-                            false,
-                            None,
-                            rustain::adapters::tui::state::LogAwareness::Hidden,
-                            rustain::adapters::tui::widgets::status_bar::NoticeBadges {
-                                unseen: unseen_notices,
-                                decisions: decisions.len(),
-                                ..Default::default()
-                            },
-                        );
-                    });
+                    presentation::compose(
+                        frame,
+                        state,
+                        &shell,
+                        host,
+                        &pane_facts,
+                        &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                        |frame| {
+                            status_bar::render(
+                                frame,
+                                app_layout.status_bar,
+                                "mock-model",
+                                None,
+                                status,
+                                theme,
+                                scroll_offset,
+                                &msg_boundaries,
+                                total_content_height,
+                                app_layout.chat_pane.height,
+                                PermissionMode::Normal,
+                                None, // token_usage
+                                0,    // context_window
+                                has_project_context,
+                                None, // session_title
+                                multiline_mode,
+                                true,
+                                0,    // injected_tokens
+                                None, // current_hint
+                                0,
+                                None,
+                                None,
+                                None,
+                                false,
+                                None, // daily_budget (Story 7.5)
+                                None,
+                                DensityMode::Focus,
+                                false,
+                                None,
+                                rustain::adapters::tui::state::LogAwareness::Hidden,
+                                rustain::adapters::tui::widgets::status_bar::NoticeBadges {
+                                    unseen: unseen_notices,
+                                    decisions: decisions.len(),
+                                    ..Default::default()
+                                },
+                            );
+                        },
+                    );
                 } else {
                     presentation::paint_too_small(frame, area);
                 }

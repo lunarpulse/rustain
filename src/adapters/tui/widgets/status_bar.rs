@@ -124,11 +124,13 @@ pub fn render(
     // granted read-only (another client holds the writer slot) the segment is the
     // dimmed never-silent `read-only — another client holds write` (AC6 #2);
     // otherwise a plain `attached` chip.
+    let mut attached_role_span = None;
     if let Some(info) = attached {
         left_spans.push(Span::styled(sep.to_string(), Style::default().fg(fg)));
         if info.read_only {
+            attached_role_span = Some(left_spans.len());
             left_spans.push(Span::styled(
-                "read-only — another client holds write".to_string(),
+                "read-only — another client holds write",
                 theme.typography.meta.fg(theme.colors.fg_muted),
             ));
         } else {
@@ -367,6 +369,25 @@ pub fn render(
     let cue = decision_pane::status_cue(badges.decisions);
     let reserved_width = reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
         + cue.as_deref().map_or(0, |text| geom::cells(text) + 1);
+    // The role is mandatory, its explanation is not: keep the complete state
+    // word ahead of optional detail even when the model has already yielded.
+    if let Some(index) = attached_role_span {
+        let core_width = left_spans[..optional_start]
+            .iter()
+            .map(|span| geom::cells(&span.content))
+            .sum::<usize>()
+            + geom::cells(&left_spans[optional_end].content)
+            + geom::cells(&left_spans[optional_end + 1].content);
+        let deficit =
+            (core_width - model_width + reserved_width).saturating_sub(usize::from(area.width));
+        if deficit > 0 {
+            let old_width = geom::cells(&left_spans[index].content);
+            let budget = old_width.saturating_sub(deficit).max("read-only".len());
+            left_spans[index].content =
+                geom::ellipsize("read-only — another client holds write", budget, "…");
+            left_width -= old_width - geom::cells(&left_spans[index].content);
+        }
+    }
     // If context/budget details alone would crowd state/counters, let them
     // clip at the far end instead. Keep their full width for hint admission:
     // a hint must never reappear merely because a fact was clipped.

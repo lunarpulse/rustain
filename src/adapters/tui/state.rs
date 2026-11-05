@@ -26,6 +26,9 @@ use crate::domain::services::search::SearchMatch;
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
 
+mod attached_presentation;
+pub(crate) use attached_presentation::*;
+
 mod login_overlay;
 pub use login_overlay::*;
 
@@ -2511,6 +2514,8 @@ impl WaveViewState {
 pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
+    /// Attached UI data; socket senders and request correlation stay in the runtime.
+    pub(crate) attached: AttachedPresentation,
     /// Arrival-only provenance; explicit focus changes relinquish the borrow.
     pub card_focus_borrowed_from: Option<FocusState>,
     pub recipient_surface: Option<RecipientSurface>,
@@ -2957,14 +2962,14 @@ impl TuiState {
     /// Story 19.16g — after a **successful** draw: hand the visits this frame
     /// actually presented to the persistence shell. The panel's visit counts
     /// only if the widget painted it with body space; the `team-log` visit
-    /// only if its block intersected the rendered chat viewport. Each visit
-    /// is consumed once, so rerendering cannot acknowledge later rows.
-    pub fn log_visits_presented(&mut self, visible_feedback_ids: &[String]) {
+    /// only if a projected row survives actual opaque paint. Each visit is
+    /// consumed once, so rerendering cannot acknowledge later rows.
+    pub fn log_visits_presented<'a>(&mut self, presented_ids: impl IntoIterator<Item = &'a str>) {
         if let Some(visit) = self.transparency_panel.painted_visit.take() {
             self.log_awareness.presented.push(visit);
         }
-        if visible_feedback_ids
-            .iter()
+        if presented_ids
+            .into_iter()
             .any(|id| id == crate::adapters::tui::handlers::team_command::TEAM_LOG_BLOCK_ID)
             && let Some(visit) = self.pending_log_visit.take()
         {
@@ -3135,7 +3140,8 @@ impl TuiState {
     pub fn with_capability(width: u16, height: u16, capability: ColorCapability) -> Self {
         Self {
             active_tab_id: 0,
-            focus: FocusState::Input,
+            focus: super::presentation::reducer::initial_base(),
+            attached: AttachedPresentation::default(),
             card_focus_borrowed_from: None,
             recipient_surface: None,
             pinned_peer_compose: None,
@@ -4654,7 +4660,7 @@ mod wave_frame_tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
         terminal
             .draw(|frame| {
-                render_permission_surface(
+                let _ = render_permission_surface(
                     frame,
                     frame.area(),
                     state.pending_permission.as_ref(),

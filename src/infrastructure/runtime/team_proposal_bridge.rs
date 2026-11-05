@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::adapters::tui::presentation::reducer;
 use crate::domain::events::AppEvent;
 use crate::domain::models::{ProposalRaiseOutcome, TeamProposal};
 use crate::domain::ports::TeamProposalSink;
@@ -270,7 +271,7 @@ pub async fn proposal_action(
         state.task_panel_state.detail_scroll_offset = 0;
         state.agent_panel_state.drill_down_agent = None;
         state.agent_panel_state.inspector_scroll_offset = 0;
-        state.focus = crate::domain::models::FocusState::Chat;
+        reducer::set_base(state, crate::domain::models::FocusState::Chat);
         state.team_proposal_scroll = 0;
         state.team_proposal_scroll_max = 0;
         state.team_proposal_footer_visible = false;

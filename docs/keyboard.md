@@ -6,6 +6,7 @@
 Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.
 `Esc` and `Ctrl+C` never decide a decision card: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.
+The attached client starts in Input in both writer and read-only modes. Its shared composer supports caret motions and readline editing, including Ctrl+A, Ctrl+E and Ctrl+K; read-only mode refuses submission, not local typing or local slash commands.
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.
 
 ## Global
@@ -50,15 +51,12 @@ Also inherits: Text field.
 | `Enter` | Send message | local, attached | portable |  |
 | `Shift+Enter` | New line (multi-line mode) | local, attached | extended keyboard | portable alternative: Enter in multi-line mode (/ml) |
 | `Alt+Enter` | Insert newline (alternative when Shift+Enter is intercepted) | local, attached | Alt (meta) | portable alternative: Enter in multi-line mode (/ml) |
-| `Ctrl+E` | Move to the end of the current line | local | portable |  |
-| `Ctrl+A` | Move to the start of the current line | local | portable |  |
+| `Ctrl+E` | Move to the end of the current line | local, attached | portable |  |
+| `Ctrl+A` | Move to the start of the current line | local, attached | portable |  |
 | `Ctrl+W` | Delete the word before the cursor | local, attached | portable |  |
 | `Ctrl+U` | Delete to the start of the current line | local, attached | portable |  |
-| `Ctrl+K` | Delete to the end of the current line | local | portable |  |
+| `Ctrl+K` | Delete to the end of the current line | local, attached | portable |  |
 | `Ctrl+H` | Delete the character before the cursor, like Backspace (legacy terminals send it for Backspace) | local, attached | portable |  |
-| `Ctrl+A` | Move to the start of the line: the attached composer has no cursor, so nothing moves | attached | portable | no cursor in this field |
-| `Ctrl+E` | Move to the end of the line: the attached composer has no cursor, so nothing moves | attached | portable | no cursor in this field |
-| `Ctrl+K` | Delete to the end of the line: the attached composer has no cursor, so nothing is deleted | attached | portable | no cursor in this field |
 | `Alt+M` | Toggle multi-line mode | local, attached | Alt (meta) | portable alternative: /ml |
 | `Ctrl+Enter` | Send (where the terminal distinguishes it from Enter) | local, attached | extended keyboard | portable alternative: Ctrl+X Enter |
 | `Esc` | Close popup / return to Chat — never sends; unsent text is kept | local, attached | portable |  |
@@ -74,11 +72,11 @@ Also inherits: Text field.
 | `Ctrl+T` | Open a new tab | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
 | `Backspace` | Delete the character before the cursor | local, attached | portable |  |
-| `Del` | Delete the character at the cursor | local | portable |  |
-| `Left` | Move the cursor one character left | local | portable |  |
-| `Right` | Move the cursor one character right | local | portable |  |
-| `Home` | Move to the start of the current row | local | portable |  |
-| `End` | Move to the end of the current row | local | portable |  |
+| `Del` | Delete the character at the cursor | local, attached | portable |  |
+| `Left` | Move the cursor one character left | local, attached | portable |  |
+| `Right` | Move the cursor one character right | local, attached | portable |  |
+| `Home` | Move to the start of the current row | local, attached | portable |  |
+| `End` | Move to the end of the current row | local, attached | portable |  |
 | `PgUp` | Scroll the transcript one page up | attached | portable |  |
 | `PgDn` | Scroll the transcript one page down | attached | portable |  |
 

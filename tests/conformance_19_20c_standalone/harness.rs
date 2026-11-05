@@ -385,7 +385,7 @@ impl Fixture {
                     rustain::domain::models::DensityMode::Focus,
                 )
                 .expect("real minimum chat viewport");
-                permission_prompt::render_permission_surface(
+                let _ = permission_prompt::render_permission_surface(
                     frame,
                     layout.chat_pane,
                     self.state.pending_permission.as_ref(),

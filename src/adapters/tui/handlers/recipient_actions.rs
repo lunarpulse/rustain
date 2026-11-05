@@ -54,11 +54,7 @@ pub(crate) fn pending_composition(state: &TuiState) -> Option<&str> {
         })
 }
 
-pub(crate) fn begin_action(
-    state: &mut TuiState,
-    frame: &ClientFrame,
-    composed_input: Option<&mut String>,
-) -> bool {
+pub(crate) fn begin_action(state: &mut TuiState, frame: &ClientFrame, composed: bool) -> bool {
     let Some(key) = action_key(frame) else {
         return true;
     };
@@ -77,15 +73,19 @@ pub(crate) fn begin_action(
     state
         .recipient_actions
         .retain(|_, action| matches!(action, RecipientActionState::Pending { .. }));
-    let pinned_compose = if composed_input.is_some() {
+    let pinned_compose = if composed {
         state.pinned_peer_compose.take()
     } else {
         None
     };
+    let composed_input = composed.then(|| {
+        state.cursor_position = 0;
+        std::mem::take(&mut state.input_buffer)
+    });
     state.recipient_actions.insert(
         key,
         RecipientActionState::Pending {
-            composed_input: composed_input.map(std::mem::take),
+            composed_input,
             pinned_compose,
         },
     );
@@ -113,7 +113,6 @@ pub(crate) fn action_is_pending(
 
 pub(crate) fn apply_action_result(
     state: &mut TuiState,
-    input: &mut String,
     action: RecipientAction,
     target: RecipientActionTarget,
     outcome: RecipientActionOutcome,
@@ -189,7 +188,8 @@ pub(crate) fn apply_action_result(
                     "acknowledgement already recorded for {id} — receipt only; no new action applied"
                 )
             } else if let Some(text) = submitted {
-                *input = text;
+                state.cursor_position = text.chars().count();
+                state.input_buffer = text;
                 state.pinned_peer_compose = pinned_compose;
                 "response already settled — your text was not sent".to_owned()
             } else {
@@ -198,7 +198,8 @@ pub(crate) fn apply_action_result(
         }
         RecipientActionOutcome::Refused { error } => {
             if let Some(text) = submitted {
-                *input = text;
+                state.cursor_position = text.chars().count();
+                state.input_buffer = text;
                 state.pinned_peer_compose = pinned_compose;
             }
             format!("[daemon error] {error}")
@@ -241,12 +242,7 @@ pub(crate) fn apply_context_state(
     state.needs_redraw = true;
 }
 
-pub(crate) fn abort_unsent_action(
-    state: &mut TuiState,
-    input: &mut String,
-    frame: ClientFrame,
-    message: String,
-) {
+pub(crate) fn abort_unsent_action(state: &mut TuiState, frame: ClientFrame, message: String) {
     let key = match frame {
         ClientFrame::ReplyToRecipientItem { item_id, .. } => (
             RecipientAction::Reply,
@@ -287,7 +283,8 @@ pub(crate) fn abort_unsent_action(
         pinned_compose,
     }) = state.recipient_actions.remove(&key)
     {
-        *input = text;
+        state.cursor_position = text.chars().count();
+        state.input_buffer = text;
         state.pinned_peer_compose = pinned_compose;
     }
     let visible = action_target_is_visible(state, &key.1);
@@ -505,27 +502,27 @@ mod tests {
                 }
             ))
         );
-        assert!(begin_action(&mut state, &share, None));
-        assert!(!begin_action(&mut state, &decline, None));
+        assert!(begin_action(&mut state, &share, false));
+        assert!(!begin_action(&mut state, &decline, false));
         assert_eq!(state.recipient_actions.len(), 1);
         assert_eq!(
             state.feedback_blocks["recipient-actions"].message,
             "applying status reply for ri_status…"
         );
-        let mut input = "unfinished operator text".to_owned();
-        abort_unsent_action(&mut state, &mut input, share, "channel closed".to_owned());
-        assert_eq!(input, "unfinished operator text");
+        state.input_buffer = "unfinished operator text".to_owned();
+        abort_unsent_action(&mut state, share, "channel closed".to_owned());
+        assert_eq!(state.input_buffer, "unfinished operator text");
         assert!(matches!(
             state.recipient_actions.values().next(),
             Some(RecipientActionState::Completed { notice }) if notice == "channel closed"
         ));
-        assert!(begin_action(&mut state, &decline, None));
+        assert!(begin_action(&mut state, &decline, false));
     }
 
     #[test]
     fn unrelated_result_does_not_release_composition_and_refusal_restores_its_pin() {
         let mut state = TuiState::new(80, 24);
-        let mut input = "line one\n  line two".to_owned();
+        state.input_buffer = "line one\n  line two".to_owned();
         state.pinned_peer_compose = Some(PinnedPeerCompose::new(
             "node-b".to_owned(),
             PeerComposeAction::Edit,
@@ -533,16 +530,15 @@ mod tests {
         let frame = ClientFrame::ResolvePeerDraft {
             node: "node-b".to_owned(),
             action: PeerDraftAction::Edit {
-                content: input.clone(),
+                content: state.input_buffer.clone(),
             },
         };
-        assert!(begin_action(&mut state, &frame, Some(&mut input)));
+        assert!(begin_action(&mut state, &frame, true));
         assert_eq!(pending_composition(&state), Some("line one\n  line two"));
-        assert!(input.is_empty());
+        assert!(state.input_buffer.is_empty());
         assert!(state.pinned_peer_compose.is_none());
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Response,
             RecipientActionTarget::Node {
                 node_id: "node-a".to_owned(),
@@ -550,10 +546,9 @@ mod tests {
             RecipientActionOutcome::Idempotent,
         );
         assert_eq!(pending_composition(&state), Some("line one\n  line two"));
-        assert!(input.is_empty());
+        assert!(state.input_buffer.is_empty());
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Response,
             RecipientActionTarget::Node {
                 node_id: "node-b".to_owned(),
@@ -562,7 +557,8 @@ mod tests {
                 error: ProtocolError::ReadOnly,
             },
         );
-        assert_eq!(input, "line one\n  line two");
+        assert_eq!(state.input_buffer, "line one\n  line two");
+        assert_eq!(state.cursor_position, state.input_buffer.chars().count());
         assert_eq!(
             state.pinned_peer_compose.as_ref().unwrap().node_id,
             "node-b"
@@ -577,19 +573,23 @@ mod tests {
     #[test]
     fn action_kind_is_part_of_pending_identity_and_duplicates_do_not_replace_text() {
         let mut state = TuiState::new(80, 24);
-        let mut input = "  /team reply ri-a first\n second".to_owned();
+        state.input_buffer = "  /team reply ri-a first\n second".to_owned();
         let reply = ClientFrame::ReplyToRecipientItem {
             item_id: "ri-a".to_owned(),
             text: "first\n second".to_owned(),
             verdict: None,
         };
-        assert!(begin_action(&mut state, &reply, Some(&mut input)));
-        input.push_str("must remain editable if refused before enqueue");
-        assert!(!begin_action(&mut state, &reply, Some(&mut input)));
-        assert_eq!(input, "must remain editable if refused before enqueue");
+        assert!(begin_action(&mut state, &reply, true));
+        state
+            .input_buffer
+            .push_str("must remain editable if refused before enqueue");
+        assert!(!begin_action(&mut state, &reply, true));
+        assert_eq!(
+            state.input_buffer,
+            "must remain editable if refused before enqueue"
+        );
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Acknowledge,
             RecipientActionTarget::Item {
                 item_id: "ri-a".to_owned(),
@@ -600,10 +600,9 @@ mod tests {
             pending_composition(&state),
             Some("  /team reply ri-a first\n second")
         );
-        input.clear();
+        state.input_buffer.clear();
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Reply,
             RecipientActionTarget::Item {
                 item_id: "ri-a".to_owned(),
@@ -612,25 +611,24 @@ mod tests {
                 error: ProtocolError::ReadOnly,
             },
         );
-        assert_eq!(input, "  /team reply ri-a first\n second");
+        assert_eq!(state.input_buffer, "  /team reply ri-a first\n second");
         assert!(pending_composition(&state).is_none());
     }
 
     #[test]
     fn repeated_ack_consumes_its_command_instead_of_restoring_unsent_reply_text() {
         let mut state = TuiState::new(80, 24);
-        let mut input = "/team ack ri-a".to_owned();
+        state.input_buffer = "/team ack ri-a".to_owned();
         assert!(begin_action(
             &mut state,
             &ClientFrame::AcknowledgeRecipientItem {
                 item_id: "ri-a".to_owned()
             },
-            Some(&mut input),
+            true,
         ));
         assert_eq!(pending_composition(&state), Some("/team ack ri-a"));
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Acknowledge,
             RecipientActionTarget::Item {
                 item_id: "ri-a".to_owned(),
@@ -638,7 +636,7 @@ mod tests {
             RecipientActionOutcome::Idempotent,
         );
         assert!(
-            input.is_empty(),
+            state.input_buffer.is_empty(),
             "an acknowledged command must not reappear as unsent reply composition"
         );
         assert!(
@@ -658,14 +656,12 @@ mod tests {
     #[test]
     fn unrelated_ack_result_does_not_clear_the_pending_marker() {
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
         let first = ClientFrame::AcknowledgeRecipientItem {
             item_id: "ri-first".to_owned(),
         };
-        assert!(begin_action(&mut state, &first, None));
+        assert!(begin_action(&mut state, &first, false));
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Acknowledge,
             RecipientActionTarget::Item {
                 item_id: "ri-other".to_owned(),
@@ -689,10 +685,8 @@ mod tests {
     #[test]
     fn ack_result_never_selects_recipient_context() {
         let mut state = TuiState::new(80, 24);
-        let mut input = String::new();
         apply_action_result(
             &mut state,
-            &mut input,
             RecipientAction::Acknowledge,
             RecipientActionTarget::Item {
                 item_id: "ri-ack-context-control".to_owned(),
@@ -768,26 +762,21 @@ mod tests {
         );
         assert_eq!(action_key(&share), Some(key.clone()));
         assert_eq!(action_key(&decline), Some(key.clone()));
-        assert!(begin_action(&mut state, &share, None));
-        assert!(!begin_action(&mut state, &decline, None));
+        assert!(begin_action(&mut state, &share, false));
+        assert!(!begin_action(&mut state, &decline, false));
         assert_eq!(state.recipient_actions.len(), 1);
         assert_eq!(
             state.feedback_blocks["recipient-actions"].message,
             "applying retrospective reply for ri_retro…"
         );
-        let mut input = "unfinished operator text".to_owned();
-        abort_unsent_action(
-            &mut state,
-            &mut input,
-            decline.clone(),
-            "channel closed".to_owned(),
-        );
-        assert_eq!(input, "unfinished operator text");
+        state.input_buffer = "unfinished operator text".to_owned();
+        abort_unsent_action(&mut state, decline.clone(), "channel closed".to_owned());
+        assert_eq!(state.input_buffer, "unfinished operator text");
         assert!(matches!(
             state.recipient_actions.get(&key),
             Some(RecipientActionState::Completed { notice }) if notice == "channel closed"
         ));
-        assert!(begin_action(&mut state, &decline, None));
+        assert!(begin_action(&mut state, &decline, false));
     }
 
     #[test]
@@ -808,7 +797,6 @@ mod tests {
             ),
         ] {
             let mut state = TuiState::new(80, 24);
-            let mut input = String::new();
             state
                 .retro_left_out
                 .insert("ri_retro".to_owned(), left_out.clone());
@@ -818,20 +806,18 @@ mod tests {
             assert!(begin_action(
                 &mut state,
                 &retro_frame("ri_retro", false),
-                None
+                false
             ));
             // Another act's result on the same item, or this act's on
             // another item, never touches the overlay.
             apply_action_result(
                 &mut state,
-                &mut input,
                 RecipientAction::ShareStatus,
                 target("ri_retro"),
                 RecipientActionOutcome::Idempotent,
             );
             apply_action_result(
                 &mut state,
-                &mut input,
                 RecipientAction::Defer,
                 target("ri_retro"),
                 RecipientActionOutcome::Applied { reply: None },
@@ -839,7 +825,6 @@ mod tests {
             assert_eq!(state.retro_left_out.get("ri_retro"), Some(&left_out));
             apply_action_result(
                 &mut state,
-                &mut input,
                 RecipientAction::ShareRetro,
                 target("ri_retro"),
                 outcome,

@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 
 use super::recipient_view::{ReceivedThreadWindow, load_received_thread};
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::{
     RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget, TuiState,
 };
@@ -53,12 +54,9 @@ pub(crate) async fn open_received_surface(
                 Vec::new()
             },
         ),
-        None => (
-            std::mem::replace(&mut state.focus, FocusState::Chat),
-            Vec::new(),
-        ),
+        None => (reducer::replace_base(state, FocusState::Chat), Vec::new()),
     };
-    state.focus = FocusState::Chat;
+    reducer::set_base(state, FocusState::Chat);
     state.recipient_surface = Some(RecipientSurface {
         target: RecipientSurfaceTarget::Item(page.opened_address),
         access,

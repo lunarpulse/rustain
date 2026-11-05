@@ -158,6 +158,12 @@ pub enum ScrollDelta {
     FullPageDown,
     WheelUp(u16),
     WheelDown(u16),
+    /// Signed rows (positive = up), retaining logical overscroll for balanced
+    /// attached navigation. The returned painter projection is still bounded.
+    UnboundedRows(isize),
+    /// Resume bottom-following without discarding retained navigation intent.
+    /// Unlike `Bottom`, this is not an explicit jump/reset.
+    ResumeFollowing,
     Top,
     Bottom,
 }
@@ -215,14 +221,14 @@ pub struct LayoutMetrics {
 
 /// Per-tab view state — the single source of truth for scroll/anchor/collapse.
 ///
-/// Lives alongside `tab.scroll_offset` / `tab.auto_scroll` (the legacy mirror
-/// that survives this story) per the path-B parallel-fields cutover.
+/// Shared by the local and attached hosts; each domain tab owns one instance.
 #[derive(Clone, Debug)]
 pub struct ViewState {
     pub mode: AnchorMode,
     pub collapsed: HashMap<TurnId, bool>,
     pub summary_tier: SummaryTier,
-    /// Offset-from-bottom in lines. `0` = bottom; `max_offset` = top.
+    /// Offset-from-bottom in lines. Unbounded row intent may exceed the top;
+    /// `reconcile` returns the bounded painter projection without losing it.
     pub scroll_offset: usize,
     pub focused_turn: Option<TurnId>,
     /// "↓ N new lines" hint counter for status bar (UX-DR-ANCHOR-FSM).
@@ -355,7 +361,9 @@ impl ViewState {
 // ---------------------------------------------------------------------------
 
 impl ViewState {
-    /// Reconcile a single ViewEvent. Returns the resolved scroll_offset.
+    /// Reconcile one event and return its bounded painter offset. Unbounded rows
+    /// and implicit resume-following retain logical `scroll_offset` in the same
+    /// owned view, not a second cache; explicit `Bottom` still resets it.
     ///
     /// One event per frame — never two — to defuse the anchor-race class
     /// (ADR-16-01 §3). When `event = None`, only refreshes the resolved
@@ -367,6 +375,14 @@ impl ViewState {
     pub fn reconcile(&mut self, event: Option<ViewEvent>, layout: &LayoutMetrics) -> usize {
         // --- Apply the event (if any) ---
         let is_fold_toggle = matches!(event, Some(ViewEvent::FoldToggle { .. }));
+        let retains_logical_offset = matches!(
+            event,
+            Some(ViewEvent::Scroll(
+                ScrollDelta::UnboundedRows(_) | ScrollDelta::ResumeFollowing
+            )) | Some(ViewEvent::DropAnchorAndScroll {
+                delta: ScrollDelta::UnboundedRows(_) | ScrollDelta::ResumeFollowing
+            })
+        );
         if let Some(e) = event {
             self.apply_event(e, layout);
         }
@@ -398,8 +414,10 @@ impl ViewState {
             }
         };
 
-        self.scroll_offset = new_offset;
-        self.scroll_offset
+        if !retains_logical_offset {
+            self.scroll_offset = new_offset;
+        }
+        new_offset
     }
 
     fn apply_event(&mut self, event: ViewEvent, layout: &LayoutMetrics) {
@@ -448,6 +466,25 @@ impl ViewState {
             ScrollDelta::HalfPageDown => -((viewport / 2).max(1).min(isize::MAX as usize) as isize),
             ScrollDelta::FullPageDown => -(viewport.max(1).min(isize::MAX as usize) as isize),
             ScrollDelta::WheelDown(n) => -(n.max(1) as isize),
+            ScrollDelta::UnboundedRows(increment) => {
+                self.scroll_offset = if increment >= 0 {
+                    self.scroll_offset.saturating_add(increment as usize)
+                } else {
+                    self.scroll_offset.saturating_sub(increment.unsigned_abs())
+                };
+                self.mode = if self.scroll_offset == 0 {
+                    self.pending_append_lines = 0;
+                    AnchorMode::Following
+                } else {
+                    AnchorMode::Reading
+                };
+                return;
+            }
+            ScrollDelta::ResumeFollowing => {
+                self.mode = AnchorMode::Following;
+                self.pending_append_lines = 0;
+                return;
+            }
             ScrollDelta::Bottom => {
                 // Jump to bottom — Following at 0.
                 self.mode = AnchorMode::Following;
@@ -458,7 +495,9 @@ impl ViewState {
         };
 
         let scroll_signed = self.scroll_offset.min(isize::MAX as usize) as isize;
-        let new_offset = (scroll_signed + increment).clamp(0, max_off_signed) as usize;
+        let new_offset = scroll_signed
+            .saturating_add(increment)
+            .clamp(0, max_off_signed) as usize;
 
         if increment > 0 {
             // Scrolling up.
@@ -1464,5 +1503,129 @@ mod tests {
         // Already at max, another scroll up should clamp.
         vs.reconcile(Some(ViewEvent::Scroll(ScrollDelta::LineUp)), &layout);
         assert_eq!(vs.scroll_offset, 40);
+    }
+
+    #[test]
+    fn unbounded_rows_keep_balanced_navigation_while_bounded_scroll_still_clamps() {
+        let layout = make_layout(10, 20, &[], None);
+        let mut bounded = ViewState::default();
+        assert_eq!(
+            bounded.reconcile(Some(ViewEvent::Scroll(ScrollDelta::WheelUp(60))), &layout),
+            10
+        );
+        assert_eq!(bounded.scroll_offset, 10, "independent bounded control");
+
+        let mut view = ViewState::default();
+        for _ in 0..20 {
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(3))),
+                &layout,
+            );
+        }
+        assert_eq!(view.scroll_offset, 60, "logical intent survives the top");
+        assert_eq!(view.mode, AnchorMode::Reading);
+        let grown = make_layout(10, 50, &[], None);
+        assert_eq!(
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(0))),
+                &grown
+            ),
+            40
+        );
+        assert_eq!(view.scroll_offset, 60);
+        for _ in 0..19 {
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(-3))),
+                &layout,
+            );
+        }
+        assert_eq!(
+            view.scroll_offset, 3,
+            "the penultimate down is not already bottom"
+        );
+        assert_eq!(
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(-3))),
+                &layout
+            ),
+            0
+        );
+        assert_eq!(view.scroll_offset, 0);
+        assert_eq!(view.mode, AnchorMode::Following);
+    }
+
+    #[test]
+    fn unbounded_rows_saturate_and_explicit_bottom_discards_remaining_intent() {
+        let layout = make_layout(10, 20, &[], None);
+        let mut view = ViewState::default();
+        view.scroll_offset = usize::MAX - 1;
+        assert_eq!(
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(5))),
+                &layout
+            ),
+            10
+        );
+        assert_eq!(view.scroll_offset, usize::MAX);
+        view.reconcile(
+            Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(isize::MIN))),
+            &layout,
+        );
+        assert_eq!(view.scroll_offset, isize::MAX as usize);
+        assert_eq!(
+            view.reconcile(Some(ViewEvent::Scroll(ScrollDelta::LineUp)), &layout),
+            10,
+            "returning to bounded navigation must normalize without overflow"
+        );
+        assert_eq!(view.scroll_offset, 10);
+        view.pending_append_lines = 7;
+        assert_eq!(
+            view.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout),
+            0
+        );
+        assert_eq!(view.scroll_offset, 0);
+        assert_eq!(view.mode, AnchorMode::Following);
+        assert_eq!(view.pending_append_lines, 0);
+        view.reconcile(
+            Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(-5))),
+            &layout,
+        );
+        assert_eq!(view.scroll_offset, 0, "downward movement also saturates");
+    }
+
+    #[test]
+    fn resume_following_keeps_intent_but_explicit_bottom_resets_it() {
+        let layout = make_layout(10, 20, &[], None);
+        let mut view = ViewState::default();
+        view.reconcile(
+            Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(45))),
+            &layout,
+        );
+        view.pending_append_lines = 7;
+        assert_eq!(
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::ResumeFollowing)),
+                &layout
+            ),
+            0
+        );
+        assert_eq!(view.mode, AnchorMode::Following);
+        assert_eq!(view.scroll_offset, 45);
+        assert_eq!(view.pending_append_lines, 0);
+        assert_eq!(
+            view.reconcile(
+                Some(ViewEvent::Scroll(ScrollDelta::UnboundedRows(5))),
+                &layout
+            ),
+            10
+        );
+        assert_eq!(view.scroll_offset, 50);
+        assert_eq!(view.mode, AnchorMode::Reading);
+        assert_eq!(
+            view.reconcile(Some(ViewEvent::Scroll(ScrollDelta::Bottom)), &layout),
+            0
+        );
+        assert_eq!(view.scroll_offset, 0);
+        assert_eq!(view.mode, AnchorMode::Following);
     }
 }

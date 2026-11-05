@@ -367,9 +367,7 @@ pub(crate) fn fanout_command(
                                         threshold,
                                         adjusted: None,
                                     });
-                                crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(
-                                    state,
-                                );
+                                crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, true);
                                 state.needs_redraw = true;
                             }
                         }
@@ -3931,18 +3929,26 @@ mod log_awareness_tests {
                         area,
                         conversation,
                         &StreamingState::default(),
-                        scroll_offset,
-                        scroll_offset == 0,
+                        &crate::domain::models::ViewState {
+                            scroll_offset,
+                            mode: if scroll_offset == 0 {
+                                crate::domain::models::AnchorMode::Following
+                            } else {
+                                crate::domain::models::AnchorMode::Reading
+                            },
+                            ..Default::default()
+                        },
                         &state.theme,
                         &mut tab,
                         &tools,
                         &state.feedback_blocks,
                         &HashMap::new(),
                     )
-                    .visible_feedback_ids;
+                    .visible_feedback_rows;
                 })
                 .unwrap();
-            self.state.log_visits_presented(&visible);
+            self.state
+                .log_visits_presented(visible.iter().map(|(id, _)| id.as_str()));
         }
 
         /// A frame whose chat pane was painted but whose draw failed: the
@@ -3953,7 +3959,7 @@ mod log_awareness_tests {
 
         fn draw_panel(&mut self, height: u16) {
             self.paint_panel(height);
-            self.state.log_visits_presented(&[]);
+            self.state.log_visits_presented(std::iter::empty());
         }
 
         /// The panel painted by a frame whose draw then failed.

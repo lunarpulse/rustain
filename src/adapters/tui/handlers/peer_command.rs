@@ -8,6 +8,7 @@
 //! (`rustain peer …`); the shell that runs them is
 //! `infrastructure::runtime::peer_bridge`, shared with the CLI.
 
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 
 const USAGE: &str = "/peer list [--json] | /peer show <alias> | /peer invite [--ttl=<dur>] \
@@ -191,7 +192,7 @@ pub fn resolve_peer_add_card(
     accept: bool,
 ) -> Option<crate::adapters::tui::state::PendingPeerAdd> {
     let pending = state.pending_peer_add.take()?;
-    state.focus = pending.prior_focus.clone();
+    reducer::set_base(state, pending.prior_focus.clone());
     state.needs_redraw = true;
     accept.then_some(pending)
 }

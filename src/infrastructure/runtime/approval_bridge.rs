@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use crate::adapters::tui::app::InputAction;
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::{FeedbackInputState, PendingPermission, TuiState};
 use crate::domain::events::AppEvent;
 use crate::domain::models::visual::ConfirmationType;
-use crate::domain::models::{ApprovalOutcome, ApprovalScope, FocusState, OverlayType, RequestId};
+use crate::domain::models::{ApprovalOutcome, ApprovalScope, RequestId};
 use crate::domain::services::approval_runtime::{
     ApprovalRuntime, ApprovalRuntimeEvent, PendingReview, ReviewScope,
 };
@@ -61,10 +62,6 @@ async fn run(
     }
 }
 
-fn another_modal_owns_focus(state: &TuiState) -> bool {
-    crate::adapters::tui::app::permission_modal_owns_focus(state)
-}
-
 fn contains(state: &TuiState, id: &RequestId) -> bool {
     state
         .pending_permission
@@ -112,13 +109,12 @@ pub fn apply(state: &mut TuiState, event: ApprovalRuntimeEvent, review: Option<P
                 // It was already resolved before the snapshot was acquired.
                 return;
             };
-            if state.pending_permission.is_some() || another_modal_owns_focus(state) {
+            if state.pending_permission.is_some() || reducer::permission_modal_owns_focus(state) {
                 state.permission_queue.push(pending);
             } else {
                 state.pending_permission = Some(pending);
-                state.focus =
-                    FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
             }
+            reducer::raise_confirmation(state, ConfirmationType::Permission);
             state.needs_redraw = true;
         }
         ApprovalRuntimeEvent::Resolved { id, .. } | ApprovalRuntimeEvent::Cancelled { id, .. } => {
@@ -189,9 +185,7 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
                     cursor: 0,
                     pending_permission,
                 });
-                state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                    ConfirmationType::PermissionFeedback,
-                ));
+                reducer::raise_confirmation(state, ConfirmationType::PermissionFeedback);
                 state.needs_redraw = true;
             }
         }
@@ -238,8 +232,7 @@ pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: 
         InputAction::FeedbackInputCancel => {
             if let Some(fi) = state.pending_feedback_input.take() {
                 state.pending_permission = Some(fi.pending_permission);
-                state.focus =
-                    FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
+                reducer::raise_confirmation(state, ConfirmationType::Permission);
                 state.needs_redraw = true;
             }
         }

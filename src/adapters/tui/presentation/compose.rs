@@ -3,7 +3,7 @@
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
-use super::{Surface, geometry, stage_search};
+use super::{Surface, geometry, occlusion::OpaqueRects, stage_search};
 use crate::adapters::tui::{
     decision_pane,
     keymap::Host,
@@ -56,6 +56,7 @@ pub fn compose(
     shell: &Shell<'_>,
     host: Host,
     facts: &LogFacts,
+    opaque: &mut OpaqueRects,
     paint_status: impl FnOnce(&mut Frame),
 ) -> bool {
     let theme = &state.theme;
@@ -185,6 +186,7 @@ pub fn compose(
                 theme,
             ),
         }
+        opaque.frame(rect);
         if depth > 0 && modal.surface != Surface::Search {
             let ancestor = Style::default().fg(theme.colors.fg_secondary);
             let current = Style::default().fg(theme.colors.fg_primary);
@@ -224,14 +226,19 @@ pub fn compose(
         }
     }
     if state.modal_stack.is_empty() && state.focus == crate::domain::models::FocusState::Input {
-        autocomplete_popup::render(frame, shell.input_area, &state.autocomplete, theme);
-        reverse_search::render(
+        opaque.host(autocomplete_popup::render(
+            frame,
+            shell.input_area,
+            &state.autocomplete,
+            theme,
+        ));
+        opaque.host(reverse_search::render(
             frame,
             shell.chat_pane,
             &state.reverse_search,
             theme,
             state.pending_leader.is_none() && !state.autocomplete.is_open(),
-        );
+        ));
     }
     if state.pending_leader.is_some()
         && state
@@ -246,13 +253,13 @@ pub fn compose(
             }
         };
         avail.frame_origin = !state.modal_stack.is_empty();
-        which_key_bar::render(
+        opaque.host(which_key_bar::render(
             frame,
             shell.region,
             theme,
             &avail,
             state.leader_feedback.as_ref(),
-        );
+        ));
     }
     paint_status(frame);
     pane_painted

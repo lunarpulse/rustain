@@ -43,7 +43,7 @@ use crate::adapters::tui::notification_log;
 use crate::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
 };
-use crate::adapters::tui::presentation::{self, RouteEffect};
+use crate::adapters::tui::presentation::{self, RouteEffect, reducer};
 use crate::adapters::tui::quit_confirm::QuitRequest;
 use crate::adapters::tui::state::{RunningLogin, TuiState};
 use crate::adapters::tui::terminal::Tui;
@@ -183,9 +183,9 @@ fn render_lines_bottom(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     lines: Vec<ratatui::text::Line<'static>>,
-) {
+) -> Option<Rect> {
     if area.height == 0 || lines.is_empty() {
-        return;
+        return None;
     }
     // P5 (review): prepend a thin separator so the overlay doesn't silently
     // obscure the most recent chat content.
@@ -204,6 +204,7 @@ fn render_lines_bottom(
     };
     frame.render_widget(ratatui::widgets::Clear, card_area);
     frame.render_widget(ratatui::widgets::Paragraph::new(all_lines), card_area);
+    Some(card_area)
 }
 
 /// Base-only Wave paint shared with behavioral witnesses; full views belong to compose.
@@ -216,7 +217,7 @@ pub fn paint_wave_base(
     wave: Option<&crate::adapters::tui::state::WaveViewState>,
     rerunning_slot: Option<usize>,
     frame_open: bool,
-) {
+) -> Option<Rect> {
     if let Some(gate) = gate {
         let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
             &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
@@ -226,7 +227,7 @@ pub fn paint_wave_base(
             },
             area.width,
         );
-        render_lines_bottom(frame, area, lines);
+        render_lines_bottom(frame, area, lines)
     } else if let Some(handle) = handle {
         if !frame_open {
             let snap = handle.snapshot();
@@ -237,7 +238,9 @@ pub fn paint_wave_base(
                     crate::adapters::tui::widgets::result_row::render_result_row(row, area.width)
                 })
                 .collect();
-            render_lines_bottom(frame, area, lines);
+            render_lines_bottom(frame, area, lines)
+        } else {
+            None
         }
     } else if let Some(wave) = wave {
         let snap = crate::adapters::tui::widgets::wave_strip::WaveStripSnapshot {
@@ -253,7 +256,9 @@ pub fn paint_wave_base(
             &snap,
             !wave.cancelled,
         );
-        render_lines_bottom(frame, area, vec![line]);
+        render_lines_bottom(frame, area, vec![line])
+    } else {
+        None
     }
 }
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
@@ -1293,7 +1298,7 @@ pub async fn run(
                                     // AC-10-4-10: Esc from a read-only tab returns to the previous tab
                                     if tab_manager.active_tab().read_only {
                                         return_from_read_only_tab(&mut tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
-                                        state.focus = FocusState::Chat;
+                                        reducer::set_base(&mut state, FocusState::Chat);
                                         continue;
                                     }
                                     // Story 21.2 AC7 / RU-14: with nothing to stop, Ctrl+C is a quit
@@ -1314,12 +1319,12 @@ pub async fn run(
                                     if let Some(fi) = state.pending_feedback_input.take() {
                                         let pending = fi.pending_permission;
                                         let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
-                                        state.focus = FocusState::Input;
+                                        reducer::set_base(&mut state, FocusState::Input);
                                     }
                                     // Cancel any pending permission before aborting
                                     if let Some(pending) = state.pending_permission.take() {
                                         let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
-                                        state.focus = FocusState::Input;
+                                        reducer::set_base(&mut state, FocusState::Input);
                                     }
                                     // Cancel all queued permission requests
                                     while let Some(queued) = state.permission_queue.pop() {
@@ -1328,7 +1333,7 @@ pub async fn run(
                                     // Decline any pending skill trust prompt
                                     if let Some(pending) = state.pending_skill_trust.take() {
                                         let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
-                                        state.focus = FocusState::Input;
+                                        reducer::set_base(&mut state, FocusState::Input);
                                     }
                                     while let Some(queued) = state.skill_trust_queue.pop_front() {
                                         let _ = queued.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
@@ -1345,7 +1350,7 @@ pub async fn run(
                                             ),
                                         });
                                         if state.pending_skill_trust.is_none() {
-                                            state.focus = FocusState::Input;
+                                            reducer::set_base(&mut state, FocusState::Input);
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
@@ -1371,7 +1376,7 @@ pub async fn run(
                                         // Clear TurnQueue entirely
                                         while turn_queue.dequeue().is_some() {}
                                         // Ready for next input
-                                        state.focus = FocusState::Input;
+                                        reducer::set_base(&mut state, FocusState::Input);
                                         state.status = StatusState::Idle;
                                         state.needs_redraw = true;
                                     }
@@ -1547,11 +1552,11 @@ pub async fn run(
                                     if let Some(card) = handlers::artifact_command::resolve_apply_card(&mut state, true) {
                                         crate::infrastructure::runtime::artifact_bridge::apply_confirmed_card(&mut state, &app_state, card, security.current_mode()).await;
                                     }
-                                    surface_deferred_modal(&mut state);
+                                    reducer::settle_legacy(&mut state);
                                 }
                                 InputAction::ApplyCardDecline => {
                                     let _ = handlers::artifact_command::resolve_apply_card(&mut state, false);
-                                    surface_deferred_modal(&mut state);
+                                    reducer::settle_legacy(&mut state);
                                 }
                                 InputAction::PeerAddConfirm | InputAction::PeerAddDecline => {
                                     let confirmed = matches!(action, InputAction::PeerAddConfirm);
@@ -1633,7 +1638,7 @@ pub async fn run(
                                             trusted: true,
                                         });
                                         if state.pending_skill_trust.is_none() {
-                                            restore_focus_after_modal(&mut state);
+                                            reducer::restore_focus_after_modal(&mut state);
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
@@ -1646,7 +1651,7 @@ pub async fn run(
                                         false
                                     };
                                     if handled && state.pending_skill_trust.is_none() {
-                                        advance_skill_trust_queue(&mut state);
+                                        reducer::advance_skill_trust_queue(&mut state);
                                     }
                                 }
                                 InputAction::SkillTrustDecline => {
@@ -1660,7 +1665,7 @@ pub async fn run(
                                             trusted: false,
                                         });
                                         if state.pending_skill_trust.is_none() {
-                                            restore_focus_after_modal(&mut state);
+                                            reducer::restore_focus_after_modal(&mut state);
                                             state.skill_trust_inspect_mode = false;
                                         }
                                         state.needs_redraw = true;
@@ -1673,7 +1678,7 @@ pub async fn run(
                                         false
                                     };
                                     if handled && state.pending_skill_trust.is_none() {
-                                        advance_skill_trust_queue(&mut state);
+                                        reducer::advance_skill_trust_queue(&mut state);
                                     }
                                 }
                                 InputAction::SkillTrustInspect => {
@@ -1703,9 +1708,7 @@ pub async fn run(
                                         continue;
                                     }
                                     state.skill_trust_inspect_mode = true;
-                                    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                        ConfirmationType::SkillTrustInspect,
-                                    ));
+                                    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrustInspect);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::FocusDecisions => {
@@ -1719,7 +1722,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     match effect {
                                         DecisionEffect::RecoveryContinue => {
-                                            crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, InputAction::Decision(effect), restore_focus_after_modal);
+                                            crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
                                         }
                                         DecisionEffect::RecoveryNewSession => {
                                             conversation.messages.clear();
@@ -1731,7 +1734,7 @@ pub async fn run(
                                             conversation.last_response_at = None;
                                             conversation.usage = None;
                                             if state.modal_stack.is_empty() {
-                                                state.focus = FocusState::Input;
+                                                reducer::set_base(&mut state, FocusState::Input);
                                             }
                                             // Persist the fresh conversation with clean_exit = true
                                             // (avoids phantom crash detection on next startup)
@@ -1813,7 +1816,7 @@ pub async fn run(
                                     if let Some(tx) = state.question_response_tx.take() {
                                         let _ = tx.send(answer);
                                     }
-                                    state.focus = FocusState::Input;
+                                    reducer::set_base(&mut state, FocusState::Input);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::ExecuteCommand { name: cmd_name, args: cmd_args } => {
@@ -2884,7 +2887,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 action @ (InputAction::ImageConfirmAttach | InputAction::ImageConfirmCancel) => {
-                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, restore_focus_after_modal);
+                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
                                 }
                                 InputAction::RequestClipboardPaste => {
                                     // Async: read image (or text) from the OS clipboard via
@@ -3161,7 +3164,7 @@ pub async fn run(
                                             // Already active — just switch focus and close sidebar
                                             state.sidebar_visible = false;
                                             state.sidebar_panel = None;
-                                            state.focus = FocusState::Chat;
+                                            reducer::set_base(&mut state, FocusState::Chat);
                                             state.needs_redraw = true;
                                         } else if tab_manager.find_by_conversation(&conv_id).is_some() {
                                             // Open in another tab — switch to it
@@ -3179,7 +3182,7 @@ pub async fn run(
                                             }
                                             state.sidebar_visible = false;
                                             state.sidebar_panel = None;
-                                            state.focus = FocusState::Chat;
+                                            reducer::set_base(&mut state, FocusState::Chat);
                                             state.needs_redraw = true;
                                         } else {
                                             // Not open — load from storage into a new tab
@@ -3215,7 +3218,7 @@ pub async fn run(
                                                     session_index.set_active(Some(&conv_id));
                                                     state.sidebar_visible = false;
                                                     state.sidebar_panel = None;
-                                                    state.focus = FocusState::Chat;
+                                                    reducer::set_base(&mut state, FocusState::Chat);
                                                     state.needs_redraw = true;
                                                 }
                                                 Ok(None) => {
@@ -3385,12 +3388,12 @@ pub async fn run(
                                         }
                                     }
                                     if state.modal_stack.is_empty() {
-                                        state.focus = FocusState::Input;
+                                        reducer::set_base(&mut state, FocusState::Input);
                                     }
                                     state.needs_redraw = true;
                                 }
                                 action @ InputAction::CancelDelete => {
-                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, restore_focus_after_modal);
+                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
                                 }
                                 // ── Fork Conversation (Story 4-3a) ──────────────
                                 InputAction::ForkAtMessage => {
@@ -3427,11 +3430,7 @@ pub async fn run(
                                             continue;
                                         }
                                         state.pending_fork_index = Some(fork_message_index);
-                                        state.focus = FocusState::Overlay(
-                                            crate::domain::models::visual::OverlayType::Confirmation(
-                                                crate::domain::models::visual::ConfirmationType::Fork,
-                                            ),
-                                        );
+                                        reducer::raise_confirmation(&mut state, ConfirmationType::Fork);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -3498,18 +3497,18 @@ pub async fn run(
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
-                                                        state.focus = FocusState::Chat;
+                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                     Err(e) => {
                                                         tracing::error!("Failed to load forked conversation: {}", e);
-                                                        state.focus = FocusState::Chat;
+                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork failed: {}", e);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                                state.focus = FocusState::Chat;
+                                                reducer::set_base(&mut state, FocusState::Chat);
                                             }
                                         }
                                         state.needs_redraw = true;
@@ -3517,7 +3516,7 @@ pub async fn run(
                                 }
                                 InputAction::ForkCancel => {
                                     state.pending_fork_index = None;
-                                    state.focus = FocusState::Chat;
+                                    reducer::set_base(&mut state, FocusState::Chat);
                                     state.needs_redraw = true;
                                 }
                                 // ── Rewind Conversation (Story 4-3b) ─────────────────
@@ -3585,11 +3584,7 @@ pub async fn run(
                                             messages_to_remove,
                                             files_to_revert,
                                         });
-                                        state.focus = FocusState::Overlay(
-                                            crate::domain::models::visual::OverlayType::Confirmation(
-                                                crate::domain::models::visual::ConfirmationType::Rewind,
-                                            ),
-                                        );
+                                        reducer::raise_confirmation(&mut state, ConfirmationType::Rewind);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -3607,14 +3602,14 @@ pub async fn run(
                                             Err(handlers::transcript_target::RewindFailure::Begin(error)) => {
                                                 tracing::error!("begin_rewind_txn failed — aborting rewind: {}", error);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Rewind aborted: could not create recovery journal ({})", error));
-                                                state.focus = FocusState::Chat;
+                                                reducer::set_base(&mut state, FocusState::Chat);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
                                             Err(handlers::transcript_target::RewindFailure::Truncate(error)) => {
                                                 tracing::error!("revert_to_checkpoint failed: {}", error);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Rewind failed: {}", error));
-                                                state.focus = FocusState::Chat;
+                                                reducer::set_base(&mut state, FocusState::Chat);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -3683,7 +3678,7 @@ pub async fn run(
                                 InputAction::RewindCancel => {
                                     state.pending_rewind_index = None;
                                     state.rewind_preview = None;
-                                    state.focus = FocusState::Chat;
+                                    reducer::set_base(&mut state, FocusState::Chat);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::RewindForkInstead => {
@@ -3720,23 +3715,23 @@ pub async fn run(
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
-                                                        state.focus = FocusState::Chat;
+                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                     Err(e) => {
                                                         tracing::error!("Failed to load forked conversation: {}", e);
-                                                        state.focus = FocusState::Chat;
+                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork (from rewind) failed: {}", e);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                                state.focus = FocusState::Chat;
+                                                reducer::set_base(&mut state, FocusState::Chat);
                                             }
                                         }
                                         state.needs_redraw = true;
                                     } else {
-                                        state.focus = FocusState::Chat;
+                                        reducer::set_base(&mut state, FocusState::Chat);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -4292,10 +4287,11 @@ pub async fn run(
                                         }
                                         state.needs_redraw = true;
                                     } else if state.sidebar_visible {
-                                        state.focus = FocusState::Sidebar {
+                                        let focus = FocusState::Sidebar {
                                             panel: crate::domain::models::visual::PanelType::History,
                                             selected: state.sidebar_selected,
                                         };
+                                        reducer::set_base(&mut state, focus);
                                         state.needs_redraw = true;
                                     } else if tab_manager.tab_count() > 1 {
                                         save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
@@ -5190,17 +5186,15 @@ pub async fn run(
                         // Defer focus if an apply-confirmation card owns it: the
                         // apply card's intercepts require Confirmation(ArtifactApply)
                         // focus and would strand if stolen. The plan card is surfaced
-                        // by `surface_deferred_modal` when the apply card resolves.
+                        // by the shared reducer when the apply card resolves.
                         if state.pending_artifact_card.is_none() {
-                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                ConfirmationType::PlanApproval,
-                            ));
+                            reducer::raise_confirmation(&mut state, ConfirmationType::PlanApproval);
                         }
                         state.needs_redraw = true;
                     }
                     AppEvent::PlanApprovalResolved { conversation_id: _conversation_id, outcome } => {
                         state.pending_plan_approval = None;
-                        restore_focus_after_modal(&mut state);
+                        reducer::restore_focus_after_modal(&mut state);
                         state.needs_redraw = true;
 
                         match outcome {
@@ -5308,14 +5302,14 @@ pub async fn run(
                             handlers::plan_card::handle_plan_decision(&mut conversation, &plan_id, &decision);
                             match decision {
                                 crate::domain::models::plan::PlanDecision::Approve => {
-                                    restore_focus_after_modal(&mut state);
+                                    reducer::restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
                                         conversation_id: cid,
                                         plan_id,
                                     });
                                 }
                                 crate::domain::models::plan::PlanDecision::Reject => {
-                                    restore_focus_after_modal(&mut state);
+                                    reducer::restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
@@ -5392,7 +5386,7 @@ pub async fn run(
                             tracing::warn!("MemoryConsolidationResolved for mismatched conversation");
                         } else {
                             state.pending_consolidation_card = None;
-                            restore_focus_after_modal(&mut state);
+                            reducer::restore_focus_after_modal(&mut state);
                             if accepted.is_empty() {
                                 // Declined — AC3/AC4: nothing is written.
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -5466,7 +5460,7 @@ pub async fn run(
                         // lives in the handler to respect the AC-4 line budget.
                         if conversation.id == conversation_id {
                             state.pending_forget_card = None;
-                            restore_focus_after_modal(&mut state);
+                            reducer::restore_focus_after_modal(&mut state);
                             let result = if keys.is_empty() {
                                 None
                             } else {
@@ -6050,9 +6044,7 @@ pub async fn run(
                                     submitted_answer: None,
                                 });
                                 state.question_response_tx = Some(response_tx);
-                                state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                    ConfirmationType::Question,
-                                ));
+                                reducer::raise_confirmation(&mut state, ConfirmationType::Question);
                                 state.needs_redraw = true;
                             }
                         } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
@@ -6069,9 +6061,7 @@ pub async fn run(
                                 submitted_answer: None,
                             });
                             state.question_response_tx = Some(response_tx);
-                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                ConfirmationType::Question,
-                            ));
+                            reducer::raise_confirmation(&mut state, ConfirmationType::Question);
                             state.needs_redraw = true;
                         }
                         // Silently drop if conversation not found (tab closed)
@@ -6370,9 +6360,7 @@ pub async fn run(
                                     });
                                 } else {
                                     state.pending_activation = Some(pending);
-                                    state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                        ConfirmationType::SkillTrust,
-                                    ));
+                                    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
                                     state.skill_trust_inspect_mode = false;
                                     state.needs_redraw = true;
                                 }
@@ -6441,9 +6429,7 @@ pub async fn run(
                             state.skill_trust_queue.push_back(trust_state);
                         } else {
                             state.pending_skill_trust = Some(trust_state);
-                            state.focus = FocusState::Overlay(OverlayType::Confirmation(
-                                ConfirmationType::SkillTrust,
-                            ));
+                            reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
                         }
                         state.needs_redraw = true;
                     }
@@ -6999,6 +6985,7 @@ pub async fn run(
             // Branch 4: Active task monitoring (placeholder for future stories)
             // Currently a no-op future that never resolves
         }
+        reducer::settle_legacy(&mut state);
         crate::adapters::tui::app::settle_local_card_focus(&mut state);
 
         if state.should_quit {
@@ -7681,71 +7668,6 @@ fn cycle_mode(current: PermissionMode) -> PermissionMode {
 // `crate::infrastructure::runtime::turn_driver::LocalTurnDriver::submit` per
 // Story 12.2a — call sites go through the `submit_turn!` macro in `run()`.
 
-/// Advance the permission queue or restore the open reader/composer focus.
-fn advance_permission_queue(state: &mut TuiState) {
-    crate::infrastructure::runtime::approval_bridge::advance(state);
-}
-
-fn restore_focus_after_modal(state: &mut TuiState) {
-    state.focus = if state.pending_feedback_input.is_some() {
-        FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::PermissionFeedback,
-        ))
-    } else if state.pending_permission.is_some() {
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-    } else if state.recipient_surface.is_some() {
-        FocusState::Chat
-    } else {
-        FocusState::Input
-    };
-    if state.pending_permission.is_none() && state.pending_feedback_input.is_none() {
-        crate::infrastructure::runtime::approval_bridge::advance(state);
-    }
-}
-
-/// After a confirmation card resolves, hand focus to a modal that deferred to
-/// it — a permission queued while the card was open, or a plan approval that
-/// arrived mid-card — so it is not left pending and invisible. No-op otherwise.
-fn surface_deferred_modal(state: &mut TuiState) {
-    if state.pending_permission.is_some() || state.pending_feedback_input.is_some() {
-        restore_focus_after_modal(state);
-        return;
-    }
-    if state.pending_permission.is_none()
-        && state.pending_feedback_input.is_none()
-        && state.pending_plan_card.is_none()
-        && state.pending_plan_approval.is_none()
-        && state.pending_artifact_card.is_none()
-        && state.permission_queue.queue.front().is_some()
-    {
-        advance_permission_queue(state);
-        return;
-    }
-    if state.pending_plan_approval.is_some()
-        && !matches!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval))
-        )
-    {
-        state.focus =
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
-        state.needs_redraw = true;
-    }
-}
-
-fn advance_skill_trust_queue(state: &mut TuiState) {
-    if let Some(next) = state.skill_trust_queue.pop_front() {
-        state.pending_skill_trust = Some(next);
-        state.skill_trust_inspect_mode = false;
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));
-    } else {
-        state.pending_skill_trust = None;
-        state.skill_trust_inspect_mode = false;
-        restore_focus_after_modal(state);
-    }
-    state.needs_redraw = true;
-}
-
 /// Render the full TUI frame.
 #[doc(hidden)]
 #[allow(clippy::too_many_arguments)]
@@ -7783,7 +7705,7 @@ pub fn render(
     let mut user_msg_bounds: Vec<usize> = Vec::new();
     let mut focused_tool_id: Option<String> = None;
     let mut vp_height: u16 = state.viewport_height;
-    let mut visible_feedback_ids: Vec<String> = Vec::new(); // Story 19.16g
+    let mut visible_feedback_rows = Vec::new();
     state.restore_unflushed_log_visits();
 
     let (recipient_blocked, card) = team_proposal_card::frame(state);
@@ -7847,6 +7769,7 @@ pub fn render(
                 let _is_compact = area.width < 80 || area.height < 24;
 
                 let card = card.prepare(&mut app_layout, area, theme);
+                let mut opaque = presentation::occlusion::OpaqueRects::new(app_layout.chat_pane);
 
                 // Render tab bar if present
                 if let (Some(tab_bar_area), Some(tm)) = (app_layout.tab_bar, tab_manager_for_bar) {
@@ -8237,7 +8160,9 @@ pub fn render(
                         state.task_panel_state.detail_scroll_offset = 0;
                         state.task_panel_state.last_executed_plan_id = None;
                     }
-                } else if let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
+                } else if !matches!(focus, FocusState::Overlay(_))
+                    && inline_card.is_none()
+                    && let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
                     use crate::adapters::tui::widgets::agent_inspector;
                     let entry = state
                         .agent_panel_state
@@ -8315,7 +8240,9 @@ pub fn render(
                         focused_match_opt,
                         search_state.matches.as_slice(),
                         bookmark_indices,
-                        state.pending_plan_card.as_ref(),
+                        state.pending_plan_card.as_ref().filter(|_| {
+                            inline_card == Some(crate::adapters::tui::app::InlineCard::Plan)
+                        }),
                         liveness_ref,
                         open_prose_ref,
                         state.focused_tool_id.as_deref(),
@@ -8325,10 +8252,10 @@ pub fn render(
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
                     focused_tool_id = result.focused_tool_id;
-                    visible_feedback_ids = result.visible_feedback_ids;
+                    visible_feedback_rows = result.visible_feedback_rows;
                 }
 
-                paint_wave_base(
+                opaque.host(paint_wave_base(
                     frame,
                     app_layout.chat_pane,
                     state.pending_spawn_gate.as_ref().filter(|_| {
@@ -8338,19 +8265,20 @@ pub fn render(
                     state.wave_state.as_ref(),
                     state.rerunning_slot,
                     wave_frame_open,
-                );
+                ));
 
                 if !recipient_blocked {
                     if let Some(surface) = state.recipient_surface.as_mut() {
-                        crate::adapters::tui::widgets::recipient_surface::render_recipient_surface(
+                        opaque.host(crate::adapters::tui::widgets::recipient_surface::render_recipient_surface(
                             frame, app_layout.chat_pane, surface, &state.recipient_actions, &[None; 6], None, true, theme,
-                        );
+                        ));
                     }
                 }
                 state.team_proposal_scroll_max = card.as_ref().map_or(0, |card| card.scroll_max());
                 state.team_proposal_scroll = state.team_proposal_scroll.min(state.team_proposal_scroll_max);
                 state.team_proposal_viewport_rows = card.as_ref().map_or(0, |card| card.viewport_rows());
                 state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
+                opaque.host(card.as_ref().map(|card| card.area()));
                 state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
                 // Story 10.5: render delegation suggestion card as a centered popup over chat pane
                 if let Some(card) = &state.pending_delegation_card
@@ -8371,6 +8299,7 @@ pub fn render(
                         card,
                         theme,
                     );
+                    opaque.host(Some(card_area));
                 }
 
                 // Story 11.2a: render the memory-consolidation review card as a
@@ -8383,9 +8312,9 @@ pub fn render(
                         theme,
                         app_layout.chat_pane.width,
                     );
-                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
-                    );
+                    )));
                 }
 
                 // Story 11.4a: render the `/memory forget` confirm card, same
@@ -8397,36 +8326,39 @@ pub fn render(
                         theme,
                         app_layout.chat_pane.width,
                     );
-                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
-                    );
+                    )));
                 }
 
-                if let Some(card) = &state.pending_artifact_card {
+                if let Some(card) = &state.pending_artifact_card
+                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply)) {
                     let card_lines = crate::adapters::tui::widgets::apply_card::render_apply_card_lines(
                         card,
                         theme,
                         app_layout.chat_pane.width,
                     );
-                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
+                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
                         frame.buffer_mut(),
                         card_lines,
                         theme.colors.accent,
                         app_layout.chat_pane,
-                    );
+                    )));
                 }
 
-                if let Some(pending) = &state.pending_team_retract {
-                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(frame.buffer_mut(), crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(pending, theme, app_layout.chat_pane.width), theme.colors.accent, app_layout.chat_pane);
+                if let Some(pending) = &state.pending_team_retract
+                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract)) {
+                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(frame.buffer_mut(), crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(pending, theme, app_layout.chat_pane.width), theme.colors.accent, app_layout.chat_pane)));
                 }
 
-                if let Some(pending) = &state.pending_peer_add {
+                if let Some(pending) = &state.pending_peer_add
+                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd)) {
                     let card_lines = crate::adapters::tui::widgets::peer_add_prompt::render_peer_add_lines(
                         pending, theme, app_layout.chat_pane.width,
                     );
-                    crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
+                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.decision_border, app_layout.chat_pane,
-                    );
+                    )));
                 }
 
 
@@ -8450,23 +8382,32 @@ pub fn render(
                                 );
                             frame.render_widget(ratatui::widgets::Clear, area);
                             frame.render_widget(paragraph, area);
+                            opaque.host(Some(area));
                         }
                         break; // Only one peek at a time
                     }
                 }
 
-                crate::adapters::tui::widgets::permission_prompt::render_permission_surface(
+                opaque.host(crate::adapters::tui::widgets::permission_prompt::render_permission_surface(
                     frame,
                     app_layout.chat_pane,
-                    pending_permission.as_ref(),
-                    pending_feedback_input.as_ref(),
+                    pending_permission.as_ref().filter(|_| {
+                        *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+                    }),
+                    pending_feedback_input.as_ref().filter(|_| {
+                        *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PermissionFeedback))
+                    }),
                     permission_queue.len(),
                     permission_reader,
                     theme,
-                );
+                ));
 
                 // Render skill trust prompt at bottom of chat pane (Story 5-2 AC4)
-                if let Some(ref pending) = *pending_activation {
+                let trust_selected = matches!(focus, FocusState::Overlay(OverlayType::Confirmation(
+                    ConfirmationType::SkillTrust | ConfirmationType::SkillTrustInspect
+                )));
+                if let Some(pending) = pending_activation
+                    && trust_selected {
                     use crate::adapters::tui::widgets::skill_trust_prompt;
                     if skill_trust_inspect_mode {
                         let fallback = "(loading…)".to_string();
@@ -8491,6 +8432,7 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
                         frame.render_widget(ratatui::widgets::Clear, prompt_area);
                         frame.render_widget(paragraph, prompt_area);
+                        opaque.host(Some(prompt_area));
                     } else {
                         let prompt_lines =
                             skill_trust_prompt::render_trust_lines(&pending.skill_name, theme, 0);
@@ -8505,8 +8447,10 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
                         frame.render_widget(ratatui::widgets::Clear, prompt_area);
                         frame.render_widget(paragraph, prompt_area);
+                        opaque.host(Some(prompt_area));
                     }
-                } else if let Some(ref trust) = *pending_skill_trust {
+                } else if let Some(trust) = pending_skill_trust
+                    && trust_selected {
                     use crate::adapters::tui::widgets::skill_trust_prompt;
                     if skill_trust_inspect_mode {
                         // H5: read from the pre-cached body populated when the user pressed `i`
@@ -8531,6 +8475,7 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
                         frame.render_widget(ratatui::widgets::Clear, prompt_area);
                         frame.render_widget(paragraph, prompt_area);
+                        opaque.host(Some(prompt_area));
                     } else {
                         let prompt_lines = skill_trust_prompt::render_trust_lines(
                             &trust.skill_name,
@@ -8548,11 +8493,13 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
                         frame.render_widget(ratatui::widgets::Clear, prompt_area);
                         frame.render_widget(paragraph, prompt_area);
+                        opaque.host(Some(prompt_area));
                     }
                 }
 
                 // Render AskUserQuestion card at bottom of chat pane if active
-                if let Some(aq) = ask_user_question {
+                if let Some(aq) = ask_user_question
+                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
                     use crate::adapters::tui::widgets::ask_user_question;
                     let aq_lines = ask_user_question::render_ask_user_lines(
                         aq,
@@ -8570,6 +8517,7 @@ pub fn render(
                     let paragraph = ratatui::widgets::Paragraph::new(aq_lines);
                     frame.render_widget(ratatui::widgets::Clear, aq_area);
                     frame.render_widget(paragraph, aq_area);
+                    opaque.host(Some(aq_area));
                 }
 
                 // Render fork confirmation card at bottom of chat pane if pending (Story 4-3a, AC1)
@@ -8605,6 +8553,7 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(fork_lines);
                         frame.render_widget(ratatui::widgets::Clear, fork_area);
                         frame.render_widget(paragraph, fork_area);
+                        opaque.host(Some(fork_area));
                     }
                 }
 
@@ -8635,6 +8584,7 @@ pub fn render(
                         let paragraph = ratatui::widgets::Paragraph::new(rewind_lines);
                         frame.render_widget(ratatui::widgets::Clear, rewind_area);
                         frame.render_widget(paragraph, rewind_area);
+                        opaque.host(Some(rewind_area));
                     }
                 }
 
@@ -8650,6 +8600,7 @@ pub fn render(
                         use crate::adapters::tui::widgets::plan_approval;
                         let card_area = plan_approval::plan_approval_area(frame.area());
                         plan_approval::render_plan_approval_card(frame, card_area, pending, theme);
+                        opaque.host(Some(card_area));
                     }
                 }
 
@@ -8722,8 +8673,10 @@ pub fn render(
                 shell.chat_pane = app_layout.chat_pane;
                 decision_painted = presentation::compose(
                     frame, state, &shell, crate::adapters::tui::keymap::Host::Local, &log_facts,
+                    &mut opaque,
                     paint_status,
                 );
+                visible_feedback_rows.retain(|(_, rows)| opaque.presented(rows));
 
             }
             None => {
@@ -8743,7 +8696,7 @@ pub fn render(
     state.user_message_boundaries = user_msg_bounds;
     state.focused_tool_id = focused_tool_id;
     state.viewport_height = vp_height;
-    state.log_visits_presented(&visible_feedback_ids); // Story 19.16g: the draw completed
+    state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));
 
     resolve_resize_anchor(tab_manager, state);
     Ok(())
@@ -9336,7 +9289,7 @@ fn arrive_delegation_card(
     card: crate::adapters::tui::state::PendingDelegationCard,
 ) {
     state.pending_delegation_card = Some(card);
-    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    reducer::take_chat_focus_for_card(state, true);
     state.needs_redraw = true;
 }
 
@@ -9346,13 +9299,13 @@ fn arrive_deviation_card(
     kind: crate::domain::models::plan::PlanDeviationKind,
 ) {
     state.task_panel_state.pending_deviation = Some((plan_id, kind));
-    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    reducer::take_chat_focus_for_card(state, true);
     state.needs_redraw = true;
 }
 
 fn arrive_cancel_plan_confirmation(state: &mut TuiState, plan_id: String) {
     state.task_panel_state.cancel_plan_confirm = Some(plan_id);
-    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    reducer::take_chat_focus_for_card(state, true);
 }
 
 fn arrive_consolidation_card(
@@ -9360,7 +9313,7 @@ fn arrive_consolidation_card(
     card: crate::adapters::tui::state::PendingConsolidationCard,
 ) {
     state.pending_consolidation_card = Some(card);
-    crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+    reducer::take_chat_focus_for_card(state, true);
     state.needs_redraw = true;
 }
 
@@ -9537,7 +9490,7 @@ mod tests {
                     decision_pane::apply_resolved_action(
                         &mut state,
                         action,
-                        restore_focus_after_modal,
+                        reducer::restore_focus_after_modal,
                     );
                     assert!(!state.decisions.holds(kind));
                     assert!(state.pending_large_image.is_none());

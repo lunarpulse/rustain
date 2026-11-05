@@ -579,57 +579,12 @@ pub fn handle_operator_input(
     }
 }
 
-/// A generic permission may become visible only after every higher owner lets go.
-pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
-    !state.modal_stack.is_empty()
-        || state.pending_leader.is_some()
-        || state.reverse_search.is_open()
-        || state.pending_plan_card.is_some()
-        || state.pending_delegation_card.is_some()
-        || state.pending_consolidation_card.is_some()
-        || state.pending_forget_card.is_some()
-        || state.task_panel_state.pending_deviation.is_some()
-        || state.task_panel_state.cancel_plan_confirm.is_some()
-        || state.task_panel_state.skip_cascade_pending.is_some()
-        || state.pending_skill_trust.is_some()
-        || state.pending_plan_approval.is_some()
-        || state.pending_spawn_gate.is_some()
-        || state.pending_large_image.is_some()
-        || state.pending_artifact_card.is_some()
-        || state.pending_feedback_input.is_some()
-        || state.tool_block_states.values().any(|tbs| tbs.peek_active)
-        || (matches!(state.focus, FocusState::Overlay(_))
-            && !matches!(
-                state.focus,
-                FocusState::Overlay(OverlayType::Confirmation(
-                    ConfirmationType::Permission | ConfirmationType::PermissionFeedback
-                ))
-            ))
-}
-
-/// Settles synchronous Login framing before the existing deferred permission handoff.
+/// Trusted auth-handler collaborator: settle Login intent, then legacy ownership.
+/// Keep this reviewed synchronous boundary; handlers never acquire stack authority.
 pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
-    let ready = reducer::settle_login(state);
-    if !ready || state.pending_permission.is_some() || permission_modal_owns_focus(state) {
-        return;
+    if reducer::settle_login(state) {
+        reducer::settle_legacy(state);
     }
-    state.permission_reader = Default::default();
-    if let Some(next) = state.permission_queue.pop() {
-        state.pending_permission = Some(next);
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
-    } else if matches!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::Permission | ConfirmationType::PermissionFeedback
-        ))
-    ) {
-        state.focus = if state.recipient_surface.is_some() {
-            FocusState::Chat
-        } else {
-            FocusState::Input
-        };
-    }
-    state.needs_redraw = true;
 }
 
 /// Handle a domain input event by updating TUI state.
@@ -644,7 +599,7 @@ pub fn with_card_focus_reconcile<T>(
     dispatch: impl FnOnce(&mut TuiState) -> T,
 ) -> T {
     let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
-    let permission_owned = permission_modal_owns_focus(state);
+    let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
@@ -661,7 +616,7 @@ pub fn try_with_card_focus_reconcile<T>(
     dispatch: impl FnOnce(&mut TuiState) -> Option<T>,
 ) -> Option<T> {
     let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
-    let permission_owned = permission_modal_owns_focus(state);
+    let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
@@ -677,14 +632,16 @@ fn finish_input_boundary(
     permission_owned: bool,
     owner_before: (Option<u64>, Option<Context>),
 ) {
-    if permission_owned && !permission_modal_owns_focus(state) {
+    if permission_owned {
         advance_deferred_permission(state);
+    } else {
+        reducer::settle_legacy(state);
     }
     if surface_was_open
         && !crate::adapters::tui::decision_pane::card_focus_blocked(state)
         && matches!(inline_card(state), Some(card) if !matches!(card, InlineCard::Plan | InlineCard::SkipCascade))
     {
-        crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+        reducer::take_chat_focus_for_card(state, true);
     }
     settle_local_card_focus(state);
     if owner_before
@@ -706,10 +663,7 @@ fn finish_input_boundary(
 
 /// The local key/event boundaries share the renderer/dispatcher's card selector.
 pub fn settle_local_card_focus(state: &mut TuiState) {
-    crate::adapters::tui::decision_pane::settle_borrowed_card_focus(
-        state,
-        inline_card(state).is_some(),
-    );
+    reducer::settle_borrowed_card_focus(state, inline_card(state).is_some());
 }
 
 fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
@@ -979,7 +933,7 @@ fn dispatch_input(state: &mut TuiState, event: &DomainInputEvent) -> InputAction
                 state.task_panel_state.expanded_detail = false;
                 state.task_panel_state.detail_scroll_offset = 0;
                 if matches!(state.focus, FocusState::Sidebar { .. }) {
-                    state.focus = FocusState::Chat;
+                    reducer::set_base(state, FocusState::Chat);
                 }
             }
             state.needs_redraw = true;
@@ -1356,6 +1310,11 @@ pub(crate) enum InlineCard {
 }
 
 pub(crate) fn inline_card(state: &TuiState) -> Option<InlineCard> {
+    // A retained inline payload cannot advertise decisions over the selected
+    // legacy confirmation or sidebar owner; dispatch uses those same base slots.
+    if !matches!(state.focus, FocusState::Input | FocusState::Chat) {
+        return None;
+    }
     if state.pending_forget_card.is_some() {
         Some(InlineCard::Forget)
     } else if state.pending_consolidation_card.is_some() {
@@ -1485,8 +1444,7 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
         (Context::Feedback, DomainKey::Esc) => InputAction::FeedbackInputCancel,
         (Context::SkillTrustInspect, DomainKey::Esc) => {
             state.skill_trust_inspect_mode = false;
-            state.focus =
-                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust));
+            reducer::raise_confirmation(state, ConfirmationType::SkillTrust);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1513,7 +1471,7 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
             // Skip: dismiss and drop the oneshot sender so the turn gets a RecvError.
             state.ask_user_question = None;
             drop(state.question_response_tx.take());
-            state.focus = FocusState::Input;
+            reducer::set_base(state, FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1531,11 +1489,11 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
     })
 }
 
-fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
+pub(crate) fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
     match cmd {
         InputCmd::ReturnToChat => {
             // Esc never submits: unsent text (a recalled history entry included) is kept.
-            state.focus = FocusState::Chat;
+            reducer::set_base(state, FocusState::Chat);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1727,9 +1685,7 @@ fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
             _ => InputAction::Consumed,
         },
         // Attached-only rows: the local host has none of them.
-        InputCmd::TranscriptPageUp | InputCmd::TranscriptPageDown | InputCmd::NoCursor => {
-            InputAction::Consumed
-        }
+        InputCmd::TranscriptPageUp | InputCmd::TranscriptPageDown => InputAction::Consumed,
     }
 }
 
@@ -1760,7 +1716,7 @@ fn exec_field(state: &mut TuiState, context: Context, cmd: FieldCmd) -> InputAct
 fn exec_chat(state: &mut TuiState, cmd: ChatCmd, keys: &[Key]) -> InputAction {
     match cmd {
         ChatCmd::FocusToggle | ChatCmd::FocusInput => {
-            state.focus = FocusState::Input;
+            reducer::set_base(state, FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1894,12 +1850,12 @@ fn exec_sidebar(state: &mut TuiState, cmd: SidebarCmd) -> InputAction {
         SidebarCmd::SelectPrev => sidebar_move(state, false),
         SidebarCmd::Quit => InputAction::Quit,
         SidebarCmd::FocusChat => {
-            state.focus = FocusState::Chat;
+            reducer::set_base(state, FocusState::Chat);
             state.needs_redraw = true;
             InputAction::Consumed
         }
         SidebarCmd::FocusInput => {
-            state.focus = FocusState::Input;
+            reducer::set_base(state, FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -1946,10 +1902,13 @@ fn sidebar_move(state: &mut TuiState, down: bool) -> InputAction {
             state.task_panel_state.selected_index = index;
         }
         state.sidebar_selected = index;
-        state.focus = FocusState::Sidebar {
-            panel,
-            selected: index,
-        };
+        reducer::set_base(
+            state,
+            FocusState::Sidebar {
+                panel,
+                selected: index,
+            },
+        );
         state.needs_redraw = true;
     }
     InputAction::Consumed
@@ -2116,10 +2075,14 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             tasks.drill_down_task = None;
             tasks.expanded_detail = false;
             tasks.detail_scroll_offset = 0;
-            state.focus = FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::Tasks,
-                selected: tasks.selected_index,
-            };
+            let selected = tasks.selected_index;
+            reducer::set_base(
+                state,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::Tasks,
+                    selected,
+                },
+            );
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2160,7 +2123,7 @@ fn exec_panel(state: &mut TuiState, cmd: PanelCmd, key: Key) -> Option<InputActi
             tasks.drill_down_task = Some((tasks.selected_index + 1) as u32);
             tasks.expanded_detail = false;
             tasks.detail_scroll_offset = 0;
-            state.focus = FocusState::Chat;
+            reducer::set_base(state, FocusState::Chat);
             state.needs_redraw = true;
             InputAction::Consumed
         }
@@ -2274,7 +2237,7 @@ fn exec_recipient(state: &mut TuiState, command: CommandId) -> InputAction {
         }
         OverlayCmd::RecipientClose => {
             if let Some(surface) = state.recipient_surface.take() {
-                state.focus = surface.prior_focus;
+                reducer::set_base(state, surface.prior_focus);
             }
         }
         OverlayCmd::RecipientPageUp | OverlayCmd::RecipientPageDown => {
@@ -2859,7 +2822,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         && !state.input_buffer.is_empty()
         && visible_team_proposal(state).is_some()
     {
-        state.focus = FocusState::Input;
+        reducer::set_base(state, FocusState::Input);
     }
 
     match state.focus {
@@ -2891,7 +2854,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
 
 /// A printable character typed into the composer. `command` is the popup-trigger row
 /// (`/` or `@`) the key resolved to, if any; every other character is plain text.
-fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputAction {
+pub(crate) fn type_char(state: &mut TuiState, c: char, command: Option<InputCmd>) -> InputAction {
     match state.focus {
         FocusState::Input => {
             // While autocomplete is open, intercept characters to update filter.
@@ -3583,7 +3546,7 @@ pub(crate) fn dispatch_palette_action(
             let mention = format!("@{}", path);
             state.input_buffer.insert_str(byte_pos, &mention);
             state.cursor_position += mention.chars().count();
-            state.focus = FocusState::Input;
+            reducer::set_base(state, FocusState::Input);
             state.needs_redraw = true;
             InputAction::Consumed
         }

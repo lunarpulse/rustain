@@ -1,6 +1,8 @@
 //! Story 21.4 A1: production-front-door ownership and compositor evidence.
 #[path = "conformance_21_4_modal_stack/k10_text_field.rs"]
 mod k10_text_field;
+#[path = "conformance_21_4_modal_stack/k12_legacy.rs"]
+mod k12_legacy;
 #[path = "conformance_21_4_modal_stack/k2_boundary.rs"]
 mod k2_boundary;
 #[path = "conformance_21_4_modal_stack/k3_compose.rs"]
@@ -372,6 +374,7 @@ mod k5_restore {
                     &Shell::new(frame.area(), &layout),
                     Host::Local,
                     &LogFacts::default(),
+                    &mut presentation::occlusion::OpaqueRects::new(layout.chat_pane),
                     |_| {},
                 );
             })

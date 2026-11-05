@@ -20,6 +20,7 @@
 //! awaiting-approval row has no rail field, but its gate is A2A-only, so it
 //! takes the A2A identity and the later A2A verdict replaces it.
 
+use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::events::DomainEventPayload;
 use crate::domain::events::DomainKey;
@@ -146,12 +147,14 @@ fn synchronize_sidebar_selection(state: &mut TuiState) {
         .synchronize_selection(&mut state.sidebar_selected);
     state.sidebar_entry_count = state.transparency_panel.visible_len();
     let selected = state.sidebar_selected;
-    if let crate::domain::models::FocusState::Sidebar {
-        panel: crate::domain::models::visual::PanelType::TransparencyLog,
-        selected: focus_selected,
-    } = &mut state.focus
-    {
-        *focus_selected = selected;
+    if matches!(
+        state.focus,
+        crate::domain::models::FocusState::Sidebar {
+            panel: crate::domain::models::visual::PanelType::TransparencyLog,
+            ..
+        }
+    ) {
+        reducer::update_sidebar_selection(state, selected);
     }
 }
 

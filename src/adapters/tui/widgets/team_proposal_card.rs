@@ -282,6 +282,11 @@ impl CardPaint {
     pub fn footer_visible(&self) -> bool {
         self.has_decision_footer && self.scroll >= self.scroll_max()
     }
+
+    /// Exact prepared bounds consumed unchanged by the opaque painter.
+    pub fn area(&self) -> Rect {
+        self.area
+    }
 }
 
 /// Paint the prepared card and return only the snapshot actually visible.

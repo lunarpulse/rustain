@@ -78,7 +78,7 @@ pub fn handle_forget_command(
                 candidates: c.into_iter().map(|(k, e)| (k, e, true)).collect(),
                 focused_index: 0,
             });
-            crate::adapters::tui::decision_pane::take_chat_focus_for_local_card(state);
+            crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, true);
             Vec::new()
         }
     }

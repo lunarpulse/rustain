@@ -101,6 +101,7 @@ fn sheet_buffer(login: LoginOverlayState, theme: &Theme) -> Buffer {
                 &shell,
                 Host::Local,
                 &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
                 |_| {},
             );
         })
