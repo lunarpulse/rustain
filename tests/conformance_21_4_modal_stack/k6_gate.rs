@@ -530,6 +530,34 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                         errors.push(format!("{path}: tool-inspector-host InspectTool must be one inspect_focused call"));
                     }
                 }
+                for (name, pattern, callee) in [
+                    (
+                        "StepTool",
+                        r"\bInputAction\s*::\s*StepTool\s*\{\s*forward\s*,?\s*\}\s*=>\s*\{",
+                        r"step",
+                    ),
+                    (
+                        "CopyToolSource",
+                        r"\bInputAction\s*::\s*CopyToolSource\s*=>\s*\{",
+                        r"copy\s*::\s*copy_source",
+                    ),
+                ] {
+                    let pattern = re(pattern);
+                    let arms: Vec<_> = pattern.find_iter(&code).collect();
+                    let only = re(&format!(
+                        r"(?s)^\{{\s*(?:crate\s*::\s*adapters\s*::\s*tui\s*::\s*)?tool_inspector\s*::\s*{callee}\s*\([^;{{}}]*\)\s*;\s*\}}$"
+                    ));
+                    if arms.len() != 1
+                        || !only.is_match({
+                            let open = arms.first().map_or(0, |arm| arm.end() - 1);
+                            &code[open..item_end(&code, open)]
+                        })
+                    {
+                        errors.push(format!(
+                            "{path}: tool-inspector-host {name} must be one owned call"
+                        ));
+                    }
+                }
                 if TOOL_REFRESH.find_iter(body).count() != 1
                     || TOOL_REFRESH.find_iter(&code).count() != 1
                 {
@@ -1613,7 +1641,7 @@ fn k6_story21_5_legacy_tool_copies_are_masked_and_identifier_boundaries_are_exac
 
 #[test]
 fn k6_story21_5_host_calls_are_single_seams_and_the_painter_has_one_owner() {
-    let host = "fn dispatch() { match action { InputAction::InspectTool => { tool_inspector::inspect_focused(state, conversation, None); }, _ => {} } } fn render() { tool_inspector::refresh(state, conversation, None, clock, 1); presentation::compose(frame); }";
+    let host = "fn dispatch() { match action { InputAction::InspectTool => { tool_inspector::inspect_focused(state, conversation, None); }, InputAction::StepTool { forward } => { tool_inspector::step(state, conversation, None, forward); }, InputAction::CopyToolSource => { tool_inspector::copy::copy_source(state, conversation, None, copier); }, _ => {} } } fn render() { tool_inspector::refresh(state, conversation, None, clock, 1); presentation::compose(frame); }";
     let files = |source: &str| {
         vec![
             (HOSTS[0].0.into(), source.into()),
@@ -1650,4 +1678,50 @@ fn k6_story21_5_host_calls_are_single_seams_and_the_painter_has_one_owner() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn k6_story21_5_step_and_copy_host_arms_are_single_owned_calls() {
+    let host = "fn dispatch() { match action { InputAction::InspectTool => { tool_inspector::inspect_focused(state, conversation, None); }, InputAction::StepTool { forward } => { tool_inspector::step(state, conversation, None, forward); }, InputAction::CopyToolSource => { tool_inspector::copy::copy_source(state, conversation, None, copier); }, _ => {} } } fn render() { tool_inspector::refresh(state, conversation, None, clock, 1); presentation::compose(frame); }";
+    let files = |source: &str| {
+        vec![
+            (HOSTS[0].0.into(), source.into()),
+            (
+                "src/adapters/tui/tool_inspector/mod.rs".into(),
+                "fn owner() {}".into(),
+            ),
+        ]
+    };
+    assert!(
+        scan(&files(host), &[]).is_empty(),
+        "complete host is the positive control"
+    );
+    for (call, action) in [
+        (
+            "tool_inspector::step(state, conversation, None, forward);",
+            "InputAction::StepTool",
+        ),
+        (
+            "tool_inspector::copy::copy_source(state, conversation, None, copier);",
+            "InputAction::CopyToolSource",
+        ),
+    ] {
+        for bad in [
+            host.replace(call, ""),
+            host.replace(call, &format!("{call} {call}")),
+            host.replace(call, &format!("{call} state.needs_redraw = true;")),
+            host.replace(action, "InputAction::Other"),
+            host.replace(
+                call,
+                "handlers::clipboard::requested(state, conversation, String::new(), copier);",
+            ),
+        ] {
+            assert!(
+                scan(&files(&bad), &[])
+                    .iter()
+                    .any(|error| error.contains("tool-inspector-host")),
+                "scanner accepted an unowned or non-single-call arm: {bad}"
+            );
+        }
+    }
 }

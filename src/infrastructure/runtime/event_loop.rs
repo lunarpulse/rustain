@@ -2150,13 +2150,14 @@ pub async fn run(
                                 InputAction::InspectTool => {
                                     crate::adapters::tui::tool_inspector::inspect_focused(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref());
                                 }
-                                InputAction::CopyToClipboard(mut content) => {
-                                    // Resolve content if empty (Chat focus copy)
-                                    // Covers: FR116 (AC6, AC8, AC9)
-                                    if content.is_empty() {
-                                        content = state.resolve_copy_content(&conversation);
-                                    }
-                                    handlers::clipboard::notify_copy(&mut state, &content, &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                InputAction::StepTool { forward } => {
+                                    crate::adapters::tui::tool_inspector::step(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), forward);
+                                }
+                                InputAction::CopyToolSource => {
+                                    crate::adapters::tui::tool_inspector::copy::copy_source(&mut state, &conversation, Some(&tab_manager.active_tab().reducer), &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                }
+                                InputAction::CopyToClipboard(content) => {
+                                    handlers::clipboard::requested(&mut state, &conversation, content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 InputAction::CopyTaskResult { plan_id, task_number } => {
                                     let content = plan_id.as_deref()
@@ -4251,38 +4252,12 @@ pub async fn run(
 
                                 InputAction::CycleInvocationInFocusedTurn => {
                                     tracing::debug!("CycleInvocationInFocusedTurn: dispatching");
-                                    let turns = conversation.turns.clone();
-                                    let focused = tab_manager.active_tab().view_state.focused_turn.clone();
-                                    let can_cycle = focused.as_ref().is_some_and(|ft| {
-                                        if let Some(turn) = turns.iter().find(|t| &t.id == ft) {
-                                            if tab_manager.active_tab().view_state.is_collapsed(turn) {
-                                                return false;
-                                            }
-                                            turn.parts.iter().filter(|p| matches!(p, crate::domain::models::TurnPart::ToolInvocation { .. })).count() >= 2
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                    if can_cycle {
-                                        let ft = focused.expect("can_cycle ensures focused_turn is Some");
-                                        let turn = turns.iter().find(|t| t.id == ft).expect("can_cycle ensures turn exists");
-                                        let invocations: Vec<_> = turn.parts.iter()
-                                            .filter(|p| matches!(p, crate::domain::models::TurnPart::ToolInvocation { .. }))
-                                            .collect();
-                                        let current_idx = state.focused_tool_id.as_ref().and_then(|ftid| {
-                                            invocations.iter().position(|p| {
-                                                if let crate::domain::models::TurnPart::ToolInvocation { id, .. } = p {
-                                                    crate::domain::models::turn::tool_call_id_for(&ft, *id) == *ftid
-                                                } else { false }
-                                            })
-                                        });
-                                        let next_idx = match current_idx {
-                                            Some(idx) => (idx + 1) % invocations.len(),
-                                            None => 0, // first Tab press focuses first invocation
-                                        };
-                                        if let Some(crate::domain::models::TurnPart::ToolInvocation { id, .. }) = invocations.get(next_idx) {
-                                            state.select_tool_explicitly(crate::domain::models::turn::tool_call_id_for(&ft, *id));
-                                        }
+                                    let active = tab_manager.active_tab_mut();
+                                    let outcome = handlers::tool_focus::cycle_invocation(&mut state, &mut active.view_state, &conversation.turns, active.reducer.open_turn.as_ref());
+                                    if let handlers::tool_focus::CycleOutcome::Cycled { tool_id } = outcome {
+                                        state.select_tool_explicitly(tool_id);
+                                        state.scroll_snapshot = tab_manager.active_tab().view_state.scroll_offset;
+                                        state.auto_snapshot = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
                                         state.needs_redraw = true;
                                     } else if state.sidebar_visible {
                                         let focus = FocusState::Sidebar {
@@ -7469,6 +7444,10 @@ pub fn reset_stage_conversation(
     state.auto_snapshot = true;
     state.total_content_height = 0;
     state.block_boundaries.clear();
+    state
+        .tab_render_state(state.active_tab_id)
+        .tool_block_boundaries
+        .clear();
     state.message_boundaries.clear();
     state.user_message_boundaries.clear();
     state
@@ -8241,7 +8220,10 @@ pub fn render(
                         }),
                         liveness_ref,
                         open_prose_ref,
-                        state.focused_tool_id.as_deref(),
+                        chat_pane::ToolFocus {
+                            current: state.focused_tool_id.as_deref(),
+                            inspector_marker: state.focus == FocusState::Chat && state.modal_stack.is_empty(),
+                        },
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;

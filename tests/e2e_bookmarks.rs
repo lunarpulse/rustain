@@ -117,7 +117,7 @@ fn render_chat_pane_with_bookmarks(
                 None,
                 None,
                 None, // open_prose
-                None, // current_focus
+                Default::default(),
             );
         })
         .unwrap();

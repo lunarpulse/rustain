@@ -405,8 +405,15 @@ With an empty composer, **y** sends exactly that snapshot once its decision foot
 has been painted, **r** opens its full, delimited Review, and **n** dismisses it.
 Enter and Escape never send. With text in the composer, y/r/n remain text input;
 higher-priority approval prompts and large-image confirmations keep their keys.
-Enter inspects the focused tool call in a local-only tool inspector; attached
-sessions have no tool inspector. Ctrl+R still opens composer history search.
+In local Chat, Enter inspects the focused tool call without expanding the Stage;
+`▸` marks that header and Tab reaches the calls in its expanded multi-tool turn.
+The inspector supports `/` search, `n`/`N` matches, `w` wrap (on by default) and
+`c` exact active-tab source copy. Terminal-safe display is not secret redaction:
+arguments/results may contain secrets, and copy preserves original source bytes.
+The UTF-8 copy limit is 8 MiB inclusive; larger sources report Copy failed,
+never a truncated copy. Copy confirmation is reviewable via Ctrl+X n even when
+the sheet hides the toast. Attached sessions have no tool inspector or Stage
+Inspect hint. Ctrl+R still opens composer history search.
 Clearing or closing the conversation withdraws its draft without peer I/O.
 Switching conversations never approves or retargets it.
 

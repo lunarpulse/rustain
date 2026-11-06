@@ -2,6 +2,14 @@
 
 use crate::conformance_21_3_keymap::support as keymap_support;
 
+#[path = "conformance_21_5_tool_inspector/k10_tab_focus.rs"]
+mod k10_tab_focus;
+#[path = "conformance_21_5_tool_inspector/k11_search.rs"]
+mod k11_search;
+#[path = "conformance_21_5_tool_inspector/k12_copy.rs"]
+mod k12_copy;
+#[path = "conformance_21_5_tool_inspector/k13_wrap.rs"]
+mod k13_wrap;
 #[path = "conformance_21_5_tool_inspector/k1_open.rs"]
 mod k1_open;
 #[path = "conformance_21_5_tool_inspector/k2_tabs.rs"]
@@ -14,6 +22,12 @@ mod k4_nav;
 mod k5_invariance;
 #[path = "conformance_21_5_tool_inspector/k6_cutover.rs"]
 mod k6_cutover;
+#[path = "conformance_21_5_tool_inspector/k7_follow.rs"]
+mod k7_follow;
+#[path = "conformance_21_5_tool_inspector/k8_step.rs"]
+mod k8_step;
+#[path = "conformance_21_5_tool_inspector/k9_marker.rs"]
+mod k9_marker;
 #[path = "conformance_21_5_tool_inspector/narrow_cue.rs"]
 mod narrow_cue;
 #[path = "conformance_21_5_tool_inspector/smoke_frames.rs"]

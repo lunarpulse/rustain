@@ -313,7 +313,7 @@ rustain/
 ## Feature highlights
 
 **Terminal UI** — ratatui 0.30 + crossterm 0.29. Multi-tab streaming chat,
-collapsible tool blocks, vim-style navigation (`j`/`k`/`i`), command palette,
+read-only tool headers with a local tool inspector, vim-style navigation (`j`/`k`/`i`), command palette,
 @-mention autocomplete, context meter with cache breakdown, plan mode overlay.
 Text is laid out by terminal cells and grapheme clusters, not bytes or code
 points: CJK text, emoji sequences (such as ZWJ families) and combining marks
@@ -345,6 +345,25 @@ Co-pending prompts retain their payloads, but only the keyboard owner paints
 answer keys. Streaming indicators do not mark overwritten log rows as read.
 Attached pending sends keep the draft's tail and caret visible; implicit resume
 following preserves scroll intent, while an explicit bottom jump resets it.
+
+In local Chat, `▸` marks the focused tool header; `[Enter] Inspect` appears only
+when the complete hint fits. `Tab` cycles calls in its expanded multi-tool turn
+(including when no turn was focused), bringing an off-screen header into view.
+`Enter` opens Output, Input, Raw and, for a successful Edit/Write, Diff; `[`/`]`
+step within the same turn without moving Stage focus. Inspector `/` edits a
+case-insensitive logical-line search; Enter commits it and `n`/`N` move between
+matches. While editing, `Esc` clears the search; after accepting, reopen `/`
+before `Esc` to clear it, or press `Esc` directly to close the inspector.
+Wrap defaults on; `w` toggles clipping with `→` on overflowing rows, keeping the
+top logical line anchored. `c` copies the active tab's original source, not its
+sanitized display or wrap markers (the live tail while Output is running).
+Copies up to and including 8 MiB of UTF-8 source are exact; larger sources are
+refused with `Copy failed`, never silently truncated. Empty source reports
+`Nothing to copy`. Display sanitization removes terminal/bidi controls, not
+secrets: tool arguments and results can contain sensitive data, and exact copy
+preserves it. Copy confirmation remains in Notifications (`Ctrl+X n`), even
+when the opaque inspector covers its toast; `Esc` returns to the sheet.
+The tool inspector and its Stage hint are unavailable in attached sessions.
 
 **Tool execution** — seven-state FSM per tool call (`Validating → Scheduled →
 AwaitingApproval → Executing → Success/Error/Cancelled`). Parallel batching for

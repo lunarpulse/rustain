@@ -1,5 +1,6 @@
 //! Frame-owned tool-call inspection; the Stage remains a read-only projection.
 
+pub mod copy;
 pub mod layout;
 pub mod model;
 pub mod project;
@@ -11,7 +12,7 @@ use std::hash::{Hash, Hasher};
 use ratatui::text::Line;
 
 use crate::adapters::tui::{
-    presentation::viewer::Viewer,
+    presentation::viewer::{RowOrigin, Viewer, ViewerSearch},
     state::{HeightCache, MessageHeightKey},
     theme::Theme,
 };
@@ -75,6 +76,18 @@ impl PendingNavigation {
     }
 }
 
+/// Preserve the order of keys across tabs and before the first preparation.
+/// Only query-sized drafts are captured; source bodies remain canonical borrows.
+#[derive(Debug)]
+enum PendingIntent {
+    Navigate(ToolTab, bool, PendingNavigation),
+    Commit(ToolTab, bool, String),
+    Match(ToolTab, bool, bool),
+    Tab(ToolTab, bool),
+    Wrap(ToolTab, bool),
+    Clear,
+}
+
 /// Borrow the current owning tab's sources; no inspector snapshots a conversation.
 #[derive(Clone, Copy)]
 pub struct ToolSources<'a> {
@@ -89,14 +102,21 @@ pub struct ToolInspectorState {
     pub tab: ToolTab,
     pub tabs: &'static [ToolTab],
     pub viewers: [Viewer; 4],
+    pub wrap: bool,
     pub viewport: usize,
     pub missing: bool,
     pub status: InvocationStatus,
+    pub previous_call: bool,
+    pub next_call: bool,
     pub heights: HeightCache,
     pub bodies: [Option<(MessageHeightKey, Vec<Line<'static>>)>; 4],
-    revisions: [Option<(u64, u16)>; 4],
+    pub origins: [Vec<Option<RowOrigin>>; 4],
+    pub row_widths: [Vec<usize>; 4],
+    pub search: ViewerSearch,
+    revisions: [Option<(u64, u16, u64, bool)>; 4],
+    search_projection: Option<(ToolTab, u64, u16, bool)>,
     tabs_revision: Option<u64>,
-    pending_navigation: [Vec<PendingNavigation>; 4],
+    pending: Vec<PendingIntent>,
 }
 
 impl ToolInspectorState {
@@ -106,14 +126,21 @@ impl ToolInspectorState {
             tab: ToolTab::Output,
             tabs: &[ToolTab::Output, ToolTab::Input, ToolTab::Raw],
             viewers: [Viewer::default(); 4],
+            wrap: true,
             viewport,
             missing: false,
             status: InvocationStatus::Pending,
+            previous_call: false,
+            next_call: false,
             heights: HeightCache::default(),
             bodies: std::array::from_fn(|_| None),
+            origins: std::array::from_fn(|_| Vec::new()),
+            row_widths: std::array::from_fn(|_| Vec::new()),
+            search: ViewerSearch::default(),
             revisions: [None; 4],
+            search_projection: None,
             tabs_revision: None,
-            pending_navigation: std::array::from_fn(|_| Vec::new()),
+            pending: Vec::new(),
         }
     }
 
@@ -124,6 +151,69 @@ impl ToolInspectorState {
     }
 
     fn prepare(
+        &mut self,
+        inputs: ToolSources<'_>,
+        width: u16,
+        viewport: usize,
+        theme: &Theme,
+        now_ms: i64,
+    ) {
+        let final_tab = self.tab;
+        let final_wrap = self.wrap;
+        let mut pending = std::mem::take(&mut self.pending);
+        for mut intent in pending.drain(..) {
+            let (tab, wrap) = match &intent {
+                PendingIntent::Navigate(tab, wrap, _)
+                | PendingIntent::Commit(tab, wrap, _)
+                | PendingIntent::Match(tab, wrap, _)
+                | PendingIntent::Tab(tab, wrap) => (*tab, *wrap),
+                PendingIntent::Wrap(tab, wrap) => {
+                    // Even a toggle before first paint needs the old rows: an
+                    // earlier navigation may have landed in a continuation.
+                    self.tab = *tab;
+                    self.wrap = !*wrap;
+                    self.prepare_tab(inputs, width, viewport, theme, now_ms);
+                    (*tab, *wrap)
+                }
+                PendingIntent::Clear => {
+                    self.search.commit(String::new());
+                    self.search_projection = None;
+                    continue;
+                }
+            };
+            self.tab = tab;
+            self.wrap = wrap;
+            if let PendingIntent::Commit(_, _, query) = &mut intent {
+                self.search.commit(std::mem::take(query));
+                self.search_projection = None;
+            }
+            self.prepare_tab(inputs, width, viewport, theme, now_ms);
+            if self.missing {
+                continue;
+            }
+            let index = self.tab.index();
+            let rows = self.rows().len();
+            match intent {
+                PendingIntent::Navigate(_, _, action) => {
+                    action.apply(&mut self.viewers[index], rows, viewport);
+                }
+                PendingIntent::Commit(_, _, _) => {
+                    self.search.jump(&mut self.viewers[index], rows, viewport);
+                }
+                PendingIntent::Match(_, _, forward) => {
+                    self.search
+                        .step(&mut self.viewers[index], forward, rows, viewport);
+                }
+                PendingIntent::Tab(_, _) | PendingIntent::Wrap(_, _) | PendingIntent::Clear => {}
+            }
+        }
+        self.pending = pending;
+        self.tab = final_tab;
+        self.wrap = final_wrap;
+        self.prepare_tab(inputs, width, viewport, theme, now_ms);
+    }
+
+    fn prepare_tab(
         &mut self,
         inputs: ToolSources<'_>,
         width: u16,
@@ -144,6 +234,9 @@ impl ToolInspectorState {
         self.status = view.status.clone();
         if self.tabs_revision != Some(view.source_revision) {
             self.tabs = source::available_tabs(&view);
+            let neighbours = project::neighbours(inputs.turns, inputs.open_turn, &self.target);
+            self.previous_call = neighbours.as_ref().is_some_and(|n| n.previous.is_some());
+            self.next_call = neighbours.as_ref().is_some_and(|n| n.next.is_some());
             self.tabs_revision = Some(view.source_revision);
         }
         if !self.tabs.contains(&self.tab) {
@@ -162,11 +255,28 @@ impl ToolInspectorState {
             (now_ms.saturating_sub(view.started_at).max(0) / 100).hash(&mut hash);
             revision = hash.finish();
         }
-        if self.revisions[index] != Some((revision, width)) {
+        let mut styles = std::collections::hash_map::DefaultHasher::new();
+        (
+            theme.colors.fg_primary,
+            theme.colors.fg_secondary,
+            theme.colors.fg_muted,
+            theme.colors.success,
+            theme.colors.error,
+        )
+            .hash(&mut styles);
+        let style_hash = styles.finish();
+        // Literal renders unwrapped bodies at usize::MAX, independent of the
+        // terminal width. Viewport clamping below still uses the real geometry.
+        let width = if self.wrap { width } else { 0 };
+        let project_search = !self.search.query().is_empty()
+            && self.search_projection != Some((self.tab, revision, width, self.wrap));
+        if self.revisions[index] != Some((revision, width, style_hash, self.wrap)) || project_search
+        {
             let prepared = source::prepare(&view, self.tab, now_ms);
             let mut hash = std::collections::hash_map::DefaultHasher::new();
             prepared.hash().hash(&mut hash);
-            true.hash(&mut hash); // Slice 1 always wraps; slice 2 adds the toggle.
+            self.wrap.hash(&mut hash);
+            style_hash.hash(&mut hash);
             let content_hash = hash.finish();
             let cached = self.bodies[index].as_ref().is_some_and(|(key, _)| {
                 key.terminal_width == width && key.content_hash == content_hash
@@ -177,39 +287,99 @@ impl ToolInspectorState {
                     terminal_width: width,
                     content_hash,
                 };
-                let rows = prepared.render(width, theme);
+                let anchor = self.revisions[index]
+                    .filter(|(_, old_width, _, wrap)| {
+                        *wrap != self.wrap || (self.wrap && *old_width != width)
+                    })
+                    .and_then(|_| self.origins[index].get(self.viewers[index].top))
+                    .and_then(Option::as_ref)
+                    .map(|origin| origin.logical_line);
+                let rendered = prepared.render(
+                    if self.wrap {
+                        usize::from(width)
+                    } else {
+                        usize::MAX
+                    },
+                    theme,
+                );
+                if let Some(logical_line) = anchor {
+                    self.viewers[index].top = rendered
+                        .origins
+                        .iter()
+                        .position(|origin| {
+                            origin
+                                .as_ref()
+                                .is_some_and(|origin| origin.logical_line >= logical_line)
+                        })
+                        .unwrap_or_else(|| rendered.lines.len().saturating_sub(1));
+                }
+                self.row_widths[index] = rendered.lines.iter().map(Line::width).collect();
                 if let Some((previous, _)) = self.bodies[index].take() {
                     self.heights.message_entries.remove(&previous);
                 }
-                self.heights.set_message(key.clone(), rows.len());
-                self.bodies[index] = Some((key, rows));
+                self.heights.set_message(key.clone(), rendered.lines.len());
+                self.bodies[index] = Some((key, rendered.lines));
+                self.origins[index] = rendered.origins;
             }
-            self.revisions[index] = Some((revision, width));
+            if project_search {
+                let rows = self.bodies[index]
+                    .as_ref()
+                    .map_or(0, |(_, rows)| rows.len());
+                let maximum = rows.saturating_sub(viewport);
+                let top = if self.viewers[index].follow {
+                    maximum
+                } else {
+                    self.viewers[index].top.min(maximum)
+                };
+                self.search
+                    .project(prepared.logical_text(), &self.origins[index], top);
+                self.search_projection = Some((self.tab, revision, width, self.wrap));
+            }
+            self.revisions[index] = Some((revision, width, style_hash, self.wrap));
         }
-        self.viewers[index].top = self.viewers[index]
-            .top
-            .min(self.rows().len().saturating_sub(viewport));
-        self.apply_pending_navigation();
+        let maximum = self.rows().len().saturating_sub(viewport);
+        self.viewers[index].top = if self.viewers[index].follow {
+            maximum
+        } else {
+            self.viewers[index].top.min(maximum)
+        };
     }
 }
 
 impl ToolInspectorState {
     fn navigate(&mut self, action: PendingNavigation) {
-        let index = self.tab.index();
-        if self.bodies[index].is_none() {
-            self.pending_navigation[index].push(action);
-        } else {
-            let rows = self.rows().len();
-            action.apply(&mut self.viewers[index], rows, self.viewport);
+        use crate::adapters::tui::presentation::viewer::ViewerCmd;
+        use crate::domain::models::view_state::ScrollDelta;
+        // Pause a painted tail at the inspected row immediately, so growth
+        // arriving before preparation cannot move the navigation's starting row.
+        // A never-painted tab must first resolve its honest initial tail.
+        if self.bodies[self.tab.index()].is_some()
+            && !matches!(
+                action,
+                PendingNavigation::Key(ViewerCmd::Tail)
+                    | PendingNavigation::Wheel(ScrollDelta::Bottom)
+            )
+        {
+            self.viewers[self.tab.index()].follow = false;
         }
+        self.pending
+            .push(PendingIntent::Navigate(self.tab, self.wrap, action));
     }
 
-    fn apply_pending_navigation(&mut self) {
-        let index = self.tab.index();
-        let rows = self.rows().len();
-        for action in self.pending_navigation[index].drain(..) {
-            action.apply(&mut self.viewers[index], rows, self.viewport);
-        }
+    pub(crate) fn accept_search(&mut self) {
+        self.search.editor.accept();
+        self.pending.push(PendingIntent::Commit(
+            self.tab,
+            self.wrap,
+            self.search.editor.query.as_str().to_owned(),
+        ));
+    }
+
+    pub(crate) fn clear_search(&mut self) {
+        // End text entry now, but clear the committed search in event order:
+        // an earlier queued n/N still navigates the old matches.
+        self.search.editor.back();
+        self.pending.push(PendingIntent::Clear);
     }
 }
 
@@ -225,16 +395,7 @@ pub fn stage_target(
     let Some(focused) = state.focused_tool_id.as_deref() else {
         return false;
     };
-    open_turn
-        .into_iter()
-        .chain(conversation.turns.iter())
-        .any(|turn| {
-            turn.parts.iter().any(|part| {
-                matches!(part,
-            crate::domain::models::TurnPart::ToolInvocation { id, .. }
-                if crate::domain::models::turn::tool_call_id_for(&turn.id, *id) == focused)
-            })
-        })
+    project::contains_call(&conversation.turns, open_turn, focused)
 }
 
 /// Event-loop opening seam. Selection changes only after the exact target resolves.
@@ -253,6 +414,35 @@ pub fn inspect_focused(
     let Some(view) = project::without_tail(&conversation.turns, open_turn, &target) else {
         return false;
     };
+    let following = view.is_running();
+    let tabs = source::available_tabs(&view);
+    let fresh = !state
+        .tool_inspectors
+        .values()
+        .any(|tool| tool.target == target);
+    let title = tool_title(&view);
+    let viewport =
+        frame_rect(state, 1).map_or(1, |rect| usize::from(layout::parts(rect).body.height));
+    let selected = target.tool_call_id.clone();
+    crate::adapters::tui::presentation::reducer::open_tool(state, target, title, viewport);
+    if fresh {
+        let id = state
+            .modal_stack
+            .top()
+            .expect("opening seats the tool frame")
+            .id;
+        let inspector = state
+            .tool_inspectors
+            .get_mut(&id)
+            .expect("frame owns its tool payload");
+        inspector.tabs = tabs;
+        inspector.viewers[ToolTab::Output.index()].follow = following;
+    }
+    state.selected_tool_id = Some(selected);
+    true
+}
+
+fn tool_title(view: &ToolView<'_>) -> String {
     let name = crate::adapters::tui::widgets::tool_block::display_tool_name(view.name);
     let safe = crate::domain::services::peer_text::sanitize_tool_text_block(&name);
     let name = if safe.contains('\n') {
@@ -260,13 +450,58 @@ pub fn inspect_focused(
     } else {
         safe
     };
-    let title = format!("Tool · {name} #{}", view.ordinal);
-    let viewport =
-        frame_rect(state, 1).map_or(1, |rect| usize::from(layout::parts(rect).body.height));
-    let selected = target.tool_call_id.clone();
-    crate::adapters::tui::presentation::reducer::open_tool(state, target, title, viewport);
-    state.selected_tool_id = Some(selected);
-    true
+    format!("Tool · {name} #{}", view.ordinal)
+}
+
+/// Resolve the key against fresh canonical parts, including pre-paint appends.
+pub fn step(
+    state: &mut crate::adapters::tui::state::TuiState,
+    conversation: &crate::domain::models::Conversation,
+    open_turn: Option<&crate::domain::models::Turn>,
+    forward: bool,
+) -> bool {
+    use crate::adapters::tui::presentation::{Surface, reducer};
+    let Some(Surface::ToolInspector(ToolFrameKey(id))) =
+        state.modal_stack.top().map(|frame| frame.surface)
+    else {
+        return false;
+    };
+    let current = &state.tool_inspectors[&id];
+    if current.target.conversation_id != conversation.id {
+        return false;
+    }
+    let Some(neighbours) = project::neighbours(&conversation.turns, open_turn, &current.target)
+    else {
+        return false;
+    };
+    let Some(next) = (if forward {
+        neighbours.next
+    } else {
+        neighbours.previous
+    }) else {
+        return false;
+    };
+    let target = ToolTarget {
+        conversation_id: conversation.id.clone(),
+        tool_call_id: crate::domain::models::tool_call_id_for(next.turn_id, next.part_id),
+    };
+    let view = project::without_tail(&conversation.turns, open_turn, &target)
+        .expect("the neighbouring canonical invocation exists");
+    let title = tool_title(&view);
+    let tab = current.tab;
+    let viewport = current.viewport;
+    let following = view.is_running();
+    let tabs = source::available_tabs(&view);
+    let mut replacement = ToolInspectorState::new(target, viewport);
+    replacement.tabs = tabs;
+    replacement.wrap = current.wrap;
+    replacement.tab = if tabs.contains(&tab) {
+        tab
+    } else {
+        ToolTab::Output
+    };
+    replacement.viewers[ToolTab::Output.index()].follow = following;
+    reducer::retarget_tool(state, id, replacement, title)
 }
 
 fn frame_rect(
@@ -354,6 +589,30 @@ pub fn on_key(
         return InputAction::Consumed;
     }
     match row.command {
+        CommandId::Overlay(
+            crate::adapters::tui::keymap::table_overlay::OverlayCmd::InspectorSearch,
+        ) => {
+            inspector.search.editor.open();
+        }
+        CommandId::Tool(command @ (ToolCmd::NextMatch | ToolCmd::PrevMatch)) => {
+            inspector.pending.push(PendingIntent::Match(
+                inspector.tab,
+                inspector.wrap,
+                command == ToolCmd::NextMatch,
+            ));
+        }
+        CommandId::Tool(command @ (ToolCmd::PrevCall | ToolCmd::NextCall)) => {
+            return InputAction::StepTool {
+                forward: command == ToolCmd::NextCall,
+            };
+        }
+        CommandId::Tool(ToolCmd::Copy) => return InputAction::CopyToolSource,
+        CommandId::Tool(ToolCmd::Wrap) => {
+            inspector.wrap = !inspector.wrap;
+            inspector
+                .pending
+                .push(PendingIntent::Wrap(inspector.tab, inspector.wrap));
+        }
         CommandId::Viewer(command) => {
             inspector.navigate(PendingNavigation::Key(command));
         }
@@ -369,6 +628,9 @@ pub fn on_key(
                 current.saturating_add(1).min(inspector.tabs.len() - 1)
             };
             inspector.tab = inspector.tabs[next];
+            inspector
+                .pending
+                .push(PendingIntent::Tab(inspector.tab, inspector.wrap));
         }
         _ => return InputAction::Consumed,
     }
@@ -473,5 +735,71 @@ mod cache_tests {
             2,
             "bounded to one key per tab"
         );
+    }
+    #[test]
+    fn story21_5_unwrapped_resize_reuses_render_and_search_projection() {
+        let (turn, target) = fixture();
+        let mut state = ToolInspectorState::new(target, 12);
+        let inputs = ToolSources {
+            turns: std::slice::from_ref(&turn),
+            open_turn: None,
+            tails: None,
+        };
+        let theme = Theme::dark();
+        state.wrap = false;
+        state.search.editor.query.insert("row");
+        state.accept_search();
+        metrics::reset();
+        for width in [76, 40, 100] {
+            state.prepare(inputs, width, 12, &theme, 0);
+        }
+        assert_eq!(metrics::renders(), 1);
+        assert!(!state.search.matches.is_empty());
+    }
+
+    #[test]
+    fn story21_5_wrapped_resize_anchors_continuation_to_logical_line() {
+        let (mut turn, target) = fixture();
+        let TurnPart::ToolResult { output, .. } = &mut turn.parts[1] else {
+            panic!("fixture has a result");
+        };
+        output.content = (0..40)
+            .map(|n| format!("line{n:02}:{}", "x".repeat(193)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut state = ToolInspectorState::new(target, 12);
+        let inputs = ToolSources {
+            turns: std::slice::from_ref(&turn),
+            open_turn: None,
+            tails: None,
+        };
+        let theme = Theme::dark();
+        state.prepare(inputs, 80, 12, &theme, 0);
+        state.viewers[0].top = 13;
+        state.viewers[0].follow = false;
+        assert_eq!(state.origins[0][13].as_ref().unwrap().logical_line, 4);
+        state.prepare(inputs, 40, 12, &theme, 0);
+        let top = state.viewers[0].top;
+        assert_eq!(state.origins[0][top].as_ref().unwrap().logical_line, 4);
+        assert_eq!(state.origins[0][top].as_ref().unwrap().bytes.start, 0);
+    }
+
+    #[test]
+    fn story21_5_search_commit_does_not_pause_before_projection() {
+        let (turn, target) = fixture();
+        let mut state = ToolInspectorState::new(target, 12);
+        let inputs = ToolSources {
+            turns: std::slice::from_ref(&turn),
+            open_turn: None,
+            tails: None,
+        };
+        let theme = Theme::dark();
+        state.viewers[0].follow = true;
+        state.prepare(inputs, 76, 12, &theme, 0);
+        state.search.editor.query.insert("not present");
+        state.accept_search();
+        assert!(state.viewers[0].follow);
+        state.prepare(inputs, 76, 12, &theme, 0);
+        assert!(state.viewers[0].follow);
     }
 }

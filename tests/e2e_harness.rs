@@ -297,7 +297,11 @@ impl TestHarness {
                     state.pending_plan_card.as_ref(),
                     None,
                     tab.reducer.open_prose.as_deref(),
-                    state.focused_tool_id.as_deref(),
+                    chat_pane::ToolFocus {
+                        current: state.focused_tool_id.as_deref(),
+                        inspector_marker: state.focus == FocusState::Chat
+                            && state.modal_stack.is_empty(),
+                    },
                 );
                 state.total_content_height = result.total_content_height;
                 state.viewport_height = app_layout.chat_pane.height;

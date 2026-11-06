@@ -165,6 +165,13 @@ fn legacy_streaming_lines(
     (prefix, prose)
 }
 
+/// Render-derived tool focus and the host's permission to decorate the Stage.
+#[derive(Clone, Copy, Default)]
+pub struct ToolFocus<'a> {
+    pub current: Option<&'a str>,
+    pub inspector_marker: bool,
+}
+
 /// Result of rendering the chat pane, including boundary data for navigation.
 pub struct RenderResult {
     pub total_content_height: usize,
@@ -339,7 +346,6 @@ mod targeting_tests {
 /// at most `"Assistant:"` (10 cells), the provenance tag adds 18 cells,
 /// and origin/fork/bookmark/synthetic prefixes keep the worst case at most
 /// 48 cells. At the enforced 60-column floor the role line remains one row.
-#[allow(clippy::too_many_arguments)]
 fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -355,18 +361,28 @@ fn hash_message_content(msg: &crate::domain::models::conversation::ChatMessage) 
     hasher.finish()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn compute_message_height(
-    content: &str,
+struct MessageHeightParams<'a> {
+    content: &'a str,
     role: MessageRole,
     has_error: bool,
     is_cancelled: bool,
-    _is_bookmarked: bool,
     auto_sent_marker: bool,
     peer_derived: bool,
     width: usize,
-    theme: &Theme,
-) -> usize {
+    theme: &'a Theme,
+}
+
+fn compute_message_height(params: MessageHeightParams<'_>) -> usize {
+    let MessageHeightParams {
+        content,
+        role,
+        has_error,
+        is_cancelled,
+        auto_sent_marker,
+        peer_derived,
+        width,
+        theme,
+    } = params;
     let content = if peer_derived {
         crate::domain::services::peer_text::sanitize_peer_text_block(content)
     } else {
@@ -857,7 +873,7 @@ fn apply_search_highlights<'a>(
 /// 4. Otherwise → content-aware `default_collapse_predicate`
 ///
 /// Signature: 2 args (`turn`, `view_state`) per P1-3.
-fn effective_is_collapsed(turn: &Turn, view_state: &ViewState) -> bool {
+pub fn effective_is_collapsed(turn: &Turn, view_state: &ViewState) -> bool {
     // S16.3 overrides
     if turn.stop_reason.is_none() {
         return false;
@@ -1737,7 +1753,7 @@ pub fn render(
         None,
         None, // liveness
         None, // open_prose
-        None, // current_focus (test-only wrapper; keystones use render_with_search)
+        ToolFocus::default(),
     )
 }
 
@@ -1781,7 +1797,7 @@ pub fn render_attached(
         None,
         None, // liveness
         None, // open_prose
-        None, // current_focus
+        ToolFocus::default(),
         true,
         Some(withheld_tool_inputs),
     )
@@ -1827,9 +1843,7 @@ pub fn render_with_search(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
-    // Story 19.9 A3: `state.focused_tool_id` from the caller. See
-    // `find_focused_tool_id` for the rule this feeds.
-    current_focus: Option<&str>,
+    focus: ToolFocus<'_>,
 ) -> RenderResult {
     render_with_search_impl(
         frame,
@@ -1851,7 +1865,7 @@ pub fn render_with_search(
         pending_plan_card,
         liveness,
         open_prose,
-        current_focus,
+        focus,
         false,
         None,
     )
@@ -1878,13 +1892,12 @@ fn render_with_search_impl(
     pending_plan_card: Option<&PendingPlanCard>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
-    // Story 19.9 A3: the focus the caller currently holds
-    // (`state.focused_tool_id`). Kept when no tool block starts in the top 3
-    // rows but that block is still visible — the `Tab` cycle depends on it.
-    current_focus: Option<&str>,
+    focus: ToolFocus<'_>,
     show_terminal_origin_prefix: bool,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
 ) -> RenderResult {
+    // Preserve the existing Stage focus resolution independently of decoration.
+    let current_focus = focus.current;
     let bookmarks = live_bookmarks(conversation, bookmarks);
     let empty = RenderResult {
         total_content_height: 0,
@@ -1901,12 +1914,14 @@ fn render_with_search_impl(
         && !streaming.is_streaming
         && feedback_blocks.is_empty()
     {
+        tab_render_state.tool_block_boundaries.clear();
         empty_state::render(frame, area, theme);
         return empty;
     }
 
     let width = area.width as usize;
     if width == 0 {
+        tab_render_state.tool_block_boundaries.clear();
         return empty;
     }
 
@@ -2043,18 +2058,16 @@ fn render_with_search_impl(
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
                     let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
                     let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
-                    let is_bookmarked = bookmarks.binary_search(&i).is_ok();
-                    h = compute_message_height(
-                        &msg.content,
-                        msg.role,
+                    h = compute_message_height(MessageHeightParams {
+                        content: &msg.content,
+                        role: msg.role,
                         has_error,
                         is_cancelled,
-                        is_bookmarked,
-                        has_auto_sent_marker(msg),
-                        msg.content_blocks.contains(&ContentBlockType::PeerText),
+                        auto_sent_marker: has_auto_sent_marker(msg),
+                        peer_derived: msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                         theme,
-                    );
+                    });
                     for tc in &msg.tool_calls {
                         // A3: the block's START, before its height is added —
                         // `block_boundaries` keeps pushing the end (unchanged,
@@ -2088,18 +2101,16 @@ fn render_with_search_impl(
                         }
                         let has_error = msg.content_blocks.contains(&ContentBlockType::Error);
                         let is_cancelled = msg.stop_reason == Some(StopReason::Cancelled);
-                        let is_bookmarked = bookmarks.binary_search(&i).is_ok();
-                        let computed = compute_message_height(
-                            &msg.content,
-                            msg.role,
+                        let computed = compute_message_height(MessageHeightParams {
+                            content: &msg.content,
+                            role: msg.role,
                             has_error,
                             is_cancelled,
-                            is_bookmarked,
-                            has_auto_sent_marker(msg),
-                            msg.content_blocks.contains(&ContentBlockType::PeerText),
+                            auto_sent_marker: has_auto_sent_marker(msg),
+                            peer_derived: msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                             theme,
-                        );
+                        });
                         tab_render_state.height_cache.set_message(key, computed);
                         computed
                     }
@@ -2405,17 +2416,16 @@ fn render_with_search_impl(
                             visible_start,
                             visible_end,
                         );
-                        let text_height = compute_message_height(
-                            &msg.content,
-                            msg.role,
-                            msg.content_blocks.contains(&ContentBlockType::Error),
-                            msg.stop_reason == Some(StopReason::Cancelled),
-                            is_bookmarked,
-                            has_auto_sent_marker(msg),
-                            msg.content_blocks.contains(&ContentBlockType::PeerText),
+                        let text_height = compute_message_height(MessageHeightParams {
+                            content: &msg.content,
+                            role: msg.role,
+                            has_error: msg.content_blocks.contains(&ContentBlockType::Error),
+                            is_cancelled: msg.stop_reason == Some(StopReason::Cancelled),
+                            auto_sent_marker: has_auto_sent_marker(msg),
+                            peer_derived: msg.content_blocks.contains(&ContentBlockType::PeerText),
                             width,
                             theme,
-                        );
+                        });
                         for (j, line) in msg_lines.into_iter().enumerate() {
                             let abs_line = line_offset + j;
                             if abs_line >= visible_start && abs_line < visible_end {
@@ -2461,17 +2471,16 @@ fn render_with_search_impl(
                         visible_start,
                         visible_end,
                     );
-                    let text_height = compute_message_height(
-                        &msg.content,
-                        msg.role,
-                        msg.content_blocks.contains(&ContentBlockType::Error),
-                        msg.stop_reason == Some(StopReason::Cancelled),
-                        is_bookmarked,
-                        has_auto_sent_marker(msg),
-                        msg.content_blocks.contains(&ContentBlockType::PeerText),
+                    let text_height = compute_message_height(MessageHeightParams {
+                        content: &msg.content,
+                        role: msg.role,
+                        has_error: msg.content_blocks.contains(&ContentBlockType::Error),
+                        is_cancelled: msg.stop_reason == Some(StopReason::Cancelled),
+                        auto_sent_marker: has_auto_sent_marker(msg),
+                        peer_derived: msg.content_blocks.contains(&ContentBlockType::PeerText),
                         width,
                         theme,
-                    );
+                    });
                     for (j, line) in msg_lines.into_iter().enumerate() {
                         let abs_line = line_offset + j;
                         if abs_line >= visible_start && abs_line < visible_end {
@@ -2745,6 +2754,52 @@ fn render_with_search_impl(
         });
     }
 
+    // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
+    // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
+    let focused_turn_prefix = view_state
+        .focused_turn
+        .as_ref()
+        .map(|t| format!("tc_{}_", t.0));
+    let focused_tool_id = find_focused_tool_id(
+        &tool_block_boundaries,
+        visible_start,
+        visible_end,
+        current_focus,
+        focused_turn_prefix.as_deref(),
+    );
+    // Decorate only an already laid-out, visible invocation header. This never
+    // participates in height/cache keys or adds a row, even when a cue cannot fit.
+    if focus.inspector_marker
+        && !show_terminal_origin_prefix
+        && let Some(id) = focused_tool_id.as_deref()
+        && let Some((start, _)) = tool_block_boundaries.iter().find(|(_, tool)| tool == id)
+        && *start >= visible_start
+        && *start < visible_end
+        && let Some(line) = lines.get_mut(*start - visible_start)
+        && let Some(lead) = line
+            .spans
+            .iter_mut()
+            .find(|span| matches!(span.content.as_ref(), "┄ " | "┃ "))
+    {
+        lead.content = "▸ ".into();
+        lead.style = Style::default()
+            .fg(theme.colors.accent)
+            .add_modifier(Modifier::BOLD);
+        if crate::adapters::tui::tool_inspector::project::contains_call(
+            &conversation.turns,
+            open_turn,
+            id,
+        ) && let Some(cue) = crate::adapters::tui::keymap::render_tips::inspect_tip()
+            && line.width() + 1 + geom::cells(&cue) <= width
+        {
+            line.spans.push(Span::raw(" "));
+            line.spans.push(Span::styled(
+                cue,
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        }
+    }
+
     let widget = Paragraph::new(Text::from(lines));
     frame.render_widget(widget, area);
     for run in &placed_runs {
@@ -2759,20 +2814,7 @@ fn render_with_search_impl(
         hyperlink::encode(frame.buffer_mut(), target, &run.url);
     }
 
-    // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
-    // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
-    let focused_turn_prefix = view_state
-        .focused_turn
-        .as_ref()
-        .map(|t| format!("tc_{}_", t.0));
-    let focused_tool_id = find_focused_tool_id(
-        &tool_block_boundaries,
-        visible_start,
-        visible_end,
-        current_focus,
-        focused_turn_prefix.as_deref(),
-    );
-
+    tab_render_state.tool_block_boundaries = tool_block_boundaries;
     RenderResult {
         total_content_height,
         block_boundaries,
@@ -4090,7 +4132,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
-                    None, // current_focus
+                    ToolFocus::default(),
                 );
             })
             .unwrap();
@@ -4125,7 +4167,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
-                    None, // current_focus
+                    ToolFocus::default(),
                 );
             })
             .unwrap();
@@ -4161,7 +4203,7 @@ mod parts_aware_tests {
                     None,
                     None, // liveness
                     None, // open_prose
-                    None, // current_focus
+                    ToolFocus::default(),
                 );
             })
             .unwrap();
@@ -4378,17 +4420,16 @@ mod parts_aware_tests {
         };
         let theme = Theme::dark();
         let rendered = render_msg(&message, 80, &theme, false, false, None, None, false);
-        let computed = compute_message_height(
-            &message.content,
-            MessageRole::Assistant,
-            false,
-            false,
-            false,
-            true,
-            false,
-            80,
-            &theme,
-        );
+        let computed = compute_message_height(MessageHeightParams {
+            content: &message.content,
+            role: MessageRole::Assistant,
+            has_error: false,
+            is_cancelled: false,
+            auto_sent_marker: true,
+            peer_derived: false,
+            width: 80,
+            theme: &theme,
+        });
         assert_eq!(
             rendered.len(),
             computed,
@@ -4442,31 +4483,29 @@ mod parts_aware_tests {
 
         let theme = Theme::dark();
         let rendered = render_msg(&surfaced, 80, &theme, false, false, None, None, false);
-        let computed = compute_message_height(
-            &surfaced.content,
-            surfaced.role,
-            false,
-            false,
-            false,
-            false,
-            false,
-            80,
-            &theme,
-        );
+        let computed = compute_message_height(MessageHeightParams {
+            content: &surfaced.content,
+            role: surfaced.role,
+            has_error: false,
+            is_cancelled: false,
+            auto_sent_marker: false,
+            peer_derived: false,
+            width: 80,
+            theme: &theme,
+        });
         assert_eq!(rendered.len(), computed);
         assert!(
             computed
-                > compute_message_height(
-                    &plain.content,
-                    plain.role,
-                    false,
-                    false,
-                    false,
-                    false,
-                    false,
-                    80,
-                    &theme,
-                )
+                > compute_message_height(MessageHeightParams {
+                    content: &plain.content,
+                    role: plain.role,
+                    has_error: false,
+                    is_cancelled: false,
+                    auto_sent_marker: false,
+                    peer_derived: false,
+                    width: 80,
+                    theme: &theme,
+                })
         );
     }
 
@@ -4528,17 +4567,16 @@ mod parts_aware_tests {
             !content.iter().any(|line| line.contains('\x1b')),
             "{content:?}"
         );
-        let computed = compute_message_height(
-            &message.content,
-            message.role,
-            false,
-            false,
-            false,
-            false,
-            true,
-            80,
-            &Theme::dark(),
-        );
+        let computed = compute_message_height(MessageHeightParams {
+            content: &message.content,
+            role: message.role,
+            has_error: false,
+            is_cancelled: false,
+            auto_sent_marker: false,
+            peer_derived: true,
+            width: 80,
+            theme: &Theme::dark(),
+        });
         assert_eq!(
             rendered.len(),
             computed,
@@ -4689,7 +4727,7 @@ mod parts_aware_tests {
                         None,
                         None,
                         None,
-                        None,
+                        ToolFocus::default(),
                     )
                 });
             })
@@ -4778,17 +4816,16 @@ mod parts_aware_tests {
                         content_blocks: vec![block.clone()],
                         ..Default::default()
                     };
-                    let computed = compute_message_height(
-                        &message.content,
+                    let computed = compute_message_height(MessageHeightParams {
+                        content: &message.content,
                         role,
-                        block == ContentBlockType::Error,
-                        false,
-                        false,
-                        false,
-                        block == ContentBlockType::PeerText,
-                        usize::from(width),
-                        &Theme::dark(),
-                    );
+                        has_error: block == ContentBlockType::Error,
+                        is_cancelled: false,
+                        auto_sent_marker: false,
+                        peer_derived: block == ContentBlockType::PeerText,
+                        width: usize::from(width),
+                        theme: &Theme::dark(),
+                    });
                     let conversation = dw_conversation(vec![message]);
                     let (buffer, result) = dw_paint(&conversation, width, 60, attached);
                     let rows = dw_rows(&buffer);

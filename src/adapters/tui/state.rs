@@ -565,6 +565,9 @@ impl HeightCache {
 #[derive(Debug, Default)]
 pub struct TabRenderState {
     pub height_cache: HeightCache,
+    /// Last-painted absolute tool-header starts; moved from the Stage renderer.
+    /// Adapter-side and tab-owned so selection never borrows another tab's layout.
+    pub tool_block_boundaries: Vec<(usize, String)>,
     pub cached_width: Option<u16>,
     pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
     /// Story 21.12 (D15): the output supports OSC 8, so Stage markdown links

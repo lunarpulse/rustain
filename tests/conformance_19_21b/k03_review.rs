@@ -77,7 +77,7 @@ fn paint_chat_surface(f: &mut ProposalFixture, width: u16, height: u16) -> Vec<S
                 None,
                 None,
                 None,
-                None,
+                Default::default(),
             );
         })
         .unwrap();

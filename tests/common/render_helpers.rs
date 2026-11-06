@@ -89,7 +89,7 @@ pub fn render_to_string_ext(
             None,
             liveness,
             None, // open_prose
-            None, // current_focus
+            Default::default(),
         );
     });
     use ratatui::buffer::Buffer;
@@ -138,7 +138,7 @@ pub fn inspect_stage_tool(
                 None,
                 None,
                 None,
-                None,
+                Default::default(),
             )
             .focused_tool_id;
         })

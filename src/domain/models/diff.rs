@@ -17,6 +17,9 @@
 //! are now distinct values, so no consumer has to guess and every "no diff"
 //! render can name its real reason.
 
+use std::borrow::Cow;
+use std::collections::VecDeque;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum diff lines a tool block shows before the `… N more lines` marker
@@ -52,6 +55,7 @@ pub struct DiffLine {
     pub content: String,
 }
 
+#[cfg(test)]
 impl DiffLine {
     fn of(kind: DiffKind, content: impl Into<String>) -> Self {
         DiffLine {
@@ -63,6 +67,32 @@ impl DiffLine {
     /// Whether this line represents an actual content change.
     pub fn is_change(&self) -> bool {
         matches!(self.kind, DiffKind::Added | DiffKind::Removed)
+    }
+}
+
+/// A display row borrowing source text; only generated markers need ownership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffLineRef<'a> {
+    pub kind: DiffKind,
+    pub content: Cow<'a, str>,
+}
+
+impl DiffLineRef<'_> {
+    pub fn into_owned(self) -> DiffLine {
+        DiffLine {
+            kind: self.kind,
+            content: self.content.into_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<DiffLine> for DiffLineRef<'_> {
+    fn from(line: DiffLine) -> Self {
+        Self {
+            kind: line.kind,
+            content: Cow::Owned(line.content),
+        }
     }
 }
 
@@ -160,37 +190,58 @@ impl WriteDiffState {
                 reason: NotCapturedReason::OriginalNotUtf8,
             };
         };
-        let (lines, more) = cap_lines(display_diff(original, new_content), DIFF_MAX_LINES);
-        WriteDiffState::Diff { lines, more }
+        let (lines, more) = capped_display_diff(original, new_content, DIFF_MAX_LINES);
+        WriteDiffState::Diff {
+            lines: lines.into_iter().map(DiffLineRef::into_owned).collect(),
+            more,
+        }
     }
 }
 
 /// Compute the diff a tool block should show: a line diff, annotated when the
 /// change is invisible to a line diff, with long unchanged runs collapsed.
 ///
-/// Elision is not cosmetic. `compute_diff` emits whole-file order, and the
-/// display cap keeps the FIRST [`DIFF_MAX_LINES`]; without elision any change
-/// past line 200 was replaced by 200 dim context lines and the user saw no
-/// change at all — FR30's promise failing silently on any large file.
+/// Elision retains nearby changes before the head-and-tail display cap is
+/// applied, so changes after a long common prefix remain visible.
+#[cfg(test)]
 pub fn display_diff(original: &str, new_content: &str) -> Vec<DiffLine> {
-    let mut lines = compute_diff(original, new_content);
-    // A line diff cannot see a changed line terminator: `str::lines()` drops a
-    // single trailing newline and strips `\r`. Say so rather than render a
-    // wall of unchanged context for a write that really did change bytes.
-    if original != new_content && !lines.iter().any(DiffLine::is_change) {
-        lines.insert(
-            0,
-            DiffLine::of(
-                DiffKind::Elided,
+    capped_display_diff(original, new_content, usize::MAX)
+        .0
+        .into_iter()
+        .map(DiffLineRef::into_owned)
+        .collect()
+}
+
+/// Derive the canonical display diff without owning source text or retaining
+/// uncapped rows. The DP cell count is capped; a highly asymmetric changed
+/// middle can still retain many borrowed line references within that budget.
+pub fn capped_display_diff<'a>(
+    original: &'a str,
+    new_content: &'a str,
+    max: usize,
+) -> (Vec<DiffLineRef<'a>>, usize) {
+    if original == new_content {
+        return (Vec::new(), 0);
+    }
+    let mut rows = CappedRows::new(max);
+    let mut elision = Elision::new(DIFF_CONTEXT_LINES, |line| rows.push(line));
+    if visit_diff(original, new_content, |line| elision.push(line)) {
+        elision.finish();
+    } else {
+        drop(elision);
+        rows.push(DiffLineRef {
+            kind: DiffKind::Elided,
+            content: Cow::Borrowed(
                 "⚠ line endings or trailing newline changed — no line content changed",
             ),
-        );
+        });
     }
-    elide_unchanged(lines, DIFF_CONTEXT_LINES)
+    rows.finish()
 }
 
 /// Collapse runs of unchanged lines further than `context` from any change
 /// into a single `Elided` marker.
+#[cfg(test)]
 pub fn elide_unchanged(lines: Vec<DiffLine>, context: usize) -> Vec<DiffLine> {
     if !lines.iter().any(DiffLine::is_change) {
         // Nothing changed: there is no hunk to centre context on, so keep the
@@ -200,36 +251,12 @@ pub fn elide_unchanged(lines: Vec<DiffLine>, context: usize) -> Vec<DiffLine> {
             .filter(|l| l.kind == DiffKind::Elided)
             .collect();
     }
-    let mut keep = vec![false; lines.len()];
-    for (i, line) in lines.iter().enumerate() {
-        if line.is_change() || line.kind == DiffKind::Elided {
-            let lo = i.saturating_sub(context);
-            let hi = (i + context).min(lines.len() - 1);
-            keep[lo..=hi].iter_mut().for_each(|k| *k = true);
-        }
+    let mut out = Vec::new();
+    let mut elision = Elision::new(context, |line| out.push(line.into_owned()));
+    for line in lines {
+        elision.push(line.into());
     }
-    let mut out = Vec::with_capacity(lines.len());
-    let mut dropped = 0usize;
-    for (i, line) in lines.into_iter().enumerate() {
-        if keep[i] {
-            if dropped > 0 {
-                out.push(DiffLine::of(
-                    DiffKind::Elided,
-                    format!("⋯ {} unchanged lines", dropped),
-                ));
-                dropped = 0;
-            }
-            out.push(line);
-        } else {
-            dropped += 1;
-        }
-    }
-    if dropped > 0 {
-        out.push(DiffLine::of(
-            DiffKind::Elided,
-            format!("⋯ {} unchanged lines", dropped),
-        ));
-    }
+    elision.finish();
     out
 }
 
@@ -240,22 +267,119 @@ pub fn elide_unchanged(lines: Vec<DiffLine>, context: usize) -> Vec<DiffLine> {
 /// addition, so a head-only cap showed 200 red lines and hid every single
 /// addition — the file looked deleted. Elision cannot help there: with no
 /// common lines there are no unchanged runs to collapse.
+#[cfg(test)]
 pub fn cap_lines(lines: Vec<DiffLine>, max: usize) -> (Vec<DiffLine>, usize) {
     if lines.len() <= max {
         return (lines, 0);
     }
-    let dropped = lines.len() - max;
-    let head = max / 2;
-    let tail = max - head;
-    let tail_start = lines.len() - tail;
-    let mut out = Vec::with_capacity(max + 1);
-    out.extend(lines[..head].iter().cloned());
-    out.push(DiffLine::of(
-        DiffKind::Elided,
-        format!("… {} more lines", dropped),
-    ));
-    out.extend(lines[tail_start..].iter().cloned());
-    (out, dropped)
+    let mut rows = CappedRows::new(max);
+    for line in lines {
+        rows.push(line.into());
+    }
+    let (rows, dropped) = rows.finish();
+    (
+        rows.into_iter().map(DiffLineRef::into_owned).collect(),
+        dropped,
+    )
+}
+
+struct CappedRows<'a> {
+    head: Vec<DiffLineRef<'a>>,
+    tail: VecDeque<DiffLineRef<'a>>,
+    max: usize,
+    count: usize,
+}
+
+impl<'a> CappedRows<'a> {
+    fn new(max: usize) -> Self {
+        Self {
+            head: Vec::new(),
+            tail: VecDeque::new(),
+            max,
+            count: 0,
+        }
+    }
+
+    fn push(&mut self, line: DiffLineRef<'a>) {
+        self.count += 1;
+        if self.head.len() < self.max / 2 {
+            self.head.push(line);
+        } else if self.max != 0 {
+            if self.tail.len() == self.max - self.max / 2 {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(line);
+        }
+    }
+
+    fn finish(mut self) -> (Vec<DiffLineRef<'a>>, usize) {
+        let dropped = self.count.saturating_sub(self.max);
+        if dropped != 0 {
+            self.head.push(DiffLineRef {
+                kind: DiffKind::Elided,
+                content: Cow::Owned(format!("… {} more lines", dropped)),
+            });
+        }
+        self.head.extend(self.tail);
+        (self.head, dropped)
+    }
+}
+
+/// Pending context is bounded by `context`, even for an unchanged huge file.
+struct Elision<'a, F> {
+    emit: F,
+    pending: VecDeque<DiffLineRef<'a>>,
+    context: usize,
+    dropped: usize,
+    after: usize,
+}
+
+impl<'a, F: FnMut(DiffLineRef<'a>)> Elision<'a, F> {
+    fn new(context: usize, emit: F) -> Self {
+        Self {
+            emit,
+            pending: VecDeque::new(),
+            context,
+            dropped: 0,
+            after: 0,
+        }
+    }
+
+    fn marker(&mut self, count: usize) {
+        if count != 0 {
+            (self.emit)(DiffLineRef {
+                kind: DiffKind::Elided,
+                content: Cow::Owned(format!("⋯ {} unchanged lines", count)),
+            });
+        }
+    }
+
+    fn push(&mut self, line: DiffLineRef<'a>) {
+        if line.kind == DiffKind::Context {
+            if self.after != 0 {
+                self.after -= 1;
+                (self.emit)(line);
+            } else {
+                self.pending.push_back(line);
+                if self.pending.len() > self.context {
+                    self.pending.pop_front();
+                    self.dropped += 1;
+                }
+            }
+        } else {
+            self.marker(self.dropped);
+            self.dropped = 0;
+            for line in self.pending.drain(..) {
+                (self.emit)(line);
+            }
+            (self.emit)(line);
+            self.after = self.context;
+        }
+    }
+
+    fn finish(mut self) {
+        self.marker(self.dropped + self.pending.len());
+    }
 }
 
 /// Compute a line-by-line diff using longest common subsequence.
@@ -264,82 +388,73 @@ pub fn cap_lines(lines: Vec<DiffLine>, max: usize) -> (Vec<DiffLine>, usize) {
 /// common "large file, small change" case linear, keeps the LCS table small
 /// enough that the degrade branch is effectively unreachable in practice, and
 /// yields the diff a reader expects.
+#[cfg(test)]
 pub fn compute_diff(original: &str, new_content: &str) -> Vec<DiffLine> {
-    let old_lines: Vec<&str> = original.lines().collect();
-    let new_lines: Vec<&str> = new_content.lines().collect();
-
-    if old_lines.is_empty() {
-        // New file — all lines are additions
-        return new_lines
-            .iter()
-            .map(|l| DiffLine::of(DiffKind::Added, *l))
-            .collect();
-    }
-
-    // Trim the common prefix, then the common suffix, of the untouched region.
-    let mut prefix = 0;
-    while prefix < old_lines.len()
-        && prefix < new_lines.len()
-        && old_lines[prefix] == new_lines[prefix]
-    {
-        prefix += 1;
-    }
-    let mut suffix = 0;
-    while suffix < old_lines.len() - prefix
-        && suffix < new_lines.len() - prefix
-        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let old_mid = &old_lines[prefix..old_lines.len() - suffix];
-    let new_mid = &new_lines[prefix..new_lines.len() - suffix];
-
-    let mut result = Vec::with_capacity(old_lines.len().max(new_lines.len()));
-    result.extend(
-        old_lines[..prefix]
-            .iter()
-            .map(|l| DiffLine::of(DiffKind::Context, *l)),
-    );
-    result.extend(diff_middle(old_mid, new_mid));
-    result.extend(
-        old_lines[old_lines.len() - suffix..]
-            .iter()
-            .map(|l| DiffLine::of(DiffKind::Context, *l)),
-    );
+    let mut result = Vec::new();
+    visit_diff(original, new_content, |line| result.push(line.into_owned()));
     result
 }
 
+/// Visit raw rows in order, trimming before allocating any middle metadata.
+/// Returns whether there was a line-content change (not just terminators).
+fn visit_diff<'a>(
+    original: &'a str,
+    new_content: &'a str,
+    mut emit: impl FnMut(DiffLineRef<'a>),
+) -> bool {
+    let old_count = original.lines().count();
+    let new_count = new_content.lines().count();
+    let prefix = original
+        .lines()
+        .zip(new_content.lines())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = original
+        .lines()
+        .rev()
+        .take(old_count - prefix)
+        .zip(new_content.lines().rev().take(new_count - prefix))
+        .take_while(|(old, new)| old == new)
+        .count();
+    let m = old_count - prefix - suffix;
+    let n = new_count - prefix - suffix;
+    let row = |kind, content| DiffLineRef {
+        kind,
+        content: Cow::Borrowed(content),
+    };
+    for line in original.lines().take(prefix) {
+        emit(row(DiffKind::Context, line));
+    }
+    let old_mid = || original.lines().skip(prefix).take(m);
+    let new_mid = || new_content.lines().skip(prefix).take(n);
+    if m == 0 || n == 0 || (m + 1).saturating_mul(n + 1) > LCS_MAX_CELLS {
+        for line in old_mid() {
+            emit(row(DiffKind::Removed, line));
+        }
+        for line in new_mid() {
+            emit(row(DiffKind::Added, line));
+        }
+    } else {
+        diff_middle(
+            &old_mid().collect::<Vec<_>>(),
+            &new_mid().collect::<Vec<_>>(),
+            &mut emit,
+        );
+    }
+    for line in original.lines().skip(old_count - suffix) {
+        emit(row(DiffKind::Context, line));
+    }
+    m != 0 || n != 0
+}
+
 /// Diff the changed middle once the common prefix/suffix are removed.
-fn diff_middle(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
+fn diff_middle<'a>(
+    old_lines: &[&'a str],
+    new_lines: &[&'a str],
+    mut emit: impl FnMut(DiffLineRef<'a>),
+) {
     let m = old_lines.len();
     let n = new_lines.len();
-    if m == 0 {
-        return new_lines
-            .iter()
-            .map(|l| DiffLine::of(DiffKind::Added, *l))
-            .collect();
-    }
-    if n == 0 {
-        return old_lines
-            .iter()
-            .map(|l| DiffLine::of(DiffKind::Removed, *l))
-            .collect();
-    }
-
-    // Degrade only if the trimmed middle is still enormous. Removals first
-    // then additions, so the display cap shows the removals AND the elision
-    // marker rather than silently hiding every addition.
-    if (m + 1).saturating_mul(n + 1) > LCS_MAX_CELLS {
-        let mut result = Vec::with_capacity(m + n);
-        result.extend(
-            old_lines
-                .iter()
-                .map(|l| DiffLine::of(DiffKind::Removed, *l)),
-        );
-        result.extend(new_lines.iter().map(|l| DiffLine::of(DiffKind::Added, *l)));
-        return result;
-    }
 
     // LCS table, flat: one allocation instead of m+1 nested Vecs.
     let stride = n + 1;
@@ -359,19 +474,29 @@ fn diff_middle(old_lines: &[&str], new_lines: &[&str]) -> Vec<DiffLine> {
     let mut j = n;
     while i > 0 || j > 0 {
         if i > 0 && j > 0 && old_lines[i - 1] == new_lines[j - 1] {
-            result.push(DiffLine::of(DiffKind::Context, old_lines[i - 1]));
+            result.push(DiffLineRef {
+                kind: DiffKind::Context,
+                content: Cow::Borrowed(old_lines[i - 1]),
+            });
             i -= 1;
             j -= 1;
         } else if j > 0 && (i == 0 || dp[i * stride + (j - 1)] >= dp[(i - 1) * stride + j]) {
-            result.push(DiffLine::of(DiffKind::Added, new_lines[j - 1]));
+            result.push(DiffLineRef {
+                kind: DiffKind::Added,
+                content: Cow::Borrowed(new_lines[j - 1]),
+            });
             j -= 1;
         } else {
-            result.push(DiffLine::of(DiffKind::Removed, old_lines[i - 1]));
+            result.push(DiffLineRef {
+                kind: DiffKind::Removed,
+                content: Cow::Borrowed(old_lines[i - 1]),
+            });
             i -= 1;
         }
     }
-    result.reverse();
-    result
+    for line in result.into_iter().rev() {
+        emit(line);
+    }
 }
 
 #[cfg(test)]
@@ -532,6 +657,200 @@ mod tests {
                 .iter()
                 .any(|l| l.kind == DiffKind::Elided && l.content == "… 300 more lines"),
             "{shown:?}"
+        );
+    }
+
+    // Independent small-input oracle: legacy trimmed LCS, bitmap elision and
+    // slice-based cap. Do not call the production visitors from this oracle.
+    fn reference_diff(old: &str, new: &str) -> Vec<DiffLine> {
+        let (old, new): (Vec<_>, Vec<_>) = (old.lines().collect(), new.lines().collect());
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old
+            .iter()
+            .rev()
+            .take(old.len() - prefix)
+            .zip(new.iter().rev().take(new.len() - prefix))
+            .take_while(|(a, b)| a == b)
+            .count();
+        let (a, b) = (
+            &old[prefix..old.len() - suffix],
+            &new[prefix..new.len() - suffix],
+        );
+        let (mut i, mut j) = (a.len(), b.len());
+        let mut dp = vec![vec![0; j + 1]; i + 1];
+        for x in 1..=i {
+            for y in 1..=j {
+                dp[x][y] = if a[x - 1] == b[y - 1] {
+                    dp[x - 1][y - 1] + 1
+                } else {
+                    dp[x - 1][y].max(dp[x][y - 1])
+                };
+            }
+        }
+        let mut middle = Vec::new();
+        while i != 0 || j != 0 {
+            if i != 0 && j != 0 && a[i - 1] == b[j - 1] {
+                middle.push(DiffLine::of(DiffKind::Context, a[i - 1]));
+                i -= 1;
+                j -= 1;
+            } else if j != 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+                middle.push(DiffLine::of(DiffKind::Added, b[j - 1]));
+                j -= 1;
+            } else {
+                middle.push(DiffLine::of(DiffKind::Removed, a[i - 1]));
+                i -= 1;
+            }
+        }
+        old[..prefix]
+            .iter()
+            .map(|s| DiffLine::of(DiffKind::Context, *s))
+            .chain(middle.into_iter().rev())
+            .chain(
+                old[old.len() - suffix..]
+                    .iter()
+                    .map(|s| DiffLine::of(DiffKind::Context, *s)),
+            )
+            .collect()
+    }
+
+    fn reference_elision(lines: Vec<DiffLine>, context: usize) -> Vec<DiffLine> {
+        if !lines.iter().any(DiffLine::is_change) {
+            return lines
+                .into_iter()
+                .filter(|l| l.kind == DiffKind::Elided)
+                .collect();
+        }
+        let mut keep = vec![false; lines.len()];
+        for (i, line) in lines.iter().enumerate() {
+            if line.is_change() || line.kind == DiffKind::Elided {
+                keep[i.saturating_sub(context)..=i.saturating_add(context).min(lines.len() - 1)]
+                    .fill(true);
+            }
+        }
+        let (mut out, mut dropped) = (Vec::new(), 0);
+        for (line, keep) in lines
+            .into_iter()
+            .zip(keep)
+            .chain(std::iter::once((DiffLine::of(DiffKind::Context, ""), true)))
+        {
+            if keep {
+                if dropped != 0 {
+                    out.push(DiffLine::of(
+                        DiffKind::Elided,
+                        format!("⋯ {dropped} unchanged lines"),
+                    ));
+                    dropped = 0;
+                }
+                out.push(line);
+            } else {
+                dropped += 1;
+            }
+        }
+        out.pop(); // The sentinel only flushes a trailing unchanged run.
+        out
+    }
+
+    #[test]
+    fn borrowed_display_matches_independent_legacy_shapes() {
+        let mut inputs = vec![String::new()];
+        for len in 1..=3 {
+            inputs.extend((0..1 << len).map(|bits| {
+                (0..len)
+                    .map(|bit| if bits & (1 << bit) == 0 { "a\n" } else { "b\n" })
+                    .collect()
+            }));
+        }
+        inputs.extend(["a", "a\r\nb\r\n", "a\nb\n"].map(String::from));
+        inputs.push((0..220).map(|i| format!("{i}\n")).collect());
+        inputs.push(inputs.last().unwrap().replace("110\n", "CHANGED\n"));
+        for old in &inputs {
+            for new in &inputs {
+                let raw = reference_diff(old, new);
+                assert_eq!(compute_diff(old, new), raw);
+                let mut annotated = raw.clone();
+                annotated.insert(raw.len() / 2, DiffLine::of(DiffKind::Elided, "note"));
+                for context in [0, 1, 3] {
+                    assert_eq!(
+                        elide_unchanged(raw.clone(), context),
+                        reference_elision(raw.clone(), context)
+                    );
+                    assert_eq!(
+                        elide_unchanged(annotated.clone(), context),
+                        reference_elision(annotated.clone(), context)
+                    );
+                }
+                let mut expected = reference_elision(raw.clone(), 3);
+                if old != new && !raw.iter().any(DiffLine::is_change) {
+                    expected.push(DiffLine::of(
+                        DiffKind::Elided,
+                        "⚠ line endings or trailing newline changed — no line content changed",
+                    ));
+                }
+                assert_eq!(display_diff(old, new), expected);
+                for max in [0, 1, 200, usize::MAX] {
+                    let more = expected.len().saturating_sub(max);
+                    let mut capped = expected.clone();
+                    if more != 0 {
+                        capped = expected[..max / 2].to_vec();
+                        capped.push(DiffLine::of(
+                            DiffKind::Elided,
+                            format!("… {more} more lines"),
+                        ));
+                        capped.extend_from_slice(&expected[expected.len() - (max - max / 2)..]);
+                    }
+                    assert_eq!(cap_lines(expected.clone(), max), (capped.clone(), more));
+                    let (rows, dropped) = capped_display_diff(old, new, max);
+                    assert_eq!(
+                        (
+                            rows.into_iter()
+                                .map(DiffLineRef::into_owned)
+                                .collect::<Vec<_>>(),
+                            dropped
+                        ),
+                        (capped, more)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retained_source_rows_borrow_even_huge_lines() {
+        let old = format!("{}\nold\nend", "x".repeat(1 << 20));
+        let new = old.replace("\nold\n", "\nnew\n");
+        let (rows, more) = capped_display_diff(&old, &new, 200);
+        assert_eq!((rows.len(), more), (4, 0));
+        for row in rows {
+            let Cow::Borrowed(text) = row.content else {
+                panic!("owned source row");
+            };
+            let source = if row.kind == DiffKind::Added {
+                &new
+            } else {
+                &old
+            };
+            let expected = source.lines().find(|line| *line == text).unwrap();
+            assert_eq!(text.as_ptr(), expected.as_ptr());
+        }
+        let unchanged = "same\n".repeat(100_000);
+        assert_eq!(capped_display_diff(&unchanged, &unchanged, 0), (vec![], 0));
+        let (rows, more) = capped_display_diff(&unchanged, unchanged.trim_end_matches('\n'), 1);
+        assert_eq!((rows.len(), more), (1, 0));
+        assert_eq!(rows[0].kind, DiffKind::Elided);
+    }
+
+    #[test]
+    fn oversized_middle_streams_borrowed_head_and_tail() {
+        let (old, new) = ("old\n".repeat(2_000), "new\n".repeat(2_000));
+        let (rows, more) = capped_display_diff(&old, &new, 200);
+        assert_eq!((rows.len(), more), (201, 3_800));
+        assert_eq!(rows[100].content, "… 3800 more lines");
+        assert!(rows[..100].iter().all(|row| row.kind == DiffKind::Removed));
+        assert!(rows[101..].iter().all(|row| row.kind == DiffKind::Added));
+        assert!(
+            rows.iter()
+                .filter(|row| row.kind != DiffKind::Elided)
+                .all(|row| matches!(&row.content, Cow::Borrowed(_)))
         );
     }
 }

@@ -45,6 +45,16 @@ pub fn without_tail<'a>(
     turns.iter().find_map(|turn| in_turn(turn, target))
 }
 
+/// Presence-only discovery never allocates a formatted id for each candidate.
+pub fn contains_call(turns: &[Turn], open_turn: Option<&Turn>, call_id: &str) -> bool {
+    open_turn.into_iter().chain(turns).any(|turn| {
+        turn.parts.iter().any(|part| {
+            matches!(part, TurnPart::ToolInvocation { id, .. }
+                if tool_call_id_matches(&turn.id, *id, call_id))
+        })
+    })
+}
+
 fn in_turn<'a>(turn: &'a Turn, target: &'a ToolTarget) -> Option<ToolView<'a>> {
     let mut ordinal = 0;
     for part in &turn.parts {
@@ -84,6 +94,48 @@ fn in_turn<'a>(turn: &'a Turn, target: &'a ToolTarget) -> Option<ToolView<'a>> {
             tail_revision: 0,
         };
         return Some(view);
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+pub struct Neighbour<'a> {
+    pub turn_id: &'a crate::domain::models::TurnId,
+    pub part_id: crate::domain::models::PartId,
+}
+
+pub struct Neighbours<'a> {
+    pub previous: Option<Neighbour<'a>>,
+    pub next: Option<Neighbour<'a>>,
+}
+
+/// Borrow adjacent invocations from exactly the resolved invocation's turn.
+pub fn neighbours<'a>(
+    turns: &'a [Turn],
+    open_turn: Option<&'a Turn>,
+    target: &'a ToolTarget,
+) -> Option<Neighbours<'a>> {
+    let view = without_tail(turns, open_turn, target)?;
+    let turn = open_turn
+        .into_iter()
+        .chain(turns)
+        .find(|turn| std::ptr::eq(&turn.id, view.turn_id))?;
+    let mut invocations = turn.parts.iter().filter_map(|part| match part {
+        TurnPart::ToolInvocation { id, .. } => Some(Neighbour {
+            turn_id: &turn.id,
+            part_id: *id,
+        }),
+        _ => None,
+    });
+    let mut previous = None;
+    while let Some(current) = invocations.next() {
+        if current.part_id == view.part_id {
+            return Some(Neighbours {
+                previous,
+                next: invocations.next(),
+            });
+        }
+        previous = Some(current);
     }
     None
 }

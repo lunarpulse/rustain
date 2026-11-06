@@ -7,17 +7,18 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::io::{self, Write};
 use std::rc::Rc;
 
 use ratatui::prelude::*;
 use serde::Serialize;
 
 use crate::adapters::tui::markdown::{self, RenderOptions};
-use crate::adapters::tui::text_geometry as geom;
+use crate::adapters::tui::presentation::viewer::{RowOrigin, row_origins};
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{
     DIFF_MAX_LINES, DiffKind, DiffLine, InvocationStatus, NotCapturedReason, WriteDiffState,
-    diff::cap_lines, display_diff,
+    diff::capped_display_diff,
 };
 use crate::domain::services::peer_text::sanitize_tool_text_block;
 
@@ -185,8 +186,8 @@ fn edit_hunk(old: &str, new: &str) -> Rc<[DiffLine]> {
         if let Some(hit) = memo.borrow().get(&key) {
             return Rc::clone(hit);
         }
-        let (lines, _) = cap_lines(display_diff(old, new), DIFF_MAX_LINES);
-        let lines: Rc<[DiffLine]> = lines.into();
+        let (lines, _) = capped_display_diff(old, new, DIFF_MAX_LINES);
+        let lines: Rc<[DiffLine]> = lines.into_iter().map(|line| line.into_owned()).collect();
         let mut memo = memo.borrow_mut();
         if memo.len() >= MEMO_CAP {
             memo.clear();
@@ -257,6 +258,183 @@ pub fn text<'a>(view: &ToolView<'a>, tab: ToolTab) -> Cow<'a, str> {
             None => Cow::Borrowed(""),
         },
     }
+}
+
+/// Canonical copy is all-or-nothing and bounded in UTF-8 bytes, not cells.
+pub const COPY_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopySourceError {
+    Exceeded,
+    Serialization,
+}
+
+impl CopySourceError {
+    /// Fixed nonsecret diagnostics: never surface serde errors or source text.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Exceeded => "tool source exceeds the 8 MiB copy limit",
+            Self::Serialization => "tool source could not be serialized",
+        }
+    }
+}
+
+#[derive(Default)]
+struct CopyWriter {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+impl Write for CopyWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > COPY_MAX_BYTES - self.bytes.len() {
+            self.exceeded = true;
+            return Err(io::Error::other("copy limit exceeded"));
+        }
+        // Vec's geometric growth must not reserve beyond the copy bound.
+        let required = self.bytes.len() + bytes.len();
+        if required > self.bytes.capacity() {
+            let capacity = required
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(COPY_MAX_BYTES);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CopyWriter {
+    fn finish<E>(self, result: Result<(), E>) -> Result<String, CopySourceError> {
+        if self.exceeded {
+            Err(CopySourceError::Exceeded)
+        } else if result.is_err() {
+            Err(CopySourceError::Serialization)
+        } else {
+            String::from_utf8(self.bytes).map_err(|_| CopySourceError::Serialization)
+        }
+    }
+}
+
+/// Resolve the original source without first allocating an unbounded JSON or
+/// diff string. Output/live tails remain borrowed. Raw's private adapters are
+/// exactly those used by `text`, including field order and absent optionals.
+pub fn copy_text<'a>(view: &ToolView<'a>, tab: ToolTab) -> Result<Cow<'a, str>, CopySourceError> {
+    if tab == ToolTab::Output {
+        let source = text(view, tab);
+        return if source.len() <= COPY_MAX_BYTES {
+            Ok(source)
+        } else {
+            Err(CopySourceError::Exceeded)
+        };
+    }
+    let mut writer = CopyWriter::default();
+    let result = match tab {
+        ToolTab::Input => serde_json::to_writer_pretty(&mut writer, view.args),
+        ToolTab::Raw => serde_json::to_writer_pretty(
+            &mut writer,
+            &RawRecord {
+                id: &view.target.tool_call_id,
+                tool: view.name,
+                status: view.status,
+                input: view.args,
+                result: view.result.map(|result| RawResult {
+                    content: &result.content,
+                    is_error: result.is_error,
+                }),
+                started_at: view.started_at,
+                ended_at: view.ended_at,
+            },
+        ),
+        ToolTab::Diff => return copy_diff(view),
+        ToolTab::Output => unreachable!(),
+    };
+    writer.finish(result).map(Cow::Owned)
+}
+
+// Serialization consumes the same canonical borrowed, capped diff rows as
+// display derivation. Only the final byte-bounded source copy is owned.
+type CopyRow<'a> = (DiffKind, Cow<'a, str>);
+
+fn copy_diff<'a>(view: &ToolView<'a>) -> Result<Cow<'a, str>, CopySourceError> {
+    if *view.status != InvocationStatus::Success {
+        return Ok(Cow::Borrowed(""));
+    }
+    let Some(result) = view.result.filter(|result| !result.is_error) else {
+        return Ok(Cow::Borrowed(""));
+    };
+    let rows = match view.name {
+        "Edit" | "edit" => {
+            let Some((old, new)) = view
+                .args
+                .get("old_string")
+                .and_then(|s| s.as_str())
+                .zip(view.args.get("new_string").and_then(|s| s.as_str()))
+            else {
+                return Ok(Cow::Borrowed(""));
+            };
+            if old.is_empty() || old == new {
+                return Ok(Cow::Borrowed(""));
+            }
+            capped_display_diff(old, new, DIFF_MAX_LINES).0
+        }
+        "Write" | "write" => match &result.diff {
+            WriteDiffState::NotAWrite => return Ok(Cow::Borrowed("")),
+            WriteDiffState::NewFile => {
+                let Some(content) = view.args.get("content").and_then(|s| s.as_str()) else {
+                    return Ok(Cow::Borrowed(""));
+                };
+                capped_display_diff("", content, DIFF_MAX_LINES).0
+            }
+            WriteDiffState::Diff { lines, more } => {
+                if lines.is_empty() && *more == 0 {
+                    return Ok(Cow::Borrowed(NO_CHANGE));
+                }
+                // Persisted rows are already capped. Do not re-cap or fabricate
+                // a marker from `more`: copy the exact original source rows.
+                return write_copy_rows(
+                    lines
+                        .iter()
+                        .map(|line| (line.kind, Cow::Borrowed(line.content.as_str()))),
+                );
+            }
+            WriteDiffState::NotCaptured { reason } => {
+                return Ok(Cow::Owned(not_captured(
+                    view.args
+                        .get("content")
+                        .and_then(|s| s.as_str())
+                        .map_or(0, str::len),
+                    *reason,
+                )));
+            }
+        },
+        _ => return Ok(Cow::Borrowed("")),
+    };
+    if rows.is_empty() {
+        return Ok(Cow::Borrowed(NO_CHANGE));
+    }
+    write_copy_rows(rows.into_iter().map(|line| (line.kind, line.content)))
+}
+
+fn write_copy_rows<'a>(
+    rows: impl IntoIterator<Item = CopyRow<'a>>,
+) -> Result<Cow<'a, str>, CopySourceError> {
+    let mut writer = CopyWriter::default();
+    let result = (|| {
+        for (index, (kind, text)) in rows.into_iter().enumerate() {
+            if index != 0 {
+                writer.write_all(b"\n")?;
+            }
+            writer.write_all(diff_prefix(kind).as_bytes())?;
+            writer.write_all(text.as_bytes())?;
+        }
+        Ok::<(), io::Error>(())
+    })();
+    writer.finish(result).map(Cow::Owned)
 }
 
 fn not_captured(bytes: usize, reason: NotCapturedReason) -> String {
@@ -334,9 +512,15 @@ pub struct PreparedSource<'a> {
 
 enum PreparedBody<'a> {
     Literal(Cow<'a, str>),
-    Diff(DiffLines<'a>),
+    Diff { text: String, kinds: Vec<DiffKind> },
     Muted(Cow<'a, str>),
     Empty,
+}
+
+/// Actual shared-pipeline rows and their normalized logical-source positions.
+pub struct RenderedSource {
+    pub lines: Vec<Line<'static>>,
+    pub origins: Vec<Option<RowOrigin>>,
 }
 
 impl PreparedSource<'_> {
@@ -346,31 +530,60 @@ impl PreparedSource<'_> {
         self.hash
     }
 
-    /// Render this already-prepared candidate without reading the view again.
-    pub fn render(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-        if width == 0 {
-            return Vec::new();
-        }
+    /// Sanitized display text, borrowed without copying or serializing again.
+    /// Literal normalization and tab expansion belong to the shared viewer.
+    pub fn logical_text(&self) -> &str {
         match &self.body {
-            PreparedBody::Literal(text) => {
-                let mut lines =
-                    markdown::render(text, usize::from(width), theme, &self.options).lines;
-                if self.dim_header {
-                    if let Some(header) = lines.first_mut() {
-                        for span in &mut header.spans {
-                            span.style = span.style.fg(theme.colors.fg_muted);
-                        }
-                    }
-                }
-                lines
-            }
-            PreparedBody::Diff(lines) => render_diff_lines(lines.as_ref(), theme),
-            PreparedBody::Muted(text) => vec![Line::from(Span::styled(
-                text.to_string(),
-                Style::default().fg(theme.colors.fg_muted),
-            ))],
-            PreparedBody::Empty => Vec::new(),
+            PreparedBody::Literal(text) | PreparedBody::Muted(text) => text,
+            PreparedBody::Diff { text, .. } => text,
+            PreparedBody::Empty => "",
         }
+    }
+
+    /// Render and map this candidate without reading or preparing the view again.
+    pub fn render(&self, width: usize, theme: &Theme) -> RenderedSource {
+        if width == 0 || matches!(&self.body, PreparedBody::Empty) {
+            return RenderedSource {
+                lines: Vec::new(),
+                origins: Vec::new(),
+            };
+        }
+        let text = self.logical_text();
+        let mut lines = markdown::render(text, width, theme, &self.options).lines;
+        let mut origins = row_origins(text, &lines);
+        // Diff and provenance notices historically have no paragraph separator.
+        // Remove only Literal's display-only trailing blank, after mapping it.
+        if matches!(
+            &self.body,
+            PreparedBody::Diff { .. } | PreparedBody::Muted(_)
+        ) && !lines.is_empty()
+        {
+            lines.pop();
+            origins.pop();
+        }
+        for (line, origin) in lines.iter_mut().zip(&origins) {
+            let color = match &self.body {
+                PreparedBody::Diff { kinds, .. } => origin
+                    .as_ref()
+                    .and_then(|origin| kinds.get(origin.logical_line))
+                    .map(|kind| diff_color(*kind, theme)),
+                PreparedBody::Muted(_) => Some(theme.colors.fg_muted),
+                PreparedBody::Literal(_) | PreparedBody::Empty => None,
+            };
+            if let Some(color) = color {
+                for span in &mut line.spans {
+                    span.style = span.style.fg(color);
+                }
+            }
+        }
+        if self.dim_header {
+            if let Some(header) = lines.first_mut() {
+                for span in &mut header.spans {
+                    span.style = span.style.fg(theme.colors.fg_muted);
+                }
+            }
+        }
+        RenderedSource { lines, origins }
     }
 }
 
@@ -381,7 +594,7 @@ pub fn prepare<'a>(view: &ToolView<'a>, tab: ToolTab, now_ms: i64) -> PreparedSo
     metrics::prepare();
     let body = if tab == ToolTab::Diff {
         match view_diff(view) {
-            Some(DiffBody::Lines { lines }) => PreparedBody::Diff(lines),
+            Some(DiffBody::Lines { lines }) => prepare_diff(lines.as_ref()),
             Some(DiffBody::NotCaptured { bytes, reason }) => {
                 PreparedBody::Muted(Cow::Owned(not_captured(bytes, reason)))
             }
@@ -406,17 +619,14 @@ pub fn prepare<'a>(view: &ToolView<'a>, tab: ToolTab, now_ms: i64) -> PreparedSo
             0_u8.hash(&mut hash);
             text.hash(&mut hash);
         }
-        PreparedBody::Diff(lines) => {
+        PreparedBody::Diff { text, kinds } => {
+            #[cfg(any(test, debug_assertions))]
+            metrics::payload(text.len());
             1_u8.hash(&mut hash);
-            for (index, line) in lines.as_ref().iter().enumerate() {
-                if index != 0 {
-                    hash.write(b"\n");
-                }
-                // Prefixes and elision rows retain their distinct color/style
-                // semantics even if unusual content produces identical text.
-                std::mem::discriminant(&line.kind).hash(&mut hash);
-                hash.write(diff_prefix(line.kind).as_bytes());
-                hash.write(sanitize_tool_text_block(&line.content).as_bytes());
+            text.hash(&mut hash);
+            // Equal text can still have distinct added/removed/elided styles.
+            for kind in kinds {
+                std::mem::discriminant(kind).hash(&mut hash);
             }
         }
         PreparedBody::Muted(text) => {
@@ -452,30 +662,56 @@ pub fn render(
     theme: &Theme,
     now_ms: i64,
 ) -> Vec<Line<'static>> {
-    prepare(view, tab, now_ms).render(width, theme)
+    prepare(view, tab, now_ms)
+        .render(usize::from(width), theme)
+        .lines
 }
 
-/// The moved diff renderer: no output gutter, and elision rows carry no prefix.
-/// Sanitize before tab expansion; the original source bytes remain untouched.
+/// Join and sanitize the display diff once. Each normalized logical line keeps
+/// its originating kind, including embedded newlines in a site-supplied row.
+/// Original unsanitized copy sources continue to use [`diff_text`] separately.
+fn prepare_diff(diff: &[DiffLine]) -> PreparedBody<'static> {
+    let capacity = diff
+        .iter()
+        .map(|line| diff_prefix(line.kind).len() + line.content.len())
+        .sum::<usize>()
+        + diff.len().saturating_sub(1);
+    let mut text = String::with_capacity(capacity);
+    let mut kinds = Vec::with_capacity(diff.len());
+    for (index, line) in diff.iter().enumerate() {
+        if index != 0 {
+            text.push('\n');
+        }
+        let safe = sanitize_tool_text_block(&line.content);
+        text.push_str(diff_prefix(line.kind));
+        text.push_str(&safe);
+        // The sanitizer has already normalized CRLF/bare CR. Splitting without
+        // trimming retains blanks before the next diff row; Literal only trims
+        // newlines at the end of the complete body.
+        kinds.extend(std::iter::repeat_n(line.kind, safe.split('\n').count()));
+    }
+    PreparedBody::Diff { text, kinds }
+}
+
+fn diff_color(kind: DiffKind, theme: &Theme) -> Color {
+    match kind {
+        DiffKind::Added => theme.colors.success,
+        DiffKind::Removed => theme.colors.error,
+        DiffKind::Context => theme.colors.fg_secondary,
+        DiffKind::Elided => theme.colors.fg_muted,
+    }
+}
+
+/// The moved diff helper uses the same Literal renderer, without a width cap.
 pub fn render_diff_lines(diff: &[DiffLine], theme: &Theme) -> Vec<Line<'static>> {
-    diff.iter()
-        .map(|line| {
-            let color = match line.kind {
-                DiffKind::Added => theme.colors.success,
-                DiffKind::Removed => theme.colors.error,
-                DiffKind::Context => theme.colors.fg_secondary,
-                DiffKind::Elided => theme.colors.fg_muted,
-            };
-            let mut source = format!("{}{}", diff_prefix(line.kind), line.content);
-            if let Cow::Owned(safe) = sanitize_tool_text_block(&source) {
-                source = safe;
-            }
-            if let Cow::Owned(expanded) = geom::expand_tabs(&source, 0) {
-                source = expanded;
-            }
-            Line::from(Span::styled(source, Style::default().fg(color)))
-        })
-        .collect()
+    PreparedSource {
+        body: prepare_diff(diff),
+        options: RenderOptions::literal(),
+        dim_header: false,
+        hash: 0,
+    }
+    .render(usize::MAX, theme)
+    .lines
 }
 
 /// Constant-size canonical identity; no source bytes are inspected on a hit.
@@ -533,6 +769,288 @@ mod tests {
             diff,
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn story21_5_copy_keeps_output_and_per_call_tail_borrowed() {
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Running,
+            None,
+            |mut view| {
+                view.tail = Some("original\r\n\u{1b}[31m");
+                let source = copy_text(&view, ToolTab::Output).unwrap();
+                assert!(matches!(source, Cow::Borrowed(_)));
+                assert!(std::ptr::eq(source.as_ptr(), view.tail.unwrap().as_ptr()));
+            },
+        );
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Success,
+            Some(output("completed", WriteDiffState::NotAWrite)),
+            |mut view| {
+                view.tail = Some("stale tail must lose to completed output");
+                let source = copy_text(&view, ToolTab::Output).unwrap();
+                assert!(matches!(source, Cow::Borrowed(_)));
+                assert!(std::ptr::eq(
+                    source.as_ptr(),
+                    view.result.unwrap().content.as_ptr()
+                ));
+            },
+        );
+    }
+
+    #[test]
+    fn story21_5_copy_writer_is_bounded_and_errors_are_fixed_nonsecret() {
+        let mut writer = CopyWriter::default();
+        let chunk = vec![b'x'; COPY_MAX_BYTES];
+        writer.write_all(&chunk).unwrap();
+        assert_eq!(writer.bytes.len(), COPY_MAX_BYTES);
+        assert!(writer.bytes.capacity() <= COPY_MAX_BYTES);
+        assert!(writer.write_all(b"x").is_err());
+        assert_eq!(
+            writer.finish(Err::<(), _>(())),
+            Err(CopySourceError::Exceeded)
+        );
+
+        struct Failing;
+        impl Serialize for Failing {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom(
+                    "secret source must never surface",
+                ))
+            }
+        }
+        let mut writer = CopyWriter::default();
+        let result = serde_json::to_writer_pretty(&mut writer, &Failing);
+        let error = writer.finish(result).unwrap_err();
+        assert_eq!(error, CopySourceError::Serialization);
+        assert_eq!(error.message(), "tool source could not be serialized");
+        assert!(!format!("{error:?}").contains("secret"));
+    }
+
+    #[test]
+    fn story21_5_bounded_derived_diff_matches_original_elision_cap_and_tie_breaking() {
+        let contexts = (0..240)
+            .map(|i| format!("same {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let removed = (0..2100)
+            .map(|i| format!("old {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let added = (0..2100)
+            .map(|i| format!("new {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for (old, new) in [
+            ("old".to_owned(), "new".to_owned()),
+            ("a\r\nb\n".into(), "a\nb".into()),
+            ("a\nb\na".into(), "b\na\nb".into()),
+            (
+                format!("{contexts}\nold\n{contexts}"),
+                format!("{contexts}\nnew\n{contexts}"),
+            ),
+            (removed, added),
+            ("".into(), contexts.clone()),
+            ("before".into(), "".into()),
+        ] {
+            for name in ["Edit", "Write"] {
+                if name == "Edit" && old.is_empty() {
+                    continue;
+                }
+                let args = if name == "Edit" {
+                    json!({"old_string":old, "new_string":new})
+                } else {
+                    json!({"content":new})
+                };
+                with_view(
+                    name,
+                    args,
+                    InvocationStatus::Success,
+                    Some(output("", WriteDiffState::NewFile)),
+                    |view| {
+                        assert_eq!(
+                            copy_text(&view, ToolTab::Diff).unwrap(),
+                            text(&view, ToolTab::Diff),
+                            "{name}: bounded copy must preserve provenance and rows"
+                        );
+                    },
+                );
+            }
+        }
+        // Cover short overlapping context runs and every LCS tie in a small
+        // alphabet through the independent original-source implementation.
+        let texts = [
+            "a",
+            "a\nb",
+            "b\na",
+            "a\nb\na",
+            "b\na\nb",
+            "x\na\nb\nc\nd\ny",
+        ];
+        for old in texts {
+            for new in texts {
+                with_view(
+                    "Edit",
+                    json!({"old_string":old, "new_string":new}),
+                    InvocationStatus::Success,
+                    Some(output("", WriteDiffState::NotAWrite)),
+                    |view| {
+                        assert_eq!(
+                            copy_text(&view, ToolTab::Diff).unwrap(),
+                            text(&view, ToolTab::Diff)
+                        )
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn story21_5_bounded_diff_preserves_provenance_and_persisted_rows() {
+        for reason in [
+            NotCapturedReason::NoActiveCheckpoint,
+            NotCapturedReason::SnapshotUnavailable,
+            NotCapturedReason::SnapshotReadFailed,
+            NotCapturedReason::OriginalNotUtf8,
+            NotCapturedReason::SupersededInBatch,
+            NotCapturedReason::HistoricalOrReattached,
+        ] {
+            with_view(
+                "Write",
+                json!({"content":"界"}),
+                InvocationStatus::Success,
+                Some(output("", WriteDiffState::NotCaptured { reason })),
+                |view| {
+                    assert_eq!(
+                        copy_text(&view, ToolTab::Diff).unwrap(),
+                        text(&view, ToolTab::Diff)
+                    );
+                },
+            );
+        }
+        for diff in [
+            WriteDiffState::Diff {
+                lines: vec![],
+                more: 0,
+            },
+            WriteDiffState::Diff {
+                lines: vec![
+                    DiffLine {
+                        kind: DiffKind::Added,
+                        content: "\u{1b}[31m界\r\t".into(),
+                    },
+                    DiffLine {
+                        kind: DiffKind::Removed,
+                        content: "old".into(),
+                    },
+                    DiffLine {
+                        kind: DiffKind::Context,
+                        content: "same".into(),
+                    },
+                    DiffLine {
+                        kind: DiffKind::Elided,
+                        content: "… 3 more lines".into(),
+                    },
+                ],
+                more: 3,
+            },
+        ] {
+            with_view(
+                "Write",
+                json!({}),
+                InvocationStatus::Success,
+                Some(output("", diff)),
+                |view| {
+                    assert_eq!(
+                        copy_text(&view, ToolTab::Diff).unwrap(),
+                        text(&view, ToolTab::Diff)
+                    );
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn story21_5_bounded_copy_uses_the_original_source_availability_guards() {
+        for status in [
+            InvocationStatus::Pending,
+            InvocationStatus::Running,
+            InvocationStatus::Error,
+            InvocationStatus::Cancelled,
+        ] {
+            with_view(
+                "Write",
+                json!({"content":"new"}),
+                status,
+                Some(output("result", WriteDiffState::NewFile)),
+                |view| {
+                    assert!(copy_text(&view, ToolTab::Diff).unwrap().is_empty());
+                },
+            );
+        }
+        for (name, args, diff) in [
+            (
+                "Edit",
+                json!({"old_string":"","new_string":"new"}),
+                WriteDiffState::NotAWrite,
+            ),
+            (
+                "Edit",
+                json!({"old_string":"same","new_string":"same"}),
+                WriteDiffState::NotAWrite,
+            ),
+            (
+                "Edit",
+                json!({"old_string":"old"}),
+                WriteDiffState::NotAWrite,
+            ),
+            ("Write", json!({}), WriteDiffState::NewFile),
+            ("Write", json!({"content":"new"}), WriteDiffState::NotAWrite),
+            ("Bash", json!({"content":"new"}), WriteDiffState::NewFile),
+        ] {
+            with_view(
+                name,
+                args,
+                InvocationStatus::Success,
+                Some(output("", diff)),
+                |view| {
+                    assert!(copy_text(&view, ToolTab::Diff).unwrap().is_empty());
+                },
+            );
+        }
+        let mut failed = output("failed", WriteDiffState::NewFile);
+        failed.is_error = true;
+        with_view(
+            "Write",
+            json!({"content":"new"}),
+            InvocationStatus::Success,
+            Some(failed),
+            |view| assert!(copy_text(&view, ToolTab::Diff).unwrap().is_empty()),
+        );
+        for status in [
+            InvocationStatus::Success,
+            InvocationStatus::Error,
+            InvocationStatus::Cancelled,
+        ] {
+            with_view("Bash", json!({}), status, None, |mut view| {
+                view.tail = Some("not running");
+                assert!(copy_text(&view, ToolTab::Output).unwrap().is_empty());
+            });
+        }
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Success,
+            Some(output("", WriteDiffState::NotAWrite)),
+            |mut view| {
+                view.tail = Some("not the empty result's source");
+                assert!(copy_text(&view, ToolTab::Output).unwrap().is_empty());
+            },
+        );
     }
 
     fn rendered(view: &ToolView<'_>, tab: ToolTab) -> Vec<String> {
@@ -888,6 +1406,7 @@ mod tests {
                         "started_at":view.started_at, "ended_at":view.ended_at,
                     });
                     let raw = text(&view, ToolTab::Raw);
+                    assert_eq!(copy_text(&view, ToolTab::Raw).unwrap(), raw);
                     assert_eq!(
                         serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
                         baseline
@@ -1026,8 +1545,8 @@ mod tests {
                 let sanitized = prepare(&changed_view, ToolTab::Output, 0);
                 assert_eq!(prepared.hash(), sanitized.hash());
                 assert_eq!(
-                    prepared.render(80, &Theme::dark()),
-                    sanitized.render(80, &Theme::dark()),
+                    prepared.render(80, &Theme::dark()).lines,
+                    sanitized.render(80, &Theme::dark()).lines,
                 );
             },
         );
@@ -1048,7 +1567,7 @@ mod tests {
                 let record: serde_json::Value = serde_json::from_str(json).unwrap();
                 assert_eq!(record["result"]["content"], "hi");
                 let renders = markdown::metrics::renders();
-                let lines = prepared.render(80, &Theme::dark());
+                let lines = prepared.render(80, &Theme::dark()).lines;
                 assert_eq!(markdown::metrics::renders(), renders + 1);
                 assert!(!lines.is_empty());
                 assert_eq!(lines, render(&view, ToolTab::Raw, 80, &Theme::dark(), 0),);
@@ -1091,8 +1610,8 @@ mod tests {
                 let sanitized = prepare(&changed_view, ToolTab::Diff, 0);
                 assert_eq!(clean.hash(), sanitized.hash());
                 assert_eq!(
-                    clean.render(80, &Theme::dark()),
-                    sanitized.render(80, &Theme::dark()),
+                    clean.render(80, &Theme::dark()).lines,
+                    sanitized.render(80, &Theme::dark()).lines,
                 );
                 let removed = output(
                     "wrote",
@@ -1112,6 +1631,208 @@ mod tests {
                     clean.hash(),
                     prepare(&removed_view, ToolTab::Diff, 0).hash()
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn story21_5_logical_text_reuses_prepared_sources_and_preserves_copy_bytes() {
+        let original = "\x1b[31mred\x1b[0m\t界\r\nnext\u{202e}";
+        with_view(
+            "Bash",
+            json!({"command": "echo hi"}),
+            InvocationStatus::Success,
+            Some(output(original, WriteDiffState::NotAWrite)),
+            |view| {
+                let prepared = prepare(&view, ToolTab::Output, 0);
+                assert_eq!(prepared.logical_text(), "red\t界\nnext");
+                assert_eq!(text(&view, ToolTab::Output), original);
+                for tab in [ToolTab::Input, ToolTab::Raw] {
+                    let prepared = prepare(&view, tab, 0);
+                    let PreparedBody::Literal(Cow::Owned(serialized)) = &prepared.body else {
+                        panic!("JSON owns its single prepared serialization");
+                    };
+                    let counts = metrics::counts();
+                    assert_eq!(prepared.logical_text().as_ptr(), serialized.as_ptr());
+                    let original_source = text(&view, tab);
+                    assert_eq!(
+                        prepared.logical_text(),
+                        sanitize_tool_text_block(&original_source).as_ref()
+                    );
+                    if tab == ToolTab::Raw {
+                        assert!(
+                            original_source.contains('\u{202e}'),
+                            "copy projection keeps original bytes"
+                        );
+                        assert!(
+                            !prepared.logical_text().contains('\u{202e}'),
+                            "display strips bidi controls"
+                        );
+                    }
+                    assert_eq!(metrics::counts(), counts);
+                }
+            },
+        );
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Success,
+            Some(output("clean\t界\n", WriteDiffState::NotAWrite)),
+            |view| {
+                let prepared = prepare(&view, ToolTab::Output, 0);
+                assert_eq!(
+                    prepared.logical_text().as_ptr(),
+                    view.result.unwrap().content.as_ptr()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn story21_5_mapped_literal_rows_use_normalized_line_byte_ranges() {
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Success,
+            Some(output(
+                "abcdefghij\r\n界e\u{301}\n",
+                WriteDiffState::NotAWrite,
+            )),
+            |view| {
+                let prepared = prepare(&view, ToolTab::Output, 0);
+                let rendered = prepared.render(4, &Theme::dark());
+                assert_eq!(
+                    rendered
+                        .lines
+                        .iter()
+                        .map(Line::to_string)
+                        .collect::<Vec<_>>(),
+                    ["abcd", "efgh", "ij", "界e\u{301}", ""],
+                );
+                assert_eq!(rendered.origins.len(), rendered.lines.len());
+                for (origin, (logical_line, bytes)) in
+                    rendered.origins[..4]
+                        .iter()
+                        .zip([(0, 0..4), (0, 4..8), (0, 8..10), (1, 0..6)])
+                {
+                    let origin = origin.as_ref().expect("source row");
+                    assert_eq!(origin.logical_line, logical_line);
+                    assert_eq!(origin.bytes, bytes);
+                }
+                assert!(rendered.origins[4].is_none());
+                let wide = prepared.render(usize::from(u16::MAX) + 1, &Theme::dark());
+                assert_eq!(wide.lines.len(), 3);
+                let renders = markdown::metrics::renders();
+                let empty = prepared.render(0, &Theme::dark());
+                assert!(empty.lines.is_empty());
+                assert!(empty.origins.is_empty());
+                assert_eq!(markdown::metrics::renders(), renders);
+            },
+        );
+    }
+
+    #[test]
+    fn story21_5_mapped_diff_wraps_once_and_keeps_multiline_kind_colors() {
+        let diff = WriteDiffState::Diff {
+            lines: vec![
+                DiffLine {
+                    kind: DiffKind::Added,
+                    content: "\x1b[31malpha\t界\r\nsecond\x1b[0m".into(),
+                },
+                DiffLine {
+                    kind: DiffKind::Removed,
+                    content: "third".into(),
+                },
+            ],
+            more: 0,
+        };
+        with_view(
+            "Write",
+            json!({"content": "after"}),
+            InvocationStatus::Success,
+            Some(output("wrote", diff)),
+            |view| {
+                let prepared = prepare(&view, ToolTab::Diff, 0);
+                assert_eq!(prepared.logical_text(), "+ alpha\t界\nsecond\n- third");
+                assert!(text(&view, ToolTab::Diff).contains('\x1b'));
+                let theme = Theme::dark();
+                let renders = markdown::metrics::renders();
+                let counts = metrics::counts();
+                let rendered = prepared.render(8, &theme);
+                assert_eq!(markdown::metrics::renders(), renders + 1);
+                assert_eq!(metrics::counts(), counts);
+                assert_eq!(rendered.lines.len(), rendered.origins.len());
+                assert!(rendered.lines.len() > 3, "the added row wraps");
+                for (row, origin) in rendered.lines.iter().zip(&rendered.origins) {
+                    let origin = origin.as_ref().expect("no paragraph blank in Diff");
+                    let color = match origin.logical_line {
+                        0 | 1 => theme.colors.success,
+                        2 => theme.colors.error,
+                        line => panic!("unexpected logical line {line}"),
+                    };
+                    assert!(row.spans.iter().all(|span| span.style.fg == Some(color)));
+                }
+                let wide = prepared.render(200, &theme);
+                assert_eq!(wide.lines.len(), 3);
+                assert!(wide.origins.iter().all(Option::is_some));
+            },
+        );
+    }
+
+    #[test]
+    fn story21_5_mapped_notices_and_live_tail_keep_display_provenance() {
+        with_view(
+            "Write",
+            json!({"content": "new"}),
+            InvocationStatus::Success,
+            Some(output(
+                "wrote",
+                WriteDiffState::NotCaptured {
+                    reason: NotCapturedReason::SnapshotUnavailable,
+                },
+            )),
+            |view| {
+                let prepared = prepare(&view, ToolTab::Diff, 0);
+                assert_eq!(
+                    prepared.logical_text(),
+                    not_captured(3, NotCapturedReason::SnapshotUnavailable)
+                );
+                let theme = Theme::dark();
+                let rendered = prepared.render(20, &theme);
+                assert!(rendered.lines.len() > 1);
+                assert!(rendered.origins.iter().all(Option::is_some));
+                for row in &rendered.lines {
+                    assert!(
+                        row.spans
+                            .iter()
+                            .all(|span| span.style.fg == Some(theme.colors.fg_muted))
+                    );
+                }
+            },
+        );
+        with_view(
+            "Bash",
+            json!({}),
+            InvocationStatus::Running,
+            None,
+            |mut view| {
+                view.tail = Some("first\nsecond");
+                let prepared = prepare(&view, ToolTab::Output, 0);
+                assert_eq!(
+                    prepared.logical_text(),
+                    display_text(&view, ToolTab::Output, 0)
+                );
+                let theme = Theme::dark();
+                let rendered = prepared.render(200, &theme);
+                assert_eq!(rendered.lines.len(), 4);
+                assert!(
+                    rendered.lines[0]
+                        .spans
+                        .iter()
+                        .all(|span| span.style.fg == Some(theme.colors.fg_muted))
+                );
+                assert_eq!(rendered.origins[2].as_ref().unwrap().logical_line, 2);
+                assert!(rendered.origins[3].is_none());
             },
         );
     }

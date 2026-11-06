@@ -3,6 +3,33 @@
 use crate::adapters::tui::clipboard::ClipboardResult;
 use crate::adapters::tui::notifications::{NoticeSeverity, NoticeSource, notify};
 use crate::adapters::tui::state::TuiState;
+use crate::domain::models::Conversation;
+
+/// Generic Chat copy keeps its historical empty-string target resolution.
+/// Tool-source copy deliberately never passes through this sentinel seam.
+pub fn requested(
+    state: &mut TuiState,
+    conversation: &Conversation,
+    content: String,
+    copy: &dyn Fn(&str) -> ClipboardResult,
+) {
+    let content = if content.is_empty() {
+        state.resolve_copy_content(conversation)
+    } else {
+        content
+    };
+    notify_copy(state, &content, copy);
+}
+
+/// Share the existing failure formatter without inventing a clipboard attempt.
+pub(crate) fn notify_failure(state: &mut TuiState, reason: &str) {
+    notify(
+        state,
+        NoticeSource::Clipboard,
+        NoticeSeverity::Error,
+        format!("Copy failed: {reason}"),
+    );
+}
 
 /// Copies `text` through `copy` (production: `clipboard::copy_to_clipboard`)
 /// and reports the outcome as a notice: Success for a copy, Info for empty
@@ -24,7 +51,8 @@ pub(crate) fn notify_copy(
                 format!("Copied to {}", path.display()),
             ),
             ClipboardResult::Failed(error) => {
-                (NoticeSeverity::Error, format!("Copy failed: {error}"))
+                notify_failure(state, &error);
+                return;
             }
         }
     };
@@ -35,6 +63,36 @@ pub(crate) fn notify_copy(
 mod tests {
     use super::*;
     use crate::domain::models::StatusState;
+
+    #[test]
+    fn story21_5_generic_requested_preserves_explicit_bytes_and_chat_fallback() {
+        let mut state = TuiState::new(80, 24);
+        let mut conversation = Conversation::default();
+        let mut turn = crate::domain::models::Turn::new("copy-model".into(), 0);
+        turn.push_part(|id| crate::domain::models::TurnPart::Prose {
+            id,
+            text: "assistant fallback".into(),
+        });
+        conversation.turns.push(turn);
+        conversation.rebuild_messages_mirror();
+        state.selected_tool_id = None;
+        let copied = std::cell::RefCell::new(Vec::new());
+        let copier = |text: &str| {
+            copied.borrow_mut().push(text.to_owned());
+            ClipboardResult::Osc52Success
+        };
+        requested(&mut state, &conversation, String::new(), &copier);
+        requested(
+            &mut state,
+            &conversation,
+            "\u{1b}[31mexplicit\r\n".into(),
+            &copier,
+        );
+        assert_eq!(
+            *copied.borrow(),
+            ["assistant fallback", "\u{1b}[31mexplicit\r\n"]
+        );
+    }
 
     /// K6 — the clipboard family: the typed copy result picks the severity
     /// (never the text), and no outcome writes the status row.

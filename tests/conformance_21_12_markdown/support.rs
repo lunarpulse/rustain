@@ -156,7 +156,7 @@ pub fn paint_local_osc8(
                 None,
                 None,
                 open_prose,
-                None,
+                Default::default(),
             );
             total_height = result.total_content_height;
         })

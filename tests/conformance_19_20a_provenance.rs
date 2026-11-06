@@ -267,7 +267,7 @@ fn paint(
                     None,
                     None,
                     None,
-                    None,
+                    Default::default(),
                 )
             });
         })
@@ -1093,7 +1093,7 @@ async fn migrated_sessions_preserve_decorations_search_and_selected_tool_copy() 
                             None,
                             None,
                             None,
-                            None,
+                            Default::default(),
                         ));
                     })
                     .unwrap();

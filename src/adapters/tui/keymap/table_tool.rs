@@ -9,6 +9,12 @@ use super::table_overlay::OverlayCmd;
 pub enum ToolCmd {
     PrevTab,
     NextTab,
+    PrevCall,
+    NextCall,
+    NextMatch,
+    PrevMatch,
+    Wrap,
+    Copy,
     Back,
 }
 
@@ -26,6 +32,13 @@ const fn t(keys: &'static [Key], command: ToolCmd, label: &'static str) -> Bindi
 pub const ROWS: &[Binding] = &[
     t(&[Key::Left], ToolCmd::PrevTab, "Tab").hint().does("Select the previous available tool tab"),
     t(&[Key::Right], ToolCmd::NextTab, "Tab").hint().does("Select the next available tool tab"),
+    t(&[Key::Char('[')], ToolCmd::PrevCall, "Previous").hint().does("Inspect the previous tool call in this turn"),
+    t(&[Key::Char(']')], ToolCmd::NextCall, "Next").hint().does("Inspect the next tool call in this turn"),
+    bind(Context::ToolInspector, &[Key::Char('/')], CommandId::Overlay(OverlayCmd::InspectorSearch), "Search").hint().local().does("Search the active tool tab"),
+    t(&[Key::Char('n')], ToolCmd::NextMatch, "Next match").hint().does("Select the next search match, wrapping at the end"),
+    t(&[Key::Char('N')], ToolCmd::PrevMatch, "Previous match").hint().does("Select the previous search match, wrapping at the start"),
+    t(&[Key::Char('w')], ToolCmd::Wrap, "Wrap").hint().does("Toggle soft wrapping, keeping the logical line at the top"),
+    t(&[Key::Char('c')], ToolCmd::Copy, "Copy").copy().hint().does("Copy the active tool tab's original source"),
     t(&[Key::Esc], ToolCmd::Back, "Back").hint().does("Back from the tool inspector"),
     t(&[Key::Ctrl('c')], ToolCmd::Back, "").does("Back from the tool inspector without cancelling work"),
     bind(Context::ToolInspector, &[Key::Ctrl('x')], CommandId::Global(GlobalCmd::OpenLeader), "menu").local().does("Open the Ctrl+X menu without closing the tool inspector"),

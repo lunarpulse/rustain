@@ -72,7 +72,7 @@ fn paint_chat(
             None,
             liveness,
             None, // open_prose
-            None, // current_focus
+            Default::default(),
         );
         total_height = result.total_content_height;
     });

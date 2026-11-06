@@ -8344,7 +8344,7 @@ mod tests {
                         None,
                         None,
                         None,
-                        None,
+                        Default::default(),
                     );
                 })
                 .unwrap();

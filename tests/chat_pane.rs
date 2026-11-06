@@ -777,7 +777,10 @@ fn focus_probe_with_view(
                 None,
                 None, // liveness
                 None, // open_prose
-                current_focus,
+                chat_pane::ToolFocus {
+                    current: current_focus,
+                    inspector_marker: false,
+                },
             );
             *out.borrow_mut() = (
                 result.focused_tool_id,

@@ -67,10 +67,76 @@ impl InspectorSearch {
     }
 }
 
-fn caseless_chars(text: &str) -> impl Iterator<Item = char> + Clone {
-    text.chars()
-        .flat_map(char::to_lowercase)
-        .map(|ch| if ch == 'ς' { 'σ' } else { ch })
+pub(crate) fn caseless_char(ch: char) -> impl Iterator<Item = char> + Clone {
+    ch.to_lowercase().map(|ch| if ch == 'ς' { 'σ' } else { ch })
+}
+
+pub(crate) fn caseless_chars(text: &str) -> impl Iterator<Item = char> + Clone {
+    text.chars().flat_map(caseless_char)
+}
+
+/// KMP over the same caseless stream as the shared inspector predicate. Only
+/// the query and a query-sized ring of source grapheme boundaries are retained.
+pub(crate) struct CaselessMatcher {
+    needle: Vec<char>,
+    failure: Vec<usize>,
+    boundaries: std::collections::VecDeque<std::ops::Range<usize>>,
+}
+
+impl CaselessMatcher {
+    pub(crate) fn new(query: &str) -> Self {
+        let needle: Vec<_> = caseless_chars(query).collect();
+        let mut failure = vec![0; needle.len()];
+        let mut matched = 0;
+        for at in 1..needle.len() {
+            while matched > 0 && needle[at] != needle[matched] {
+                matched = failure[matched - 1];
+            }
+            if needle[at] == needle[matched] {
+                matched += 1;
+            }
+            failure[at] = matched;
+        }
+        let boundaries = std::collections::VecDeque::with_capacity(needle.len());
+        Self {
+            needle,
+            failure,
+            boundaries,
+        }
+    }
+
+    pub(crate) fn ranges(&mut self, text: &str, mut found: impl FnMut(std::ops::Range<usize>)) {
+        use unicode_segmentation::UnicodeSegmentation;
+        if self.needle.is_empty() {
+            return;
+        }
+        self.boundaries.clear();
+        let mut matched = 0;
+        let mut previous = None;
+        for (at, grapheme) in text.grapheme_indices(true) {
+            for ch in grapheme.chars().flat_map(caseless_char) {
+                if self.boundaries.len() == self.needle.len() {
+                    self.boundaries.pop_front();
+                }
+                self.boundaries.push_back(at..at + grapheme.len());
+                while matched > 0 && ch != self.needle[matched] {
+                    matched = self.failure[matched - 1];
+                }
+                if ch == self.needle[matched] {
+                    matched += 1;
+                }
+                if matched == self.needle.len() {
+                    let bytes =
+                        self.boundaries.front().expect("nonempty query").start..at + grapheme.len();
+                    if previous.as_ref() != Some(&bytes) {
+                        previous = Some(bytes.clone());
+                        found(bytes);
+                    }
+                    matched = self.failure[matched - 1];
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

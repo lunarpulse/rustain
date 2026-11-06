@@ -91,6 +91,7 @@ pub fn compose(
                     .expect("Tool frame owns its payload"),
                 theme,
                 modal.title(),
+                show_caret,
             ),
             Surface::Search => {
                 rect = Rect::new(

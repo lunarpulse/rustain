@@ -45,18 +45,31 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
         {
             Context::InspectorSearch
         }
+        Surface::ToolInspector(key)
+            if state
+                .tool_inspectors
+                .get(&key.0)
+                .is_some_and(|tool| !tool.missing && tool.search.editor.editing) =>
+        {
+            Context::InspectorSearch
+        }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
         _ => surface.context(),
     }
 }
 
-/// Only the current Log/Help frame may lend its child field to the common editor.
+/// Only the current inspector frame may lend its child field to the common editor.
 pub(crate) fn inspector_search_mut(
     state: &mut TuiState,
 ) -> Option<&mut inspector_search::InspectorSearch> {
     match state.modal_stack.top()?.surface {
         Surface::Help => Some(&mut state.help_overlay.search),
         Surface::NotificationLog => state.notification_log.as_mut().map(|log| &mut log.search),
+        Surface::ToolInspector(key) => state
+            .tool_inspectors
+            .get_mut(&key.0)
+            .filter(|tool| !tool.missing)
+            .map(|tool| &mut tool.search.editor),
         _ => None,
     }
 }
@@ -106,7 +119,8 @@ pub fn consistent(state: &TuiState) -> bool {
             })
         && is_open(state, Surface::NotificationLog) == state.notification_log.is_some()
         && is_open(state, Surface::QuitConfirm) == state.quit_confirm.is_some()
-        && state.tool_inspectors.iter().all(|(id, tool)| {
+        // In-place stepping may coincide targets; each frame still owns one payload.
+        && state.tool_inspectors.keys().all(|id| {
             stack
                 .all_frames()
                 .filter(
@@ -114,10 +128,6 @@ pub fn consistent(state: &TuiState) -> bool {
                 )
                 .count()
                 == 1
-                && state
-                    .tool_inspectors
-                    .iter()
-                    .all(|(other_id, other)| id == other_id || tool.target != other.target)
         })
 }
 

@@ -46,10 +46,6 @@ pub fn copy_to_clipboard(content: &str) -> ClipboardResult {
 /// Write content to the system clipboard via OSC 52 escape sequence.
 /// Writes to /dev/tty to avoid contention with ratatui's stdout buffer.
 pub fn write_osc52(content: &str) -> io::Result<()> {
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
-    let sequence = format!("\x1b]52;c;{}\x07", encoded);
-
     // Write to /dev/tty directly to bypass ratatui's stdout buffer
     let tty_path = std::path::Path::new("/dev/tty");
     if !tty_path.exists() {
@@ -59,9 +55,16 @@ pub fn write_osc52(content: &str) -> io::Result<()> {
         ));
     }
     let mut tty = fs::OpenOptions::new().write(true).open(tty_path)?;
-    tty.write_all(sequence.as_bytes())?;
-    tty.flush()?;
-    Ok(())
+    write_osc52_to(&mut tty, content)
+}
+
+fn write_osc52_to(writer: &mut impl Write, content: &str) -> io::Result<()> {
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    writer.write_all(b"\x1b]52;c;")?;
+    writer.write_all(encoded.as_bytes())?;
+    writer.write_all(b"\x07")?;
+    writer.flush()
 }
 
 /// Write content to the fallback clipboard file.
@@ -100,6 +103,38 @@ fn clipboard_strategy() -> Strategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn story21_5_review_osc52_writes_framing_without_a_second_payload_copy() {
+        #[derive(Default)]
+        struct Writes(Vec<Vec<u8>>);
+        impl Write for Writes {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.push(bytes.to_vec());
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        use base64::Engine;
+        let content = format!("界\x1b{}", "x".repeat(1_000_000));
+        let mut writes = Writes::default();
+        write_osc52_to(&mut writes, &content).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+        assert_eq!(
+            writes.0.concat(),
+            [b"\x1b]52;c;".as_slice(), encoded.as_bytes(), b"\x07"].concat()
+        );
+        assert_eq!(
+            writes.0.len(),
+            3,
+            "framing must not duplicate the full base64 payload"
+        );
+        assert_eq!(writes.0[0], b"\x1b]52;c;");
+        assert_eq!(writes.0[1], encoded.as_bytes());
+        assert_eq!(writes.0[2], b"\x07");
+    }
 
     #[test]
     fn osc52_sequence_format() {

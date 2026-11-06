@@ -587,7 +587,7 @@ fn paint_view(
                 None,
                 None,
                 None,
-                None,
+                Default::default(),
             );
             total_height = result.total_content_height;
         })

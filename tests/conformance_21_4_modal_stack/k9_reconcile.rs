@@ -527,7 +527,7 @@ fn paint_active_stage(
                 None,
                 None,
                 None,
-                None,
+                Default::default(),
             ));
         })
         .unwrap();

@@ -236,6 +236,20 @@ impl Fixture {
         )
     }
 
+    /// Drive the registry action through the same fresh canonical host effect.
+    pub fn step(&mut self, key: Key) -> bool {
+        let InputAction::StepTool { forward } = self.press(key) else {
+            panic!("the production registry must request a canonical step");
+        };
+        let tab = self.tabs.active_tab();
+        tool_inspector::step(
+            &mut self.h.state,
+            &tab.conversation,
+            tab.reducer.open_turn.as_ref(),
+            forward,
+        )
+    }
+
     /// Seat focus by actual Stage paint, not by seeding the inspector target.
     pub fn focus_call(&mut self, wanted: &str) {
         self.paint();

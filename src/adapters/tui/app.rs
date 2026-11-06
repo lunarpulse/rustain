@@ -29,6 +29,12 @@ pub enum InputAction {
     Consumed,
     /// Inspect the render-focused tool; the runtime resolves the live conversation.
     InspectTool,
+    /// Resolve a same-turn step against canonical sources before the next paint.
+    StepTool {
+        forward: bool,
+    },
+    /// Copy the current tool tab from fresh owning canonical sources, not cells.
+    CopyToolSource,
     /// Event not handled by this focus mode.
     Ignored,
     RecipientThreadPage {
@@ -1938,7 +1944,8 @@ fn edit_query(
                     Some(Surface::NotificationLog) => {
                         crate::adapters::tui::notification_log::reconcile_search(state);
                     }
-                    _ => unreachable!("only Log/Help lend the inspector field"),
+                    Some(Surface::ToolInspector(_)) => {}
+                    _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
             changed
@@ -2298,6 +2305,23 @@ fn exec_help(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
 fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
     if cmd == OverlayCmd::QuitRequest {
         return InputAction::Quit;
+    }
+    if let Some(Surface::ToolInspector(key)) = state.modal_stack.top().map(|frame| frame.surface) {
+        let tool = state
+            .tool_inspectors
+            .get_mut(&key.0)
+            .expect("frame owns tool search");
+        if tool.missing {
+            return InputAction::Consumed;
+        }
+        match cmd {
+            OverlayCmd::InspectorSearch => tool.search.editor.open(),
+            OverlayCmd::InspectorAccept => tool.accept_search(),
+            OverlayCmd::InspectorBack => tool.clear_search(),
+            _ => return InputAction::Consumed,
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
     }
     let Some(search) = presentation::inspector_search_mut(state) else {
         return InputAction::Consumed;
@@ -3830,6 +3854,36 @@ pub fn convert_crossterm_event(
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    #[test]
+    fn story21_5_missing_tool_cannot_lend_search_child() {
+        use crate::adapters::tui::tool_inspector::ToolTarget;
+        let mut state = TuiState::new(80, 24);
+        presentation::reducer::open_tool(
+            &mut state,
+            ToolTarget {
+                conversation_id: "conversation".into(),
+                tool_call_id: "call".into(),
+            },
+            "tool".into(),
+            12,
+        );
+        let Surface::ToolInspector(key) = state.modal_stack.top().unwrap().surface else {
+            panic!("real tool frame");
+        };
+        exec_inspector_search(&mut state, OverlayCmd::InspectorSearch);
+        assert!(state.tool_inspectors[&key.0].search.editor.editing);
+        state
+            .tool_inspectors
+            .get_mut(&key.0)
+            .unwrap()
+            .search
+            .editor
+            .editing = false;
+        state.tool_inspectors.get_mut(&key.0).unwrap().missing = true;
+        exec_inspector_search(&mut state, OverlayCmd::InspectorSearch);
+        assert!(!state.tool_inspectors[&key.0].search.editor.editing);
+    }
 
     fn alt_key(c: char) -> crossterm::event::Event {
         crossterm::event::Event::Key(KeyEvent {

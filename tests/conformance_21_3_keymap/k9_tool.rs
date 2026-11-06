@@ -1,7 +1,9 @@
 //! AC7: the shared body is witnessed through its real S-TOOL child, not Viewer::apply.
 use rustain::adapters::tui::{
     app::InputAction,
+    clipboard::ClipboardResult,
     keymap::{Context, Key},
+    notifications::NoticeSource,
     presentation::{self, Surface},
     quit_confirm::{self, QuitFacts, QuitHost},
     state::TuiState,
@@ -12,7 +14,7 @@ use serde_json::json;
 
 use super::support::{is_inert, press};
 use super::witness::{self, Case, Runtime, W, never, w, wp};
-use crate::conformance_21_5_tool_inspector::support::{Fixture, pixels, row, rows};
+use crate::conformance_21_5_tool_inspector::support::{Fixture, call, pixels, row, rows};
 
 pub(super) struct ToolRuntime(Fixture);
 
@@ -86,9 +88,24 @@ fn salient(runtime: &ToolRuntime) -> String {
         );
     }
     let tool = f.tool();
+    if presentation::frame_context(s, frame.surface) == Context::InspectorSearch {
+        return format!(
+            "search-editing frames={} payloads={}",
+            s.modal_stack.len(),
+            s.tool_inspectors.len()
+        );
+    }
+    if let Some(notice) = s
+        .notifications
+        .visible()
+        .find(|notice| notice.source == NoticeSource::Clipboard)
+    {
+        return format!("clipboard={:?} {:?}", notice.severity, notice.message);
+    }
     let tabs = tool_inspector::layout::parts(f.frame_rect()).tabs;
     format!(
-        "{}@{} {:?} tabs={} frames={} payloads={} leader={}",
+        "{}{}@{} {:?} tabs={} frames={} payloads={} leader={}",
+        if tool.wrap { "" } else { "wrap-off " },
         tool.tab.label(),
         tool.viewers[tool.tab.index()].top,
         f.body_row(0).trim(),
@@ -113,6 +130,29 @@ fn door(runtime: &mut ToolRuntime, key: Key) -> (String, bool) {
                 ..QuitFacts::idle(QuitHost::Local)
             },
         );
+    } else if let InputAction::StepTool { forward } = action {
+        let tab = f.tabs.active_tab();
+        tool_inspector::step(
+            &mut f.h.state,
+            &tab.conversation,
+            tab.reducer.open_turn.as_ref(),
+            forward,
+        );
+    } else if action == InputAction::CopyToolSource {
+        let tab = f.tabs.active_tab();
+        let expected = rows(99);
+        assert!(tool_inspector::copy::copy_source(
+            &mut f.h.state,
+            &tab.conversation,
+            Some(&tab.reducer),
+            &|text| {
+                assert_eq!(
+                    text, expected,
+                    "copy is original full source, not visible row020"
+                );
+                ClipboardResult::Osc52Success
+            },
+        ));
     }
     f.compose();
     assert_eq!(stage(f), before, "{key:?}: owning Stage/draft changed");
@@ -139,6 +179,52 @@ fn tail(runtime: &mut ToolRuntime) {
     assert_eq!(door(runtime, Key::Char('G')).0, "Consumed");
 }
 
+fn with_neighbour(runtime: &mut ToolRuntime) {
+    let f = &mut runtime.0;
+    call(
+        &mut f.tabs.active_tab_mut().conversation.turns[0],
+        "Bash",
+        json!({"command":"second"}),
+        InvocationStatus::Success,
+        Some(("next-call", WriteDiffState::NotAWrite)),
+    );
+    f.tabs
+        .active_tab_mut()
+        .conversation
+        .rebuild_messages_mirror();
+    f.paint();
+}
+
+fn at_neighbour(runtime: &mut ToolRuntime) {
+    with_neighbour(runtime);
+    assert_eq!(
+        door(runtime, Key::Char(']')).0,
+        "StepTool { forward: true }"
+    );
+    assert!(
+        runtime.0.body_row(0).contains("next-call"),
+        "observable other-target control"
+    );
+}
+
+fn searchable(runtime: &mut ToolRuntime) {
+    let f = &mut runtime.0;
+    f.press(Key::Char('/'));
+    assert_eq!(
+        presentation::frame_context(&f.h.state, f.h.state.modal_stack.top().unwrap().surface),
+        Context::InspectorSearch
+    );
+    for ch in "row".chars() {
+        f.press(Key::Char(ch));
+    }
+    f.press(Key::Enter);
+    f.compose();
+    assert!(
+        f.h.screen_text().contains("Search 21/99"),
+        "actual committed-match control"
+    );
+}
+
 #[rustfmt::skip]
 const BODY: &[W<ToolRuntime>] = &[
     w(&[Key::Char('j')], "Consumed | Output@21 \"row 021\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
@@ -157,6 +243,13 @@ const BODY: &[W<ToolRuntime>] = &[
 const TOOL: &[W<ToolRuntime>] = &[
     wp(&[Key::Left], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", input),
     w(&[Key::Right], "Consumed | Input@0 \"{\" tabs=Output  [Input]  Raw frames=1 payloads=1 leader=false"),
+    wp(&[Key::Char('[')], "StepTool { forward: false } | Output@0 \"row 000\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", at_neighbour),
+    wp(&[Key::Char(']')], "StepTool { forward: true } | Output@0 \"next-call\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", with_neighbour),
+    w(&[Key::Char('/')], "Consumed | search-editing frames=1 payloads=1"),
+    wp(&[Key::Char('n')], "Consumed | Output@21 \"row 021\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", searchable),
+    wp(&[Key::Char('N')], "Consumed | Output@19 \"row 019\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false", searchable),
+    w(&[Key::Char('w')], "Consumed | wrap-off Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+    w(&[Key::Char('c')], "CopyToolSource | clipboard=Success \"Copied to clipboard\""),
     w(&[Key::Esc], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('c')], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('x')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=true"),

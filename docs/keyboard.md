@@ -298,6 +298,13 @@ Also inherits: Inspector body.
 |---|---|---|---|---|
 | `Left` | Select the previous available tool tab | local | portable |  |
 | `Right` | Select the next available tool tab | local | portable |  |
+| `[` | Inspect the previous tool call in this turn | local | portable |  |
+| `]` | Inspect the next tool call in this turn | local | portable |  |
+| `/` | Search the active tool tab | local | portable |  |
+| `n` | Select the next search match, wrapping at the end | local | portable |  |
+| `N` | Select the previous search match, wrapping at the start | local | portable |  |
+| `w` | Toggle soft wrapping, keeping the logical line at the top | local | portable |  |
+| `c` | Copy the active tool tab's original source | local | portable |  |
 | `Esc` | Back from the tool inspector | local | portable |  |
 | `Ctrl+C` | Back from the tool inspector without cancelling work | local | portable |  |
 | `Ctrl+X` | Open the Ctrl+X menu without closing the tool inspector | local | portable |  |

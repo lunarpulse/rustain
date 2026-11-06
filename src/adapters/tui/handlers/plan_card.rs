@@ -198,7 +198,7 @@ mod tests {
                     state.pending_plan_card.as_ref(),
                     None,
                     None,
-                    None,
+                    Default::default(),
                 );
             })
             .unwrap();

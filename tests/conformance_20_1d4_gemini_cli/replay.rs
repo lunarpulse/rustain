@@ -463,7 +463,7 @@ pub(crate) fn render(conversation: &Conversation) -> String {
             None,
             None,
             None,
-            None,
+            Default::default(),
         );
     });
     let buffer = terminal.backend().buffer().clone();

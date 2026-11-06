@@ -330,6 +330,39 @@ pub fn open_tool(
     )
 }
 
+/// Stepping changes only the top frame's payload/title, never another owner.
+pub fn retarget_tool(
+    state: &mut TuiState,
+    id: u64,
+    replacement: crate::adapters::tui::tool_inspector::ToolInspectorState,
+    title: String,
+) -> bool {
+    if state
+        .modal_stack
+        .top()
+        .is_none_or(|frame| frame.id != id || !matches!(frame.surface, Surface::ToolInspector(_)))
+    {
+        return false;
+    }
+    let payload = state
+        .tool_inspectors
+        .get_mut(&id)
+        .expect("frame owns its tool payload");
+    assert_eq!(
+        payload.target.conversation_id,
+        replacement.target.conversation_id
+    );
+    *payload = replacement;
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.id == id)
+        .expect("the current frame exists")
+        .tool_title = Some(title);
+    state.needs_redraw = true;
+    true
+}
+
 /// Consume the payload preparation owed by a fresh frame, including a palette
 /// handoff whose effect is applied after key dispatch. Reopening never resets it.
 pub fn initialize_surface(state: &mut TuiState, surface: Surface) -> bool {
