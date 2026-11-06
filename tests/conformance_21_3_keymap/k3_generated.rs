@@ -249,7 +249,7 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
 #[test]
 fn chat_tip_is_at_most_60_cells() {
     for host in [Host::Local, Host::Attached] {
-        let tip = tip(Context::Chat, host, false).expect("a Chat tip");
+        let tip = tip(Context::Chat, host, false, false).expect("a Chat tip");
         assert!(
             tip.width() <= 60,
             "{host:?}: `{tip}` is {} cells",

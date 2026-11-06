@@ -16,6 +16,7 @@ pub enum Surface {
     BookmarkList,
     WaveOverlay,
     CrossSearch,
+    ToolInspector(crate::adapters::tui::tool_inspector::ToolFrameKey),
 }
 
 impl Surface {
@@ -35,6 +36,7 @@ impl Surface {
             Self::BookmarkList => "Bookmarks",
             Self::WaveOverlay => "Wave",
             Self::CrossSearch => "Cross-Search",
+            Self::ToolInspector(_) => "Tool",
         }
     }
 
@@ -54,6 +56,7 @@ impl Surface {
             Self::BookmarkList => Context::BookmarkList,
             Self::WaveOverlay => Context::WaveOverlay,
             Self::CrossSearch => Context::CrossSearch,
+            Self::ToolInspector(_) => Context::ToolInspector,
         }
     }
 
@@ -69,6 +72,7 @@ impl Surface {
                 | Self::BookmarkList
                 | Self::WaveOverlay
                 | Self::CrossSearch
+                | Self::ToolInspector(_)
         )
     }
 }
@@ -81,16 +85,20 @@ pub struct Frame {
     pub conversation_id: Option<String>,
     /// Queue item identity belongs to the frame, never to the queue payload.
     pub decision: Option<crate::adapters::tui::decision_pane::DecisionKey>,
+    /// Display metadata belongs to the frame, not its cached body payload.
+    pub tool_title: Option<String>,
     /// One-shot payload preparation after an effect opens a fresh frame.
     /// This is not presence: only membership in the stack owns visibility.
     pub(super) needs_initialization: bool,
 }
 
 impl Frame {
-    pub fn title(&self) -> &'static str {
-        self.decision
-            .as_ref()
-            .map_or(self.surface.title(), |key| key.title())
+    pub fn title(&self) -> &str {
+        self.tool_title.as_deref().unwrap_or_else(|| {
+            self.decision
+                .as_ref()
+                .map_or(self.surface.title(), |key| key.title())
+        })
     }
 }
 

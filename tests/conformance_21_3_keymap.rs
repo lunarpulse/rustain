@@ -64,3 +64,6 @@ mod k9_inspector;
 
 #[path = "conformance_21_3_keymap/k9_dispatch.rs"]
 mod k9_dispatch;
+
+#[path = "conformance_21_3_keymap/k9_tool.rs"]
+mod k9_tool;

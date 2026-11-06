@@ -3218,7 +3218,6 @@ fn paint_attached(
     streaming: &StreamingState,
     view: &crate::domain::models::view_state::ViewState,
     tab_render_state: &mut TabRenderState,
-    tool_block_states: &HashMap<String, crate::adapters::tui::widgets::tool_block::ToolBlockState>,
     tool_inputs: &HashMap<String, crate::adapters::daemon::protocol::ToolInputWithheld>,
     permission_mode: PermissionMode,
     attach_info: &AttachInfo,
@@ -3295,7 +3294,6 @@ fn paint_attached(
         view,
         &state.theme,
         tab_render_state,
-        tool_block_states,
         &state.feedback_blocks,
         tool_inputs,
     );
@@ -3604,10 +3602,6 @@ pub async fn run_attached(
         );
     }
     let mut tab_render_state = TabRenderState::default();
-    let tool_block_states: HashMap<
-        String,
-        crate::adapters::tui::widgets::tool_block::ToolBlockState,
-    > = HashMap::new();
     // Story 19.16g — local, read-only journal access for the reminder and
     // `/team log`; nothing here creates a journal or sends a frame.
     let log_service = crate::infrastructure::transparency::TransparencyService::new(
@@ -3647,7 +3641,6 @@ pub async fn run_attached(
                 streaming,
                 view,
                 &mut tab_render_state,
-                &tool_block_states,
                 &tool_inputs.reasons,
                 permission_mode,
                 &attach_info,
@@ -3892,6 +3885,10 @@ pub async fn run_attached(
     writer.abort();
     loop_result
 }
+
+#[cfg(test)]
+#[path = "attach_loop/inspect_hint_tests.rs"]
+mod inspect_hint_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5502,7 +5499,6 @@ mod tests {
                             &self.domain_tab.view_state,
                             &self.state.theme,
                             &mut self.tab,
-                            &HashMap::new(),
                             &self.state.feedback_blocks,
                             &HashMap::new(),
                         );
@@ -9194,7 +9190,6 @@ mod tests {
                     &domain_tab.view_state,
                     &theme,
                     &mut tab,
-                    &HashMap::new(),
                     &BTreeMap::new(),
                     &inputs.reasons,
                 );
@@ -10493,7 +10488,6 @@ mod tests {
         let theme = Theme::dark();
         let domain_tab = crate::domain::models::tab::TabState::from_conversation(0, conv);
         let mut trs = TabRenderState::default();
-        let tbs = HashMap::new();
         let fbs = BTreeMap::new();
         term.draw(|f| {
             chat_pane::render_attached(
@@ -10504,7 +10498,6 @@ mod tests {
                 &domain_tab.view_state,
                 &theme,
                 &mut trs,
-                &tbs,
                 &fbs,
                 &HashMap::new(),
             );
@@ -10941,7 +10934,6 @@ mod tests {
             let mut tab = TabRenderState::default();
             let domain_tab =
                 crate::domain::models::tab::TabState::from_conversation(0, Conversation::default());
-            let tools = HashMap::new();
             let mut visible = Vec::new();
             term.draw(|f| {
                 visible = chat_pane::render_attached(
@@ -10952,7 +10944,6 @@ mod tests {
                     &domain_tab.view_state,
                     &state.theme,
                     &mut tab,
-                    &tools,
                     &state.feedback_blocks,
                     &HashMap::new(),
                 )

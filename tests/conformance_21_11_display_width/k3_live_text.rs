@@ -8,7 +8,7 @@
 
 use super::support::*;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
@@ -64,7 +64,6 @@ fn paint_chat(
             true,
             &theme,
             &mut tab,
-            &HashMap::new(),
             &BTreeMap::new(),
             query,
             focused,

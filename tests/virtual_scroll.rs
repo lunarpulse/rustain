@@ -1,5 +1,4 @@
 #![allow(clippy::field_reassign_with_default)] // AI-12.1: test setup
-use std::collections::HashMap;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -7,7 +6,6 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::{ChatMessage, Conversation, MessageRole, StreamingState};
 
 fn make_conversation(msg_count: usize) -> Conversation {
@@ -79,7 +77,6 @@ fn test_virtual_scroll_1000_messages_performance() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -121,7 +118,6 @@ fn test_virtual_scroll_relative_scaling() {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
@@ -149,7 +145,6 @@ fn test_virtual_scroll_relative_scaling() {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
@@ -194,7 +189,6 @@ fn test_virtual_scroll_zero_messages() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -225,7 +219,6 @@ fn test_virtual_scroll_one_message() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -262,7 +255,6 @@ fn test_virtual_scroll_viewport_culling() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -295,7 +287,6 @@ fn test_virtual_scroll_viewport_culling() {
                 false, // NOT auto-scroll — use explicit offset
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -349,7 +340,6 @@ fn test_virtual_scroll_jump_to_bottom() {
                 true, // auto_scroll = jump to bottom
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -402,7 +392,6 @@ fn test_virtual_scroll_above_viewport_not_rendered() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -429,7 +418,6 @@ fn test_virtual_scroll_above_viewport_not_rendered() {
                 false,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -517,7 +505,6 @@ fn test_virtual_scroll_only_user_messages() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -636,7 +623,6 @@ fn test_no_recompute_during_scroll() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -662,7 +648,6 @@ fn test_no_recompute_during_scroll() {
                     false,
                     &theme,
                     &mut tab_render_state,
-                    &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
@@ -704,7 +689,6 @@ fn test_turn_render_scaling_500_vs_50() {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
@@ -730,7 +714,6 @@ fn test_turn_render_scaling_500_vs_50() {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &HashMap::<String, ToolBlockState>::new(),
                     &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(),
                 );
             })
@@ -764,7 +747,6 @@ fn test_evict_turns_not_in_drops_stale_entries() {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: i + 1,
@@ -828,7 +810,6 @@ fn test_width_divergence_invalidates_cache() {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         },
         CachedTurnLayout {
             height: 5,

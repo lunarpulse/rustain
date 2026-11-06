@@ -76,14 +76,30 @@ fn test_is_multiplexer_session_false_when_unset() {
 
 #[test]
 fn test_contextual_hint_input_focus() {
-    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
+    let hint = hints::contextual_hint(
+        &FocusState::Input,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_some());
     assert!(hint.unwrap().contains('?'));
 }
 
 #[test]
 fn test_contextual_hint_chat_focus() {
-    let hint = hints::contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default(), None);
+    let hint = hints::contextual_hint(
+        &FocusState::Chat,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("j/k"));
 }
@@ -91,16 +107,32 @@ fn test_contextual_hint_chat_focus() {
 #[test]
 fn test_contextual_hint_fades_above_threshold() {
     assert!(
-        hints::contextual_hint(&FocusState::Input, 6, 5, false, &Default::default(), None)
-            .is_none()
+        hints::contextual_hint(
+            &FocusState::Input,
+            6,
+            5,
+            false,
+            &Default::default(),
+            None,
+            false
+        )
+        .is_none()
     );
 }
 
 #[test]
 fn test_contextual_hint_shows_at_threshold() {
     assert!(
-        hints::contextual_hint(&FocusState::Input, 5, 5, false, &Default::default(), None)
-            .is_some()
+        hints::contextual_hint(
+            &FocusState::Input,
+            5,
+            5,
+            false,
+            &Default::default(),
+            None,
+            false
+        )
+        .is_some()
     );
 }
 
@@ -573,7 +605,15 @@ fn test_help_overlay_small_terminal_no_crash() {
 fn test_session_count_parse_valid() {
     // This tests the internal parser indirectly via the module tests
     // The parse logic is covered by hints::tests::test_parse_session_count_*
-    let hint = hints::contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
+    let hint = hints::contextual_hint(
+        &FocusState::Input,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_some());
 }
 

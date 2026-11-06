@@ -12,6 +12,7 @@ pub mod route;
 mod stack;
 pub mod stage_search;
 pub mod text_field;
+pub mod viewer;
 
 pub use compose::{Shell, compose, paint_too_small};
 pub use route::{RouteEffect, route, too_small};
@@ -71,12 +72,23 @@ pub fn consistent(state: &TuiState) -> bool {
                 && stack
                     .all_frames()
                     .take(index)
-                    .all(|earlier| earlier.surface != frame.surface)
+                    .all(|earlier| earlier.id != frame.id && earlier.surface != frame.surface)
                 && match &frame.decision {
                     Some(key) => {
                         frame.surface == Surface::DecisionPane && state.decisions.contains_key(key)
                     }
                     None => frame.surface != Surface::DecisionPane,
+                }
+                && match frame.surface {
+                    Surface::ToolInspector(key) => {
+                        key.0 == frame.id
+                            && frame.tool_title.is_some()
+                            && state.tool_inspectors.get(&key.0).is_some_and(|tool| {
+                                frame.conversation_id.as_deref()
+                                    == Some(tool.target.conversation_id.as_str())
+                            })
+                    }
+                    _ => frame.tool_title.is_none(),
                 }
         })
         && stack.continuations.len() <= 5
@@ -94,6 +106,19 @@ pub fn consistent(state: &TuiState) -> bool {
             })
         && is_open(state, Surface::NotificationLog) == state.notification_log.is_some()
         && is_open(state, Surface::QuitConfirm) == state.quit_confirm.is_some()
+        && state.tool_inspectors.iter().all(|(id, tool)| {
+            stack
+                .all_frames()
+                .filter(
+                    |frame| matches!(frame.surface, Surface::ToolInspector(key) if key.0 == *id),
+                )
+                .count()
+                == 1
+                && state
+                    .tool_inspectors
+                    .iter()
+                    .all(|(other_id, other)| id == other_id || tool.target != other.target)
+        })
 }
 
 /// RU-6 eligibility is evaluated BEFORE adding the incoming queue item.

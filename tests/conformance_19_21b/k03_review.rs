@@ -69,7 +69,6 @@ fn paint_chat_surface(f: &mut ProposalFixture, width: u16, height: u16) -> Vec<S
                 true,
                 &f.state.theme,
                 render,
-                &Default::default(),
                 &f.state.feedback_blocks,
                 None,
                 None,

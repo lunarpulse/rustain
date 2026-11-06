@@ -1,6 +1,7 @@
 //! K6 / A19: final 4-C ratchet. Behaviour belongs to the keystones, not this scanner.
 //! Every retained occurrence has an exact named-site pin and a migration owner.
 //! Removed/changed pins fail stale; new hits never inherit a file exemption.
+//! Story 21-5 extends the same production scan to retired tool-block inspector identifiers.
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,7 @@ const TEST_FILES: &[&str] = &[
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",
     "src/adapters/tui/story21_2_slash_tests.rs",
+    "src/infrastructure/runtime/attach_loop/inspect_hint_tests.rs",
     "src/infrastructure/runtime/state_extraction_tests.rs",
 ];
 type Pin<'a> = (&'a str, &'a str, &'a [&'a str]);
@@ -260,7 +262,7 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "render",
-        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search)\s*::\s*render\w*\s*\("###,
+        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search|tool_inspector)\s*::\s*render\w*\s*\("###,
     ),
     // Payload presence cannot become a second open authority, regardless of read syntax.
     ("option", r"\.\s*(?:notification_log|quit_confirm)\b"),
@@ -287,6 +289,10 @@ const RULES: &[(&str, &str)] = &[
     ),
     ("a2b-payload-owner", r"\b(?:pub\s+)?(?:active|focused)\s*:"),
     ("legacy-painter", r"\bpaint_legacy\b"),
+    (
+        "tool-inspector-legacy",
+        r"\b(?:ToolBlockState|tool_block_states|tool_block_states_version|peek_active|render_peek_overlay|PeekToolBlock|ToggleToolBlock|expanded_body_height|expanded_diff_body|TOGGLE_TOOL_BLOCK)\b",
+    ),
     (
         "field-string",
         r"\b(?:query|filter_text)\s*:\s*(?:std\s*::\s*string\s*::\s*)?String\b",
@@ -346,9 +352,21 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
     });
     static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay)\b",
+            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay|tool_inspector)\b",
         )
     });
+    static TOOL_OPEN_ARM: LazyLock<Regex> =
+        LazyLock::new(|| re(r"\bInputAction\s*::\s*InspectTool\s*=>\s*\{"));
+    static TOOL_OPEN_ONLY: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"(?s)^\{\s*(?:crate\s*::\s*adapters\s*::\s*tui\s*::\s*)?tool_inspector\s*::\s*inspect_focused\s*\([^;{}]*\)\s*;\s*\}$",
+        )
+    });
+    static TOOL_REFRESH: LazyLock<Regex> =
+        LazyLock::new(|| re(r"\btool_inspector\s*::\s*refresh\s*\("));
+    let has_tool_owner = files
+        .iter()
+        .any(|(path, _)| path == "src/adapters/tui/tool_inspector/mod.rs");
     let mut errors = Vec::new();
     let mut unused: Vec<_> = pins
         .iter()
@@ -445,6 +463,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "a2b-owner",
                     "a2b-payload-owner",
                     "legacy-painter",
+                    "tool-inspector-legacy",
                     "field-string",
                     "field-tail",
                 ]
@@ -498,6 +517,27 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "{path}: {name} must call presentation::compose exactly once"
                 ));
             }
+            if has_tool_owner && path == HOSTS[0].0 {
+                let arms: Vec<_> = TOOL_OPEN_ARM.find_iter(&code).collect();
+                if arms.len() != 1 {
+                    errors.push(format!(
+                        "{path}: tool-inspector-host needs one InspectTool arm"
+                    ));
+                } else {
+                    let open = arms[0].end() - 1;
+                    let arm = &code[open..item_end(&code, open)];
+                    if !TOOL_OPEN_ONLY.is_match(arm) {
+                        errors.push(format!("{path}: tool-inspector-host InspectTool must be one inspect_focused call"));
+                    }
+                }
+                if TOOL_REFRESH.find_iter(body).count() != 1
+                    || TOOL_REFRESH.find_iter(&code).count() != 1
+                {
+                    errors.push(format!(
+                        "{path}: tool-inspector-host render must refresh exactly once"
+                    ));
+                }
+            }
         }
     }
     for (path, owner, site, _, _, _) in unused {
@@ -547,6 +587,14 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
     for (host, _) in HOSTS {
         assert_eq!(files.iter().filter(|(p, _)| p.as_str() == *host).count(), 1);
     }
+    assert_eq!(
+        files
+            .iter()
+            .filter(|(path, _)| path == "src/adapters/tui/tool_inspector/mod.rs")
+            .count(),
+        1,
+        "the live tree must contain its tool payload owner"
+    );
     for module in [
         "mod",
         "stack",
@@ -1474,4 +1522,132 @@ fn k6_bb2_fields_are_typed_and_tail_helpers_cannot_return() {
     let legacy = "struct FeedbackInputState { query: String }
         fn edit_field() { state.model_selector.search_query.push(x); }";
     assert!(scan(&[("src/field.rs".into(), legacy.into())], &[]).is_empty());
+}
+
+const LEGACY_TOOL_INSPECTOR_IDENTIFIERS: &[&str] = &[
+    "ToolBlockState",
+    "tool_block_states",
+    "tool_block_states_version",
+    "peek_active",
+    "render_peek_overlay",
+    "PeekToolBlock",
+    "ToggleToolBlock",
+    "expanded_body_height",
+    "expanded_diff_body",
+    "TOGGLE_TOOL_BLOCK",
+];
+
+#[test]
+fn k6_story21_5_each_legacy_tool_identifier_is_unpinnable_in_production() {
+    for token in LEGACY_TOOL_INSPECTOR_IDENTIFIERS {
+        for path in [
+            "src/x.rs",
+            "src/adapters/tui/state.rs",
+            "src/adapters/tui/notification_log.rs",
+            "src/adapters/tui/quit_confirm.rs",
+            "src/adapters/tui/presentation/compose.rs",
+        ] {
+            let files = [(path.into(), format!("fn real() {{ let _ = {token}; }}"))];
+            let first = scan(&files, &[]);
+            assert_eq!(first.len(), 1, "{path}: {token}: {first:?}");
+            assert!(
+                first[0].contains("tool-inspector-legacy|real|"),
+                "{path}: {token}: {first:?}"
+            );
+            let sites: Vec<_> = first
+                .iter()
+                .map(|error| error.split_once(": ").unwrap().1)
+                .collect();
+            for owner in ["21-6", "21-8"] {
+                let errors = scan(&files, &[(path, owner, sites.as_slice())]);
+                assert!(
+                    errors.iter().any(|error| {
+                        !error.starts_with("stale pin")
+                            && error.contains("tool-inspector-legacy|real|")
+                    }),
+                    "{path}: {token}: {owner}: {errors:?}"
+                );
+                assert!(
+                    errors.iter().any(|error| error.starts_with("stale pin")),
+                    "{path}: {token}: {owner}: {errors:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn k6_story21_5_legacy_tool_copies_are_masked_and_identifier_boundaries_are_exact() {
+    for token in LEGACY_TOOL_INSPECTOR_IDENTIFIERS {
+        for source in [
+            format!("// {token}\nfn real() {{}}"),
+            format!("/* outer /* {token} */ comment */ fn real() {{}}"),
+            format!("fn real() {{ let _ = \"escaped \\\" {token}\"; }}"),
+            format!("fn real() {{ let _ = r##\"{token}\"##; }}"),
+            format!("#[cfg(test)] fn test_only() {{ let _ = {token}; }}\nfn real() {{}}"),
+            format!(
+                "#[cfg(test)] mod tests {{ fn test_only() {{ let _ = {token}; }} }}\nfn real() {{}}"
+            ),
+            format!("#[cfg(test)] use crate::{{{token}}};\nfn real() {{}}"),
+            format!("fn real() {{ let _ = prefix_{token}; let _ = {token}_suffix; }}"),
+        ] {
+            for path in ["src/x.rs", "src/adapters/tui/presentation/compose.rs"] {
+                let errors = scan(&[(path.into(), source.clone())], &[]);
+                assert!(errors.is_empty(), "{path}: {source}: {errors:?}");
+                let errors = scan(
+                    &[(
+                        path.into(),
+                        format!("{source}\nfn later() {{ let _ = {token}; }}"),
+                    )],
+                    &[],
+                );
+                assert_eq!(errors.len(), 1, "{path}: {source}: {errors:?}");
+                assert!(
+                    errors[0].contains("tool-inspector-legacy|later|"),
+                    "{path}: {source}: {errors:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn k6_story21_5_host_calls_are_single_seams_and_the_painter_has_one_owner() {
+    let host = "fn dispatch() { match action { InputAction::InspectTool => { tool_inspector::inspect_focused(state, conversation, None); }, _ => {} } } fn render() { tool_inspector::refresh(state, conversation, None, clock, 1); presentation::compose(frame); }";
+    let files = |source: &str| {
+        vec![
+            (HOSTS[0].0.into(), source.into()),
+            (
+                "src/adapters/tui/tool_inspector/mod.rs".into(),
+                "fn owner() {}".into(),
+            ),
+        ]
+    };
+    assert!(scan(&files(host), &[]).is_empty());
+    let refresh = "tool_inspector::refresh(state, conversation, None, clock, 1);";
+    let open = "tool_inspector::inspect_focused(state, conversation, None);";
+    for bad in [
+        host.replace(open, &format!("{open} state.needs_redraw = true;")),
+        host.replace(open, &format!("{open} {open}")),
+        host.replace("InputAction::InspectTool =>", "InputAction::Other =>"),
+        host.replace(refresh, ""),
+        format!("{host} fn stray() {{ {refresh} }}"),
+        format!("{} fn stray() {{ {refresh} }}", host.replace(refresh, "")),
+    ] {
+        assert!(
+            scan(&files(&bad), &[])
+                .iter()
+                .any(|error| error.contains("tool-inspector-host"))
+        );
+    }
+    assert!(
+        !scan(
+            &[(
+                "src/side_door.rs".into(),
+                "fn draw() { tool_inspector::render(frame, area, state, theme, title); }".into(),
+            )],
+            &[]
+        )
+        .is_empty()
+    );
 }

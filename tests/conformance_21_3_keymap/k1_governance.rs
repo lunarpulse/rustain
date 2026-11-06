@@ -298,3 +298,51 @@ fn every_command_a_surface_displays_is_a_registered_row() {
     );
     validate(table(), &shipped(), &displayed).expect("every displayed command is registered");
 }
+
+/// Shared-body coverage is registered once, through the concrete local frame.
+/// Attached has no S-TOOL surface or inherited body route (FR-21-5-b).
+#[test]
+fn tool_inspector_cases_cover_both_contexts_once_and_remain_local_only() {
+    use rustain::adapters::tui::keymap::{Host, Resolved, resolve, resolve::rows_of};
+
+    let cases = super::k9_tool::cases();
+    let mut contexts = cases.iter().map(|case| case.context).collect::<Vec<_>>();
+    contexts.sort();
+    assert_eq!(
+        contexts,
+        vec![Context::InspectorBody, Context::ToolInspector]
+    );
+    assert!(Context::InspectorBody.parents().is_empty());
+    assert_eq!(Context::ToolInspector.parents(), &[Context::InspectorBody]);
+    for case in &cases {
+        assert_eq!(case.surface, Context::ToolInspector);
+        assert_eq!(
+            Context::ALL
+                .iter()
+                .filter(|context| **context == case.context)
+                .count(),
+            1
+        );
+        let local = rows_of(case.context, Host::Local).collect::<Vec<_>>();
+        assert!(
+            !local.is_empty(),
+            "the attached n/a assertion has a local control"
+        );
+        assert_eq!(rows_of(case.context, Host::Attached).count(), 0);
+        for row in local {
+            assert!(matches!(
+                resolve(case.surface, Host::Local, row.keys),
+                Resolved::Hit(_)
+            ));
+            assert!(
+                matches!(
+                    resolve(case.surface, Host::Attached, row.keys),
+                    Resolved::Miss
+                ),
+                "attached must not inherit {:?} from {:?}",
+                row.keys,
+                case.context
+            );
+        }
+    }
+}

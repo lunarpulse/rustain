@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -7,7 +5,6 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::events::ChunkAction;
 use rustain::domain::models::{
     ChatMessage, Conversation, MessageRole, StopReason, StreamChunk, StreamingPhase,
@@ -62,7 +59,6 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -110,7 +106,6 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -173,7 +168,6 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -226,7 +220,6 @@ fn test_e2e_message_to_streaming_response() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );

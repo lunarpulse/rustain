@@ -36,23 +36,46 @@ pub fn chat_pixels(h: &TestHarness) -> String {
         .collect()
 }
 
-pub fn cache_keys(h: &TestHarness, tabs: &TabManager) -> (Vec<String>, Vec<String>, u64) {
+pub fn cache_keys(h: &TestHarness, tabs: &TabManager) -> (Vec<String>, Vec<String>) {
     let render = &h.state.tab_render_states[&tabs.active_tab_id()];
     let mut turns = render
         .height_cache
         .entries
-        .keys()
-        .map(|key| format!("{key:?}"))
+        .iter()
+        .map(|(key, entry)| format!("{key:?}={entry:?}"))
         .collect::<Vec<_>>();
     let mut messages = render
         .height_cache
         .message_entries
-        .keys()
-        .map(|key| format!("{key:?}"))
+        .iter()
+        .map(|(key, height)| format!("{key:?}={height}"))
         .collect::<Vec<_>>();
     turns.sort();
     messages.sort();
-    (turns, messages, render.tool_block_states_version)
+    (turns, messages)
+}
+
+#[test]
+fn cache_snapshot_observes_actual_stage_entry_changes() {
+    let (mut h, tabs) = stage(80, 24);
+    let before = cache_keys(&h, &tabs);
+    let render = h
+        .state
+        .tab_render_states
+        .get_mut(&tabs.active_tab_id())
+        .unwrap();
+    let height = render
+        .height_cache
+        .message_entries
+        .values_mut()
+        .next()
+        .expect("production Stage rendering populated a message entry");
+    *height += 1;
+    assert_ne!(
+        cache_keys(&h, &tabs),
+        before,
+        "entry-height mutations must be visible even with identical cache keys"
+    );
 }
 
 pub fn paste(

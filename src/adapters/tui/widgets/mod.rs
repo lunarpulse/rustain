@@ -56,6 +56,7 @@ pub mod team_proposal_card;
 pub mod team_retract_prompt;
 pub mod toast_layer;
 pub mod tool_block;
+pub mod tool_inspector;
 pub mod transparency_panel;
 pub mod usage_panel;
 pub mod which_key_bar;

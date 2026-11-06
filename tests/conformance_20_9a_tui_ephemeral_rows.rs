@@ -1,6 +1,6 @@
 //! Production ingress and ephemeral display projection regressions for story 20.9a.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ratatui::{Terminal, backend::TestBackend};
@@ -650,7 +650,6 @@ fn render(conversation: &Conversation, state: &TuiState) -> String {
                 true,
                 &Theme::dark(),
                 &mut tab,
-                &HashMap::new(),
                 &BTreeMap::new(),
                 None,
                 None,

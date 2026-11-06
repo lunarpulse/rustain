@@ -405,9 +405,10 @@ With an empty composer, **y** sends exactly that snapshot once its decision foot
 has been painted, **r** opens its full, delimited Review, and **n** dismisses it.
 Enter and Escape never send. With text in the composer, y/r/n remain text input;
 higher-priority approval prompts and large-image confirmations keep their keys.
-A tool peek takes its dismissing key before any proposal decision; Ctrl+R still
-opens composer history search. Clearing or closing the conversation withdraws its
-draft without peer I/O. Switching conversations never approves or retargets it.
+Enter inspects the focused tool call in a local-only tool inspector; attached
+sessions have no tool inspector. Ctrl+R still opens composer history search.
+Clearing or closing the conversation withdraws its draft without peer I/O.
+Switching conversations never approves or retargets it.
 
 Long recipient lists remain complete and scrollable, including at 60×16. Use
 **PgUp/PgDn** to page an overflowing card; Send stays disabled until the decision

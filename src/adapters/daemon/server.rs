@@ -8337,7 +8337,6 @@ mod tests {
                         &Theme::dark(),
                         &mut cache,
                         &Default::default(),
-                        &Default::default(),
                         None,
                         None,
                         &[],

@@ -177,3 +177,6 @@ mod virtual_scroll;
 
 #[path = "../widget_in_context.rs"]
 mod widget_in_context;
+
+#[path = "../conformance_21_5_tool_inspector.rs"]
+mod conformance_21_5_tool_inspector;

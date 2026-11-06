@@ -306,6 +306,7 @@ fn frame_owned_hints_hide_and_restore_the_underlying_context() {
             state.is_vscode,
             &state.modal_stack,
             state.pending_leader,
+            false,
         )
     }
     for origin in ["log", "base", "leader", "palette"] {

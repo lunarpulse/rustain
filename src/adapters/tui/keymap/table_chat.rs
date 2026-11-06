@@ -13,7 +13,7 @@
 //!
 //! One row per line on purpose (`rustfmt::skip`): the table is data.
 
-use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};
+use super::model::{AvailCtx, Availability, Binding, CommandId, Context, HelpCat, Key, bind};
 
 /// Commands of the Chat context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,12 +64,10 @@ pub enum ChatCmd {
     SwitchToTab(u8),
     /// `Alt+V`: paste (image or text) from the system clipboard.
     PasteClipboard,
-    /// `Enter`: toggle collapse of the focused tool block.
-    ToggleToolBlock,
+    /// `Enter`: inspect the render-focused tool in its own frame.
+    Inspect,
     /// `c`: copy the focused content (the Copy command, RU-21).
     Copy,
-    /// `p`: peek the focused collapsed tool block.
-    PeekToolBlock,
     /// `f`: fork the conversation at the focused message.
     ForkAtMessage,
     /// `R`: rewind the conversation to the focused message.
@@ -102,6 +100,14 @@ pub enum ChatCmd {
 
 const fn c(keys: &'static [Key], cmd: ChatCmd, label: &'static str) -> Binding {
     bind(Context::Chat, keys, CommandId::Chat(cmd), label)
+}
+
+fn stage_target(ctx: &AvailCtx) -> Availability {
+    if ctx.stage_target {
+        Availability::Available
+    } else {
+        Availability::Unavailable("Focus a tool call in Chat to inspect it")
+    }
 }
 
 const N: HelpCat = HelpCat::Navigation;
@@ -161,8 +167,7 @@ const CHAT: &[Binding] = &[
     c(&[Key::Alt('v')], ChatCmd::PasteClipboard, "").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
     c(&[Key::Char('c')], ChatCmd::Copy, "").local().copy().help(HelpCat::Clipboard, "c", "Copy focused content to clipboard"),
     // ── the focused message / tool block ──
-    c(&[Key::Enter], ChatCmd::ToggleToolBlock, "").local().does("Expand or collapse the focused tool block"),
-    c(&[Key::Char('p')], ChatCmd::PeekToolBlock, "").local().does("Peek at the focused tool block"),
+    c(&[Key::Enter], ChatCmd::Inspect, "Inspect").hint().local().avail(stage_target).does("Inspect the focused tool call"),
     c(&[Key::Char('f')], ChatCmd::ForkAtMessage, "").local().does("Fork the conversation at the focused message"),
     c(&[Key::Char('R')], ChatCmd::RewindAtMessage, "").local().does("Rewind the conversation to the focused message"),
     c(&[Key::Char('m')], ChatCmd::ToggleBookmark, "").local().help(HelpCat::Search, "m", "Toggle bookmark on current message"),

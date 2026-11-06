@@ -447,17 +447,41 @@ fn test_e2e_contextual_hint_per_focus() {
     use rustain::adapters::tui::hints::contextual_hint;
 
     // Test Input focus hint
-    let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None);
+    let hint = contextual_hint(
+        &FocusState::Input,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("? for help"));
 
     // Test Chat focus hint
-    let hint = contextual_hint(&FocusState::Chat, 1, 5, false, &Default::default(), None);
+    let hint = contextual_hint(
+        &FocusState::Chat,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_some());
     assert!(hint.unwrap().contains("j/k"));
 
     // Test above threshold
-    let hint = contextual_hint(&FocusState::Input, 6, 5, false, &Default::default(), None);
+    let hint = contextual_hint(
+        &FocusState::Input,
+        6,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    );
     assert!(hint.is_none());
 }
 

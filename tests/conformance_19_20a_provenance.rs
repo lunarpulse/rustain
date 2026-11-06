@@ -243,7 +243,6 @@ fn paint(
                     &attached_view,
                     &theme,
                     cache,
-                    &HashMap::new(),
                     &BTreeMap::new(),
                     withheld,
                 )
@@ -260,7 +259,6 @@ fn paint(
                     false,
                     &theme,
                     cache,
-                    &HashMap::new(),
                     &BTreeMap::new(),
                     None,
                     None,
@@ -1087,7 +1085,6 @@ async fn migrated_sessions_preserve_decorations_search_and_selected_tool_copy() 
                             false,
                             &theme,
                             &mut cache,
-                            &HashMap::new(),
                             &BTreeMap::new(),
                             Some("PARTIAL"),
                             matches.first(),
@@ -1199,7 +1196,6 @@ fn provenance_prefixes_preserve_fold_navigation_geometry() {
         60,
         8,
         &MockClock::at_wall_ms(3_000),
-        &HashMap::new(),
         &[0],
     );
     assert_eq!(
@@ -1234,7 +1230,6 @@ fn provenance_prefixes_preserve_fold_navigation_geometry() {
         60,
         8,
         &MockClock::at_wall_ms(3_000),
-        &HashMap::new(),
         &[0],
     );
     assert_eq!(

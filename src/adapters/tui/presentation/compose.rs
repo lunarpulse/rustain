@@ -82,6 +82,16 @@ pub fn compose(
                 .set_style(area, Style::default().add_modifier(Modifier::DIM));
         }
         match modal.surface {
+            Surface::ToolInspector(key) => crate::adapters::tui::widgets::tool_inspector::render(
+                frame,
+                rect,
+                state
+                    .tool_inspectors
+                    .get(&key.0)
+                    .expect("Tool frame owns its payload"),
+                theme,
+                modal.title(),
+            ),
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -206,7 +216,8 @@ pub fn compose(
                 | Surface::ModelSelector
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel
-                | Surface::Login => theme.colors.accent,
+                | Surface::Login
+                | Surface::ToolInspector(_) => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

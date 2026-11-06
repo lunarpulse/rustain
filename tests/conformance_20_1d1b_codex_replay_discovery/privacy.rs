@@ -15,7 +15,7 @@ use rustain::domain::models::{
 use rustain::domain::services::message_builder::build_api_messages;
 use rustain::infrastructure::runtime::event_bus::{EventBus, RawEvent};
 use serial_test::serial;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use wiremock::MockServer;
@@ -52,7 +52,6 @@ fn render(conversation: &Conversation) -> String {
             true,
             &Theme::dark(),
             &mut tab_render_state,
-            &HashMap::new(),
             &BTreeMap::new(),
             None,
             None,

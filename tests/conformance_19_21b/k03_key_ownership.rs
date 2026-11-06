@@ -22,6 +22,10 @@ use serde_json::json;
 use super::observed_host::{HttpCounts, ObservedHost};
 use super::proposal_harness::ProposalFixture;
 
+#[allow(clippy::duplicate_mod)]
+#[path = "../common/render_helpers.rs"]
+mod stage;
+
 async fn fixture(host: &ObservedHost) -> ProposalFixture {
     let mut fixture = ProposalFixture::start(vec![host.peer("lena-po")]).await;
     fixture.set_mode(PermissionMode::Yolo);
@@ -152,24 +156,70 @@ async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
     host.stop().await;
 }
 
+fn paint_owned_frame(fixture: &mut ProposalFixture) -> Vec<String> {
+    fixture.tabs.active_tab_mut().conversation = fixture.conversation.clone();
+    fixture.state.terminal_width = 60;
+    fixture.state.terminal_height = 16;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 16)).unwrap();
+    let core = rustain::infrastructure::runtime::agent_core::AgentCore::test_noop();
+    let count = fixture.tabs.tab_count();
+    rustain::infrastructure::runtime::event_loop::render(
+        &mut terminal,
+        &mut fixture.state,
+        &fixture.conversation,
+        &Default::default(),
+        "fixture-model",
+        "fixture-provider",
+        &*fixture.security,
+        count,
+        0,
+        Some(&mut fixture.tabs),
+        &rustain::domain::services::session_index::SessionIndex::new(),
+        128_000,
+        &core,
+    )
+    .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(60)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+        .collect()
+}
+
+fn assert_tool_covers_proposal(fixture: &ProposalFixture, rows: &[String]) {
+    // Shared frames keep the underlay metadata, but it cannot authorize a key.
+    assert!(fixture.state.team_proposal_visible.is_some());
+    assert!(rows.iter().any(|row| row.contains("Tool · Read #1")));
+    assert!(!rows.iter().any(|row| row.contains("[y] Send")));
+}
+
 #[tokio::test]
-async fn k03_tool_peek_dismisses_y_without_sending_with_stale_or_fresh_paint() {
+async fn k03_tool_inspector_owns_y_without_sending_with_stale_or_fresh_paint() {
+    use rustain::adapters::tui::presentation::Surface;
+    use rustain::domain::models::{InvocationStatus, MessageRole, StopReason};
+
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut fixture = fixture(&host).await;
-    // The real scripted turn emitted this tool call; p creates its collapsed state.
-    fixture.state.focused_tool_id = Some("proposal-0".into());
+    // The ownership witness uses a real, renderable invocation, not the old
+    // wire-id-only peek marker. The pending proposal remains the send target.
+    fixture
+        .conversation
+        .messages
+        .push(stage::make_msg("inspected-tool", MessageRole::Assistant));
+    fixture.conversation.turns.push(stage::make_turn(
+        "inspected-tool",
+        vec![stage::tool("Read", InvocationStatus::Success)],
+        Some(StopReason::EndTurn),
+    ));
     for repaint in [false, true] {
-        assert!(matches!(
-            fixture
-                .raw_key(press(KeyCode::Char('p'), KeyModifiers::NONE))
-                .await,
-            Some(InputAction::Consumed)
-        ));
-        assert!(fixture.state.tool_block_states["proposal-0"].peek_active);
+        stage::inspect_stage_tool(&mut fixture.state, &fixture.conversation, None);
+        let owner = fixture.state.modal_stack.top().unwrap().clone();
+        assert!(matches!(owner.surface, Surface::ToolInspector(_)));
         if repaint {
-            let rows = fixture.paint(60, 16);
-            assert!(fixture.state.team_proposal_visible.is_none());
-            assert!(!rows.iter().any(|row| row.contains("[y] Send")));
+            let rows = paint_owned_frame(&mut fixture);
+            assert_tool_covers_proposal(&fixture, &rows);
         }
         assert!(matches!(
             fixture
@@ -177,7 +227,20 @@ async fn k03_tool_peek_dismisses_y_without_sending_with_stale_or_fresh_paint() {
                 .await,
             Some(InputAction::Consumed)
         ));
-        assert!(!fixture.state.tool_block_states["proposal-0"].peek_active);
+        assert_not_sent(&fixture, &host).await;
+        if !repaint {
+            let rows = paint_owned_frame(&mut fixture);
+            assert_tool_covers_proposal(&fixture, &rows);
+        }
+        assert_eq!(fixture.state.modal_stack.top(), Some(&owner));
+        assert!(matches!(
+            fixture
+                .raw_key(press(KeyCode::Esc, KeyModifiers::NONE))
+                .await,
+            Some(InputAction::Consumed)
+        ));
+        assert!(fixture.state.modal_stack.is_empty());
+        assert!(fixture.state.tool_inspectors.is_empty());
         assert_not_sent(&fixture, &host).await;
         fixture.paint(60, 16);
     }

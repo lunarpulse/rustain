@@ -1,0 +1,28 @@
+{
+  "scene": "story-21-5-tool-inspector-a",
+  "personas": {
+    "scene-tool-inspector": {
+      "wire": "anthropic",
+      "turns": [
+        {
+          "expect": "inspect please",
+          "content": [
+            {"type": "tool_use", "name": "Bash", "input": {"command": "seq 1 60 | sed 's/^/row /'"}},
+            {"type": "text", "text": "Before Edit 01  \nBefore Edit 02  \nBefore Edit 03  \nBefore Edit 04  \nBefore Edit 05  \nBefore Edit 06  \nBefore Edit 07  \nBefore Edit 08  \nBefore Edit 09  \nBefore Edit 10  \nBefore Edit 11  \nBefore Edit 12  \nBefore Edit 13  \nBefore Edit 14  \nBefore Edit 15  \nBefore Edit 16  \nBefore Edit 17  \nBefore Edit 18  \nBefore Edit 19  \nBefore Edit 20  \nBefore Edit 21  \nBefore Edit 22  \nBefore Edit 23  \nBefore Edit 24  \nBefore Edit 25  \nBefore Edit 26  \nBefore Edit 27  \nBefore Edit 28  \n"},
+            {"type": "tool_use", "name": "Edit", "input": {"file_path": "notes.txt", "old_string": "alpha", "new_string": "beta"}},
+            {"type": "text", "text": "Before Write 01  \nBefore Write 02  \nBefore Write 03  \nBefore Write 04  \nBefore Write 05  \nBefore Write 06  \nBefore Write 07  \nBefore Write 08  \nBefore Write 09  \nBefore Write 10  \nBefore Write 11  \nBefore Write 12  \nBefore Write 13  \nBefore Write 14  \nBefore Write 15  \nBefore Write 16  \nBefore Write 17  \nBefore Write 18  \nBefore Write 19  \nBefore Write 20  \nBefore Write 21  \nBefore Write 22  \nBefore Write 23  \nBefore Write 24  \nBefore Write 25  \nBefore Write 26  \nBefore Write 27  \nBefore Write 28  \n"},
+            {"type": "tool_use", "name": "Write", "input": {"file_path": "fresh.txt", "content": "line one\nline two\n"}}
+          ],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 40, "output_tokens": 80}
+        },
+        {
+          "expect": "row 60",
+          "content": [{"type": "text", "text": "Inspected three tools."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 80, "output_tokens": 8}
+        }
+      ]
+    }
+  }
+}

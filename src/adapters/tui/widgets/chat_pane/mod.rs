@@ -17,7 +17,7 @@ use crate::adapters::tui::state::PendingPlanCard;
 use crate::adapters::tui::state::{CachedTurnLayout, TabRenderState};
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
-use crate::adapters::tui::widgets::tool_block::{self, ToolBlockState};
+use crate::adapters::tui::widgets::tool_block;
 use crate::domain::clock::{Clock, current_braille_frame};
 use crate::domain::models::turn::tool_call_id_for;
 use crate::domain::models::{
@@ -890,8 +890,8 @@ fn effective_is_collapsed(turn: &Turn, view_state: &ViewState) -> bool {
 ///
 /// `tool_lines` pairs each invocation with its result before measuring
 /// height (P0-4 fix — without this every invocation = 1 collapsed line).
-/// Uses `ToolBlockState { collapsed: false }` so the predicate sees the
-/// true height.
+/// Preserve the historical full-body estimate, independently of compact
+/// Stage rendering, so deleting inline expansion does not change turn folds.
 ///
 /// Signature: 1 arg (`turn`) per P1-3 — frame-stable, reads only immutable
 /// turn.parts.
@@ -926,16 +926,31 @@ fn default_collapse_predicate(turn: &Turn) -> bool {
         .parts
         .iter()
         .filter_map(|p| {
-            if let TurnPart::ToolInvocation { id, .. } = p {
-                let result_part = results.get(id).copied();
-                let tc = adapter_shim(turn, p, result_part);
-                Some(tool_block::tool_block_height(
-                    &tc,
-                    &ToolBlockState {
-                        collapsed: false,
-                        peek_active: false,
-                    },
-                ))
+            if let TurnPart::ToolInvocation {
+                id,
+                tool,
+                args,
+                status,
+                ..
+            } = p
+            {
+                let result = results.get(id).copied().filter(|_| {
+                    matches!(status, InvocationStatus::Success | InvocationStatus::Error)
+                });
+                Some(match result {
+                    Some(TurnPart::ToolResult { output, .. }) if output.is_error => {
+                        1 + output.content.lines().count().max(1)
+                    }
+                    Some(TurnPart::ToolResult { output, .. }) => {
+                        3 + crate::adapters::tui::tool_inspector::source::diff_body(
+                            tool,
+                            args,
+                            &output.diff,
+                        )
+                        .map_or_else(|| output.content.lines().count(), |body| body.row_count())
+                    }
+                    _ => 1,
+                })
             } else {
                 None
             }
@@ -1049,22 +1064,7 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
 /// - tool → tool: 0 (flush — tool group)
 /// - prose/reasoning → prose/reasoning: 1 (adjacent prose, rare)
 // Height is clock-independent — see AC6.
-pub(super) fn expanded_turn_height(
-    turn: &Turn,
-    theme: &Theme,
-    width: usize,
-    tool_block_states: &HashMap<String, ToolBlockState>,
-) -> CachedTurnLayout {
-    expanded_turn_height_attached(turn, theme, width, tool_block_states, None)
-}
-
-fn expanded_turn_height_attached(
-    turn: &Turn,
-    theme: &Theme,
-    width: usize,
-    tool_block_states: &HashMap<String, ToolBlockState>,
-    withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
-) -> CachedTurnLayout {
+pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> CachedTurnLayout {
     let content_width = width.saturating_sub(2);
     if content_width == 0 {
         return CachedTurnLayout {
@@ -1123,12 +1123,7 @@ fn expanded_turn_height_attached(
                 // Story 19.9 A3: the id travels with the START offset so
                 // keyboard focus can name THIS block, not the first one.
                 tool_block_offsets.push((height, tc.id.clone()));
-                let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
-                height += tool_block::tool_block_height_attached(
-                    &tc,
-                    &tb_state,
-                    withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
-                );
+                height += tool_block::tool_block_height(&tc);
                 if *status == InvocationStatus::Running {
                     running_count += 1;
                 }
@@ -1237,10 +1232,6 @@ pub fn build_layout_metrics(
     width: u16,
     viewport_height: usize,
     clock: &dyn Clock,
-    tool_block_states: &std::collections::HashMap<
-        String,
-        crate::adapters::tui::widgets::tool_block::ToolBlockState,
-    >,
     bookmarks: &[usize],
 ) -> LayoutMetrics {
     let bookmarks = live_bookmarks(conversation, bookmarks);
@@ -1273,7 +1264,6 @@ pub fn build_layout_metrics(
                 expansion: false, // collapsed
                 summary_tier: view_state.summary_tier,
                 terminal_width: width,
-                tool_block_states_version: tab_render_state.tool_block_states_version,
             };
             if let Some(cached) = tab_render_state.height_cache.get(&key) {
                 cached.clone()
@@ -1288,12 +1278,11 @@ pub fn build_layout_metrics(
                 expansion: true, // expanded
                 summary_tier: view_state.summary_tier,
                 terminal_width: width,
-                tool_block_states_version: tab_render_state.tool_block_states_version,
             };
             if let Some(cached) = tab_render_state.height_cache.get(&key) {
                 cached.clone()
             } else {
-                let fresh = expanded_turn_height(turn, theme, width_usize, tool_block_states);
+                let fresh = expanded_turn_height(turn, theme, width_usize);
                 tab_render_state.height_cache.set(key, fresh.clone());
                 fresh
             }
@@ -1421,7 +1410,6 @@ fn render_expanded_turn<'a>(
     theme: &'a Theme,
     width: usize,
     clock: &dyn Clock,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
     search: Option<(&str, Option<usize>)>,
@@ -1498,11 +1486,9 @@ fn render_expanded_turn<'a>(
             } => {
                 let result = result_map.get(id).copied();
                 let tc = adapter_shim(turn, part, result);
-                let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                 let tb_lines = tool_block::render_tool_block_lines_attached(
                     &tc,
                     theme,
-                    &tb_state,
                     content_width as u16,
                     clock,
                     withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
@@ -1729,7 +1715,6 @@ pub fn render(
     auto_scroll: bool,
     theme: &Theme,
     tab_render_state: &mut TabRenderState,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
 ) -> RenderResult {
     render_with_search(
@@ -1744,7 +1729,6 @@ pub fn render(
         auto_scroll,
         theme,
         tab_render_state,
-        tool_block_states,
         feedback_blocks,
         None,
         None,
@@ -1760,8 +1744,8 @@ pub fn render(
 /// Attach-mode render wrapper: preserves the local TUI render contract while
 /// showing every persisted channel origin, including `[terminal]`, in the
 /// socket-sourced unified scrollback (Story 12.2c AC2).
-/// Withheld input is keyed by tool call id and replaces every input display,
-/// including expanded blocks. An empty map preserves trusted-local rendering.
+/// Withheld input is keyed by tool call id and replaces each input summary.
+/// An empty map preserves trusted-local rendering.
 #[allow(clippy::too_many_arguments, dead_code)]
 pub fn render_attached(
     frame: &mut Frame,
@@ -1771,7 +1755,6 @@ pub fn render_attached(
     view_state: &ViewState,
     theme: &Theme,
     tab_render_state: &mut TabRenderState,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
     withheld_tool_inputs: &HashMap<String, ToolInputWithheld>,
 ) -> RenderResult {
@@ -1790,7 +1773,6 @@ pub fn render_attached(
         ),
         theme,
         tab_render_state,
-        tool_block_states,
         feedback_blocks,
         None,
         None,
@@ -1837,7 +1819,6 @@ pub fn render_with_search(
     auto_scroll: bool,
     theme: &Theme,
     tab_render_state: &mut TabRenderState,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
     search_query: Option<&str>,
     focused_search_match: Option<&SearchMatch>,
@@ -1862,7 +1843,6 @@ pub fn render_with_search(
         auto_scroll,
         theme,
         tab_render_state,
-        tool_block_states,
         feedback_blocks,
         search_query,
         focused_search_match,
@@ -1890,7 +1870,6 @@ fn render_with_search_impl(
     auto_scroll: bool,
     theme: &Theme,
     tab_render_state: &mut TabRenderState,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
     search_query: Option<&str>,
     focused_search_match: Option<&SearchMatch>,
@@ -1995,74 +1974,55 @@ fn render_with_search_impl(
                         expansion: !collapsed,
                         summary_tier: view_state.summary_tier,
                         terminal_width: area.width,
-                        tool_block_states_version: tab_render_state.tool_block_states_version,
                     };
-                    // Withheld blocks can omit input-derived diffs, so their
-                    // layouts must not reuse standalone argument-based heights.
-                    let layout = if let Some(inputs) =
-                        withheld_tool_inputs.filter(|inputs| !inputs.is_empty())
-                    {
-                        if collapsed {
-                            collapsed_turn_height(turn, view_state, theme, width)
-                        } else {
-                            expanded_turn_height_attached(
-                                turn,
-                                theme,
-                                width,
-                                tool_block_states,
-                                Some(inputs),
-                            )
-                        }
-                    } else {
-                        match tab_render_state.height_cache.get(&key) {
-                            Some(l) => {
-                                let l = l.clone();
-                                #[cfg(debug_assertions)]
-                                {
-                                    crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    let probe = if collapsed {
-                                        collapsed_turn_height(turn, view_state, theme, width)
-                                    } else {
-                                        expanded_turn_height(turn, theme, width, tool_block_states)
-                                    };
-                                    if probe.height != l.height
-                                        || probe.block_offsets != l.block_offsets
-                                        || probe.tool_block_offsets != l.tool_block_offsets
-                                    {
-                                        tracing::warn!(
-                                            "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
-                                            turn.id.0,
-                                            !collapsed,
-                                            l.height,
-                                            l.block_offsets,
-                                            l.tool_block_offsets,
-                                            probe.height,
-                                            probe.block_offsets,
-                                            probe.tool_block_offsets
-                                        );
-                                        tab_render_state.height_cache.invalidate_all();
-                                    }
-                                }
-                                l
-                            }
-                            None => {
-                                let l = if collapsed {
+                    let layout = match tab_render_state.height_cache.get(&key) {
+                        Some(l) => {
+                            let l = l.clone();
+                            #[cfg(debug_assertions)]
+                            {
+                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::HITS
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let probe = if collapsed {
                                     collapsed_turn_height(turn, view_state, theme, width)
                                 } else {
-                                    expanded_turn_height(turn, theme, width, tool_block_states)
+                                    expanded_turn_height(turn, theme, width)
                                 };
-                                #[cfg(debug_assertions)]
+                                if probe.height != l.height
+                                    || probe.block_offsets != l.block_offsets
+                                    || probe.tool_block_offsets != l.tool_block_offsets
                                 {
-                                    crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    tracing::warn!(
+                                        "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
+                                        turn.id.0,
+                                        !collapsed,
+                                        l.height,
+                                        l.block_offsets,
+                                        l.tool_block_offsets,
+                                        probe.height,
+                                        probe.block_offsets,
+                                        probe.tool_block_offsets
+                                    );
+                                    tab_render_state.height_cache.invalidate_all();
                                 }
-                                tab_render_state.height_cache.set(key.clone(), l.clone());
-                                l
                             }
+                            l
+                        }
+                        None => {
+                            let l = if collapsed {
+                                collapsed_turn_height(turn, view_state, theme, width)
+                            } else {
+                                expanded_turn_height(turn, theme, width)
+                            };
+                            #[cfg(debug_assertions)]
+                            {
+                                crate::adapters::tui::widgets::chat_pane::height_cache::metrics::MISSES
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            tab_render_state.height_cache.set(key.clone(), l.clone());
+                            l
                         }
                     };
-                    // Story 19.20a: prefix both cached and withheld-input layouts.
+                    // Story 19.20a: prefix the cached turn layout.
                     let prefix_height = turn_message_prefix_height(
                         msg,
                         conversation.fork_source.is_some() && i + 1 == msg_count,
@@ -2096,16 +2056,11 @@ fn render_with_search_impl(
                         theme,
                     );
                     for tc in &msg.tool_calls {
-                        let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                         // A3: the block's START, before its height is added —
                         // `block_boundaries` keeps pushing the end (unchanged,
                         // it anchors scrolling), the focus list needs the start.
                         tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
-                        h += tool_block::tool_block_height_attached(
-                            tc,
-                            &tb_state,
-                            withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
-                        );
+                        h += tool_block::tool_block_height(tc);
                         block_boundaries.push(cumulative_offset + h);
                     }
                 }
@@ -2150,13 +2105,8 @@ fn render_with_search_impl(
                     }
                 };
                 for tc in &msg.tool_calls {
-                    let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                     tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
-                    h += tool_block::tool_block_height_attached(
-                        tc,
-                        &tb_state,
-                        withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
-                    );
+                    h += tool_block::tool_block_height(tc);
                     block_boundaries.push(cumulative_offset + h);
                 }
             }
@@ -2218,15 +2168,8 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let layout = expanded_turn_height_attached(
-                ot,
-                theme,
-                width,
-                tool_block_states,
-                withheld_tool_inputs,
-            );
-            // A3: a still-open turn's tool blocks are focusable too — the claim
-            // is that EVERY tool block can be expanded, not every committed one.
+            let layout = expanded_turn_height(ot, theme, width);
+            // A3: a still-open turn's tool blocks are focusable too.
             for (offset, id) in &layout.tool_block_offsets {
                 tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
             }
@@ -2381,7 +2324,6 @@ fn render_with_search_impl(
                                 theme,
                                 width,
                                 clock,
-                                tool_block_states,
                                 liveness,
                                 withheld_tool_inputs,
                                 search,
@@ -2482,12 +2424,9 @@ fn render_with_search_impl(
                         }
                         let mut tool_line_offset = line_offset + text_height;
                         for tc in &msg.tool_calls {
-                            let tb_state =
-                                tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                             let tb_lines = tool_block::render_tool_block_lines_attached(
                                 tc,
                                 theme,
-                                &tb_state,
                                 area.width,
                                 clock,
                                 withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
@@ -2498,11 +2437,7 @@ fn render_with_search_impl(
                                     lines.push(line);
                                 }
                             }
-                            tool_line_offset += tool_block::tool_block_height_attached(
-                                tc,
-                                &tb_state,
-                                withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
-                            );
+                            tool_line_offset += tool_block::tool_block_height(tc);
                         }
                     }
                 }
@@ -2545,11 +2480,9 @@ fn render_with_search_impl(
                     }
                     let mut tool_line_offset = line_offset + text_height;
                     for tc in &msg.tool_calls {
-                        let tb_state = tool_block_states.get(&tc.id).cloned().unwrap_or_default();
                         let tb_lines = tool_block::render_tool_block_lines_attached(
                             tc,
                             theme,
-                            &tb_state,
                             area.width,
                             clock,
                             withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
@@ -2560,11 +2493,7 @@ fn render_with_search_impl(
                                 lines.push(line);
                             }
                         }
-                        tool_line_offset += tool_block::tool_block_height_attached(
-                            tc,
-                            &tb_state,
-                            withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
-                        );
+                        tool_line_offset += tool_block::tool_block_height(tc);
                     }
                 }
             }
@@ -2653,7 +2582,6 @@ fn render_with_search_impl(
                 theme,
                 width,
                 clock,
-                tool_block_states,
                 liveness,
                 withheld_tool_inputs,
                 None,
@@ -2975,14 +2903,12 @@ mod parts_aware_tests {
         theme: &'a Theme,
         width: usize,
         clock: &dyn Clock,
-        tbs: &HashMap<String, ToolBlockState>,
     ) -> Vec<Line<'a>> {
         render_expanded_turn(
             turn,
             theme,
             width,
             clock,
-            tbs,
             None,
             None,
             None,
@@ -3114,7 +3040,6 @@ mod parts_aware_tests {
                             &ViewState::default(),
                             &theme,
                             &mut tab,
-                            &HashMap::new(),
                             &BTreeMap::new(),
                             &inputs,
                         );
@@ -3173,7 +3098,7 @@ mod parts_aware_tests {
         });
         turn.stop_reason = Some(StopReason::EndTurn);
 
-        let layout = expanded_turn_height(&turn, &Theme::dark(), 80, &HashMap::new());
+        let layout = expanded_turn_height(&turn, &Theme::dark(), 80);
         let ids: Vec<&str> = layout
             .tool_block_offsets
             .iter()
@@ -3311,6 +3236,125 @@ mod parts_aware_tests {
             Some(StopReason::EndTurn),
         );
         assert!(!default_collapse_predicate(&turn));
+    }
+
+    #[test]
+    fn story21_5_default_fold_preserves_full_body_estimates() {
+        use crate::domain::models::{NotCapturedReason, ToolOutput, WriteDiffState};
+
+        for (name, args, diff, content, is_error, status, full_height) in [
+            (
+                "Bash",
+                serde_json::json!({}),
+                WriteDiffState::NotAWrite,
+                "one\ntwo\nthree",
+                false,
+                InvocationStatus::Success,
+                6,
+            ),
+            (
+                "Bash",
+                serde_json::json!({}),
+                WriteDiffState::NotAWrite,
+                "",
+                false,
+                InvocationStatus::Success,
+                3,
+            ),
+            (
+                "Edit",
+                serde_json::json!({"old_string": "a\nb", "new_string": "a\nc"}),
+                WriteDiffState::NotAWrite,
+                "edited",
+                false,
+                InvocationStatus::Success,
+                6,
+            ),
+            (
+                "Write",
+                serde_json::json!({"content": "a\nb"}),
+                WriteDiffState::NewFile,
+                "wrote",
+                false,
+                InvocationStatus::Success,
+                5,
+            ),
+            (
+                "Write",
+                serde_json::json!({"content": ""}),
+                WriteDiffState::Diff {
+                    lines: vec![],
+                    more: 0,
+                },
+                "",
+                false,
+                InvocationStatus::Success,
+                4,
+            ),
+            (
+                "Write",
+                serde_json::json!({"content": "new"}),
+                WriteDiffState::NotCaptured {
+                    reason: NotCapturedReason::NoActiveCheckpoint,
+                },
+                "wrote",
+                false,
+                InvocationStatus::Success,
+                4,
+            ),
+            (
+                "Bash",
+                serde_json::json!({}),
+                WriteDiffState::NotAWrite,
+                "failed\nagain",
+                true,
+                InvocationStatus::Error,
+                3,
+            ),
+            (
+                "Bash",
+                serde_json::json!({}),
+                WriteDiffState::NotAWrite,
+                "stale\noutput",
+                false,
+                InvocationStatus::Cancelled,
+                1,
+            ),
+        ] {
+            for prose_lines in [3 * full_height - 1, 3 * full_height] {
+                let mut turn = Turn::new("claude".into(), 0);
+                turn.push_part(|id| TurnPart::Prose {
+                    id,
+                    text: "\n".repeat(prose_lines),
+                });
+                for _ in 0..3 {
+                    let invocation = turn.push_part(|id| TurnPart::ToolInvocation {
+                        id,
+                        tool: name.into(),
+                        args: args.clone(),
+                        status: status.clone(),
+                        started_at: 0,
+                        ended_at: Some(1),
+                    });
+                    turn.push_part(|id| TurnPart::ToolResult {
+                        id,
+                        refs: invocation,
+                        output: ToolOutput {
+                            content: content.into(),
+                            is_error,
+                            diff: diff.clone(),
+                            images: vec![],
+                        },
+                    });
+                }
+                turn.stop_reason = Some(StopReason::EndTurn);
+                assert_eq!(
+                    default_collapse_predicate(&turn),
+                    prose_lines < 3 * full_height,
+                    "{name}: {status:?}, prose_lines={prose_lines}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -3492,8 +3536,7 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 80, &clock);
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -3518,8 +3561,7 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 80, &clock);
         let rail_text: String = lines
             .iter()
             .filter(|l| l.spans.iter().any(|s| s.content.contains("⠋")))
@@ -3545,8 +3587,7 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 80, &clock);
         // Verify both prose and tool are present, and tool comes after prose
         let all_text: String = lines
             .iter()
@@ -3600,8 +3641,7 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 80, &clock);
         // Every non-empty line should start with the gutter
         for line in &lines {
             if line.spans.is_empty() {
@@ -3673,8 +3713,7 @@ mod parts_aware_tests {
         let turn = make_turn(vec![make_prose("x")], Some(StopReason::EndTurn));
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let lines = render_turn(&turn, &theme, 0, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 0, &clock);
         assert!(lines.is_empty());
     }
 
@@ -3690,7 +3729,6 @@ mod parts_aware_tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         tab_render_state.height_cache.set(
             key.clone(),
@@ -3717,7 +3755,6 @@ mod parts_aware_tests {
             expansion: false,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         tab_render_state.height_cache.set(
             key.clone(),
@@ -3742,8 +3779,7 @@ mod parts_aware_tests {
             Some(StopReason::EndTurn),
         );
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let layout = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let layout = expanded_turn_height(&turn, &theme, 80);
         assert!(layout.height > 0);
         // Clock-independent: no clock parameter in signature
     }
@@ -3762,44 +3798,6 @@ mod parts_aware_tests {
     }
 
     #[test]
-    fn height_key_version_change_produces_different_cache_entries() {
-        let mut cache = crate::adapters::tui::state::HeightCache::default();
-        let turn_id = crate::domain::models::TurnId("t1".into());
-        let key_v0 = crate::adapters::tui::state::HeightKey {
-            turn_id: turn_id.clone(),
-            expansion: true,
-            summary_tier: SummaryTier::Tier1,
-            terminal_width: 80,
-            tool_block_states_version: 0,
-        };
-        let key_v1 = crate::adapters::tui::state::HeightKey {
-            turn_id: turn_id.clone(),
-            expansion: true,
-            summary_tier: SummaryTier::Tier1,
-            terminal_width: 80,
-            tool_block_states_version: 1,
-        };
-        cache.set(
-            key_v0.clone(),
-            CachedTurnLayout {
-                height: 10,
-                block_offsets: vec![],
-                tool_block_offsets: vec![],
-            },
-        );
-        cache.set(
-            key_v1.clone(),
-            CachedTurnLayout {
-                height: 20,
-                block_offsets: vec![],
-                tool_block_offsets: vec![],
-            },
-        );
-        assert_eq!(cache.get(&key_v0).unwrap().height, 10);
-        assert_eq!(cache.get(&key_v1).unwrap().height, 20);
-    }
-
-    #[test]
     fn height_key_width_change_produces_different_cache_entries() {
         let mut cache = crate::adapters::tui::state::HeightCache::default();
         let turn_id = crate::domain::models::TurnId("t1".into());
@@ -3808,14 +3806,12 @@ mod parts_aware_tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         let key_w40 = crate::adapters::tui::state::HeightKey {
             turn_id: turn_id.clone(),
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 40,
-            tool_block_states_version: 0,
         };
         cache.set(
             key_w80.clone(),
@@ -3847,7 +3843,6 @@ mod parts_aware_tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         // Miss: get on empty cache
         let _ = cache.get(&key);
@@ -3866,9 +3861,8 @@ mod parts_aware_tests {
         let turn = make_turn(vec![], Some(StopReason::EndTurn));
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: empty turn");
         // Empty turn: only trailing rail = 1
         assert_eq!(cached.height, 1);
@@ -3879,9 +3873,8 @@ mod parts_aware_tests {
         let turn = make_turn(vec![make_prose("Hello world")], Some(StopReason::EndTurn));
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: single prose");
     }
 
@@ -3896,9 +3889,8 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: prose + inter-part blank");
     }
 
@@ -3913,37 +3905,50 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: running tool with rail");
         // Should include per-Running rail addend
         assert!(cached.height > 0);
     }
 
     #[test]
-    fn parity_completed_tool_expanded() {
-        let turn = make_turn(
-            vec![
-                make_prose("Done."),
-                make_tool("Read", InvocationStatus::Success),
-            ],
-            Some(StopReason::EndTurn),
-        );
+    fn parity_completed_tool_compact() {
+        let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+        turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "Done.".into(),
+        });
+        let invocation = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Read".into(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 1_700_000_000_000,
+            ended_at: Some(1_700_000_005_000),
+        });
+        turn.push_part(|id| TurnPart::ToolResult {
+            id,
+            refs: invocation,
+            output: crate::domain::models::ToolOutput {
+                content: "completed\nmultiline\noutput".into(),
+                is_error: false,
+                diff: crate::domain::models::WriteDiffState::NotAWrite,
+                images: vec![],
+            },
+        });
+        turn.stop_reason = Some(StopReason::EndTurn);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        // Expanded tool block
-        tbs.insert(
-            "test-turn-1".into(),
-            ToolBlockState {
-                collapsed: false,
-                peek_active: false,
-            },
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let lines = render_turn(&turn, &theme, 80, &clock);
+        assert_eq!(cached.height, lines.len(), "parity: completed tool compact");
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.to_string().contains("multiline")),
+            "successful output belongs only to the inspector",
         );
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
-        assert_eq!(cached.height, rendered, "parity: completed tool expanded");
     }
 
     #[test]
@@ -3958,9 +3963,8 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: mixed prose-tool-prose");
     }
 
@@ -3969,41 +3973,12 @@ mod parts_aware_tests {
         let turn = make_turn(vec![make_tool("Read", InvocationStatus::Running)], None);
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
+        let cached = expanded_turn_height(&turn, &theme, 80);
+        let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(
             cached.height, rendered,
             "parity: trailing rail after running"
         );
-    }
-
-    /// Fixture 6: Tool peek state (peek_active: true, collapsed: false).
-    /// Covers AC1 `tool_block_states_version` — 3rd tool state distinct from
-    /// default-collapsed and expanded.
-    #[test]
-    fn parity_tool_peek_state() {
-        let turn = make_turn(
-            vec![
-                make_prose("Let me check."),
-                make_tool("Read", InvocationStatus::Success),
-            ],
-            Some(StopReason::EndTurn),
-        );
-        let clock = MockClock::at_wall_ms(1_700_000_000_000);
-        let theme = Theme::dark();
-        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        tbs.insert(
-            "test-turn".into(),
-            ToolBlockState {
-                collapsed: false,
-                peek_active: true,
-            },
-        );
-        let cached = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered = render_turn(&turn, &theme, 80, &clock, &tbs).len();
-        assert_eq!(cached.height, rendered, "parity: tool peek state");
-        assert!(cached.height > 0);
     }
 
     /// Fixture 8: Spinner digit-cliff — elapsed crosses 9.9s → 10.0s.
@@ -4024,12 +3999,11 @@ mod parts_aware_tests {
         clock_10s.set_wall_anchor_ms(1_700_000_010_000); // 10s elapsed
 
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
 
-        let cached_9s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_9s = render_turn(&turn, &theme, 80, &clock_9s, &tbs).len();
-        let cached_10s = expanded_turn_height(&turn, &theme, 80, &tbs);
-        let rendered_10s = render_turn(&turn, &theme, 80, &clock_10s, &tbs).len();
+        let cached_9s = expanded_turn_height(&turn, &theme, 80);
+        let rendered_9s = render_turn(&turn, &theme, 80, &clock_9s).len();
+        let cached_10s = expanded_turn_height(&turn, &theme, 80);
+        let rendered_10s = render_turn(&turn, &theme, 80, &clock_10s).len();
 
         assert_eq!(cached_9s.height, rendered_9s, "parity: 9.9s elapsed");
         assert_eq!(cached_10s.height, rendered_10s, "parity: 10.0s elapsed");
@@ -4042,7 +4016,7 @@ mod parts_aware_tests {
 
     /// AC6: Spinner ticks do NOT invalidate cache — strict equality.
     /// Exercises the full render+HeightCache path: warm cache, advance clock
-    /// frames, render again, assert cache size unchanged.
+    /// frames, render again, assert actual cache keys and layouts unchanged.
     #[test]
     fn spinner_tick_strict_equality() {
         use ratatui::Terminal;
@@ -4090,7 +4064,6 @@ mod parts_aware_tests {
         let theme = Theme::dark();
         let streaming = StreamingState::default();
         let mut tab_render_state = TabRenderState::default();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
 
         // Warm render: populates cache
         let backend = TestBackend::new(80, 24);
@@ -4109,7 +4082,6 @@ mod parts_aware_tests {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &tbs,
                     &BTreeMap::new(),
                     None,
                     None,
@@ -4123,8 +4095,8 @@ mod parts_aware_tests {
             })
             .unwrap();
 
-        let n0 = tab_render_state.height_cache.entries.len();
-        assert!(n0 > 0, "warm render must populate cache");
+        let entries = tab_render_state.height_cache.entries.clone();
+        assert!(!entries.is_empty(), "warm render must populate cache");
 
         // Re-render with clock advanced (frame 7: different spinner glyph)
         let backend = TestBackend::new(80, 24);
@@ -4145,7 +4117,6 @@ mod parts_aware_tests {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &tbs,
                     &BTreeMap::new(),
                     None,
                     None,
@@ -4159,9 +4130,8 @@ mod parts_aware_tests {
             })
             .unwrap();
         assert_eq!(
-            tab_render_state.height_cache.entries.len(),
-            n0,
-            "spinner tick must not change cache size"
+            tab_render_state.height_cache.entries, entries,
+            "spinner tick must not change cache entries"
         );
 
         // Re-render with clock advanced further (frame 11)
@@ -4183,7 +4153,6 @@ mod parts_aware_tests {
                     true,
                     &theme,
                     &mut tab_render_state,
-                    &tbs,
                     &BTreeMap::new(),
                     None,
                     None,
@@ -4197,9 +4166,8 @@ mod parts_aware_tests {
             })
             .unwrap();
         assert_eq!(
-            tab_render_state.height_cache.entries.len(),
-            n0,
-            "spinner tick must not change cache size (second frame)"
+            tab_render_state.height_cache.entries, entries,
+            "spinner tick must not change cache entries (second frame)"
         );
     }
 
@@ -4214,18 +4182,17 @@ mod parts_aware_tests {
         );
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let theme = Theme::dark();
-        let tbs: HashMap<String, ToolBlockState> = HashMap::new();
 
         for width in [79, 80, 81] {
-            let cached = expanded_turn_height(&turn, &theme, width, &tbs);
-            let rendered = render_turn(&turn, &theme, width, &clock, &tbs).len();
+            let cached = expanded_turn_height(&turn, &theme, width);
+            let rendered = render_turn(&turn, &theme, width, &clock).len();
             assert_eq!(cached.height, rendered, "parity fail: width={}", width);
         }
     }
 
-    /// Task 4.2: Block boundaries match render offsets with expanded tool.
+    /// Block boundaries match render offsets with a compact tool header.
     #[test]
-    fn block_boundaries_match_render_offsets_with_expanded_tool() {
+    fn block_boundaries_match_render_offsets_with_compact_tool() {
         let turn = make_turn(
             vec![
                 make_prose("Before tool."),
@@ -4235,23 +4202,15 @@ mod parts_aware_tests {
             Some(StopReason::EndTurn),
         );
         let theme = Theme::dark();
-        let mut tbs: HashMap<String, ToolBlockState> = HashMap::new();
-        tbs.insert(
-            "test-turn-1".into(),
-            ToolBlockState {
-                collapsed: false,
-                peek_active: false,
-            },
-        );
 
-        let layout = expanded_turn_height(&turn, &theme, 80, &tbs);
+        let layout = expanded_turn_height(&turn, &theme, 80);
 
         // block_offsets should have 3 entries (prose, tool, prose)
         assert_eq!(layout.block_offsets.len(), 3, "expected 3 block offsets");
 
         // Render and verify cumulative offsets
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
-        let lines = render_turn(&turn, &theme, 80, &clock, &tbs);
+        let lines = render_turn(&turn, &theme, 80, &clock);
 
         // The first block offset should be 0 (start of turn)
         assert_eq!(layout.block_offsets[0], 0, "first block should start at 0");
@@ -4297,7 +4256,6 @@ mod parts_aware_tests {
             80,
             24,
             &clock,
-            &std::collections::HashMap::new(),
             &[],
         );
 
@@ -4345,7 +4303,6 @@ mod parts_aware_tests {
             80,
             24,
             &clock,
-            &std::collections::HashMap::new(),
             &[],
         );
 
@@ -4405,7 +4362,6 @@ mod parts_aware_tests {
             80,
             24,
             &clock,
-            &std::collections::HashMap::new(),
             &[],
         );
 
@@ -4709,7 +4665,6 @@ mod parts_aware_tests {
                         &ViewState::default(),
                         &theme,
                         &mut tab,
-                        &HashMap::new(),
                         &BTreeMap::new(),
                         &HashMap::new(),
                     )
@@ -4726,7 +4681,6 @@ mod parts_aware_tests {
                         true,
                         &theme,
                         &mut tab,
-                        &HashMap::new(),
                         &BTreeMap::new(),
                         None,
                         None,
@@ -4995,7 +4949,6 @@ mod parts_aware_tests {
                     view,
                     &Theme::dark(),
                     &mut cache,
-                    &HashMap::new(),
                     &blocks,
                     &HashMap::new(),
                 ));

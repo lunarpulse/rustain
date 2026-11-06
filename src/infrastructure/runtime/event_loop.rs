@@ -312,7 +312,6 @@ fn reconcile_fold_toggle<F>(
     let theme = state.theme.clone();
     let vs_before = tab_manager.active_tab().view_state.clone();
     let clock = tab_manager.active_tab().clock.clone();
-    let tool_block_states = state.tool_block_states.clone();
     let pre_layout = {
         let rs = state.tab_render_state(state.active_tab_id);
         chat_pane::build_layout_metrics(
@@ -323,7 +322,6 @@ fn reconcile_fold_toggle<F>(
             width,
             vp_height,
             &*clock,
-            &tool_block_states,
             &tab_manager.active_tab().session_meta.bookmarks,
         )
     };
@@ -336,7 +334,6 @@ fn reconcile_fold_toggle<F>(
         let rs = state.tab_render_state(state.active_tab_id);
         mutate(&mut tab.view_state, rs);
     }
-    let tool_block_states = state.tool_block_states.clone();
     let post_layout = {
         let rs = state.tab_render_state(state.active_tab_id);
         chat_pane::build_layout_metrics(
@@ -347,7 +344,6 @@ fn reconcile_fold_toggle<F>(
             width,
             vp_height,
             &*clock,
-            &tool_block_states,
             &tab_manager.active_tab().session_meta.bookmarks,
         )
     };
@@ -512,6 +508,7 @@ pub async fn run(
         state.is_vscode,
         &state.modal_stack,
         state.pending_leader,
+        false,
     );
 
     // Set project context indicator based on persona
@@ -1193,6 +1190,7 @@ pub async fn run(
                                     state.is_vscode,
                                     &state.modal_stack,
                                     state.pending_leader,
+                                    crate::adapters::tui::tool_inspector::stage_target(&state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref()),
                                 );
                             }
 
@@ -1967,7 +1965,6 @@ pub async fn run(
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
-                                        state.tool_block_states.clear();
                                         state.clear_tool_selection();
                                         state.feedback_blocks.clear();
                                         crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::Carryover, &previous_conversation_id);
@@ -2149,6 +2146,9 @@ pub async fn run(
                                             Err(e) => { handlers::render_error::handle_render_error(e, |streaming, state| turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, streaming, &mut state.pending_resolved_model), &mut streaming, &mut state, terminal); }
                                         }
                                     }
+                                }
+                                InputAction::InspectTool => {
+                                    crate::adapters::tui::tool_inspector::inspect_focused(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref());
                                 }
                                 InputAction::CopyToClipboard(mut content) => {
                                     // Resolve content if empty (Chat focus copy)
@@ -3994,9 +3994,8 @@ pub async fn run(
                                     let clock = tab_manager.active_tab().clock.clone();
                                     let vs = tab_manager.active_tab().view_state.clone();
                                     let layout = {
-                                        let tool_block_states = state.tool_block_states.clone();
                                         let rs = state.tab_render_state(state.active_tab_id);
-                                        chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks)
+                                        chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tab_manager.active_tab().session_meta.bookmarks)
                                     };
                                     let scroll_offset = state.scroll_snapshot;
                                     let total_h = layout.total_content_height;
@@ -4077,7 +4076,7 @@ pub async fn run(
                                     if let Some(t) = target {
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
                                         // Set Pinned mode via reconcile (correctly anchors the turn)
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
+                                        let layout = { let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
                                         // Compute scroll position using the same render-driven approach
                                         // as {}/{}.  Try the TurnId→MessageId mapping (rebuild_messages_mirror
@@ -4132,7 +4131,7 @@ pub async fn run(
                                         let width = state.terminal_width;
                                         let theme = state.theme.clone();
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(t.id.clone()));
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
+                                        let layout = { let clock = tab_manager.active_tab().clock.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: t.id.clone() }), &layout);
                                         // Use render-driven message_boundaries with ID-match + fallback
                                         let msg_idx = conversation.messages.iter().position(|m| m.id == t.id.0)
@@ -4179,10 +4178,9 @@ pub async fn run(
                                         Some(ft)
                                     } else {
                                         let vs = tab_manager.active_tab().view_state.clone();
-                                        let tool_block_states = state.tool_block_states.clone();
                                         let layout = {
                                             let rs = state.tab_render_state(state.active_tab_id);
-                                            chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks)
+                                            chat_pane::build_layout_metrics(&conversation, &vs, rs, &theme, width, vp_height, &*clock, &tab_manager.active_tab().session_meta.bookmarks)
                                         };
                                         let scroll_offset = state.scroll_snapshot;
                                         let total_h = layout.total_content_height;
@@ -4198,7 +4196,7 @@ pub async fn run(
                                     };
                                     if let Some(turn_id) = target {
                                         tab_manager.active_tab_mut().view_state.set_focused_turn(Some(turn_id.clone()));
-                                        let layout = { let tool_block_states = state.tool_block_states.clone(); let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tool_block_states, &tab_manager.active_tab().session_meta.bookmarks) };
+                                        let layout = { let rs = state.tab_render_state(state.active_tab_id); chat_pane::build_layout_metrics(&conversation, &tab_manager.active_tab().view_state, rs, &theme, width, vp_height, &*clock, &tab_manager.active_tab().session_meta.bookmarks) };
                                         let _ = tab_manager.active_tab_mut().view_state.reconcile(Some(crate::domain::models::ViewEvent::JumpTurn { turn_id: turn_id.clone() }), &layout);
                                         // Use render-driven message_boundaries with ID-match + content fallback
                                         let msg_idx = conversation.messages.iter().position(|m| m.id == turn_id.0)
@@ -7422,14 +7420,6 @@ pub fn load_active_tab(
     state.pending_context_carryover = tab.pending_context_carryover.clone();
     state.context_warn_level = tab.context_warn_level;
     state.active_tab_id = tab_manager.active_tab_id();
-    // tool_block_states is global (cleared on tab switch); version resets for new tab
-    state.tool_block_states.clear();
-    if let Some(trs) = state
-        .tab_render_states
-        .get_mut(&tab_manager.active_tab_id())
-    {
-        trs.tool_block_states_version = 0;
-    }
     // Sync token usage from the loaded conversation
     state.token_usage = tab.conversation.usage.clone();
     // Infer status from loaded streaming state so the status bar reflects the tab being entered.
@@ -7485,9 +7475,6 @@ pub fn reset_stage_conversation(
         .tab_render_state(state.active_tab_id)
         .height_cache
         .invalidate_all();
-    state
-        .tab_render_state(state.active_tab_id)
-        .tool_block_states_version = 0;
 }
 
 /// Decode, hash, and persist the `pending_images` drained on message submit.
@@ -7687,6 +7674,19 @@ pub fn render(
     agent_core: &crate::infrastructure::runtime::agent_core::AgentCore,
 ) -> Result<()> {
     let tab_manager_for_bar = tab_manager.as_deref();
+    let preview_clock = tab_manager_for_bar
+        .is_none()
+        .then(crate::domain::clock::SystemClock::default);
+    let inspector_clock: &dyn crate::domain::clock::Clock = tab_manager_for_bar
+        .map(|tabs| &*tabs.active_tab().clock)
+        .unwrap_or_else(|| preview_clock.as_ref().expect("preview clock"));
+    crate::adapters::tui::tool_inspector::refresh(
+        state,
+        conversation,
+        tab_manager_for_bar.map(|tabs| &tabs.active_tab().reducer),
+        inspector_clock,
+        tab_count,
+    );
     notifications::begin_draw(state);
     let log_facts = notice_actions::log_facts(
         conversation,
@@ -7712,14 +7712,13 @@ pub fn render(
     let permission_mode = security.current_mode();
     let leader_tail = crate::adapters::tui::app::status_tail(state);
 
-    // Split borrows: tool_block_states needs &, feedback_blocks needs &
-    // height_cache is now in tab_render_states (side-table) and borrowed inside the closure.
+    // Split immutable feedback and mutable per-tab height-cache borrows inside the closure.
 
     let mut decision_painted = false;
+    let mut rendered_hint = None;
     terminal.draw(|frame| {
     let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
     let TuiState {
-        ref tool_block_states,
         ref feedback_blocks,
         ref pending_permission,
         ref permission_queue,
@@ -7743,7 +7742,6 @@ pub fn render(
         active_profile: ref _active_profile,
         ref selected_model,
         ref image_indicator,
-        ref current_hint,
         density_mode,
         sidebar_visible,
         ref pending_fork_index,
@@ -8195,7 +8193,6 @@ pub fn render(
                     // If no tab manager is available, use defaults (render-only views
                     // like standalone conversation previews).
                     let default_vs = crate::domain::models::view_state::ViewState::default();
-                    let default_clock = crate::domain::clock::SystemClock::default();
                     let (view_state_ref, open_turn_ref, clock_ref): (
                         &crate::domain::models::view_state::ViewState,
                         Option<&crate::domain::models::turn::Turn>,
@@ -8208,7 +8205,7 @@ pub fn render(
                             &*tab.clock as &dyn crate::domain::clock::Clock,
                         )
                     } else {
-                        (&default_vs, None, &default_clock)
+                        (&default_vs, None, inspector_clock)
                     };
                     // Story 16.9: capture liveness snapshot for live rail rendering
                     let liveness_snapshot: Option<crate::domain::models::LivenessSnapshot> =
@@ -8234,7 +8231,6 @@ pub fn render(
                         auto_scroll,
                         theme,
                         render_state,
-                        tool_block_states,
                         feedback_blocks,
                         search_query_opt,
                         focused_match_opt,
@@ -8359,33 +8355,6 @@ pub fn render(
                     opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.decision_border, app_layout.chat_pane,
                     )));
-                }
-
-
-
-                // Render peek overlay if any tool block has peek_active (AC5)
-                for (tool_id, tbs) in tool_block_states.iter() {
-                    if tbs.peek_active {
-                        // Find the tool call info for this tool block
-                        let tc = conversation
-                            .messages
-                            .iter()
-                            .flat_map(|m| m.tool_calls.iter())
-                            .chain(streaming.active_tool_calls.values())
-                            .find(|tc| tc.id == *tool_id);
-                        if let Some(tc) = tc {
-                            let (paragraph, area) =
-                                crate::adapters::tui::widgets::tool_block::render_peek_overlay(
-                                    tc,
-                                    theme,
-                                    app_layout.chat_pane,
-                                );
-                            frame.render_widget(ratatui::widgets::Clear, area);
-                            frame.render_widget(paragraph, area);
-                            opaque.host(Some(area));
-                        }
-                        break; // Only one peek at a time
-                    }
                 }
 
                 opaque.host(crate::adapters::tui::widgets::permission_prompt::render_permission_surface(
@@ -8614,6 +8583,11 @@ pub fn render(
                     .drill_down_task
                     .map(|n| format!("Tasks > Task {}", n));
                 state.notifications.set_capacity(toast_layer::capacity_for(app_layout.chat_pane.height));
+                rendered_hint = crate::adapters::tui::hints::contextual_hint(
+                    focus, state.session_count, theme.timing.status_hint_fade_sessions, state.is_vscode,
+                    &state.modal_stack, state.pending_leader,
+                    *focus == FocusState::Chat && state.modal_stack.is_empty() && focused_tool_id.is_some(),
+                );
                 let paint_status = |frame: &mut ratatui::Frame<'_>| {
                 status_bar::render(
                     frame,
@@ -8634,7 +8608,7 @@ pub fn render(
                     multiline_mode,
                     state.context_injection_on,
                     state.last_context_bundle.as_ref().map_or(0, |b| b.diagnostics.total_tokens as u32),
-                    current_hint.as_deref(),
+                    rendered_hint.as_deref(),
                     state.active_skill_count,
                     state.active_agent_name.as_deref(),
                     state.pending_plan_reminder_at_turn,
@@ -8695,6 +8669,7 @@ pub fn render(
     state.message_boundaries = msg_bounds;
     state.user_message_boundaries = user_msg_bounds;
     state.focused_tool_id = focused_tool_id;
+    state.current_hint = rendered_hint;
     state.viewport_height = vp_height;
     state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));
 

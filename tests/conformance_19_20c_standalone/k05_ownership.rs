@@ -20,6 +20,10 @@ use serde_json::json;
 
 use super::harness::{Fixture, VIEWPORTS, press, request_id, text};
 
+#[allow(clippy::duplicate_mod)]
+#[path = "../common/render_helpers.rs"]
+mod stage;
+
 #[tokio::test]
 async fn k05_review_decision_targets_pinned_request_not_queue() {
     let mut f = Fixture::new(64).await;
@@ -666,14 +670,24 @@ async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
 }
 
 #[tokio::test]
-async fn k05_peek_dismissal_hands_off_to_queued_permission() {
+async fn k05_tool_inspector_back_hands_off_to_queued_permission() {
+    use rustain::domain::models::{InvocationStatus, MessageRole, StopReason};
+
     let mut f = Fixture::new(64).await;
     f.state.focus = FocusState::Chat;
-    f.state
-        .tool_block_states
-        .entry("peeked-tool".into())
-        .or_default()
-        .peek_active = true;
+    let conversation = stage::make_conversation(
+        vec![stage::make_msg("inspected-tool", MessageRole::Assistant)],
+        vec![stage::make_turn(
+            "inspected-tool",
+            vec![stage::tool("Read", InvocationStatus::Success)],
+            Some(StopReason::EndTurn),
+        )],
+    );
+    stage::inspect_stage_tool(&mut f.state, &conversation, None);
+    assert!(matches!(
+        f.state.modal_stack.top().map(|frame| frame.surface),
+        Some(Surface::ToolInspector(_))
+    ));
     f.submit(vec![("Bash", json!({"command": "printf AFTER-PEEK"}))])
         .await;
     let (event, _) = f.wait_requested().await;
@@ -684,7 +698,8 @@ async fn k05_peek_dismissal_hands_off_to_queued_permission() {
         f.key(KeyCode::Esc).await,
         Some(InputAction::Consumed)
     ));
-    assert!(!f.state.tool_block_states["peeked-tool"].peek_active);
+    assert!(f.state.modal_stack.is_empty());
+    assert!(f.state.tool_inspectors.is_empty());
     assert_eq!(f.current_id(), id);
     assert!(f.paint(60, 16).join("\n").contains("AFTER-PEEK"));
     f.key(KeyCode::Char('n')).await;

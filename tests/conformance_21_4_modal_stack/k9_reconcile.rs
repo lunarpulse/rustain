@@ -520,7 +520,6 @@ fn paint_active_stage(
                 &theme,
                 state.tab_render_state(tabs.active_tab_id()),
                 &Default::default(),
-                &Default::default(),
                 None,
                 None,
                 &[],

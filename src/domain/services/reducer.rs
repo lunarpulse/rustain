@@ -110,7 +110,7 @@ pub struct ReducerState {
     /// preserved here for mirror sync via `update_streaming_mirror`).
     completed_invocations: HashMap<String, PartId>,
     progress: HashMap<String, (u64, u64)>,
-    tail: HashMap<String, String>,
+    tail: HashMap<String, (String, u64)>,
     last_running_tool: Option<String>,
     last_running_tool_use_id: Option<String>,
     pub pending_usage: Option<UsageInfo>,
@@ -166,7 +166,7 @@ impl ReducerState {
         let tail = self
             .last_running_tool_use_id
             .as_ref()
-            .and_then(|id| self.tail.get(id).cloned());
+            .and_then(|id| self.tail.get(id).map(|(text, _)| text.clone()));
         LivenessSnapshot {
             active_tool_name: self.last_running_tool.clone(),
             progress,
@@ -189,7 +189,27 @@ impl ReducerState {
     /// for the same `tool_use_id` — the ring-buffer throttling in the bash
     /// adapter ensures this is called at most 4 Hz, so no coalescing is needed.
     pub fn set_tail(&mut self, tool_use_id: &str, text: String) {
-        self.tail.insert(tool_use_id.to_string(), text);
+        self.tail.insert(
+            tool_use_id.to_string(),
+            (text, crate::domain::models::turn::next_source_revision()),
+        );
+    }
+
+    /// Borrow this pending invocation's stdout tail by its part identity.
+    ///
+    /// Tool names and the last-running liveness snapshot are not identities:
+    /// concurrent calls of the same tool must never share their tails.
+    pub fn tail_for(&self, part: PartId) -> Option<&str> {
+        self.tail_source_for(part).map(|(text, _)| text)
+    }
+
+    /// Borrow tail bytes together with their mutation identity.
+    pub fn tail_source_for(&self, part: PartId) -> Option<(&str, u64)> {
+        self.pending_invocations
+            .iter()
+            .find(|(_, pending_part)| **pending_part == part)
+            .and_then(|(wire_id, _)| self.tail.get(wire_id))
+            .map(|(text, revision)| (text.as_str(), *revision))
     }
 
     /// Current wall-clock time in unix milliseconds via the injected clock.
@@ -1705,6 +1725,52 @@ mod tests {
 
         let snap = state.liveness();
         assert_eq!(snap.tail.as_deref(), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn story21_5_tail_for_isolates_same_named_running_calls() {
+        let (mut state, clock) = make_state(1000);
+        for wire_id in ["A", "B", "without-tail"] {
+            reduce(&mut state, tool_use(wire_id), &clock);
+        }
+        let a = state.pending_invocations["A"];
+        let b = state.pending_invocations["B"];
+        let without_tail = state.pending_invocations["without-tail"];
+        state.set_tail("A", "A1\nA2".into());
+        state.set_tail("B", "B1".into());
+        state.set_tail("unknown-wire", "unattributed".into());
+
+        assert_eq!(state.tail_for(a), Some("A1\nA2"));
+        assert_eq!(state.tail_for(b), Some("B1"));
+        assert_eq!(state.tail_for(without_tail), None);
+        assert_eq!(state.tail_for(PartId(u64::MAX)), None);
+
+        state.set_tail("B", "B2".into());
+        assert_eq!(state.tail_for(a), Some("A1\nA2"));
+        assert_eq!(state.tail_for(b), Some("B2"));
+    }
+
+    #[test]
+    fn story21_5_tail_for_does_not_reuse_completed_or_liveness_tails() {
+        let (mut state, clock) = make_state(1000);
+        reduce(&mut state, tool_use("A"), &clock);
+        reduce(&mut state, tool_use("B"), &clock);
+        let a = state.pending_invocations["A"];
+        let b = state.pending_invocations["B"];
+        state.set_tail("A", "A1".into());
+        state.set_tail("B", "B1".into());
+        assert_eq!(state.liveness().tail.as_deref(), Some("B1"));
+        assert_eq!(state.tail_for(a), Some("A1"));
+
+        reduce(&mut state, tool_result("A", Vec::new()), &clock);
+        // Even a late tail event cannot revive a completed invocation.
+        state.set_tail("A", "late A".into());
+        assert_eq!(state.tail_for(a), None);
+        assert_eq!(state.tail_for(b), Some("B1"));
+
+        reduce(&mut state, complete(StopReason::EndTurn), &clock);
+        assert_eq!(state.tail_for(a), None);
+        assert_eq!(state.tail_for(b), None);
     }
 
     #[test]

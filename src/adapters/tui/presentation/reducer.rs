@@ -131,7 +131,6 @@ pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
         || state.pending_large_image.is_some()
         || state.pending_artifact_card.is_some()
         || state.pending_feedback_input.is_some()
-        || state.tool_block_states.values().any(|tbs| tbs.peek_active)
         || another_confirmation_owns_focus(state)
 }
 
@@ -294,10 +293,41 @@ pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
 /// Reopen truncates to the existing frame and retains its untouched payload.
 pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
     assert!(
-        surface != Surface::DecisionPane,
-        "pane opens with its queue identity"
+        !matches!(surface, Surface::DecisionPane | Surface::ToolInspector(_)),
+        "identity-bearing frames open through their dedicated reducer"
     );
-    open_frame(state, surface, None)
+    open_frame(state, surface, None, None)
+}
+
+/// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
+pub fn open_tool(
+    state: &mut TuiState,
+    target: crate::adapters::tui::tool_inspector::model::ToolTarget,
+    title: String,
+    viewport: usize,
+) -> Opened {
+    use crate::adapters::tui::tool_inspector::{ToolFrameKey, ToolInspectorState};
+    if let Some((&id, _)) = state
+        .tool_inspectors
+        .iter()
+        .find(|(_, tool)| tool.target == target)
+    {
+        return open_frame(state, Surface::ToolInspector(ToolFrameKey(id)), None, None);
+    }
+    let id = state
+        .modal_stack
+        .last_id
+        .checked_add(1)
+        .expect("modal frame id overflow");
+    state
+        .tool_inspectors
+        .insert(id, ToolInspectorState::new(target, viewport));
+    open_frame(
+        state,
+        Surface::ToolInspector(ToolFrameKey(id)),
+        None,
+        Some(title),
+    )
 }
 
 /// Consume the payload preparation owed by a fresh frame, including a palette
@@ -365,7 +395,7 @@ pub fn handoff(state: &mut TuiState, from: Surface, to: Surface) -> Opened {
     let continuation = take_continuation(state, from);
     release_payload(state, from, false);
     prepare_payload(state, to);
-    let replacement = fresh_frame(state, to, None);
+    let replacement = fresh_frame(state, to, None, None);
     replace_frame(state, from, replacement);
     if let Some(frame) = continuation {
         if to.keeps_continuation() {
@@ -469,11 +499,16 @@ fn reopen_for_handoff(state: &mut TuiState, from: Surface, to: Surface) -> Opene
 /// The queue requests focus; this reducer alone writes the selected identity.
 pub(crate) fn focus_decision(state: &mut TuiState, key: DecisionKey) {
     state.decisions.prepare(&key);
-    open_frame(state, Surface::DecisionPane, Some(key));
+    open_frame(state, Surface::DecisionPane, Some(key), None);
     debug_assert!(super::consistent(state));
 }
 
-fn open_frame(state: &mut TuiState, surface: Surface, decision: Option<DecisionKey>) -> Opened {
+fn open_frame(
+    state: &mut TuiState,
+    surface: Surface,
+    decision: Option<DecisionKey>,
+    tool_title: Option<String>,
+) -> Opened {
     // A surface displaced into a continuation is still owned. Restore it before
     // truncating, rather than creating a second payload/identity for that surface.
     while !state
@@ -534,14 +569,19 @@ fn open_frame(state: &mut TuiState, surface: Surface, decision: Option<DecisionK
     } else {
         Opened::Pushed
     };
-    let frame = fresh_frame(state, surface, decision);
+    let frame = fresh_frame(state, surface, decision, tool_title);
     state.modal_stack.frames.push(frame);
     transition(state);
     debug_assert!(super::consistent(state));
     opened
 }
 
-fn fresh_frame(state: &mut TuiState, surface: Surface, decision: Option<DecisionKey>) -> Frame {
+fn fresh_frame(
+    state: &mut TuiState,
+    surface: Surface,
+    decision: Option<DecisionKey>,
+    tool_title: Option<String>,
+) -> Frame {
     let stack = &mut state.modal_stack;
     stack.last_id = stack
         .last_id
@@ -550,8 +590,14 @@ fn fresh_frame(state: &mut TuiState, surface: Surface, decision: Option<Decision
     Frame {
         id: stack.last_id,
         surface,
-        conversation_id: None,
+        conversation_id: match surface {
+            Surface::ToolInspector(key) => {
+                Some(state.tool_inspectors[&key.0].target.conversation_id.clone())
+            }
+            _ => None,
+        },
         decision,
+        tool_title,
         needs_initialization: matches!(
             surface,
             Surface::ModelSelector
@@ -605,7 +651,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
-        | Surface::Login => {}
+        | Surface::Login
+        | Surface::ToolInspector(_) => {}
     }
 }
 
@@ -783,6 +830,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
             caller
         }
         Surface::QuitConfirm => state.quit_confirm.take().map(|quit| quit.caller_focus),
+        Surface::ToolInspector(key) => {
+            state.tool_inspectors.remove(&key.0);
+            None
+        }
     };
     if was_top && let Some(focus) = caller_focus {
         state.focus = focus;
@@ -803,6 +854,7 @@ fn refresh_hint(state: &mut TuiState) {
         state.is_vscode,
         &state.modal_stack,
         state.pending_leader,
+        crate::adapters::tui::app::local_avail_ctx(state).stage_target,
     );
 }
 
@@ -1048,5 +1100,102 @@ mod tests {
             QuitKeyOutcome::Consumed
         );
         assert_eq!(state.modal_stack.top(), Some(&frame));
+    }
+
+    fn tool_target(id: &str) -> crate::adapters::tui::tool_inspector::ToolTarget {
+        crate::adapters::tui::tool_inspector::ToolTarget {
+            conversation_id: "stage".into(),
+            tool_call_id: id.into(),
+        }
+    }
+
+    // Topology controls complement the conversation/paint front-door conformance.
+    #[test]
+    fn story21_5_exact_target_reopen_retains_payload_and_drops_only_truncated_frames() {
+        let mut state = TuiState::new(80, 24);
+        assert_eq!(
+            open_tool(&mut state, tool_target("a"), "Tool · Bash #1".into(), 12),
+            Opened::Pushed
+        );
+        let original = state.modal_stack.top().unwrap().clone();
+        state.tool_inspectors.get_mut(&original.id).unwrap().viewers[0].top = 7;
+        assert_eq!(
+            open_tool(
+                &mut state,
+                tool_target("a"),
+                "ignored duplicate title".into(),
+                1
+            ),
+            Opened::Unchanged
+        );
+        assert_eq!(state.modal_stack.top(), Some(&original));
+        assert_eq!(state.tool_inspectors[&original.id].viewers[0].top, 7);
+        assert_eq!(
+            open_tool(&mut state, tool_target("b"), "Tool · Read #2".into(), 12),
+            Opened::Pushed
+        );
+        let discarded = state.modal_stack.top().unwrap().id;
+        open(&mut state, Surface::Help);
+        assert_eq!(
+            open_tool(&mut state, tool_target("a"), "unused".into(), 1),
+            Opened::Truncated
+        );
+        assert_eq!(state.modal_stack.top(), Some(&original));
+        assert!(!state.tool_inspectors.contains_key(&discarded));
+        assert_eq!(state.tool_inspectors.len(), 1);
+        assert!(consistent(&state));
+        back(&mut state);
+        assert!(state.tool_inspectors.is_empty());
+        assert!(consistent(&state));
+    }
+
+    #[test]
+    fn story21_5_continuation_keeps_payload_until_actual_discard_or_reconcile() {
+        let mut state = TuiState::new(80, 24);
+        for surface in [
+            Surface::ModelSelector,
+            Surface::ProfileSwitcher,
+            Surface::UsagePanel,
+        ] {
+            open(&mut state, surface);
+        }
+        open_tool(&mut state, tool_target("a"), "Tool · Bash #1".into(), 12);
+        let original = state.modal_stack.top().unwrap().clone();
+        assert_eq!(open(&mut state, Surface::Help), Opened::Continued);
+        assert!(
+            state.tool_inspectors.contains_key(&original.id),
+            "cover retains body"
+        );
+        assert_eq!(
+            open_tool(&mut state, tool_target("a"), "unused".into(), 1),
+            Opened::Unchanged
+        );
+        assert_eq!(
+            state.modal_stack.top(),
+            Some(&original),
+            "reopen restores suspended frame"
+        );
+        assert!(consistent(&state));
+        open(&mut state, Surface::Help);
+        assert_eq!(
+            open_tool(&mut state, tool_target("b"), "Tool · Read #2".into(), 12),
+            Opened::Replaced
+        );
+        assert!(
+            !state.tool_inspectors.contains_key(&original.id),
+            "replacement discards Help's continuation"
+        );
+        let replacement = state.modal_stack.top().unwrap().clone();
+        open(&mut state, Surface::Help);
+        let help = state.modal_stack.top().unwrap().clone();
+        reconcile_stage(&mut state);
+        assert!(state.tool_inspectors.is_empty());
+        assert!(!is_open(&state, replacement.surface));
+        assert_eq!(
+            state.modal_stack.top(),
+            Some(&help),
+            "global covering frame remains"
+        );
+        assert!(consistent(&state));
     }
 }

@@ -88,8 +88,16 @@ fn k1_slash_parity_per_host() {
 /// K5 — help and hints tell the current truth.
 #[test]
 fn k5_help_and_hints_tell_the_truth() {
-    let hint = contextual_hint(&FocusState::Input, 1, 5, false, &Default::default(), None)
-        .expect("input hint");
+    let hint = contextual_hint(
+        &FocusState::Input,
+        1,
+        5,
+        false,
+        &Default::default(),
+        None,
+        false,
+    )
+    .expect("input hint");
     assert!(hint.contains("Ctrl+X ?"), "{hint}");
     let mut state = TuiState::new(80, 24);
     handle_input(&mut state, &key('?'));

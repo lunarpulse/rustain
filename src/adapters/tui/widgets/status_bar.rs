@@ -396,15 +396,30 @@ pub fn render(
     {
         left_spans[optional_start..].rotate_left(optional_end - optional_start);
     }
-    let model_budget =
-        usize::from(area.width).saturating_sub(left_width - model_width + reserved_width);
+    // A focused tool has no Stage marker in this slice: fit its compact,
+    // registry-derived discovery cue using the existing flexible model slot.
+    // State/counters/mode/host/log/decision facts still win; if those leave
+    // insufficient room, omit the cue whole rather than displacing a fact.
+    let inspect_width = current_hint
+        .filter(|hint| {
+            crate::adapters::tui::keymap::render_tips::inspect_tip().as_deref() == Some(*hint)
+        })
+        .map_or(0, |hint| geom::cells(hint) + 1);
+    let inspect_width =
+        if left_width - model_width + reserved_width + inspect_width <= usize::from(area.width) {
+            inspect_width
+        } else {
+            0
+        };
+    let model_budget = usize::from(area.width)
+        .saturating_sub(left_width - model_width + reserved_width + inspect_width);
     if model_width > model_budget {
         let label = left_spans[model_span_index].content.to_mut();
         let end = geom::clip(label, model_budget).len();
         label.truncate(end);
         left_width -= model_width - geom::cells(label);
     }
-    let required_width = left_width + reserved_width;
+    let required_width = left_width + reserved_width + inspect_width;
     // Key hints yield whole before state, tokens, mode/host, log or decision
     // facts. Once admitted, the generated tail remains the rightmost segment.
     let area = match badges.tail.text() {

@@ -18,7 +18,7 @@ fn sp(key: DomainKey) -> DomainInputEvent {
 }
 
 #[test]
-fn legacy_chat_keys_are_unchanged() {
+fn chat_keys_preserve_legacy_actions_except_deleted_peek() {
     let legacy_keys: &[(DomainInputEvent, fn() -> InputAction)] = &[
         (key('j'), || InputAction::ScrollLineDown),
         (key('k'), || InputAction::ScrollLineUp),
@@ -29,7 +29,8 @@ fn legacy_chat_keys_are_unchanged() {
         (key('g'), || InputAction::ScrollToTop),
         (key('G'), || InputAction::ScrollToBottom),
         (key('c'), || InputAction::CopyToClipboard(String::new())),
-        (key('p'), || InputAction::Consumed),
+        // Story21.5 AC4 deletes the Peek row: p is now unbound, not consumed.
+        (key('p'), || InputAction::Ignored),
         (key('i'), || InputAction::Consumed),
         (key('q'), || InputAction::Quit),
         (key('f'), || InputAction::ForkAtMessage),

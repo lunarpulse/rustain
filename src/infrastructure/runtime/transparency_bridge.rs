@@ -3915,7 +3915,6 @@ mod log_awareness_tests {
             self.state.restore_unflushed_log_visits();
             let mut terminal = Terminal::new(TestBackend::new(100, height.max(1))).unwrap();
             let mut tab = TabRenderState::default();
-            let tools = HashMap::new();
             let mut visible = Vec::new();
             let (state, conversation) = (&self.state, &self.conversation);
             terminal
@@ -3940,7 +3939,6 @@ mod log_awareness_tests {
                         },
                         &state.theme,
                         &mut tab,
-                        &tools,
                         &state.feedback_blocks,
                         &HashMap::new(),
                     )

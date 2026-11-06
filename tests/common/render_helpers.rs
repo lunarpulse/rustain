@@ -81,7 +81,6 @@ pub fn render_to_string_ext(
             true,
             &Theme::dark(),
             &mut tab_render_state,
-            &HashMap::new(),
             &BTreeMap::new(),
             None,
             None,
@@ -106,6 +105,54 @@ pub fn render_to_string_ext(
         }
     }
     lines.join("\n")
+}
+
+/// Open the render-derived Stage target through the runtime's inspection seam.
+pub fn inspect_stage_tool(
+    state: &mut rustain::adapters::tui::state::TuiState,
+    conversation: &Conversation,
+    open_turn: Option<&Turn>,
+) {
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut render = TabRenderState::default();
+    let mut focused = None;
+    terminal
+        .draw(|frame| {
+            focused = chat_pane::render_with_search(
+                frame,
+                frame.area(),
+                conversation,
+                open_turn,
+                &StreamingState::default(),
+                &ViewState::default(),
+                &rustain::domain::clock::MockClock::at_wall_ms(0),
+                0,
+                false,
+                &state.theme,
+                &mut render,
+                &BTreeMap::new(),
+                None,
+                None,
+                &[],
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .focused_tool_id;
+        })
+        .unwrap();
+    assert!(
+        focused.is_some(),
+        "the real Stage renders an inspectable tool"
+    );
+    state.focused_tool_id = focused;
+    assert!(rustain::adapters::tui::tool_inspector::inspect_focused(
+        state,
+        conversation,
+        open_turn,
+    ));
 }
 
 // ---------------------------------------------------------------------------

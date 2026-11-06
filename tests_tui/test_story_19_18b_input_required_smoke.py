@@ -135,7 +135,7 @@ def _outbound(stack, binary, root, stub, evidence):
         assert time.monotonic() < deadline, f"outbound question:\n{screen}"
     # The Agents sidebar (including Dashboard's Agents selection) legitimately
     # requires >=120 columns. At 80 columns the real tool result is the closest
-    # operator-visible proof: expand it using the normal transcript controls.
+    # operator-visible proof: inspect it using the normal transcript controls.
     tui.send("\x1b")
     _screen(tui, lambda _value: tui._screen.cursor.hidden, "transcript focus after Escape")
     tui.send("g")
@@ -145,8 +145,8 @@ def _outbound(stack, binary, root, stub, evidence):
     tui.get_screen_text()
     tui.send("\r")
     _screen(tui, lambda value: '"state": "input-required"' in value,
-            "expanded tool result")
-    # Expansion preserves the tail anchor; the handle is at the JSON's top.
+            "tool inspector output")
+    # Inspection preserves the Stage anchor; the handle is at the JSON's top.
     tui.send("g")
     tui.send("g")
     screen = _screen(tui, lambda value: '"state": "input-required"' in value
@@ -236,7 +236,7 @@ def _exercise(binary, evidence, root, monkeypatch):
         assert not any(row.get("desync") for row in stub.rows()), stub.rows()
         (evidence / "assertions.txt").write_text(
             "PASS: debug binary, one 80x24 native smoke, two legs.\n"
-            "PASS: expanded model tool result shows input-required and a continuation handle; zero tasks/cancel while parked.\n"
+            "PASS: tool inspector output shows input-required and a continuation handle; zero tasks/cancel while parked.\n"
             "PASS: attached inbound pending card cancels to canceled; card disappears and exact notice persists.\n"
             "PASS: native cancelled taskId continuation refuses with -32004; no provider scene desync.\n")
 

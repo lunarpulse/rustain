@@ -2,7 +2,7 @@
 //! tip is read from registry rows (`hint()` rows of the context, or the named
 //! leader rows), never typed. Fading by session count stays in `hints.rs`.
 
-use super::model::{Binding, CommandId, Context, Host, Key};
+use super::model::{AvailCtx, Binding, CommandId, Context, Host, Key};
 use super::resolve::rows_of;
 use super::table::LeaderCmd;
 use super::table_input::InputCmd;
@@ -28,10 +28,21 @@ fn send_tip(host: Host) -> Option<String> {
     Some(format!("[{}] {}", send.compact_label(), send.label))
 }
 
+/// The focused local tool's compact discovery cue. Both key and command text
+/// come from its registry row; the status painter can fit this whole cue.
+pub(crate) fn inspect_tip() -> Option<String> {
+    let inspect = hint_row(
+        Context::Chat,
+        Host::Local,
+        super::table_chat::ChatCmd::Inspect,
+    )?;
+    Some(format!("[{}] {}", inspect.compact_label(), inspect.label))
+}
+
 /// The tip of `context` for `host`: the Input tip (`is_vscode` selects the VS
 /// Code variant), the Chat tip, or, for `Leader`, the which-key tip. `None`
 /// for contexts without a tip.
-pub fn tip(context: Context, host: Host, is_vscode: bool) -> Option<String> {
+pub fn tip(context: Context, host: Host, is_vscode: bool, stage_target: bool) -> Option<String> {
     match context {
         Context::Input if is_vscode => {
             let newline = hint_row(Context::Input, host, InputCmd::InsertNewline)?;
@@ -53,8 +64,9 @@ pub fn tip(context: Context, host: Host, is_vscode: bool) -> Option<String> {
                 send_tip(host)?
             ))
         }
+        Context::Chat if host == Host::Local && stage_target => inspect_tip(),
         Context::Chat => {
-            let items = chat_items(host);
+            let items = chat_items(host, stage_target);
             (!items.is_empty()).then(|| format!("Tip: {}", items.join(", ")))
         }
         Context::Leader => {
@@ -75,10 +87,17 @@ pub fn palette_tip() -> String {
 
 /// The `hint()` rows of Chat as `key label` items. Consecutive letters of one
 /// case (`j`,`k` / `J`,`K`) share one item (`j/k scroll`).
-fn chat_items(host: Host) -> Vec<String> {
+fn chat_items(host: Host, stage_target: bool) -> Vec<String> {
+    let mut avail = match host {
+        Host::Local => AvailCtx::local(0, crate::domain::models::visual::DensityMode::Focus),
+        Host::Attached => AvailCtx::attached(0, false),
+    };
+    avail.stage_target = stage_target && host == Host::Local;
     let mut items: Vec<(String, String)> = Vec::new();
     let mut last: Option<char> = None;
-    for row in rows_of(Context::Chat, host).filter(|row| row.hint) {
+    for row in rows_of(Context::Chat, host)
+        .filter(|row| row.hint && row.availability(&avail).is_available())
+    {
         let key = row.keys[0];
         let pair = match (key, last, items.last_mut()) {
             (Key::Char(c), Some(p), Some(item))
@@ -128,7 +147,7 @@ pub fn attached_status_tip(chat_focus: bool, multiline: bool) -> Option<String> 
         ));
     }
     if chat_focus {
-        parts.extend(chat_items(host));
+        parts.extend(chat_items(host, false));
     }
     if multiline {
         parts.extend(send_tip(host));
@@ -143,13 +162,13 @@ mod tests {
     #[test]
     fn story21_3_input_tips_are_generated_and_keep_their_visible_text() {
         assert_eq!(
-            tip(Context::Input, Host::Local, false).as_deref(),
+            tip(Context::Input, Host::Local, false, false).as_deref(),
             Some(
                 "Tip: Ctrl+X ? for help, Ctrl+P for commands, [^X Enter] Send, /mode to switch permission mode"
             )
         );
         assert_eq!(
-            tip(Context::Input, Host::Local, true).as_deref(),
+            tip(Context::Input, Host::Local, true, false).as_deref(),
             Some(
                 "VS Code detected. Alt+Enter for newlines, Alt+M for multi-line mode, [^X Enter] Send"
             )
@@ -158,12 +177,12 @@ mod tests {
 
     #[test]
     fn story21_3_chat_tip_names_the_scroll_jump_cycle_type_and_help_keys() {
-        let local = tip(Context::Chat, Host::Local, false).unwrap();
+        let local = tip(Context::Chat, Host::Local, false, false).unwrap();
         for key in ["j/k", "J/K", "Tab", "i ", "?"] {
             assert!(local.contains(key), "{key}: {local}");
         }
         // The attached client has no j/k rows: only the keys it answers.
-        let attached = tip(Context::Chat, Host::Attached, false).unwrap();
+        let attached = tip(Context::Chat, Host::Attached, false, false).unwrap();
         assert!(
             attached.contains("i ") && attached.contains('?'),
             "{attached}"
@@ -173,7 +192,7 @@ mod tests {
 
     #[test]
     fn story21_3_which_key_and_palette_tips_keep_their_pinned_substrings() {
-        let which_key = tip(Context::Leader, Host::Local, false).unwrap();
+        let which_key = tip(Context::Leader, Host::Local, false, false).unwrap();
         assert!(
             which_key.contains("Press a key") && which_key.contains("Esc"),
             "{which_key}"
@@ -183,7 +202,7 @@ mod tests {
             palette.contains("Tip:") && palette.contains("filter"),
             "{palette}"
         );
-        assert_eq!(tip(Context::Global, Host::Local, false), None);
+        assert_eq!(tip(Context::Global, Host::Local, false, false), None);
     }
 
     #[test]

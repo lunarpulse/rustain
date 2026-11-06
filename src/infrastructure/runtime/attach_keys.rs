@@ -489,6 +489,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
             ctx.state.is_vscode,
             &ctx.state.modal_stack,
             ctx.state.pending_leader,
+            false,
         );
     }
     flow
@@ -913,6 +914,7 @@ async fn execute_attached(ctx: &mut KeyCtx<'_>, command: CommandId, key: KeyEven
             | OverlayCmd::AutoBackspace,
         ) => popup_delegate(ctx, key),
         // Local-only commands never resolve in this host.
+        CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Chat(ChatCmd::Inspect) => {}
         _ => {}
     }
     KeyFlow::Continue
@@ -1629,7 +1631,6 @@ pub(super) mod tests {
                         &self.domain_tab.streaming,
                         &self.domain_tab.view_state,
                         &mut self.tab,
-                        &std::collections::HashMap::new(),
                         &std::collections::HashMap::new(),
                         crate::domain::models::PermissionMode::Normal,
                         &crate::adapters::tui::state::AttachInfo {
@@ -5307,6 +5308,7 @@ pub(super) mod tests {
                     | Surface::BookmarkList
                     | Surface::WaveOverlay
                     | Surface::CrossSearch
+                    | Surface::ToolInspector(_)
                     | Surface::Login => unreachable!("surface not offered attached"),
                 }
                 let before = (
@@ -6000,6 +6002,7 @@ pub(super) mod tests {
                     rig.state.is_vscode,
                     &rig.state.modal_stack,
                     None,
+                    false,
                 )
             );
             assert!(rig.frames().is_empty());

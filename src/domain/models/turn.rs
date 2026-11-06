@@ -44,6 +44,8 @@
 //! > messages consumed by the runtime). Do not merge or rename either concept.
 
 use serde::{Deserialize, Serialize};
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::PolicyPrincipal;
 use super::conversation::ChatMessage;
@@ -147,7 +149,7 @@ impl TurnOrigin {
 
 /// Turn-local monotonic part identifier.
 ///
-/// Scoped to a single `Turn` — there is **no global counter** anywhere in the crate.
+/// Scoped to a single `Turn` — there is no global part-id counter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PartId(pub u64);
@@ -244,6 +246,101 @@ pub enum TurnPart {
     },
 }
 
+/// Process-local source identity. Never serialized or derived from payload bytes.
+pub(crate) fn next_source_revision() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The canonical parts array, with automatic invalidation on mutable access.
+///
+/// A mutable borrow invalidates before exposing any nested argument/result.
+/// Read-only clones retain the canonical revision; any mutable access to either
+/// copy invalidates it. Deserialization gets a fresh identity, so same-id loaded
+/// replacements cannot reuse stale bodies. Wire shape/equality stay array-shaped.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TurnParts {
+    parts: Vec<TurnPart>,
+    #[serde(skip, default = "next_source_revision")]
+    revision: u64,
+}
+
+impl TurnParts {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+
+impl From<Vec<TurnPart>> for TurnParts {
+    fn from(parts: Vec<TurnPart>) -> Self {
+        Self {
+            parts,
+            revision: next_source_revision(),
+        }
+    }
+}
+
+impl Default for TurnParts {
+    fn default() -> Self {
+        Vec::new().into()
+    }
+}
+
+impl Clone for TurnParts {
+    fn clone(&self) -> Self {
+        Self {
+            parts: self.parts.clone(),
+            revision: self.revision,
+        }
+    }
+}
+
+impl std::fmt::Debug for TurnParts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.parts.fmt(f)
+    }
+}
+
+impl PartialEq for TurnParts {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts == other.parts
+    }
+}
+
+impl Deref for TurnParts {
+    type Target = Vec<TurnPart>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.parts
+    }
+}
+
+impl DerefMut for TurnParts {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.revision = next_source_revision();
+        &mut self.parts
+    }
+}
+
+impl<'a> IntoIterator for &'a TurnParts {
+    type Item = &'a TurnPart;
+    type IntoIter = std::slice::Iter<'a, TurnPart>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.parts.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut TurnParts {
+    type Item = &'a mut TurnPart;
+    type IntoIter = std::slice::IterMut<'a, TurnPart>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.deref_mut().iter_mut()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Turn
 // ---------------------------------------------------------------------------
@@ -253,7 +350,7 @@ pub enum TurnPart {
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
     pub id: TurnId,
-    pub parts: Vec<TurnPart>,
+    pub parts: TurnParts,
     /// Unix timestamp in milliseconds.
     pub started_at: i64,
     pub model: String,
@@ -304,7 +401,7 @@ impl Turn {
     pub fn new(model: String, started_at: i64) -> Self {
         Self {
             id: generate_turn_id(),
-            parts: Vec::new(),
+            parts: TurnParts::default(),
             started_at,
             model,
             role: MessageRole::Assistant,
@@ -370,6 +467,43 @@ impl Turn {
 // Canonical mirror tool-call id helper
 // ---------------------------------------------------------------------------
 
+/// Match the canonical id without formatting a temporary id for each candidate.
+/// Decimal part ids must be canonical too: no leading zeroes or extra suffix.
+pub fn tool_call_id_matches(turn_id: &TurnId, pid: PartId, candidate: &str) -> bool {
+    candidate
+        .strip_prefix("tc_")
+        .and_then(|rest| rest.strip_prefix(turn_id.0.as_str()))
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                && (suffix == "0" || !suffix.starts_with('0'))
+                && suffix.parse::<u64>() == Ok(pid.0)
+        })
+}
+
+/// Debug-only counts of actual canonical-id allocations on this thread.
+#[cfg(any(test, debug_assertions))]
+pub mod metrics {
+    use std::cell::Cell;
+
+    thread_local! {
+        static IDS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn allocated_id() {
+        IDS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub fn allocated_ids() -> usize {
+        IDS.with(Cell::get)
+    }
+
+    pub fn reset() {
+        IDS.with(|count| count.set(0));
+    }
+}
+
 /// Canonical mirror tool-call id format.
 ///
 /// Used by `rebuild_messages_mirror` and the render-time `adapter_shim` so the
@@ -378,6 +512,8 @@ impl Turn {
 ///
 /// Deleted in S16.10-cleanup alongside `Conversation.messages` mirror.
 pub fn tool_call_id_for(turn_id: &TurnId, pid: PartId) -> String {
+    #[cfg(any(test, debug_assertions))]
+    metrics::allocated_id();
     format!("tc_{}_{}", turn_id.0, pid.0)
 }
 
@@ -402,7 +538,7 @@ pub fn migrate_chat_message_to_turn(msg: &ChatMessage) -> Turn {
         } else {
             TurnId(msg.id.clone())
         },
-        parts: Vec::new(),
+        parts: TurnParts::default(),
         started_at: msg.created_at.saturating_mul(1000),
         model: String::new(),
         role: MessageRole::Assistant,
@@ -491,6 +627,98 @@ fn map_tool_call_status(tc: &ToolCallInfo) -> InvocationStatus {
 mod tests {
     use super::*;
     use crate::domain::models::{MessageRole, ToolResultInfo};
+
+    #[test]
+    fn story21_5_parts_epochs_track_mutation_clone_and_rehydration_without_wire_changes() {
+        let mut turn = Turn::new("model".into(), 0);
+        turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Bash".into(),
+            args: serde_json::json!({"command":"before"}),
+            status: InvocationStatus::Running,
+            started_at: 0,
+            ended_at: None,
+        });
+        let revision = turn.parts.revision();
+        assert_eq!(turn.parts.len(), 1);
+        assert_eq!(turn.parts.revision(), revision, "reads do not invalidate");
+        if let TurnPart::ToolInvocation { args, .. } = &mut turn.parts[0] {
+            args["command"] = serde_json::json!("after");
+        }
+        assert_ne!(
+            turn.parts.revision(),
+            revision,
+            "nested mutation invalidates"
+        );
+        let revision = turn.parts.revision();
+        if let Some(TurnPart::ToolInvocation { status, .. }) = turn.parts.iter_mut().next() {
+            *status = InvocationStatus::Success;
+        }
+        assert_ne!(
+            turn.parts.revision(),
+            revision,
+            "iterator mutation invalidates"
+        );
+        let encoded = serde_json::to_value(&turn).unwrap();
+        assert!(encoded["parts"].is_array());
+        assert_eq!(
+            encoded["parts"][0],
+            serde_json::json!({
+                "kind":"toolInvocation", "id":0, "tool":"Bash",
+                "args":{"command":"after"}, "status":"success",
+                "started_at":0, "ended_at":null,
+            })
+        );
+        let restored: Turn = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.parts, turn.parts);
+        assert_ne!(restored.parts.revision(), turn.parts.revision());
+        let mut cloned = turn.clone();
+        assert_eq!(cloned, turn);
+        assert_eq!(
+            cloned.parts.revision(),
+            turn.parts.revision(),
+            "read-only snapshots preserve their canonical source revision"
+        );
+        if let TurnPart::ToolInvocation { args, .. } = &mut cloned.parts[0] {
+            args["command"] = serde_json::json!("clone-only-change");
+        }
+        assert_ne!(cloned.parts.revision(), turn.parts.revision());
+        assert!(
+            matches!(&turn.parts[0], TurnPart::ToolInvocation { args, .. }
+            if args["command"] == "after"),
+            "mutating a clone leaves its source unchanged"
+        );
+    }
+
+    #[test]
+    fn story21_5_canonical_id_match_is_exact_and_allocation_free() {
+        let id = TurnId("turn_with_underscores".into());
+        for part in [PartId(0), PartId(9), PartId(u64::MAX)] {
+            let canonical = tool_call_id_for(&id, part);
+            metrics::reset();
+            assert!(tool_call_id_matches(&id, part, &canonical));
+            assert_eq!(metrics::allocated_ids(), 0);
+            for wrong in [
+                format!("{canonical}_stale"),
+                format!("{canonical}0"),
+                canonical
+                    .trim_end_matches(|c: char| c.is_ascii_digit())
+                    .to_owned(),
+            ] {
+                assert!(!tool_call_id_matches(&id, part, &wrong), "{wrong}");
+            }
+        }
+        assert!(!tool_call_id_matches(
+            &id,
+            PartId(1),
+            "tc_turn_with_underscores_01"
+        ));
+        assert!(!tool_call_id_matches(
+            &id,
+            PartId(1),
+            "tc_turn_with_underscores_+1"
+        ));
+    }
 
     // -----------------------------------------------------------------------
     // PartId

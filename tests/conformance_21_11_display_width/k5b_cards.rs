@@ -33,7 +33,7 @@ use rustain::adapters::tui::state::{
 };
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::result_row::{ResultRowSnapshot, render_result_row};
-use rustain::adapters::tui::widgets::tool_block::{ToolBlockState, render_tool_block_lines};
+use rustain::adapters::tui::widgets::tool_block::render_tool_block_lines;
 use rustain::adapters::tui::widgets::{
     apply_card, consolidation_card, forget_card, inline_card, peer_add_prompt, skill_trust_prompt,
     team_retract_prompt, usage_panel,
@@ -558,14 +558,10 @@ fn bash_call(name: &str, command: &str) -> ToolCallInfo {
     }
 }
 
-fn paint_block(tc: &ToolCallInfo, collapsed: bool, width: u16) -> Painted {
-    let state = ToolBlockState {
-        collapsed,
-        peek_active: false,
-    };
+fn paint_block(tc: &ToolCallInfo, width: u16) -> Painted {
     let theme = Theme::dark();
     let clock = MockClock::at_wall_ms(0);
-    let lines = render_tool_block_lines(tc, &theme, &state, width, &clock);
+    let lines = render_tool_block_lines(tc, &theme, width, &clock);
     let n = lines.len() as u16;
     paint(width, n, |f| {
         let area = f.area();
@@ -585,7 +581,7 @@ fn k5b_tool_block_bash_summary_is_a_60_cell_display_excerpt() {
         (format!("{}{A}zzzz", a(56)), format!("{}{A}...", a(56))),
     ];
     for (command, want) in cases {
-        let p = paint_block(&bash_call("Bash", &command), true, 130);
+        let p = paint_block(&bash_call("Bash", &command), 130);
         let row = row_text(&p.buffer, 0);
         let summary = row
             .split_once("Bash \"")
@@ -597,62 +593,40 @@ fn k5b_tool_block_bash_summary_is_a_60_cell_display_excerpt() {
 }
 
 #[test]
-fn k5b_tool_block_expanded_chrome_spans_the_pane_and_keeps_raw_input() {
-    // Short enough that the raw input row fits even the 60-cell pane, so every
-    // (name, width) case asserts the same exact input row.
+fn k5b_tool_block_compact_header_keeps_display_names_and_source_input() {
+    // AC4 deletes expanded chrome and raw input rows from the Stage, not the
+    // display-name, grapheme-boundary or immutable-source contracts.
     let raw = format!("echo {}{G}{A}", C.repeat(10));
-    let json_input = serde_json::json!({ "command": raw }).to_string();
-    let cases: Vec<(String, String, String)> = vec![
-        // (tool name, displayed name, exact raw input row text)
-        ("Bash".into(), "Bash".into(), format!("│ $ {raw}")),
-        (
-            format!("mcp__{C}{C}__Read"),
-            format!("[{C}{C}] Read"),
-            format!("│ {json_input}"),
-        ),
-        (
-            format!("mcp__{G}{A}__run"),
-            format!("[{G}{A}] run"),
-            format!("│ {json_input}"),
-        ),
+    let cases: Vec<(String, String)> = vec![
+        ("Bash".into(), "Bash".into()),
+        (format!("mcp__{C}{C}__Read"), format!("[{C}{C}] Read")),
+        (format!("mcp__{G}{A}__run"), format!("[{G}{A}] run")),
         (
             format!("mcp__{}__do", C.repeat(10)),
             format!("[{}] do", C.repeat(10)),
-            format!("│ {json_input}"),
         ),
     ];
-    for (name, display, input_row) in &cases {
+    for (name, display) in &cases {
         for width in WIDTHS {
-            let p = paint_block(&bash_call(name, &raw), false, width);
-            let last = p.buffer.area.bottom() - 1;
-            assert_eq!(row_cells(&p.buffer, last), width as usize, "bottom border");
+            let call = bash_call(name, &raw);
+            let p = paint_block(&call, width);
+            assert_eq!(p.buffer.area.height, 1, "{name}@{width}");
             assert_eq!(row_cells(&p.buffer, 0), width as usize, "{name}@{width}");
-            let top = row_text(&p.buffer, 0);
+            let header = row_text(&p.buffer, 0);
             assert!(
-                top.starts_with(&format!("┌─ {display} ")),
-                "{name}@{width}: {top:?}"
+                header.starts_with(&format!("┄ {display} ")),
+                "{name}@{width}: {header:?}"
             );
-            assert!(top.ends_with(" ✓ (2.3s) ┐"), "{name}@{width}: {top:?}");
-            // Raw tool input is untouched by the display chrome.
-            assert_eq!(&row_text(&p.buffer, 1), input_row, "{name}@{width}");
+            assert_eq!(call.input["command"].as_str(), Some(raw.as_str()));
             assert_whole_clusters(&p.buffer);
         }
     }
-    // A command far wider than any pane stays whole in the expanded input
-    // line; only its collapsed display summary is excerpted.
     let wide = format!("echo {}{G}{A}", C.repeat(60));
-    let theme = Theme::dark();
-    let lines = render_tool_block_lines(
-        &bash_call("Bash", &wide),
-        &theme,
-        &ToolBlockState {
-            collapsed: false,
-            peek_active: false,
-        },
-        80,
-        &MockClock::at_wall_ms(0),
-    );
-    assert_eq!(lines[1].spans[1].content.as_ref(), format!("$ {wide}"));
+    let call = bash_call("Bash", &wide);
+    let p = paint_block(&call, 80);
+    assert_eq!(p.buffer.area.height, 1);
+    assert_eq!(call.input["command"].as_str(), Some(wide.as_str()));
+    assert_whole_clusters(&p.buffer);
 }
 
 // ── usage panel ─────────────────────────────────────────────────────────────

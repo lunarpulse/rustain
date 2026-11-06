@@ -17,7 +17,6 @@ use rustain::domain::models::view_state::{AnchorMode, LayoutMetrics, ViewEvent};
 use rustain::domain::models::{
     ChatMessage, Conversation, InvocationStatus, MessageRole, StopReason, ViewState,
 };
-use std::collections::HashMap;
 
 // All tests use viewport_height=14 to ensure content (5 turns × prose+tools)
 // exceeds viewport, making scroll_offset non-zero and tests meaningful.
@@ -111,10 +110,6 @@ fn jump_and_reconcile(
 ) -> (ViewState, usize) {
     view_state.focused_turn = Some(focus_id.clone());
 
-    let tool_block_states: HashMap<
-        String,
-        rustain::adapters::tui::widgets::tool_block::ToolBlockState,
-    > = HashMap::new();
     let mut tab_render_state = TabRenderState::default();
 
     // Build layout to seed HeightCache and produce turn_top_offsets
@@ -126,7 +121,6 @@ fn jump_and_reconcile(
         width,
         viewport_height,
         clock,
-        &tool_block_states,
         &[],
     );
 
@@ -138,7 +132,6 @@ fn jump_and_reconcile(
         width,
         viewport_height,
         clock,
-        &tool_block_states,
         &[],
     );
 
@@ -165,10 +158,6 @@ fn build_verify_layout(
     width: u16,
     viewport_height: usize,
 ) -> LayoutMetrics {
-    let tool_block_states: HashMap<
-        String,
-        rustain::adapters::tui::widgets::tool_block::ToolBlockState,
-    > = HashMap::new();
     let mut tab_render_state = TabRenderState::default();
     chat_pane::build_layout_metrics(
         conv,
@@ -178,7 +167,6 @@ fn build_verify_layout(
         width,
         viewport_height,
         clock,
-        &tool_block_states,
         &[],
     )
 }

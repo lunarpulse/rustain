@@ -822,7 +822,7 @@ mod markdown_structure {
     use rustain::domain::services::message_builder::{
         ResolvedFileContext, build_file_context_prefix,
     };
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
     use unicode_width::UnicodeWidthStr;
 
     const EVERY_ELEMENT: &str = "# Release notes
@@ -887,7 +887,6 @@ fn main() {
                     true,
                     &Theme::dark(),
                     &mut tab,
-                    &HashMap::new(),
                     &BTreeMap::new(),
                     None,
                     None,

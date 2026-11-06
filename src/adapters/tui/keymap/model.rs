@@ -17,6 +17,8 @@ use super::table_nav::{BookmarkCmd, SearchCmd, SidebarCmd};
 use super::table_overlay::OverlayCmd;
 use super::table_panels::PanelCmd;
 use super::table_permission::PermissionCmd;
+use super::table_tool::ToolCmd;
+use crate::adapters::tui::presentation::viewer::ViewerCmd;
 
 // ── keys ──────────────────────────────────────────────────────────────────
 
@@ -361,6 +363,9 @@ pub enum Context {
     CaretField,
     /// In-frame Log/Help filtering; Enter keeps the filter, Esc clears and leaves it.
     InspectorSearch,
+    /// Read-only frame navigation without any Global or Chat inheritance.
+    InspectorBody,
+    ToolInspector,
     /// The task-panel drill-down (focus Chat): its own keys plus only the
     /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
     ChatDrill,
@@ -416,7 +421,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 54] = [
+    pub const ALL: [Context; 56] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -431,6 +436,8 @@ impl Context {
         Context::FieldEdit,
         Context::CaretField,
         Context::InspectorSearch,
+        Context::InspectorBody,
+        Context::ToolInspector,
         Context::ChatDrill,
         Context::ChatWave,
         Context::ChatReorder,
@@ -490,6 +497,8 @@ impl Context {
             Context::FieldEdit => "Append-only text field",
             Context::CaretField => "Caret text field",
             Context::InspectorSearch => "Inspector search",
+            Context::InspectorBody => "Inspector body",
+            Context::ToolInspector => "Tool inspector",
             Context::ChatDrill => "Task drill-down",
             Context::ChatWave => "Chat (wave)",
             Context::ChatReorder => "Chat (reorder)",
@@ -545,6 +554,7 @@ impl Context {
             | Context::FieldEdit
             | Context::WaveOverlay
             | Context::Help
+            | Context::InspectorBody
             | Context::ProfileSwitcher
             | Context::UsagePanel
             | Context::Autocomplete
@@ -556,6 +566,7 @@ impl Context {
             | Context::Card
             | Context::SkillTrustInspect
             | Context::Consent => &[],
+            Context::ToolInspector => &[Context::InspectorBody],
             // The decision cards own every key: the shared cue rows only (A8).
             Context::SkillTrust
             | Context::PlanApproval
@@ -653,6 +664,8 @@ pub struct AvailCtx {
     pub leader_available: bool,
     /// A frame lies beneath this route; still-legacy targets cannot take ownership.
     pub frame_origin: bool,
+    /// The local Chat Stage has a render-focused, resolvable tool target.
+    pub stage_target: bool,
 }
 
 impl AvailCtx {
@@ -664,6 +677,7 @@ impl AvailCtx {
             read_only: false,
             leader_available: true,
             frame_origin: false,
+            stage_target: false,
         }
     }
 
@@ -675,6 +689,7 @@ impl AvailCtx {
             read_only,
             leader_available: true,
             frame_origin: false,
+            stage_target: false,
         }
     }
 }
@@ -716,6 +731,8 @@ pub enum CommandId {
     Inspector(InspectorCmd),
     Overlay(OverlayCmd),
     Card(CardCmd),
+    Viewer(ViewerCmd),
+    Tool(ToolCmd),
 }
 
 macro_rules! command_from {
@@ -741,6 +758,8 @@ command_from!(
     Inspector(InspectorCmd),
     Overlay(OverlayCmd),
     Card(CardCmd),
+    Viewer(ViewerCmd),
+    Tool(ToolCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

@@ -239,9 +239,8 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
     use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::chat_pane;
-    use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
     use rustain::domain::models::{Conversation, StreamingState};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let mut blocks = BTreeMap::new();
     // Alphabetical order is the OPPOSITE of arrival order: `z-first` arrived first.
@@ -277,7 +276,6 @@ fn k11_the_view_shown_last_renders_last_in_the_real_chat_pane_and_reports_its_id
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &blocks,
             );
             visible = result

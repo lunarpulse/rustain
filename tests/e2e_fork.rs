@@ -309,7 +309,7 @@ fn test_e2e_fork_marker_on_forked_conversation() {
     use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane;
     use rustain::domain::models::StreamingState;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -328,7 +328,6 @@ fn test_e2e_fork_marker_on_forked_conversation() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::new(),
                 &BTreeMap::new(),
             );
             // The render should succeed with valid boundaries
@@ -361,7 +360,7 @@ fn test_e2e_fork_no_marker_on_non_forked_conversation() {
     use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane;
     use rustain::domain::models::StreamingState;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -380,7 +379,6 @@ fn test_e2e_fork_no_marker_on_non_forked_conversation() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::new(),
                 &BTreeMap::new(),
             );
         })

@@ -1,5 +1,4 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use crate::common;
 use ratatui::Terminal;
@@ -8,7 +7,6 @@ use ratatui::backend::TestBackend;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::{
     ChatMessage, ContentBlockType, Conversation, FeedbackBlock, FeedbackLevel, MessageRole,
     StreamingPhase, StreamingState, ToolCallInfo, ToolResultInfo,
@@ -55,7 +53,6 @@ fn test_chat_pane_empty_shows_welcome() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -108,7 +105,6 @@ fn test_chat_pane_shows_user_message() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -161,7 +157,6 @@ fn test_chat_pane_shows_assistant_message() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -202,7 +197,6 @@ fn test_chat_pane_typing_indicator() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -246,7 +240,6 @@ fn test_chat_pane_streaming_text() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -306,7 +299,6 @@ fn test_chat_pane_user_message_before_typing_indicator() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -365,7 +357,6 @@ fn test_chat_pane_error_displays_in_red() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -418,7 +409,6 @@ fn test_chat_pane_streaming_error() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, rustain::domain::models::FeedbackBlock>::new(
                 ),
             );
@@ -505,7 +495,6 @@ fn test_feedback_block_visible_with_auto_scroll() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &feedback_blocks,
             );
         })
@@ -519,22 +508,16 @@ fn test_feedback_block_visible_with_auto_scroll() {
     );
 }
 
-/// AC2 (DF-061): Height cache and block_boundaries stay coherent after tool block expand.
-///
-/// When a tool block is expanded the height cache must be invalidated so that:
-/// (a) block_boundaries entries reflect the new expanded height, and
-/// (b) the cache entry for the message matches the expanded height.
+/// Story 21.5 AC4: compact tool geometry and cached boundaries remain coherent
+/// when the Stage cache is invalidated and rebuilt.
 // Covers: FR7 (chat pane rendering), FR5 (tool blocks), FR13 (navigation)
 #[test]
-fn test_tool_block_expand_updates_cache_and_boundaries() {
+fn test_compact_tool_cache_rebuild_preserves_boundaries() {
     let backend = TestBackend::new(80, 40);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    // A tool call with 3 output lines; collapsed height=1, expanded height=3+3=6.
-    // Message text height = 1 (role) + markdown::compute_height("Hello") = 1 + 2 = 3
-    // (markdown pipeline appends a blank line after each paragraph block). Total:
-    //   collapsed: 3 + 1 = 4
-    //   expanded:  3 + 6 = 9
+    // Three output lines still occupy one compact Stage header row.
+    // The user message contributes three rows, so the final boundary is four.
     let tool_id = "tc1".to_string();
     let tc = ToolCallInfo {
         id: tool_id.clone(),
@@ -572,10 +555,6 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
     let streaming = StreamingState::default();
     let theme = Theme::dark();
 
-    // --- First render: collapsed (default) ---
-    let mut collapsed_states = HashMap::new();
-    collapsed_states.insert(tool_id.clone(), ToolBlockState::default()); // collapsed=true
-
     let mut tab_render_state = TabRenderState::default();
     let collapsed_boundaries: RefCell<Vec<usize>> = RefCell::new(vec![]);
     terminal
@@ -590,7 +569,6 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
                 false,
                 &theme,
                 &mut tab_render_state,
-                &collapsed_states,
                 &Default::default(),
             );
             *collapsed_boundaries.borrow_mut() = result.block_boundaries;
@@ -612,18 +590,10 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
         "collapsed render should populate height cache"
     );
 
-    // --- Simulate toggle: invalidate cache, switch to expanded ---
+    // Rebuilding the cache must never expose the tool output inline.
+    let before_messages = tab_render_state.height_cache.message_entries.clone();
     tab_render_state.height_cache.invalidate_all();
-    let mut expanded_states = HashMap::new();
-    expanded_states.insert(
-        tool_id.clone(),
-        ToolBlockState {
-            collapsed: false,
-            peek_active: false,
-        },
-    );
-
-    let expanded_boundaries: RefCell<Vec<usize>> = RefCell::new(vec![]);
+    let rebuilt_boundaries: RefCell<Vec<usize>> = RefCell::new(vec![]);
     terminal
         .draw(|frame| {
             let area = frame.area();
@@ -636,32 +606,26 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
                 false,
                 &theme,
                 &mut tab_render_state,
-                &expanded_states,
                 &Default::default(),
             );
-            *expanded_boundaries.borrow_mut() = result.block_boundaries;
+            *rebuilt_boundaries.borrow_mut() = result.block_boundaries;
         })
         .unwrap();
 
-    // expanded cache should differ from collapsed (version bumped by invalidate_all + re-fill)
-    let expanded_cache_count = tab_render_state.height_cache.entries.len()
-        + tab_render_state.height_cache.message_entries.len();
-    assert!(
-        expanded_cache_count > 0,
-        "expanded render should populate height cache"
-    );
-    let expanded_bounds = expanded_boundaries.into_inner();
-    // text 3 + expanded tool (3 + 3 output lines) = 3 + 6 = 9
+    assert_eq!(rebuilt_boundaries.into_inner(), collapsed_bounds);
     assert_eq!(
-        expanded_bounds,
-        vec![0, 9],
-        "Expanded: block_boundaries should be [0, 9], got {:?}",
-        expanded_bounds
+        tab_render_state.height_cache.message_entries, before_messages,
+        "rebuilding preserves the compact message height and its actual cache key"
     );
+    let text = common::buffer_text(&terminal);
+    assert!(text.contains("Bash"));
+    assert!(!text.contains("output1"));
+    assert!(!text.contains("output2"));
+    assert!(!text.contains("output3"));
 }
 
 // ---------------------------------------------------------------------------
-// Story 19.9 A3 — every tool block is expandable by keyboard
+// Story 19.9 A3 — every visible tool block is a keyboard inspection target
 // ---------------------------------------------------------------------------
 //
 // The defect these keystones pin: `find_focused_tool_id` used to return the
@@ -677,9 +641,8 @@ fn test_tool_block_expand_updates_cache_and_boundaries() {
 // `state.focused_tool_id` and is what `Enter` (`app.rs`) acts on.
 
 /// One assistant turn: `Read` → result → `Write` → result → prose, plus the
-/// user message that precedes it. Ids are the canonical mirror ids, so the
-/// assertions name exactly the strings `tool_block_states` and
-/// `state.focused_tool_id` use.
+/// user message that precedes it. Ids are the canonical mirror ids used by
+/// `state.focused_tool_id` and the tool inspector target.
 fn read_then_write_turn() -> (Conversation, String, String) {
     use rustain::domain::models::turn::TurnPart;
     use rustain::domain::models::{InvocationStatus, StopReason, ToolOutput, Turn, WriteDiffState};
@@ -806,7 +769,6 @@ fn focus_probe_with_view(
                 auto_scroll,
                 &Theme::dark(),
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::new(),
                 None,
                 None,

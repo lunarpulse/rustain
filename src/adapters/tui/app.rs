@@ -27,6 +27,8 @@ use crate::domain::services::slash_command::parse_slash_command;
 pub enum InputAction {
     /// Event handled, no further action needed.
     Consumed,
+    /// Inspect the render-focused tool; the runtime resolves the live conversation.
+    InspectTool,
     /// Event not handled by this focus mode.
     Ignored,
     RecipientThreadPage {
@@ -490,7 +492,6 @@ pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
         || state.pending_plan_approval.is_some()
         || state.pending_spawn_gate.is_some()
         || state.pending_large_image.is_some()
-        || state.tool_block_states.values().any(|tbs| tbs.peek_active)
         || matches!(state.focus, FocusState::Overlay(_))
 }
 
@@ -657,6 +658,7 @@ fn finish_input_boundary(
             state.is_vscode,
             &state.modal_stack,
             state.pending_leader,
+            local_avail_ctx(state).stage_target,
         );
     }
 }
@@ -717,6 +719,9 @@ pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap:
         crate::adapters::tui::keymap::AvailCtx::local(state.terminal_width, state.density_mode);
     ctx.leader_available = ctrl_x_opens_leader(state);
     ctx.frame_origin = !state.modal_stack.is_empty();
+    ctx.stage_target = state.focus == FocusState::Chat
+        && state.modal_stack.is_empty()
+        && state.focused_tool_id.is_some();
     ctx
 }
 
@@ -1221,6 +1226,9 @@ fn execute(
         CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Inspector(cmd) => exec_inspector(state, cmd),
+        CommandId::Viewer(_) | CommandId::Tool(_) => {
+            crate::adapters::tui::tool_inspector::on_key(state, key, host)
+        }
         CommandId::Leader(_) | CommandId::Permission(_) | CommandId::Card(_) => {
             InputAction::Consumed
         }
@@ -1765,42 +1773,14 @@ fn exec_chat(state: &mut TuiState, cmd: ChatCmd, keys: &[Key]) -> InputAction {
         ChatCmd::NewTab => InputAction::NewTab,
         ChatCmd::SwitchToTab(n) => InputAction::SwitchToTab(usize::from(n)),
         ChatCmd::PasteClipboard => InputAction::RequestClipboardPaste,
-        ChatCmd::ToggleToolBlock => {
-            // Toggle collapse/expand on the focused tool block.
-            if let Some(tool_id) = &state.focused_tool_id {
-                // Acting on a block is choosing it: `c` copies THIS block (story 19.9).
-                state.selected_tool_id = Some(tool_id.clone());
-                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
-                entry.collapsed = !entry.collapsed;
-                entry.peek_active = false;
-                let tab_id = state.active_tab_id;
-                state.tab_render_state(tab_id).height_cache.invalidate_all();
-                state.tab_render_state(tab_id).tool_block_states_version = state
-                    .tab_render_state(tab_id)
-                    .tool_block_states_version
-                    .wrapping_add(1);
-                state.needs_redraw = true;
+        ChatCmd::Inspect => {
+            if state.focused_tool_id.is_some() {
+                InputAction::InspectTool
+            } else {
+                InputAction::Consumed
             }
-            InputAction::Consumed
         }
         ChatCmd::Copy => InputAction::CopyToClipboard(String::new()),
-        ChatCmd::PeekToolBlock => {
-            if let Some(tool_id) = &state.focused_tool_id {
-                // Peeking a block is choosing it (story 19.9 review patch).
-                state.selected_tool_id = Some(tool_id.clone());
-                let entry = state.tool_block_states.entry(tool_id.clone()).or_default();
-                if entry.collapsed {
-                    entry.peek_active = !entry.peek_active;
-                    let tab_id = state.active_tab_id;
-                    state.tab_render_state(tab_id).tool_block_states_version = state
-                        .tab_render_state(tab_id)
-                        .tool_block_states_version
-                        .wrapping_add(1);
-                    state.needs_redraw = true;
-                }
-            }
-            InputAction::Consumed
-        }
         ChatCmd::ForkAtMessage => InputAction::ForkAtMessage,
         ChatCmd::RewindAtMessage => InputAction::RewindAtMessage,
         ChatCmd::ToggleBookmark => InputAction::ToggleBookmark,
@@ -2804,18 +2784,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         };
     }
 
-    // Any keypress dismisses an active peek overlay (AC5)
-    if state.focus == FocusState::Chat {
-        let had_peek = state.tool_block_states.values().any(|tbs| tbs.peek_active);
-        if had_peek {
-            for tbs in state.tool_block_states.values_mut() {
-                tbs.peek_active = false;
-            }
-            state.needs_redraw = true;
-            return InputAction::Consumed;
-        }
-    }
-
     #[cfg(feature = "a2a")]
     if matches!(c, 'y' | 'r' | 'n')
         && state.focus == FocusState::Chat
@@ -2976,18 +2944,6 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
     // without a row is consumed.
     if let Some(done) = card_special_key(state, key) {
         return done;
-    }
-
-    // Any keypress dismisses an active peek overlay (AC5)
-    if state.focus == FocusState::Chat {
-        let had_peek = state.tool_block_states.values().any(|tbs| tbs.peek_active);
-        if had_peek {
-            for tbs in state.tool_block_states.values_mut() {
-                tbs.peek_active = false;
-            }
-            state.needs_redraw = true;
-            return InputAction::Consumed;
-        }
     }
 
     #[cfg(feature = "a2a")]
@@ -5678,7 +5634,7 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_wave_strip_opens_overlay_before_tool_toggle() {
+    fn enter_on_wave_strip_opens_overlay_before_tool_inspection() {
         let mut state = state_with_wave();
         assert_eq!(
             handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),

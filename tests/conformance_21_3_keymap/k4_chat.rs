@@ -18,7 +18,6 @@ use rustain::adapters::tui::keymap::table_chat::ChatCmd;
 use rustain::adapters::tui::keymap::{self, Binding, CommandId, Context, Host, Key, Resolved};
 use rustain::adapters::tui::presentation::{Surface, is_open};
 use rustain::adapters::tui::state::{Direction, TuiState};
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::models::FocusState;
 
 use super::support::{assert_global_effect, decode, fresh, global_owned, is_inert, press};
@@ -285,20 +284,19 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
                 InputAction::RequestClipboardPaste
             );
         }
-        ChatCmd::ToggleToolBlock => {
+        ChatCmd::Inspect => {
             let mut state = chat_state();
             state.focused_tool_id = Some("tool-1".to_owned());
-            state
-                .tool_block_states
-                .insert("tool-1".to_owned(), ToolBlockState::default());
-            assert!(state.tool_block_states["tool-1"].collapsed);
-            assert_eq!(one(&mut state, Key::Enter), InputAction::Consumed);
-            assert!(!state.tool_block_states["tool-1"].collapsed, "expanded");
-            assert_eq!(state.selected_tool_id.as_deref(), Some("tool-1"));
-            assert_eq!(one(&mut state, Key::Enter), InputAction::Consumed);
+            state.selected_tool_id = Some("previous-tool".to_owned());
+            assert_eq!(one(&mut state, Key::Enter), InputAction::InspectTool);
+            assert_eq!(
+                state.selected_tool_id.as_deref(),
+                Some("previous-tool"),
+                "the runtime resolves the actual target before changing selection"
+            );
             assert!(
-                state.tool_block_states["tool-1"].collapsed,
-                "collapsed again"
+                state.modal_stack.is_empty(),
+                "the pure mapper has no conversation"
             );
         }
         ChatCmd::Copy => {
@@ -317,17 +315,6 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
                     task_number: 3
                 }
             );
-        }
-        ChatCmd::PeekToolBlock => {
-            let mut state = chat_state();
-            state.focused_tool_id = Some("tool-1".to_owned());
-            state
-                .tool_block_states
-                .insert("tool-1".to_owned(), ToolBlockState::default());
-            assert!(!state.tool_block_states["tool-1"].peek_active);
-            assert_eq!(one(&mut state, Key::Char('p')), InputAction::Consumed);
-            assert!(state.tool_block_states["tool-1"].peek_active);
-            assert_eq!(state.selected_tool_id.as_deref(), Some("tool-1"));
         }
         ChatCmd::ForkAtMessage => {
             let mut state = chat_state();

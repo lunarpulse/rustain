@@ -56,7 +56,7 @@ use rustain::infrastructure::runtime::turn_driver::{
 use rustain::infrastructure::telemetry::ActiveRatioWindow;
 use serde_json::{Value, json};
 use serial_test::serial;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -455,7 +455,6 @@ pub(crate) fn render(conversation: &Conversation) -> String {
             true,
             &Theme::dark(),
             &mut tab_render_state,
-            &HashMap::new(),
             &BTreeMap::new(),
             None,
             None,

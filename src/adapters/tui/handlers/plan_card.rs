@@ -171,7 +171,7 @@ mod tests {
         use crate::domain::clock::MockClock;
         use crate::domain::models::{StreamingState, ViewState};
         use ratatui::{Terminal, backend::TestBackend};
-        use std::collections::{BTreeMap, HashMap};
+        use std::collections::BTreeMap;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
         let mut tab = TabRenderState::default();
@@ -190,7 +190,6 @@ mod tests {
                     state.auto_scroll(),
                     &Theme::dark(),
                     &mut tab,
-                    &HashMap::new(),
                     &BTreeMap::new(),
                     None,
                     None,

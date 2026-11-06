@@ -148,7 +148,6 @@ pub fn paint_local_osc8(
                 true,
                 theme,
                 &mut tab,
-                &HashMap::new(),
                 &BTreeMap::new(),
                 None,
                 None,
@@ -203,7 +202,6 @@ pub fn paint_attached_osc8(
                 &rustain::domain::models::ViewState::default(),
                 theme,
                 &mut tab,
-                &HashMap::new(),
                 &BTreeMap::new(),
                 &HashMap::new(),
             );

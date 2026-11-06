@@ -686,7 +686,7 @@ mod tests {
         turn.id = TurnId(id.to_string());
         turn.stop_reason = stop_reason;
         // Clear default parts and insert ours.
-        turn.parts = parts;
+        turn.parts = parts.into();
         turn
     }
 

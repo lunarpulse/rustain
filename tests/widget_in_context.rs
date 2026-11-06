@@ -2,7 +2,7 @@
 //! Integration tests verifying each widget type renders correctly within the
 //! full layout (compute_layout + chat pane + status bar + input box).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::common;
 use ratatui::Terminal;
@@ -14,7 +14,6 @@ use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, permission_prompt, status_bar};
 use rustain::domain::models::tool_call::ApprovalSource;
 use rustain::domain::models::visual::DensityMode;
@@ -46,7 +45,6 @@ fn make_conversation(messages: Vec<ChatMessage>) -> Conversation {
 fn render_full_layout(
     conversation: &Conversation,
     streaming: &StreamingState,
-    tool_block_states: &HashMap<String, ToolBlockState>,
     feedback_blocks: &BTreeMap<String, FeedbackBlock>,
 ) -> Terminal<TestBackend> {
     let backend = TestBackend::new(80, 24);
@@ -67,7 +65,6 @@ fn render_full_layout(
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                tool_block_states,
                 feedback_blocks,
             );
             status_bar::render(
@@ -175,21 +172,7 @@ fn test_tool_block_in_full_layout() {
         },
     ]);
 
-    let mut tool_states = HashMap::new();
-    tool_states.insert(
-        "toolu_test1".to_string(),
-        ToolBlockState {
-            collapsed: true,
-            peek_active: false,
-        },
-    );
-
-    let terminal = render_full_layout(
-        &conversation,
-        &StreamingState::default(),
-        &tool_states,
-        &BTreeMap::new(),
-    );
+    let terminal = render_full_layout(&conversation, &StreamingState::default(), &BTreeMap::new());
     let text = common::buffer_text(&terminal);
 
     // Tool block should show tool name in the composed frame
@@ -236,12 +219,7 @@ fn test_feedback_block_in_full_layout() {
         },
     );
 
-    let terminal = render_full_layout(
-        &conversation,
-        &StreamingState::default(),
-        &HashMap::new(),
-        &feedback_blocks,
-    );
+    let terminal = render_full_layout(&conversation, &StreamingState::default(), &feedback_blocks);
     let text = common::buffer_text(&terminal);
 
     assert!(
@@ -273,7 +251,6 @@ fn test_permission_prompt_in_full_layout() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
 
@@ -392,7 +369,6 @@ fn test_ask_user_question_in_full_layout() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
 
@@ -476,7 +452,6 @@ fn test_empty_state_in_full_layout() {
     let terminal = render_full_layout(
         &make_conversation(vec![]),
         &StreamingState::default(),
-        &HashMap::new(),
         &BTreeMap::new(),
     );
     let text = common::buffer_text(&terminal);

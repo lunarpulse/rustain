@@ -12,16 +12,27 @@ use rustain::adapters::tui::state::TuiState;
 
 use super::support::{assert_global_effect, global_owned, is_inert, press};
 
+/// A witness may retain the real owning tab and renderer alongside TUI state.
+pub trait Runtime {
+    fn state_mut(&mut self) -> &mut TuiState;
+}
+
+impl Runtime for TuiState {
+    fn state_mut(&mut self) -> &mut TuiState {
+        self
+    }
+}
+
 /// One recorded witness: pressing `keys` from the case's fixture (after `prep`)
 /// yields an outcome and a salient state whose `"{outcome} | {salient}"` text is
 /// `expect`.
-pub struct W {
+pub struct W<R = TuiState> {
     pub keys: &'static [Key],
     pub expect: &'static str,
-    pub prep: Option<fn(&mut TuiState)>,
+    pub prep: Option<fn(&mut R)>,
 }
 
-pub const fn w(keys: &'static [Key], expect: &'static str) -> W {
+pub const fn w<R>(keys: &'static [Key], expect: &'static str) -> W<R> {
     W {
         keys,
         expect,
@@ -30,7 +41,7 @@ pub const fn w(keys: &'static [Key], expect: &'static str) -> W {
 }
 
 /// A witness whose fixture needs one more step (a sub-state: warning, preview).
-pub const fn wp(keys: &'static [Key], expect: &'static str, prep: fn(&mut TuiState)) -> W {
+pub const fn wp<R>(keys: &'static [Key], expect: &'static str, prep: fn(&mut R)) -> W<R> {
     W {
         keys,
         expect,
@@ -38,27 +49,29 @@ pub const fn wp(keys: &'static [Key], expect: &'static str, prep: fn(&mut TuiSta
     }
 }
 
-pub struct Case {
+pub struct Case<R: 'static = TuiState> {
     pub context: Context,
+    /// Concrete surface used for inherited/shared-body witnesses and sweeps.
+    pub surface: Context,
     /// The context's fixture: the state a user sees when the context is current.
-    pub setup: fn() -> TuiState,
+    pub setup: fn() -> R,
     /// The few fields that summarise the context for a before/after comparison.
-    pub salient: fn(&TuiState) -> String,
-    pub witnesses: &'static [W],
+    pub salient: fn(&R) -> String,
+    pub witnesses: &'static [W<R>],
     /// Rowless keys that legitimately act (typed text, a documented fallthrough).
     pub acts_without_row: fn(Key) -> bool,
     /// The context's real front door: `local_door` (`handle_input`), or the
     /// host-neutral handler the event loop calls before `handle_input`
     /// (notification log, decision pane). Returns the outcome text and whether the
     /// outcome is inert (consumed or ignored: nothing was commanded).
-    pub door: fn(&mut TuiState, Key) -> (String, bool),
+    pub door: fn(&mut R, Key) -> (String, bool),
     /// Off-state witnesses (R3): a key whose row is state-guarded (`y` with no
     /// warning) or that types text (`q j k G e /` into a search), pressed after
     /// `prep`. By value: inert, or the documented typed effect.
-    pub off: &'static [W],
-    /// Inherited-row witnesses (R4): the exclusive contexts (`ChatDrill`,
-    /// `TasksReorder`) require one for every non-Global row they inherit.
-    pub inherited: &'static [W],
+    pub off: &'static [W<R>],
+    /// Rows supplied by the concrete surface outside `context`: inherited rows,
+    /// or child-specific rows when witnessing a shared parent through its child.
+    pub inherited: &'static [W<R>],
 }
 
 /// A case driven through `app::handle_input`, with no off-state or inherited
@@ -71,6 +84,7 @@ pub fn local(
 ) -> Case {
     Case {
         context,
+        surface: context,
         setup,
         salient,
         witnesses,
@@ -96,7 +110,7 @@ pub fn printable(key: Key) -> bool {
     matches!(key, Key::Char(c) if (' '..='~').contains(&c))
 }
 
-fn play(case: &Case, w: &W) -> String {
+fn play<R: 'static>(case: &Case<R>, w: &W<R>) -> String {
     let mut state = (case.setup)();
     if let Some(prep) = w.prep {
         prep(&mut state);
@@ -109,13 +123,14 @@ fn play(case: &Case, w: &W) -> String {
 }
 
 /// Run one case: witnesses by value, row coverage, negative sweep.
-pub fn run(case: &Case) {
+pub fn run<R: Runtime + 'static>(case: &Case<R>) {
     let name = case.context.name();
     let rows: Vec<&[Key]> = rows_of(case.context, Host::Local).map(|r| r.keys).collect();
     for keys in &rows {
+        // One row may have several guarded states; every witness runs below.
         assert!(
             case.witnesses.iter().any(|w| w.keys == *keys),
-            "{name}: row {keys:?} has no witness"
+            "{name}: row {keys:?} must have a by-value witness"
         );
     }
     for w in case.witnesses {
@@ -139,11 +154,11 @@ pub fn run(case: &Case) {
     );
     let (mut swept, mut inherited) = (0, Vec::new());
     for key in Key::universe() {
-        if global_owned(case.context, key) {
-            assert_global_effect(&mut (case.setup)(), key);
+        if global_owned(case.surface, key) {
+            assert_global_effect((case.setup)().state_mut(), key);
             continue;
         }
-        match resolve(case.context, Host::Local, &[key]) {
+        match resolve(case.surface, Host::Local, &[key]) {
             Resolved::Hit(row) if row.context != case.context => {
                 inherited.push(key);
                 continue;
@@ -164,7 +179,13 @@ pub fn run(case: &Case) {
     }
     assert!(swept > 40, "{name}: the sweep ran ({swept} keys)");
     let witnessed = |key: Key| case.inherited.iter().any(|w| w.keys == [key]);
-    let exclusive = matches!(case.context, Context::ChatDrill | Context::TasksReorder);
+    let exclusive = matches!(
+        case.context,
+        Context::ChatDrill
+            | Context::TasksReorder
+            | Context::InspectorBody
+            | Context::ToolInspector
+    );
     for key in &inherited {
         assert!(
             !exclusive || witnessed(*key),

@@ -579,7 +579,6 @@ fn paint_view(
                 auto_scroll,
                 &Theme::dark(),
                 &mut tab,
-                &std::collections::HashMap::new(),
                 &std::collections::BTreeMap::new(),
                 None,
                 None,
@@ -776,7 +775,6 @@ fn k9_a_toast_painted_over_link_runs_leaves_no_envelope_under_or_around_it() {
                         },
                         &theme,
                         &mut tab,
-                        &HashMap::new(),
                         &BTreeMap::new(),
                         &HashMap::new(),
                     );

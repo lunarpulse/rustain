@@ -294,14 +294,12 @@ fn test_height_cache_invalidate_turn() {
         expansion: true,
         summary_tier: SummaryTier::Tier1,
         terminal_width: 80,
-        tool_block_states_version: 0,
     };
     let key_b = HeightKey {
         turn_id: turn_b.clone(),
         expansion: true,
         summary_tier: SummaryTier::Tier1,
         terminal_width: 80,
-        tool_block_states_version: 0,
     };
     cache.set(
         key_a.clone(),

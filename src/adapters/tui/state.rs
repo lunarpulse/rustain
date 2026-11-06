@@ -8,7 +8,6 @@ use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
 use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::refresh_tracker::RefreshTracker;
 use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-use crate::adapters::tui::widgets::tool_block::ToolBlockState;
 use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
@@ -471,14 +470,13 @@ pub struct RewindPreview {
     pub files_to_revert: Vec<RevertPreviewItem>,
 }
 
-/// Five-axis key for turn height cache entries.
+/// Four-axis key for turn height cache entries.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct HeightKey {
     pub turn_id: TurnId,
     pub expansion: bool,
     pub summary_tier: SummaryTier,
     pub terminal_width: u16,
-    pub tool_block_states_version: u64,
 }
 
 /// Key for user/system message height cache entries.
@@ -490,7 +488,7 @@ pub struct MessageHeightKey {
 }
 
 /// Cached layout for a turn, including height and per-part block offsets.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CachedTurnLayout {
     pub height: usize,
     pub block_offsets: Vec<usize>,
@@ -511,8 +509,8 @@ pub struct CachedTurnLayout {
 /// - `evict_turns_not_in(live)`: rewind / fork / compact (turn list shrinks)
 ///
 /// # Key axes
-/// Turn entries use `HeightKey` (5-axis: turn_id, expansion, summary_tier,
-/// terminal_width, tool_block_states_version). Message entries use
+/// Turn entries use `HeightKey` (4-axis: turn_id, expansion, summary_tier,
+/// terminal_width). Message entries use
 /// `MessageHeightKey` (3-axis: msg_id, terminal_width, content_hash).
 #[derive(Debug, Default)]
 pub struct HeightCache {
@@ -568,7 +566,6 @@ impl HeightCache {
 pub struct TabRenderState {
     pub height_cache: HeightCache,
     pub cached_width: Option<u16>,
-    pub tool_block_states_version: u64,
     pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
     /// Story 21.12 (D15): the output supports OSC 8, so Stage markdown links
     /// are encoded after the paint. Changes no geometry (the host suffix is
@@ -2567,21 +2564,16 @@ pub struct TuiState {
     /// Pending anchor message index for resize scroll preservation.
     /// Set by resize handler, consumed by next render to recompute scroll_offset.
     pub pending_anchor: Option<usize>,
-    /// Per-tool-block collapsed/expanded/peek state, keyed by tool_use_id.
-    pub tool_block_states: HashMap<String, ToolBlockState>,
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
     pub focused_tool_id: Option<String>,
     /// Explicitly selected tool block id — set ONLY by user intent (the `Tab`
-    /// cycle inside a focused turn, `Enter` toggling a block, `'p'` peeking
-    /// one), never by the render pass. Story 19.9 review finding (FR116
-    /// regression): the render pass rewrites `focused_tool_id` every frame
-    /// from `find_focused_tool_id`, whose nearest-visible fallback seats SOME
-    /// block whenever any is on screen, so keying copy/peek on that field
-    /// silently widened `c` from the last assistant message to a tool block's
-    /// raw output. `resolve_copy_content` and the peek handler read THIS
-    /// field; `focused_tool_id` stays the render-derived signal that drives
-    /// `Enter`.
+    /// cycle inside a focused turn or `Enter` inspecting a call), never by
+    /// the render pass. The nearest-visible fallback in `find_focused_tool_id`
+    /// seats a block whenever any is on screen; copying must instead keep the
+    /// last assistant message until a tool is explicitly selected.
+    /// `resolve_copy_content` reads THIS field; `focused_tool_id` stays the
+    /// render-derived signal that drives `Enter`.
     pub selected_tool_id: Option<String>,
     /// Pending permission request awaiting user y/n/a/s/f response.
     pub pending_permission: Option<PendingPermission>,
@@ -2705,6 +2697,8 @@ pub struct TuiState {
     pub leader_feedback: Option<LeaderFeedback>,
     /// Shared frame inventory; only the presentation reducer mutates it.
     pub modal_stack: crate::adapters::tui::presentation::ModalStack,
+    /// Frame-owned tool bodies and viewers; only the reducer creates/releases entries.
+    pub tool_inspectors: crate::adapters::tui::tool_inspector::ToolInspectors,
     /// S-QUIT payload, present exactly while its stack frame is open.
     pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
     /// Session notification store (Story 21.1): every transient notice of the
@@ -3166,7 +3160,6 @@ impl TuiState {
             user_message_boundaries: Vec::new(),
             tab_render_states: HashMap::new(),
             pending_anchor: None,
-            tool_block_states: HashMap::new(),
             focused_tool_id: None,
             selected_tool_id: None,
             pending_permission: None,
@@ -3210,6 +3203,7 @@ impl TuiState {
             pending_leader: None,
             leader_feedback: None,
             modal_stack: crate::adapters::tui::presentation::ModalStack::default(),
+            tool_inspectors: Default::default(),
             quit_confirm: None,
             notifications: {
                 let mut store = crate::adapters::tui::notifications::NotificationStore::default();
@@ -3578,7 +3572,6 @@ mod tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         let layout = CachedTurnLayout {
             height: 42,
@@ -3598,7 +3591,6 @@ mod tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         assert!(cache.get(&key).is_none());
     }
@@ -3611,7 +3603,6 @@ mod tests {
             expansion: true,
             summary_tier: SummaryTier::Tier1,
             terminal_width: 80,
-            tool_block_states_version: 0,
         };
         cache.set(
             key.clone(),
@@ -3637,7 +3628,6 @@ mod tests {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: 1,
@@ -3651,7 +3641,6 @@ mod tests {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: 2,
@@ -3667,7 +3656,6 @@ mod tests {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 0
                 })
                 .is_none()
         );
@@ -3678,7 +3666,6 @@ mod tests {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 0
                 })
                 .unwrap()
                 .height,
@@ -3698,7 +3685,6 @@ mod tests {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: 1,
@@ -3712,7 +3698,6 @@ mod tests {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: 2,
@@ -3726,7 +3711,6 @@ mod tests {
                 expansion: true,
                 summary_tier: SummaryTier::Tier1,
                 terminal_width: 80,
-                tool_block_states_version: 0,
             },
             CachedTurnLayout {
                 height: 3,
@@ -3742,7 +3726,6 @@ mod tests {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 0
                 })
                 .is_some()
         );
@@ -3753,7 +3736,6 @@ mod tests {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 0
                 })
                 .is_none()
         );
@@ -3764,7 +3746,6 @@ mod tests {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 0
                 })
                 .is_some()
         );

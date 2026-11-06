@@ -553,6 +553,7 @@ pub fn open_waiting(state: &mut TuiState, facts: &LogFacts) {
             state.is_vscode,
             &state.modal_stack,
             state.pending_leader,
+            false,
         );
     } else {
         notifications::info(state, NoticeSource::System, message);

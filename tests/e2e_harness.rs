@@ -7,7 +7,7 @@
 //! - Domain event injection: simulates user input via AppEvent channel
 //! - Full apply_chunk + widget rendering integration
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
@@ -33,8 +33,6 @@ use rustain::domain::ports::StreamingProvider;
 use rustain::domain::services::message_builder;
 use rustain::domain::services::reducer::{ReducerState, apply_chunk_for_tests, test_reducer_state};
 use rustain::domain::services::turn_queue::TurnQueue;
-
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 
 // ── MockProvider ────────────────────────────────────────────────────────────
 
@@ -178,7 +176,6 @@ pub struct TestHarness {
     #[allow(dead_code)]
     pub turn_queue: TurnQueue,
     pub tab_render_state: TabRenderState,
-    pub tool_block_states: HashMap<String, ToolBlockState>,
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
     pub theme: Theme,
 }
@@ -233,7 +230,6 @@ impl TestHarness {
             clock,
             turn_queue: TurnQueue::default(),
             tab_render_state: TabRenderState::default(),
-            tool_block_states: HashMap::new(),
             feedback_blocks: BTreeMap::new(),
             theme,
         }
@@ -286,7 +282,6 @@ impl TestHarness {
                     ),
                     theme,
                     state.tab_render_states.entry(tab.id).or_default(),
-                    &state.tool_block_states,
                     &tab.feedback_blocks,
                     searching.then_some(state.search_state.query.as_str()),
                     searching
@@ -390,7 +385,6 @@ impl TestHarness {
         let theme = &self.theme;
         let state = &self.state;
         let tab_render_state = &mut self.tab_render_state;
-        let tool_states = &self.tool_block_states;
         let feedback = &self.feedback_blocks;
         let scroll_offset = self.state.scroll_offset();
         let auto_scroll = self.state.auto_scroll();
@@ -433,7 +427,6 @@ impl TestHarness {
                         auto_scroll,
                         theme,
                         tab_render_state,
-                        tool_states,
                         feedback,
                     );
 

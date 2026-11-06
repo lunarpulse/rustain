@@ -127,7 +127,6 @@ fn render_text(
             true,
             &Theme::dark(),
             &mut tab_render_state,
-            &HashMap::new(),
             &BTreeMap::new(),
             None,
             None,

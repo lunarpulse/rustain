@@ -131,8 +131,7 @@ Also inherits: Global.
 | `9` | Switch to tab 9 | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
 | `c` | Copy focused content to clipboard | local | portable |  |
-| `Enter` | Expand or collapse the focused tool block | local | portable |  |
-| `p` | Peek at the focused tool block | local | portable |  |
+| `Enter` | Inspect the focused tool call | local | portable |  |
 | `f` | Fork the conversation at the focused message | local | portable |  |
 | `R` | Rewind the conversation to the focused message | local | portable |  |
 | `m` | Toggle bookmark on current message | local | portable |  |
@@ -275,6 +274,35 @@ Also inherits: Caret text field.
 | `Ctrl+Q` | Ask to quit without closing the search field | local, attached | portable |  |
 | `Ctrl+X` | Open the menu above this search field | local, attached | portable |  |
 | `Ctrl+P` | Open the command palette above this search field | local, attached | portable |  |
+
+## Inspector body
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `j` | Scroll the inspector down one line | local | portable |  |
+| `Down` | Scroll the inspector down one line | local | portable |  |
+| `k` | Scroll the inspector up one line | local | portable |  |
+| `Up` | Scroll the inspector up one line | local | portable |  |
+| `Ctrl+D` | Scroll the inspector down half a page | local | portable |  |
+| `Ctrl+U` | Scroll the inspector up half a page | local | portable |  |
+| `PgDn` | Scroll the inspector down one page | local | portable |  |
+| `PgUp` | Scroll the inspector up one page | local | portable |  |
+| `g` | Jump to the first inspector row | local | portable |  |
+| `G` | Jump to the last inspector row | local | portable |  |
+
+## Tool inspector
+
+Also inherits: Inspector body.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Left` | Select the previous available tool tab | local | portable |  |
+| `Right` | Select the next available tool tab | local | portable |  |
+| `Esc` | Back from the tool inspector | local | portable |  |
+| `Ctrl+C` | Back from the tool inspector without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu without closing the tool inspector | local | portable |  |
+| `Ctrl+P` | Open the command palette above the tool inspector | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the tool inspector | local | portable |  |
 
 ## Task drill-down
 

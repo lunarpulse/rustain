@@ -436,6 +436,7 @@ const SKIPPED_TEST_FILES: &[&str] = &[
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",
     "src/adapters/tui/story21_2_slash_tests.rs",
+    "src/infrastructure/runtime/attach_loop/inspect_hint_tests.rs",
     "src/infrastructure/runtime/state_extraction_tests.rs",
 ];
 

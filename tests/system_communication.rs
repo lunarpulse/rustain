@@ -3,7 +3,7 @@
 //! Tests: FeedbackBlock rendering, flash message expiry, token usage formatting,
 //! StatusState transitions, and AskUserQuestion card.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -13,7 +13,6 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::{
     AskUserQuestionState, render_ask_user_lines,
 };
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::adapters::tui::widgets::{chat_pane, feedback_block, status_bar};
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, MessageRole, StatusState,
@@ -87,7 +86,6 @@ fn test_error_feedback_block_in_conversation() {
                 true,
                 &theme,
                 &mut TabRenderState::default(),
-                &HashMap::<String, ToolBlockState>::new(),
                 &feedback_blocks,
             );
         })

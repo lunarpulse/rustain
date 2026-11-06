@@ -29,6 +29,7 @@ pub mod terminal;
 pub mod text_geometry;
 #[allow(dead_code)]
 pub mod theme;
+pub mod tool_inspector;
 pub mod version_info;
 pub mod views;
 pub mod widgets;

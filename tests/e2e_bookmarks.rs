@@ -6,7 +6,7 @@
 //! handlers (save_session_meta persistence) are covered by unit tests
 //! in `event_loop.rs` and the `apply_bookmark_toggle` helper.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::common;
 use ratatui::Terminal;
@@ -18,7 +18,6 @@ use rustain::adapters::tui::state::{TabRenderState, TuiState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::bookmark_list;
 use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::view_state::ViewState;
@@ -110,7 +109,6 @@ fn render_chat_pane_with_bookmarks(
                 state.auto_scroll(),
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 None,
                 None,

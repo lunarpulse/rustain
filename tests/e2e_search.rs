@@ -5,8 +5,6 @@
 //! Production Search effects use `handlers::search::handle_search_action`;
 //! frame-only routing fixtures open through the real presentation reducer.
 
-use std::collections::HashMap;
-
 use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -22,7 +20,6 @@ use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::chat_pane;
 use rustain::adapters::tui::widgets::chat_pane::RenderResult;
 use rustain::adapters::tui::widgets::chat_pane::render_with_search;
-use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
 use rustain::domain::clock::SystemClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
 use rustain::domain::models::tab::TabManager;
@@ -149,7 +146,6 @@ fn render_once(
                 state.auto_scroll(),
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &std::collections::BTreeMap::<String, FeedbackBlock>::new(),
                 search_query,
                 focused_match,
@@ -458,9 +454,8 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
     // have highlighted "Assistant" on that row.
     use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
-    use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
     use rustain::domain::models::{FeedbackBlock, StreamingState};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let conv = make_conversation(vec![
         // First message is assistant-labeled content. Role line: "Assistant:".
@@ -498,7 +493,6 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 Some("assistant"),
                 None,
@@ -557,9 +551,8 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
     // (the second match, 0-indexed), not 0.
     use rustain::adapters::tui::state::TabRenderState;
     use rustain::adapters::tui::widgets::chat_pane::{RenderResult, render_with_search};
-    use rustain::adapters::tui::widgets::tool_block::ToolBlockState;
     use rustain::domain::models::{FeedbackBlock, StreamingState};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let conv = make_conversation(vec!["foo bar foo baz foo qux"]);
     let all_matches = find_matches(&conv, "foo");
@@ -604,7 +597,6 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::<String, ToolBlockState>::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
                 Some("foo"),
                 Some(&focused),

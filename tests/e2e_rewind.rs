@@ -1553,7 +1553,7 @@ fn test_e2e_amend2_render_produces_full_and_user_message_boundaries() {
     use rustain::adapters::tui::theme::Theme;
     use rustain::adapters::tui::widgets::chat_pane;
     use rustain::domain::models::{FeedbackBlock, StreamingState};
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::BTreeMap;
 
     let conversation = make_mixed_conversation_n(10);
     let streaming = StreamingState::default();
@@ -1574,7 +1574,6 @@ fn test_e2e_amend2_render_produces_full_and_user_message_boundaries() {
                 true,
                 &theme,
                 &mut tab_render_state,
-                &HashMap::new(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
             assert_eq!(

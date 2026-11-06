@@ -296,6 +296,8 @@ pub fn all_rows() -> Vec<Binding> {
         super::table_overlay::ROWS,
         super::table_permission::ROWS,
         super::table_card::ROWS,
+        super::table_viewer::ROWS,
+        super::table_tool::ROWS,
     ]
     .concat()
 }

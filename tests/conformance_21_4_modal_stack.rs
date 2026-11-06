@@ -1413,7 +1413,7 @@ mod k7_surfaces {
 }
 
 mod k8_stage {
-    use super::{k3_compose, k7_surfaces, keymap_support::press};
+    use super::{k3_compose, k7_surfaces, keymap_support::press, stage_support};
     use rustain::adapters::tui::{
         keymap::Key,
         presentation::Surface,
@@ -1494,19 +1494,18 @@ mod k8_stage {
                 h.state.input_scroll_offset,
             );
             let cache = &h.state.tab_render_states[&tabs.active_tab().id];
-            let version = cache.tool_block_states_version;
             let mut cache_keys = cache
                 .height_cache
                 .entries
-                .keys()
-                .map(|key| format!("{key:?}"))
+                .iter()
+                .map(|(key, entry)| format!("{key:?}={entry:?}"))
                 .collect::<Vec<_>>();
             cache_keys.sort();
             let mut message_keys = cache
                 .height_cache
                 .message_entries
-                .keys()
-                .map(|key| format!("{key:?}"))
+                .iter()
+                .map(|(key, height)| format!("{key:?}={height}"))
                 .collect::<Vec<_>>();
             message_keys.sort();
             assert!(
@@ -1564,20 +1563,19 @@ mod k8_stage {
             let mut after_keys = cache
                 .height_cache
                 .entries
-                .keys()
-                .map(|key| format!("{key:?}"))
+                .iter()
+                .map(|(key, entry)| format!("{key:?}={entry:?}"))
                 .collect::<Vec<_>>();
             after_keys.sort();
             assert_eq!(after_keys, cache_keys);
             let mut after_messages = cache
                 .height_cache
                 .message_entries
-                .keys()
-                .map(|key| format!("{key:?}"))
+                .iter()
+                .map(|(key, height)| format!("{key:?}={height}"))
                 .collect::<Vec<_>>();
             after_messages.sort();
             assert_eq!(after_messages, message_keys);
-            assert_eq!(cache.tool_block_states_version, version);
         }
     }
 
@@ -1731,7 +1729,6 @@ mod k8_stage {
                     expansion: true,
                     summary_tier: SummaryTier::Tier1,
                     terminal_width: 80,
-                    tool_block_states_version: 7,
                 };
                 let message = MessageHeightKey {
                     msg_id: "message".into(),
@@ -1739,7 +1736,6 @@ mod k8_stage {
                     content_hash: 13,
                 };
                 let mut render = TabRenderState {
-                    tool_block_states_version: 7,
                     cached_width: Some(80),
                     ..Default::default()
                 };
@@ -1763,6 +1759,7 @@ mod k8_stage {
                     state.input_scroll_offset,
                 );
                 h.render_active_tab(&tabs);
+                let cache_snapshot = stage_support::cache_keys(&h, &tabs);
                 assert_eq!(format!("{:?}", tabs.active_tab().view_state), view);
                 let stage = h.screen_text();
                 k7_surfaces::open(&mut h.state, surface).await;
@@ -1794,7 +1791,7 @@ mod k8_stage {
                         composer
                     );
                     let render = &state.tab_render_states[&tabs.active_tab().id];
-                    assert_eq!(render.tool_block_states_version, 7);
+                    assert_eq!(stage_support::cache_keys(&h, &tabs), cache_snapshot);
                     assert_eq!(render.cached_width, Some(80));
                     assert_eq!(
                         render.height_cache.entries.keys().collect::<Vec<_>>(),
