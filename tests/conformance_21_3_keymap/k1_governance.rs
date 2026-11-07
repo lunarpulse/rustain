@@ -313,7 +313,8 @@ fn tool_inspector_cases_cover_both_contexts_once_and_remain_local_only() {
         vec![Context::InspectorBody, Context::ToolInspector]
     );
     assert!(Context::InspectorBody.parents().is_empty());
-    assert_eq!(Context::ToolInspector.parents(), &[Context::InspectorBody]);
+    assert_eq!(Context::ToolInspector.parents(), &[Context::MarkdownBody]);
+    assert_eq!(Context::MarkdownBody.parents(), &[Context::InspectorBody]);
     for case in &cases {
         assert_eq!(case.surface, Context::ToolInspector);
         assert_eq!(

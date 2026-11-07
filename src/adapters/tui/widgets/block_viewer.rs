@@ -4,7 +4,11 @@ use ratatui::widgets::{Block, Borders, Clear};
 
 use crate::adapters::tui::{
     block_viewer::{self, BlockViewerState},
-    keymap::{Context, render, table_block::BlockCmd, table_overlay::OverlayCmd},
+    keymap::{
+        Context, render,
+        table_block::{BlockCmd, BodyCmd},
+        table_overlay::OverlayCmd,
+    },
     markdown::{BlockKind, BlockMode},
     presentation::viewer::{self, ViewerCmd},
     text_geometry as geom,
@@ -45,15 +49,22 @@ fn status(state: &BlockViewerState) -> String {
         }
         .to_owned(),
     );
+    if state.numbers && state.applies_numbers() {
+        words.push("numbers".to_owned());
+    }
+    if state.wrapped() {
+        words.push("wrap".to_owned());
+    }
     if state.wide() {
-        let first = state.viewer.h_off.min(state.widest - state.cols) + 1;
-        let last = (first - 1 + state.cols).min(state.widest);
+        let cols = state.content_cols();
+        let first = state.viewer.h_off.min(state.widest - cols) + 1;
+        let last = (first - 1 + cols).min(state.widest);
         words.push(format!("col {first}-{last}/{}", state.widest));
     }
     words.join(" · ")
 }
 
-fn rail_text(state: &BlockViewerState) -> String {
+fn rail_text(state: &BlockViewerState, width: usize) -> String {
     let back = format!(
         "{} Back",
         render::rail(Context::BlockViewer, BlockCmd::Back)
@@ -61,18 +72,36 @@ fn rail_text(state: &BlockViewerState) -> String {
     if state.missing {
         return back;
     }
-    let mut text = format!(
-        "{back}  {} Copy  [{}] Scroll",
-        render::rail(Context::BlockViewer, BlockCmd::Copy),
-        render::rail_pair(
-            Context::InspectorBody,
-            ViewerCmd::LineDown,
-            ViewerCmd::LineUp
+    // Applicable rows only (D12), primary actions first: the rail is cut at the
+    // right edge, so what a narrow terminal loses is the last, rarest rows.
+    let mut items = vec![
+        back,
+        format!(
+            "{} Copy",
+            render::rail(Context::BlockViewer, BlockCmd::Copy)
         ),
-    );
+        format!(
+            "{} {}",
+            render::rail(Context::MarkdownBody, BodyCmd::ToggleMode),
+            match state.mode {
+                BlockMode::Rendered => "Source",
+                BlockMode::Source => "Rendered",
+            }
+        ),
+    ];
+    if state.rows.len() > state.viewport {
+        items.push(format!(
+            "[{}] Scroll",
+            render::rail_pair(
+                Context::InspectorBody,
+                ViewerCmd::LineDown,
+                ViewerCmd::LineUp
+            )
+        ));
+    }
     if state.wide() {
-        text.push_str(&format!(
-            "  [{}] Columns",
+        items.push(format!(
+            "[{}] Columns",
             render::rail_pair(
                 Context::MarkdownBody,
                 ViewerCmd::ScrollLeft,
@@ -80,10 +109,40 @@ fn rail_text(state: &BlockViewerState) -> String {
             )
         ));
     }
-    text.push_str(&format!(
-        "  {} Search",
+    items.push(format!(
+        "{} Search",
         render::rail(Context::BlockViewer, OverlayCmd::InspectorSearch)
     ));
+    for (applies, command, label) in [
+        (state.applies_numbers(), BlockCmd::Numbers, "Numbers"),
+        (state.applies_wrap(), BlockCmd::Wrap, "Wrap"),
+        (state.has_previous(), BlockCmd::PrevBlock, "Previous"),
+        (state.has_next(), BlockCmd::NextBlock, "Next"),
+    ] {
+        if applies {
+            items.push(format!(
+                "{} {label}",
+                render::rail(Context::BlockViewer, command)
+            ));
+        }
+    }
+    // Whole items only: a cut-off `[#` would promise a key without naming it. The
+    // back key always stays; an ellipsis marks what did not fit.
+    let mut text = String::new();
+    for (at, item) in items.iter().enumerate() {
+        let candidate = if text.is_empty() {
+            item.clone()
+        } else {
+            format!("{text}  {item}")
+        };
+        let room = width.saturating_sub(if at + 1 < items.len() { 3 } else { 0 });
+        if at == 0 || geom::cells(&candidate) <= room {
+            text = candidate;
+        } else {
+            text.push_str("  …");
+            break;
+        }
+    }
     text
 }
 
@@ -128,7 +187,7 @@ pub fn render(
             frame.buffer_mut().set_stringn(
                 area.x,
                 area.y,
-                label,
+                geom::ellipsize(&label, usize::from(area.width), "…"),
                 usize::from(area.width),
                 Style::default().fg(theme.colors.fg_secondary),
             );
@@ -147,28 +206,44 @@ pub fn render(
         }
     } else {
         let range = viewer::slice(&state.viewer, state.rows.len(), usize::from(body.height));
+        let gutter = u16::try_from(state.gutter()).unwrap_or(0);
+        let content = Rect::new(
+            body.x + gutter,
+            body.y,
+            body.width.saturating_sub(gutter),
+            body.height,
+        );
         let h_off = state
             .viewer
             .h_off
-            .min(state.widest.saturating_sub(state.cols));
+            .min(state.widest.saturating_sub(state.content_cols()));
         for (offset, index) in range.enumerate() {
             let (line, left, right) = block_viewer::window(
                 state.painted(index),
                 state.row_widths[index],
                 h_off,
-                usize::from(body.width),
+                usize::from(content.width),
             );
             let y = body.y + offset as u16;
+            if gutter > 0 {
+                frame.buffer_mut().set_stringn(
+                    body.x,
+                    y,
+                    state.gutter_text(index),
+                    usize::from(gutter),
+                    muted,
+                );
+            }
             frame
                 .buffer_mut()
-                .set_line(body.x + u16::from(left), y, &line, body.width);
+                .set_line(content.x + u16::from(left), y, &line, content.width);
             if left {
-                frame.buffer_mut().set_stringn(body.x, y, "←", 1, muted);
+                frame.buffer_mut().set_stringn(content.x, y, "←", 1, muted);
             }
             if right {
                 frame
                     .buffer_mut()
-                    .set_stringn(body.right() - 1, y, "→", 1, muted);
+                    .set_stringn(content.right() - 1, y, "→", 1, muted);
             }
         }
     }
@@ -176,7 +251,11 @@ pub fn render(
         frame.buffer_mut().set_stringn(
             area.x,
             area.y,
-            geom::ellipsize(&rail_text(state), usize::from(area.width), "…"),
+            geom::ellipsize(
+                &rail_text(state, usize::from(area.width)),
+                usize::from(area.width),
+                "…",
+            ),
             usize::from(area.width),
             Style::default().fg(theme.colors.fg_secondary),
         );

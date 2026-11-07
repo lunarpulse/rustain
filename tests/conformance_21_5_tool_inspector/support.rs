@@ -150,6 +150,13 @@ impl Fixture {
             &*tab.clock,
             self.tabs.tabs().len(),
         );
+        // The host's draw refreshes block viewers right after tool inspectors.
+        rustain::adapters::tui::block_viewer::refresh(
+            &mut self.h.state,
+            &tab.conversation,
+            Some(&tab.reducer),
+            self.tabs.tabs().len(),
+        );
         let after = self
             .h
             .state

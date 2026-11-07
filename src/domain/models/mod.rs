@@ -156,9 +156,9 @@ pub use config::AppConfig;
 pub use config::RuntimeConfig;
 #[allow(unused_imports)]
 pub use config::{
-    AuthHeaderScheme, AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig, MouseConfig,
-    NotificationTtlSecs, NotificationsConfig, ProviderConfig, SearchConfig, SubTaskFailurePolicy,
-    SubagentsConfig, ToolProgressConfig,
+    AuthHeaderScheme, AutoApprovePolicy, AutoPanelsConfig, DaemonConfig, LayoutConfig,
+    MarkdownConfig, MouseConfig, NotificationTtlSecs, NotificationsConfig, ProviderConfig,
+    SearchConfig, SubTaskFailurePolicy, SubagentsConfig, ToolProgressConfig,
 };
 #[allow(unused_imports)]
 pub use content::{ContentBlockType, ResponseSpan, ResponseSpanBuilder};

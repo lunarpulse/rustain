@@ -168,7 +168,12 @@ pub(super) fn line_cells(line: &Line<'_>) -> usize {
 /// Lay the styled blocks out at `width` cells.
 #[must_use]
 pub fn layout(blocks: Vec<StyledBlock>, width: usize, theme: &Theme) -> Rows {
-    layout_with_blocks(blocks, width, theme, BlockPresentation::Stage)
+    layout_with_blocks(
+        blocks,
+        width,
+        theme,
+        BlockPresentation::Stage { code_cap: None },
+    )
 }
 
 pub(super) fn layout_with_blocks(
@@ -454,16 +459,41 @@ fn render_code_block(
     styles: &Styles,
     out: &mut Vec<Line<'static>>,
 ) {
-    let code_lines: Vec<&str> = if content.is_empty() {
+    let mut code_lines: Vec<&str> = if content.is_empty() {
         Vec::new()
     } else {
         content.split('\n').collect()
     };
+    // The Stage cap (D6): keep the first `cap` rows and count the rest.
+    let hidden = match styles.blocks {
+        BlockPresentation::Stage {
+            code_cap: Some(cap),
+        } if code_lines.len() > usize::from(cap) => {
+            let hidden = code_lines.len() - usize::from(cap);
+            code_lines.truncate(usize::from(cap));
+            Some(hidden)
+        }
+        _ => None,
+    };
+    let remainder = hidden.map(|hidden| {
+        if hidden == 1 {
+            "… 1 more line".to_owned()
+        } else {
+            format!("… {hidden} more lines")
+        }
+    });
+    let marker_style = styles.muted.patch(styles.code_bg);
     // A border needs three cells; narrower panes paint the bare code.
     if width < 3 {
         for code_line in code_lines {
             let fitted = geom::fit_exact(&geom::expand_tabs(code_line, 0), width);
             out.push(Line::from(Span::styled(fitted, styles.code_bg)));
+        }
+        if let Some(text) = remainder {
+            out.push(Line::from(Span::styled(
+                geom::fit_exact(&text, width),
+                marker_style,
+            )));
         }
         return;
     }
@@ -487,6 +517,16 @@ fn render_code_block(
                 Span::styled("│", styles.code_border),
             ]));
         }
+    }
+    if let Some(text) = remainder {
+        out.push(Line::from(vec![
+            Span::styled("│", styles.code_border),
+            Span::styled(
+                geom::pad_right(&geom::fit_exact(&text, inner_width), inner_width),
+                marker_style,
+            ),
+            Span::styled("│", styles.code_border),
+        ]));
     }
     out.push(Line::from(Span::styled(
         format!("└{}┘", "─".repeat(inner_width)),

@@ -33,7 +33,7 @@ pub mod transform;
 
 use ratatui::prelude::*;
 
-pub use block::render_block;
+pub use block::{block_count, block_source_len, render_block};
 pub use link::{LinkPresentation, LinkRun};
 
 use crate::adapters::tui::theme::Theme;
@@ -48,7 +48,10 @@ pub enum RenderMode {
 /// Geometry policy for inspectable blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockPresentation {
-    Stage,
+    /// The Stage: fenced code optionally capped at `code_cap` rows.
+    Stage {
+        code_cap: Option<u16>,
+    },
     Window,
 }
 
@@ -128,7 +131,7 @@ impl RenderOptions {
         Self {
             mode,
             links: LinkPresentation::Explicit,
-            blocks: BlockPresentation::Stage,
+            blocks: BlockPresentation::Stage { code_cap: None },
         }
     }
 
@@ -142,6 +145,15 @@ impl RenderOptions {
     #[must_use]
     pub const fn with_blocks(mut self, blocks: BlockPresentation) -> Self {
         self.blocks = blocks;
+        self
+    }
+
+    /// The Stage presentation with fenced code capped at `cap` rows (`None`: not
+    /// capped). The cap changes geometry, so every caller of a height pass and
+    /// the painter that follows it must pass the same value (D5).
+    #[must_use]
+    pub const fn with_code_cap(mut self, cap: Option<u16>) -> Self {
+        self.blocks = BlockPresentation::Stage { code_cap: cap };
         self
     }
 }
@@ -166,9 +178,16 @@ pub mod metrics {
     thread_local! {
         static RENDERS: Cell<usize> = const { Cell::new(0) };
     }
+    thread_local! {
+        static BLOCK_RENDERS: Cell<usize> = const { Cell::new(0) };
+    }
 
     pub(super) fn record_render() {
         RENDERS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn record_block_render() {
+        BLOCK_RENDERS.with(|count| count.set(count.get() + 1));
     }
 
     /// Pipeline runs on this thread since the last [`reset`].
@@ -176,8 +195,14 @@ pub mod metrics {
         RENDERS.with(Cell::get)
     }
 
+    /// `render_block` calls (the one-block pipeline) since the last [`reset`].
+    pub fn block_renders() -> usize {
+        BLOCK_RENDERS.with(Cell::get)
+    }
+
     pub fn reset() {
         RENDERS.with(|count| count.set(0));
+        BLOCK_RENDERS.with(|count| count.set(0));
     }
 }
 

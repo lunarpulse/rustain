@@ -4799,6 +4799,32 @@ mod tests {
         }
     }
 
+    /// Story 21.13 (D4/M9): the code cap is a local-Stage setting; the attached
+    /// host paints every code row whatever the local value is.
+    #[test]
+    fn story21_13_attached_code_is_never_capped() {
+        use crate::domain::models::{Turn, TurnPart};
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.state.terminal_width = 80;
+        rig.state.terminal_height = 70;
+        rig.state.code_max_rows = 3;
+        let body = (1..=45)
+            .map(|n| format!("fn line_{n:02}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut turn = Turn::new("model".into(), 0);
+        turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: format!("```rust\n{body}\n```\n"),
+        });
+        rig.domain_tab.conversation.turns.push(turn);
+        rig.domain_tab.conversation.rebuild_messages_mirror();
+        let screen = attached_screen(&rig.paint());
+        assert!(screen.contains("fn line_01()"), "{screen}");
+        assert!(screen.contains("fn line_45()"), "{screen}");
+        assert!(!screen.contains("more line"), "{screen}");
+    }
+
     /// Moved from conformance_18_3d_consent: labels and dispatch are observed
     /// through the real producer, attached state, painter, front door and wire.
     #[tokio::test]

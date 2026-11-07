@@ -33,6 +33,11 @@ pub enum InputAction {
     StepTool {
         forward: bool,
     },
+    /// Move the open block viewer to a same-turn neighbour, resolved against the
+    /// live canonical parts before the next paint.
+    StepBlock {
+        forward: bool,
+    },
     /// Copy the current tool tab from fresh owning canonical sources, not cells.
     CopyToolSource,
     /// Copy the open block's exact source from the owning canonical parts.
@@ -1234,7 +1239,7 @@ fn execute(
         CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Inspector(cmd) => exec_inspector(state, cmd),
-        CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) => {
+        CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) | CommandId::Body(_) => {
             match state.modal_stack.top().map(|frame| frame.surface) {
                 Some(Surface::BlockViewer(_)) => {
                     crate::adapters::tui::block_viewer::on_key(state, key, host)

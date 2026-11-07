@@ -12,7 +12,10 @@ use std::hash::{Hash, Hasher};
 use ratatui::text::Line;
 
 use crate::adapters::tui::{
-    presentation::viewer::{RowOrigin, Viewer, ViewerSearch},
+    presentation::{
+        markdown_body::BodyMode,
+        viewer::{RowOrigin, Viewer, ViewerSearch},
+    },
     state::{HeightCache, MessageHeightKey},
     theme::Theme,
 };
@@ -45,15 +48,25 @@ impl PendingNavigation {
     }
 }
 
+/// The presentation a queued key was issued in: replaying an intent restores
+/// exactly this tab, wrap and body mode before it acts.
+#[derive(Debug, Clone, Copy)]
+struct Ctx {
+    tab: ToolTab,
+    wrap: bool,
+    mode: BodyMode,
+}
+
 /// Preserve the order of keys across tabs and before the first preparation.
 /// Only query-sized drafts are captured; source bodies remain canonical borrows.
 #[derive(Debug)]
 enum PendingIntent {
-    Navigate(ToolTab, bool, PendingNavigation),
-    Commit(ToolTab, bool, String),
-    Match(ToolTab, bool, bool),
-    Tab(ToolTab, bool),
-    Wrap(ToolTab, bool),
+    Navigate(Ctx, PendingNavigation),
+    Commit(Ctx, String),
+    Match(Ctx, bool),
+    Tab(Ctx),
+    Wrap(Ctx),
+    Mode(Ctx),
     Clear,
 }
 
@@ -82,8 +95,18 @@ pub struct ToolInspectorState {
     pub origins: [Vec<Option<RowOrigin>>; 4],
     pub row_widths: [Vec<usize>; 4],
     pub search: ViewerSearch,
-    revisions: [Option<(u64, u16, u64, bool)>; 4],
-    search_projection: Option<(ToolTab, u64, u16, bool)>,
+    revisions: [Option<(u64, u16, u64, bool, BodyMode)>; 4],
+    search_projection: Option<(ToolTab, u64, u16, bool, BodyMode)>,
+    /// Output as Source (the default) or rendered markdown (D15, `v`).
+    pub mode: BodyMode,
+    /// Rows of the Output body that scroll sideways, and their widest extent.
+    pub wide: Vec<std::ops::Range<usize>>,
+    pub widest: usize,
+    /// Body width of the last preparation (the horizontal scroll's viewport).
+    pub cols: usize,
+    /// `(top, h_off)` of Output parked while the other presentation is shown
+    /// (Source, Rendered).
+    saved_view: [(usize, usize); 2],
     tabs_revision: Option<u64>,
     pending: Vec<PendingIntent>,
 }
@@ -107,6 +130,11 @@ impl ToolInspectorState {
             row_widths: std::array::from_fn(|_| Vec::new()),
             search: ViewerSearch::default(),
             revisions: [None; 4],
+            mode: BodyMode::Source,
+            wide: Vec::new(),
+            widest: 0,
+            cols: 0,
+            saved_view: [(0, 0); 2],
             search_projection: None,
             tabs_revision: None,
             pending: Vec::new(),
@@ -119,6 +147,45 @@ impl ToolInspectorState {
             .map_or(&[], |(_, rows)| rows)
     }
 
+    fn ctx(&self) -> Ctx {
+        Ctx {
+            tab: self.tab,
+            wrap: self.wrap,
+            mode: self.mode,
+        }
+    }
+
+    fn set_ctx(&mut self, ctx: Ctx) {
+        (self.tab, self.wrap, self.mode) = (ctx.tab, ctx.wrap, ctx.mode);
+    }
+
+    /// Only the Output tab is a Markdown body (D16).
+    pub fn is_body(&self) -> bool {
+        self.tab == ToolTab::Output
+    }
+
+    /// The presentation the active tab is painted in (Source for every tab but
+    /// Output).
+    pub fn body_mode(&self) -> BodyMode {
+        if self.is_body() {
+            self.mode
+        } else {
+            BodyMode::Source
+        }
+    }
+
+    /// `w`: soft wrap means something everywhere except a rendered body, which
+    /// always wraps its prose at the inner width.
+    pub fn wrap_applies(&self) -> bool {
+        self.body_mode() == BodyMode::Source
+    }
+
+    /// `h`, `l`, `0` and `$` can move something right now. One rule for the key
+    /// and the rail's hint.
+    pub fn scrollable(&self) -> bool {
+        self.is_body() && !self.wide.is_empty() && self.widest > self.cols
+    }
+
     fn prepare(
         &mut self,
         inputs: ToolSources<'_>,
@@ -127,22 +194,24 @@ impl ToolInspectorState {
         theme: &Theme,
         now_ms: i64,
     ) {
-        let final_tab = self.tab;
-        let final_wrap = self.wrap;
+        let final_ctx = self.ctx();
         let mut pending = std::mem::take(&mut self.pending);
         for mut intent in pending.drain(..) {
-            let (tab, wrap) = match &intent {
-                PendingIntent::Navigate(tab, wrap, _)
-                | PendingIntent::Commit(tab, wrap, _)
-                | PendingIntent::Match(tab, wrap, _)
-                | PendingIntent::Tab(tab, wrap) => (*tab, *wrap),
-                PendingIntent::Wrap(tab, wrap) => {
+            let ctx = match &intent {
+                PendingIntent::Navigate(ctx, _)
+                | PendingIntent::Commit(ctx, _)
+                | PendingIntent::Match(ctx, _)
+                | PendingIntent::Tab(ctx)
+                | PendingIntent::Mode(ctx) => *ctx,
+                PendingIntent::Wrap(ctx) => {
                     // Even a toggle before first paint needs the old rows: an
                     // earlier navigation may have landed in a continuation.
-                    self.tab = *tab;
-                    self.wrap = !*wrap;
+                    self.set_ctx(Ctx {
+                        wrap: !ctx.wrap,
+                        ..*ctx
+                    });
                     self.prepare_tab(inputs, width, viewport, theme, now_ms);
-                    (*tab, *wrap)
+                    *ctx
                 }
                 PendingIntent::Clear => {
                     self.search.commit(String::new());
@@ -150,9 +219,8 @@ impl ToolInspectorState {
                     continue;
                 }
             };
-            self.tab = tab;
-            self.wrap = wrap;
-            if let PendingIntent::Commit(_, _, query) = &mut intent {
+            self.set_ctx(ctx);
+            if let PendingIntent::Commit(_, query) = &mut intent {
                 self.search.commit(std::mem::take(query));
                 self.search_projection = None;
             }
@@ -163,22 +231,47 @@ impl ToolInspectorState {
             let index = self.tab.index();
             let rows = self.rows().len();
             match intent {
-                PendingIntent::Navigate(_, _, action) => {
+                PendingIntent::Navigate(_, PendingNavigation::Key(command))
+                    if command.horizontal() =>
+                {
+                    if self.scrollable() {
+                        crate::adapters::tui::presentation::viewer::apply_horizontal(
+                            &mut self.viewers[index],
+                            command,
+                            self.widest,
+                            self.cols,
+                        );
+                    }
+                }
+                PendingIntent::Navigate(_, action) => {
                     action.apply(&mut self.viewers[index], rows, viewport);
                 }
-                PendingIntent::Commit(_, _, _) => {
+                PendingIntent::Commit(_, _) => {
                     self.search.jump(&mut self.viewers[index], rows, viewport);
                 }
-                PendingIntent::Match(_, _, forward) => {
+                PendingIntent::Match(_, forward) => {
                     self.search
                         .step(&mut self.viewers[index], forward, rows, viewport);
                 }
-                PendingIntent::Tab(_, _) | PendingIntent::Wrap(_, _) | PendingIntent::Clear => {}
+                PendingIntent::Mode(ctx) => {
+                    // Each presentation keeps its own position: park the one being
+                    // left (after every scroll issued before the toggle acted on
+                    // its rows) and restore the one being entered (top and first
+                    // column the first time).
+                    let slot = |mode: BodyMode| usize::from(mode == BodyMode::Rendered);
+                    let output = &mut self.viewers[index];
+                    self.saved_view[slot(ctx.mode.toggled())] = (output.top, output.h_off);
+                    let (top, h_off) = self.saved_view[slot(ctx.mode)];
+                    output.h_off = h_off;
+                    if !output.follow {
+                        output.top = top;
+                    }
+                }
+                PendingIntent::Tab(_) | PendingIntent::Wrap(_) | PendingIntent::Clear => {}
             }
         }
         self.pending = pending;
-        self.tab = final_tab;
-        self.wrap = final_wrap;
+        self.set_ctx(final_ctx);
         self.prepare_tab(inputs, width, viewport, theme, now_ms);
     }
 
@@ -212,6 +305,7 @@ impl ToolInspectorState {
             self.tab = ToolTab::Output;
         }
         self.viewport = viewport;
+        self.cols = usize::from(width);
         let index = self.tab.index();
         let mut revision = source::revision(&view, self.tab);
         if self.tab == ToolTab::Output
@@ -235,16 +329,24 @@ impl ToolInspectorState {
             .hash(&mut styles);
         let style_hash = styles.finish();
         // Literal renders unwrapped bodies at usize::MAX, independent of the
-        // terminal width. Viewport clamping below still uses the real geometry.
-        let width = if self.wrap { width } else { 0 };
+        // terminal width; a rendered body always wraps its prose at the real
+        // width. Viewport clamping below still uses the real geometry.
+        let mode_key = self.body_mode();
+        let width = if self.wrap || mode_key == BodyMode::Rendered {
+            width
+        } else {
+            0
+        };
         let project_search = !self.search.query().is_empty()
-            && self.search_projection != Some((self.tab, revision, width, self.wrap));
-        if self.revisions[index] != Some((revision, width, style_hash, self.wrap)) || project_search
+            && self.search_projection != Some((self.tab, revision, width, self.wrap, mode_key));
+        if self.revisions[index] != Some((revision, width, style_hash, self.wrap, mode_key))
+            || project_search
         {
             let prepared = source::prepare(&view, self.tab, now_ms);
             let mut hash = std::collections::hash_map::DefaultHasher::new();
             prepared.hash().hash(&mut hash);
             self.wrap.hash(&mut hash);
+            mode_key.hash(&mut hash);
             style_hash.hash(&mut hash);
             let content_hash = hash.finish();
             let cached = self.bodies[index].as_ref().is_some_and(|(key, _)| {
@@ -257,20 +359,34 @@ impl ToolInspectorState {
                     content_hash,
                 };
                 let anchor = self.revisions[index]
-                    .filter(|(_, old_width, _, wrap)| {
-                        *wrap != self.wrap || (self.wrap && *old_width != width)
+                    .filter(|(_, old_width, _, wrap, old_mode)| {
+                        *old_mode == mode_key
+                            && (*wrap != self.wrap || (self.wrap && *old_width != width))
                     })
                     .and_then(|_| self.origins[index].get(self.viewers[index].top))
                     .and_then(Option::as_ref)
                     .map(|origin| origin.logical_line);
-                let rendered = prepared.render(
-                    if self.wrap {
-                        usize::from(width)
-                    } else {
-                        usize::MAX
-                    },
-                    theme,
-                );
+                let rendered = if self.tab == ToolTab::Output {
+                    prepared.render_body(
+                        if self.wrap || mode_key == BodyMode::Rendered {
+                            usize::from(width)
+                        } else {
+                            usize::MAX
+                        },
+                        self.wrap,
+                        theme,
+                        mode_key,
+                    )
+                } else {
+                    prepared.render(
+                        if self.wrap {
+                            usize::from(width)
+                        } else {
+                            usize::MAX
+                        },
+                        theme,
+                    )
+                };
                 if let Some(logical_line) = anchor {
                     self.viewers[index].top = rendered
                         .origins
@@ -283,6 +399,10 @@ impl ToolInspectorState {
                         .unwrap_or_else(|| rendered.lines.len().saturating_sub(1));
                 }
                 self.row_widths[index] = rendered.lines.iter().map(Line::width).collect();
+                if self.tab == ToolTab::Output {
+                    self.wide = rendered.wide;
+                    self.widest = rendered.widest;
+                }
                 if let Some((previous, _)) = self.bodies[index].take() {
                     self.heights.message_entries.remove(&previous);
                 }
@@ -300,17 +420,45 @@ impl ToolInspectorState {
                 } else {
                     self.viewers[index].top.min(maximum)
                 };
-                self.search
-                    .project(prepared.logical_text(), &self.origins[index], top);
-                self.search_projection = Some((self.tab, revision, width, self.wrap));
+                if mode_key == BodyMode::Rendered {
+                    // Rendered rows are their own search lines: a match is a
+                    // match of what is displayed, not of the markdown source.
+                    let text = self.bodies[index]
+                        .as_ref()
+                        .map_or(String::new(), |(_, rows)| {
+                            rows.iter()
+                                .map(|row| {
+                                    row.spans
+                                        .iter()
+                                        .map(|s| s.content.as_ref())
+                                        .collect::<String>()
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        });
+                    self.search.project(&text, &self.origins[index], top);
+                } else {
+                    self.search
+                        .project(prepared.logical_text(), &self.origins[index], top);
+                }
+                self.search_projection = Some((self.tab, revision, width, self.wrap, mode_key));
             }
-            self.revisions[index] = Some((revision, width, style_hash, self.wrap));
+            self.revisions[index] = Some((revision, width, style_hash, self.wrap, mode_key));
         }
         let maximum = self.rows().len().saturating_sub(viewport);
         self.viewers[index].top = if self.viewers[index].follow {
             maximum
         } else {
             self.viewers[index].top.min(maximum)
+        };
+        // A horizontal offset only exists where something scrolls, and never
+        // past the last cell (the viewport may have grown since the key).
+        self.viewers[index].h_off = if self.scrollable() {
+            self.viewers[index]
+                .h_off
+                .min(self.widest.saturating_sub(self.cols))
+        } else {
+            0
         };
     }
 }
@@ -322,7 +470,9 @@ impl ToolInspectorState {
         // Pause a painted tail at the inspected row immediately, so growth
         // arriving before preparation cannot move the navigation's starting row.
         // A never-painted tab must first resolve its honest initial tail.
+        let horizontal = matches!(action, PendingNavigation::Key(command) if command.horizontal());
         if self.bodies[self.tab.index()].is_some()
+            && !horizontal
             && !matches!(
                 action,
                 PendingNavigation::Key(ViewerCmd::Tail)
@@ -332,14 +482,13 @@ impl ToolInspectorState {
             self.viewers[self.tab.index()].follow = false;
         }
         self.pending
-            .push(PendingIntent::Navigate(self.tab, self.wrap, action));
+            .push(PendingIntent::Navigate(self.ctx(), action));
     }
 
     pub(crate) fn accept_search(&mut self) {
         self.search.editor.accept();
         self.pending.push(PendingIntent::Commit(
-            self.tab,
-            self.wrap,
+            self.ctx(),
             self.search.editor.query.as_str().to_owned(),
         ));
     }
@@ -464,6 +613,7 @@ pub fn step(
     let mut replacement = ToolInspectorState::new(target, viewport);
     replacement.tabs = tabs;
     replacement.wrap = current.wrap;
+    replacement.mode = current.mode;
     replacement.tab = if tabs.contains(&tab) {
         tab
     } else {
@@ -535,7 +685,7 @@ pub fn on_key(
 ) -> crate::adapters::tui::app::InputAction {
     use crate::adapters::tui::{
         app::InputAction,
-        keymap::{self, CommandId, Context, Resolved, table_tool::ToolCmd},
+        keymap::{self, CommandId, Context, Resolved, table_block::BodyCmd, table_tool::ToolCmd},
         presentation::{Surface, reducer},
     };
     let Some(Surface::ToolInspector(ToolFrameKey(id))) =
@@ -565,8 +715,7 @@ pub fn on_key(
         }
         CommandId::Tool(command @ (ToolCmd::NextMatch | ToolCmd::PrevMatch)) => {
             inspector.pending.push(PendingIntent::Match(
-                inspector.tab,
-                inspector.wrap,
+                inspector.ctx(),
                 command == ToolCmd::NextMatch,
             ));
         }
@@ -577,10 +726,21 @@ pub fn on_key(
         }
         CommandId::Tool(ToolCmd::Copy) => return InputAction::CopyToolSource,
         CommandId::Tool(ToolCmd::Wrap) => {
-            inspector.wrap = !inspector.wrap;
-            inspector
-                .pending
-                .push(PendingIntent::Wrap(inspector.tab, inspector.wrap));
+            if inspector.wrap_applies() {
+                inspector.wrap = !inspector.wrap;
+                inspector.pending.push(PendingIntent::Wrap(inspector.ctx()));
+            }
+        }
+        CommandId::Body(BodyCmd::ToggleMode) => {
+            if inspector.is_body() {
+                inspector.mode = inspector.mode.toggled();
+                inspector.pending.push(PendingIntent::Mode(inspector.ctx()));
+            }
+        }
+        CommandId::Viewer(command) if command.horizontal() => {
+            if inspector.is_body() {
+                inspector.navigate(PendingNavigation::Key(command));
+            }
         }
         CommandId::Viewer(command) => {
             inspector.navigate(PendingNavigation::Key(command));
@@ -597,9 +757,7 @@ pub fn on_key(
                 current.saturating_add(1).min(inspector.tabs.len() - 1)
             };
             inspector.tab = inspector.tabs[next];
-            inspector
-                .pending
-                .push(PendingIntent::Tab(inspector.tab, inspector.wrap));
+            inspector.pending.push(PendingIntent::Tab(inspector.ctx()));
         }
         _ => return InputAction::Consumed,
     }

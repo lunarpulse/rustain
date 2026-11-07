@@ -9,7 +9,7 @@ use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::visual::DensityMode;
 
 use super::table::{GlobalCmd, LeaderCmd};
-use super::table_block::BlockCmd;
+use super::table_block::{BlockCmd, BodyCmd};
 use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
@@ -576,7 +576,7 @@ impl Context {
             | Context::Consent => &[],
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
-            Context::ToolInspector => &[Context::InspectorBody],
+            Context::ToolInspector => &[Context::MarkdownBody],
             // The decision cards own every key: the shared cue rows only (A8).
             Context::SkillTrust
             | Context::PlanApproval
@@ -744,6 +744,7 @@ pub enum CommandId {
     Viewer(ViewerCmd),
     Tool(ToolCmd),
     Block(BlockCmd),
+    Body(BodyCmd),
 }
 
 macro_rules! command_from {
@@ -772,6 +773,7 @@ command_from!(
     Viewer(ViewerCmd),
     Tool(ToolCmd),
     Block(BlockCmd),
+    Body(BodyCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

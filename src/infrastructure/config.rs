@@ -65,6 +65,7 @@ pub const KNOWN_TOP_LEVEL_FIELDS: &[&str] = &[
     "daemon",
     "fanout_spawn_gate_threshold",
     "notifications",
+    "markdown",
 ];
 
 const CREDENTIAL_PATH_SEGMENTS: &[&str] = &[

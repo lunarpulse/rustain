@@ -56,6 +56,63 @@ fn sources(input: &str) -> Vec<String> {
     result
 }
 
+/// How many code blocks and tables `content` holds, in the parser's block order
+/// (the same order and count `render_block` selects from). One parse, no
+/// source text is retained.
+#[must_use]
+pub fn block_count(content: &str) -> usize {
+    let input = super::sanitize::sanitize(content, RenderMode::Literal);
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
+    Parser::new_ext(&input, options)
+        .filter(|event| {
+            matches!(
+                event,
+                Event::Start(Tag::CodeBlock(_)) | Event::Start(Tag::Table(_))
+            )
+        })
+        .count()
+}
+
+/// The byte length `render_block(content, ordinal, ..).source` would have, from
+/// one parser pass that retains nothing (no source text, styled blocks or rows).
+/// Exact for code; for a table the raw table range, an upper bound of its source
+/// (stripping a container prefix only shortens it). `None`: no such block.
+#[must_use]
+pub fn block_source_len(content: &str, ordinal: usize) -> Option<usize> {
+    let input = super::sanitize::sanitize(content, RenderMode::Literal);
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
+    let (mut seen, mut code) = (0usize, None::<(usize, bool)>);
+    for (event, range) in Parser::new_ext(&input, options).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => code = Some((0, false)),
+            Event::Text(text) if code.is_some() => {
+                if let Some((len, ends_newline)) = &mut code {
+                    *len += text.len();
+                    *ends_newline = text.ends_with('\n');
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let (len, ends_newline) = code.take()?;
+                if seen == ordinal {
+                    return Some(len - usize::from(ends_newline));
+                }
+                seen += 1;
+            }
+            Event::Start(Tag::Table(_)) => {
+                if seen == ordinal {
+                    let table = &input[range];
+                    return Some(table.strip_suffix('\n').unwrap_or(table).len());
+                }
+                seen += 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn find_block<'a>(blocks: &'a [StyledBlock], ordinal: &mut usize) -> Option<&'a StyledBlock> {
     for block in blocks {
         match block {
@@ -91,6 +148,8 @@ pub fn render_block(
     theme: &Theme,
     render: &BlockRender,
 ) -> Option<BlockView> {
+    #[cfg(any(test, debug_assertions))]
+    super::metrics::record_block_render();
     let source = sources(content).into_iter().nth(ordinal)?;
     let sanitized = super::sanitize::sanitize(content, RenderMode::Completed);
     let parsed = super::parse::parse(&sanitized, LinkPresentation::Explicit);
@@ -115,11 +174,33 @@ pub fn render_block(
     let (rows, source_line) = match render.mode {
         BlockMode::Rendered => super::layout::inspect(block, theme, render.wrap)?,
         BlockMode::Source => {
-            let rows: Vec<Line<'static>> = source
-                .split('\n')
-                .map(|line| Line::from(geom::expand_tabs(line, 0).into_owned()))
-                .collect();
-            let mapping = (1..=rows.len()).map(Some).collect();
+            // Raw lines, tabs expanded and control characters omitted for display
+            // only; only code wraps (`wrap` is the content width in cells).
+            let wrap = render
+                .wrap
+                .filter(|_| matches!(kind, BlockKind::Code { .. }));
+            if wrap == Some(0) {
+                return None;
+            }
+            let mut rows: Vec<Line<'static>> = Vec::new();
+            let mut mapping: Vec<Option<usize>> = Vec::new();
+            for (index, line) in source.split('\n').enumerate() {
+                let expanded = geom::expand_tabs(line, 0);
+                match wrap {
+                    Some(width) => {
+                        for (part, chunk) in
+                            geom::wrap_hard(&expanded, width).into_iter().enumerate()
+                        {
+                            rows.push(Line::from(chunk.to_owned()));
+                            mapping.push((part == 0).then_some(index + 1));
+                        }
+                    }
+                    None => {
+                        rows.push(Line::from(expanded.into_owned()));
+                        mapping.push(Some(index + 1));
+                    }
+                }
+            }
             (rows, mapping)
         }
     };

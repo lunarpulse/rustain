@@ -310,6 +310,29 @@ error_ttl_secs = 60    # default 60
 
 Notifications are session-local and are never written to disk.
 
+### Code blocks (`[markdown]`)
+
+On the local Stage a fenced code block of an assistant reply that is longer than
+`code_max_rows` rows shows its first `code_max_rows` rows and a muted
+`… N more lines` row inside the box (`… 1 more line` for one); the rest of the
+block is one key away: focus it (the `▸` marker and `[Enter] Inspect` appear on
+its first row) and press `Enter` to read all of it in the block viewer, where
+`#` adds line numbers, `w` wraps, `v` shows the source and `c` copies the
+exact source. The value is a whole number of rows, clamped to `[1, 1000]`: a
+value outside that range (or `0` or a negative number) is clamped and logged as
+a warning, whereas a non-integer value invalidates the config. It can be set per
+profile, and `/config reload` applies a new value to every conversation
+without a restart.
+
+```toml
+[markdown]
+code_max_rows = 30   # default 30, range 1-1000
+```
+
+The cap applies to the local Stage only and to completed replies: code in the
+reply that is still streaming, in reasoning, in system messages and in an
+attached session always shows every row.
+
 ### Decisions that need an answer
 
 A few prompts are decisions, not notices, so they never expire: the startup

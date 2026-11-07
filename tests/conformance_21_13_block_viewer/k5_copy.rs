@@ -9,7 +9,7 @@ use rustain::adapters::tui::{
 use super::support::{Fixture, focus, mixed_turn, open, single};
 
 /// Press `key` and run the production copy effect with an injected copier.
-fn copy(f: &mut Fixture, key: Key) -> Vec<String> {
+pub(super) fn copy(f: &mut Fixture, key: Key) -> Vec<String> {
     let action = f.press(key);
     let copied = RefCell::new(Vec::new());
     let copier = |text: &str| {
@@ -123,6 +123,7 @@ fn block_copy_is_bounded_at_eight_mebibytes_and_never_calls_the_copier_above_it(
     for (bytes, expect_copy) in [(8 * 1024 * 1024, true), (8 * 1024 * 1024 + 1, false)] {
         let (mut f, id) = single(80, 24, &format!("```\n{}\n```\n", "x".repeat(bytes)));
         open(&mut f, &id);
+        rustain::adapters::tui::markdown::metrics::reset();
         let copied = copy(&mut f, Key::Char('c'));
         if expect_copy {
             assert_eq!(copied.len(), 1);
@@ -138,6 +139,13 @@ fn block_copy_is_bounded_at_eight_mebibytes_and_never_calls_the_copier_above_it(
                 "Copy failed: block source exceeds the 8 MiB copy limit"
             );
         }
+        // The bound bounds the work: above it no block is built at all, and at it
+        // exactly one is (the source the copy is made of).
+        assert_eq!(
+            rustain::adapters::tui::markdown::metrics::block_renders(),
+            usize::from(expect_copy),
+            "{bytes} bytes"
+        );
     }
 }
 

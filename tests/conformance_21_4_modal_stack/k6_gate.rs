@@ -439,7 +439,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             }
             if *rule == "block-window"
                 && (path.starts_with("src/adapters/tui/markdown/")
-                    || path == "src/adapters/tui/widgets/block_viewer.rs")
+                    || path == "src/adapters/tui/presentation/markdown_body.rs")
             {
                 continue;
             }
@@ -1799,6 +1799,12 @@ fn k6_story21_13_block_cutover_clauses_have_positive_controls_and_exact_allowlis
             "src/adapters/tui/markdown/layout.rs",
             "src/adapters/tui/widgets/chat_pane/mod.rs",
         ),
+        (
+            "block-window",
+            "fn f() { let _ = BlockPresentation::Window; }",
+            "src/adapters/tui/presentation/markdown_body.rs",
+            "src/adapters/tui/widgets/chat_pane/mod.rs",
+        ),
     ] {
         let text = text.to_owned();
         let errors = scan(&[(denied.into(), text.clone())], &[]);
@@ -1829,6 +1835,16 @@ fn k6_story21_13_block_cutover_clauses_have_positive_controls_and_exact_allowlis
         elsewhere.iter().any(|e| e.contains("osc8-encoder|")),
         "{elsewhere:?}"
     );
+    // The markdown_body.rs allowance is exercised by its real Window layout: the
+    // same scanner flags that text anywhere else, and not under its own path.
+    let body = include_str!("../../src/adapters/tui/presentation/markdown_body.rs");
+    let flagged = |path: &str| {
+        scan(&[(path.into(), body.into())], &[])
+            .iter()
+            .any(|e| e.contains("block-window|"))
+    };
+    assert!(flagged("src/adapters/tui/widgets/chat_pane/mod.rs"));
+    assert!(!flagged("src/adapters/tui/presentation/markdown_body.rs"));
     let here = scan(
         &[(
             "src/adapters/tui/widgets/hyperlink.rs".into(),
@@ -1851,13 +1867,23 @@ fn k6_story21_13_block_cutover_clauses_have_positive_controls_and_exact_allowlis
         !comment.iter().any(|e| e.contains("osc8-encoder|")),
         "{comment:?}"
     );
-    // Block viewers are allowed to name Window only inside the widget.
-    let errors = scan(
-        &[(
-            "src/adapters/tui/widgets/block_viewer.rs".into(),
-            "fn f() { let _ = BlockPresentation::Window; }".into(),
-        )],
-        &[],
-    );
-    assert!(errors.is_empty(), "{errors:?}");
+    // Only the two layouts that build Window geometry are exempt: the S-BLOCK
+    // widget never names it, so naming it there (or in any sibling) is a hit.
+    for denied in [
+        "src/adapters/tui/widgets/block_viewer.rs",
+        "src/adapters/tui/presentation/viewer.rs",
+        "src/adapters/tui/block_viewer/mod.rs",
+    ] {
+        let errors = scan(
+            &[(
+                denied.into(),
+                "fn f() { let _ = BlockPresentation::Window; }".into(),
+            )],
+            &[],
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("block-window|")),
+            "{denied}: {errors:?}"
+        );
+    }
 }

@@ -5,6 +5,7 @@ use rustain::adapters::tui::{
     block_viewer,
     clipboard::ClipboardResult,
     keymap::{Context, Key},
+    markdown::BlockMode,
     notifications::NoticeSource,
     presentation::{self, Surface},
     quit_confirm::{self, QuitFacts, QuitHost},
@@ -76,8 +77,17 @@ fn salient(runtime: &BlockRuntime) -> String {
     }
     let block = block(f);
     let row: Vec<char> = body_row(f, 0).chars().collect();
+    let words = [
+        (block.mode == BlockMode::Source, " source"),
+        (block.numbers, " numbers"),
+        (block.wrap, " wrap"),
+    ]
+    .iter()
+    .filter(|(on, _)| *on)
+    .map(|(_, word)| *word)
+    .collect::<String>();
     format!(
-        "@{} h{} {}{} frames={} leader={}",
+        "@{} h{} {}{}{words} frames={} leader={}",
         block.viewer.top,
         block.viewer.h_off,
         row[0],
@@ -156,6 +166,7 @@ const INHERITED: &[W<BlockRuntime>] = &[
     w(&[Key::PageUp], "Consumed | @5 h16 ←→ frames=1 leader=false"),
     w(&[Key::Char('g')], "Consumed | @0 h16 ←→ frames=1 leader=false"),
     w(&[Key::Char('G')], "Consumed | @46 h16 ←→ frames=1 leader=false"),
+    w(&[Key::Char('v')], "Consumed | @0 h0 f  source frames=1 leader=false"),
 ];
 
 #[rustfmt::skip]
@@ -164,6 +175,10 @@ const BLOCK: &[W<BlockRuntime>] = &[
     wp(&[Key::Char('n')], "Consumed | @21 h3 ←→ frames=1 leader=false", searchable),
     wp(&[Key::Char('N')], "Consumed | @19 h3 ←→ frames=1 leader=false", searchable),
     w(&[Key::Char('c')], "CopyBlockSource | clipboard=Success \"Copied to clipboard\""),
+    w(&[Key::Char('#')], "Consumed | @20 h16 2→ numbers frames=1 leader=false"),
+    w(&[Key::Char('w')], "Consumed | @20 h0 ││ wrap frames=1 leader=false"),
+    w(&[Key::Char('[')], "StepBlock { forward: false } | @20 h16 ←→ frames=1 leader=false"),
+    w(&[Key::Char(']')], "StepBlock { forward: true } | @20 h16 ←→ frames=1 leader=false"),
     w(&[Key::Esc], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('c')], "Consumed | closed payloads=0"),
     w(&[Key::Ctrl('x')], "Consumed | @20 h16 ←→ frames=1 leader=true"),

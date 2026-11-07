@@ -4,13 +4,14 @@ use rustain::adapters::tui::{
     clipboard::ClipboardResult,
     keymap::{Context, Key},
     notifications::NoticeSource,
-    presentation::{self, Surface},
+    presentation::{self, Surface, markdown_body::BodyMode},
     quit_confirm::{self, QuitFacts, QuitHost},
     state::TuiState,
     tool_inspector::{self, ToolTab},
 };
 use rustain::domain::models::{FocusState, InvocationStatus, WriteDiffState};
 use serde_json::json;
+use std::sync::LazyLock;
 
 use super::support::{is_inert, press};
 use super::witness::{self, Case, Runtime, W, never, w, wp};
@@ -104,8 +105,13 @@ fn salient(runtime: &ToolRuntime) -> String {
     }
     let tabs = tool_inspector::layout::parts(f.frame_rect()).tabs;
     format!(
-        "{}{}@{} {:?} tabs={} frames={} payloads={} leader={}",
+        "{}{}{}@{} {:?} tabs={} frames={} payloads={} leader={}",
         if tool.wrap { "" } else { "wrap-off " },
+        if tool.mode == BodyMode::Rendered {
+            "rendered "
+        } else {
+            ""
+        },
         tool.tab.label(),
         tool.viewers[tool.tab.index()].top,
         f.body_row(0).trim(),
@@ -257,6 +263,23 @@ const TOOL: &[W<ToolRuntime>] = &[
     w(&[Key::Ctrl('q')], "Quit | Quit confirmation frames=2 payloads=1 retained=20"),
 ];
 
+/// The inherited MarkdownBody rows (`h l 0 $ v`) as one concrete S-TOOL sees them:
+/// the 99-row Output is short and wrapped, so the horizontal rows are inapplicable
+/// no-ops; `v` renders it and the viewer starts again at the top.
+#[rustfmt::skip]
+const MARKDOWN: &[W<ToolRuntime>] = &[
+    w(&[Key::Char('h')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+    w(&[Key::Char('l')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+    w(&[Key::Char('0')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+    w(&[Key::Char('$')], "Consumed | Output@20 \"row 020\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+    w(&[Key::Char('v')], "Consumed | rendered Output@0 \"row 000 row 001 row 002 row 003 row 004 row 005 row 006 row 007 row 008 row\" tabs=[Output]  Input  Raw frames=1 payloads=1 leader=false"),
+];
+
+/// A case lists the rows its surface inherits: the shared body's rows plus the
+/// MarkdownBody rows (witnesses are plain copies, so the lists are built once).
+static TOOL_INHERITED: LazyLock<Vec<W<ToolRuntime>>> = LazyLock::new(|| [BODY, MARKDOWN].concat());
+static BODY_INHERITED: LazyLock<Vec<W<ToolRuntime>>> = LazyLock::new(|| [TOOL, MARKDOWN].concat());
+
 pub(super) fn cases() -> [Case<ToolRuntime>; 2] {
     let case = |context, witnesses, inherited| Case {
         context,
@@ -270,8 +293,8 @@ pub(super) fn cases() -> [Case<ToolRuntime>; 2] {
         off: &[],
     };
     [
-        case(Context::ToolInspector, TOOL, BODY),
-        case(Context::InspectorBody, BODY, TOOL),
+        case(Context::ToolInspector, TOOL, TOOL_INHERITED.as_slice()),
+        case(Context::InspectorBody, BODY, BODY_INHERITED.as_slice()),
     ]
 }
 

@@ -580,6 +580,23 @@ pub struct TabRenderState {
     /// callers set it from `hyperlink::terminal_supports_osc8()` before the
     /// chat-pane draw; it defaults to `false`.
     pub osc8_links: bool,
+    /// Story 21.13 (D5): the code cap the Stage heights and paint were built
+    /// with. `None` (the default and the attached host) leaves code uncapped.
+    /// Production writes it only through `set_code_cap`, which drops every
+    /// cached height on a change (the cap shapes the geometry the cache stores);
+    /// the field is `pub` solely because existing tests build this struct with
+    /// `..Default::default()` literals.
+    pub code_cap: Option<u16>,
+}
+
+impl TabRenderState {
+    /// Adopt a new cap; the height cache is invalidated only on a change.
+    pub fn set_code_cap(&mut self, cap: Option<u16>) {
+        if self.code_cap != cap {
+            self.code_cap = cap;
+            self.height_cache.invalidate_all();
+        }
+    }
 }
 
 /// Session-scoped input history buffer for Up/Down navigation and Ctrl+R search.
@@ -2774,6 +2791,9 @@ pub struct TuiState {
     /// Current information density mode (Story 8.4b).
     /// Controls layout density, sidebar visibility policy, and notification routing.
     pub density_mode: crate::domain::models::visual::DensityMode,
+    /// Story 21.13 (D5): the local Stage's fenced-code cap in rows, from
+    /// `[markdown] code_max_rows` (clamped to `[1, 1000]`, default 30).
+    pub code_max_rows: u16,
     /// Epic-10 hook: auto-trigger logic (e.g., InteractionState::Executing → Monitor)
     /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
     /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
@@ -3242,6 +3262,7 @@ impl TuiState {
             session_count: 0,
             current_hint: None,
             density_mode: Default::default(),
+            code_max_rows: 30,
             session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
             shadows_announced: std::collections::BTreeSet::new(),

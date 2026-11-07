@@ -51,13 +51,19 @@ fn stage_options(mode: RenderOptions, osc8: bool) -> RenderOptions {
 /// that is off asks the pipeline for no runs.
 struct LinkSink {
     osc8: bool,
+    code_cap: Option<u16>,
     runs: Vec<LinkRun>,
 }
 
 impl LinkSink {
     fn new(osc8: bool) -> Self {
+        Self::capped(osc8, None)
+    }
+
+    fn capped(osc8: bool, code_cap: Option<u16>) -> Self {
         Self {
             osc8,
+            code_cap,
             runs: Vec::new(),
         }
     }
@@ -69,6 +75,11 @@ impl LinkSink {
 
     fn options(&self, mode: RenderOptions) -> RenderOptions {
         stage_options(mode, self.osc8)
+    }
+
+    /// Committed assistant prose: the Stage code cap applies (D4).
+    fn prose_options(&self, mode: RenderOptions) -> RenderOptions {
+        self.options(mode).with_code_cap(self.code_cap)
     }
 
     /// Keep the runs of `rendered`, whose first line is line `first_line` of
@@ -1083,6 +1094,17 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
 /// - prose/reasoning → prose/reasoning: 1 (adjacent prose, rare)
 // Height is clock-independent — see AC6.
 pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> CachedTurnLayout {
+    expanded_turn_height_capped(turn, theme, width, None)
+}
+
+/// `expanded_turn_height` with the Stage's fenced-code cap (Story 21.13 D5):
+/// only committed Prose parts are capped; reasoning is not.
+pub(super) fn expanded_turn_height_capped(
+    turn: &Turn,
+    theme: &Theme,
+    width: usize,
+    code_cap: Option<u16>,
+) -> CachedTurnLayout {
     let content_width = width.saturating_sub(2);
     if content_width == 0 {
         return CachedTurnLayout {
@@ -1125,7 +1147,7 @@ pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> 
                     text,
                     content_width,
                     theme,
-                    &stage_options(RenderOptions::completed(), false),
+                    &stage_options(RenderOptions::completed(), false).with_code_cap(code_cap),
                 );
                 md_block_offsets.extend(rendered.blocks.iter().map(|span| {
                     (
@@ -1311,7 +1333,12 @@ pub fn build_layout_metrics(
             if let Some(cached) = tab_render_state.height_cache.get(&key) {
                 cached.clone()
             } else {
-                let fresh = expanded_turn_height(turn, theme, width_usize);
+                let fresh = expanded_turn_height_capped(
+                    turn,
+                    theme,
+                    width_usize,
+                    tab_render_state.code_cap,
+                );
                 tab_render_state.height_cache.set(key, fresh.clone());
                 fresh
             }
@@ -1481,7 +1508,7 @@ fn render_expanded_turn<'a>(
                     text,
                     content_width,
                     theme,
-                    &sink.options(RenderOptions::completed()),
+                    &sink.prose_options(RenderOptions::completed()),
                 );
                 let prose_lines = sink.take(rendered, lines.len());
                 lines.extend(prose_lines);
@@ -2015,7 +2042,12 @@ fn render_with_search_impl(
                                 let probe = if collapsed {
                                     collapsed_turn_height(turn, view_state, theme, width)
                                 } else {
-                                    expanded_turn_height(turn, theme, width)
+                                    expanded_turn_height_capped(
+                                        turn,
+                                        theme,
+                                        width,
+                                        tab_render_state.code_cap,
+                                    )
                                 };
                                 if probe.height != l.height
                                     || probe.block_offsets != l.block_offsets
@@ -2042,7 +2074,12 @@ fn render_with_search_impl(
                             let l = if collapsed {
                                 collapsed_turn_height(turn, view_state, theme, width)
                             } else {
-                                expanded_turn_height(turn, theme, width)
+                                expanded_turn_height_capped(
+                                    turn,
+                                    theme,
+                                    width,
+                                    tab_render_state.code_cap,
+                                )
                             };
                             #[cfg(debug_assertions)]
                             {
@@ -2209,7 +2246,7 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let layout = expanded_turn_height(ot, theme, width);
+            let layout = expanded_turn_height_capped(ot, theme, width, tab_render_state.code_cap);
             // A3: a still-open turn's tool blocks are focusable too.
             let first_item = item_boundaries.len();
             for (offset, id) in &layout.tool_block_offsets {
@@ -2369,7 +2406,7 @@ fn render_with_search_impl(
                             + authorship_line.iter().count()
                             + marker_line.iter().count();
                         let search = search_query.map(|query| (query, focused_local_ordinal));
-                        let mut sink = LinkSink::new(osc8);
+                        let mut sink = LinkSink::capped(osc8, tab_render_state.code_cap);
                         let turn_lines = if collapsed {
                             render_collapsed_turn(turn, view_state, theme, width, clock, search)
                         } else {
@@ -2628,7 +2665,7 @@ fn render_with_search_impl(
                 }
                 line_offset += spacing;
             }
-            let mut sink = LinkSink::new(osc8);
+            let mut sink = LinkSink::capped(osc8, tab_render_state.code_cap);
             let turn_lines = render_expanded_turn(
                 ot,
                 theme,
@@ -3039,6 +3076,50 @@ mod parts_aware_tests {
             None,
             &mut LinkSink::off(),
         )
+    }
+
+    /// Story 21.13 (Cap-3): the height the Stage caches for a capped turn is the
+    /// number of rows `render_expanded_turn` really paints (a quote-nested fence,
+    /// a CRLF fence and a list-nested fence included), for every cap.
+    #[test]
+    fn story21_13_capped_height_equals_the_painted_rows_for_every_cap() {
+        let body = |n: usize| {
+            (1..=n)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let texts = [
+            format!("```rust\n{}\n```\n", body(45)),
+            format!("> ```\n{}\n> ```\n", body(9).replace('\n', "\n> ")),
+            format!("```\r\n{}\r\n```\r\n", body(7).replace('\n', "\r\n")),
+            format!(
+                "- item\n\n  ```\n{}\n  ```\n",
+                body(6).replace('\n', "\n  ")
+            ),
+            "plain".to_owned(),
+        ];
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        for text in texts {
+            let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+            turn.push_part(|id| TurnPart::Prose {
+                id,
+                text: text.clone(),
+            });
+            for cap in [None, Some(1), Some(3), Some(30)] {
+                for width in [20, 40, 80] {
+                    let height = expanded_turn_height_capped(&turn, &theme, width, cap).height;
+                    let mut sink = LinkSink::capped(false, cap);
+                    let painted = render_expanded_turn(
+                        &turn, &theme, width, &clock, None, None, None, &mut sink,
+                    )
+                    .len();
+                    // The paint adds the per-turn trailing rail row the height pass counts.
+                    assert_eq!(height, painted, "{text:?} cap {cap:?} width {width}");
+                }
+            }
+        }
     }
 
     /// `render_message` with no link collection.

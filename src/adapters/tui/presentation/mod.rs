@@ -6,6 +6,7 @@
 mod compose;
 pub mod geometry;
 pub mod inspector_search;
+pub mod markdown_body;
 pub mod occlusion;
 pub mod reducer;
 pub mod route;

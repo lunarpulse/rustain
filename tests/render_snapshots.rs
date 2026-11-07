@@ -868,6 +868,11 @@ fn main() {
     /// Paint the whole conversation and return every row (blank rows kept) up
     /// to the reported content height, with the right edge trimmed.
     fn painted(conversation: &Conversation, width: u16) -> String {
+        painted_with(conversation, width, None)
+    }
+
+    /// `painted` with the Stage's code cap set the way the host sets it.
+    fn painted_with(conversation: &Conversation, width: u16, code_cap: Option<u16>) -> String {
         let height = 120;
         let clock = MockClock::at_wall_ms(1_700_000_000_000);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -875,6 +880,7 @@ fn main() {
         terminal
             .draw(|frame| {
                 let mut tab = TabRenderState::default();
+                tab.set_code_cap(code_cap);
                 total = chat_pane::render_with_search(
                     frame,
                     Rect::new(0, 0, width, height),
@@ -1008,6 +1014,56 @@ See [claude.ai](https://claude.ai@evil.test/) and [the docs](https://www.example
     #[test]
     fn markdown_structure_tables_w120() {
         insta::assert_snapshot!("markdown_structure_tables_w120", tables(120));
+    }
+
+    /// Capped code through the Stage paint (AC9): a long block, a block exactly at
+    /// the cap, one in a list item, an unlabeled block and a collapsed single line.
+    const CODE_CAP: &str = "## Code
+
+```rust
+fn one() {}
+fn two() {}
+fn three() {}
+fn four() {}
+fn five() {}
+fn six() {}
+fn seven() {}
+```
+
+```
+exactly
+three
+rows
+```
+
++ item
+
+  ```sh
+  a
+  b
+  c
+  d
+  ```
+
+```
+x
+y
+```";
+
+    fn code_cap(inner: u16) -> String {
+        let turn = make_turn("cc", vec![prose(CODE_CAP)], Some(StopReason::EndTurn));
+        let conv = make_conversation(vec![make_msg("cc", MessageRole::Assistant)], vec![turn]);
+        painted_with(&conv, inner + 2, Some(3))
+    }
+
+    #[test]
+    fn markdown_structure_code_cap_w40() {
+        insta::assert_snapshot!("markdown_structure_code_cap_w40", code_cap(40));
+    }
+
+    #[test]
+    fn markdown_structure_code_cap_w80() {
+        insta::assert_snapshot!("markdown_structure_code_cap_w80", code_cap(80));
     }
 
     #[test]

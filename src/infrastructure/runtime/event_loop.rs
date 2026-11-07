@@ -463,6 +463,7 @@ pub async fn run(
     state.auto_open_on_task_plan = config.layout.auto_panels.on_task_plan.clone();
     // Story 8.4b AC-9: seed initial density mode from config
     state.density_mode = config.layout.density_mode;
+    crate::adapters::tui::handlers::config::apply_markdown_config(&mut state, &config.markdown);
 
     // P-23: Initialize active_profile snapshot from resolved profile
     {
@@ -2152,6 +2153,9 @@ pub async fn run(
                                 }
                                 InputAction::StepTool { forward } => {
                                     crate::adapters::tui::tool_inspector::step(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), forward);
+                                }
+                                InputAction::StepBlock { forward } => {
+                                    crate::adapters::tui::block_viewer::step(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), forward);
                                 }
                                 InputAction::CopyToolSource => {
                                     crate::adapters::tui::tool_inspector::copy::copy_source(&mut state, &conversation, Some(&tab_manager.active_tab().reducer), &crate::adapters::tui::clipboard::copy_to_clipboard);
@@ -6549,6 +6553,10 @@ pub async fn run(
                         });
                         config_arc = app_state.app_config.load_full();
                         config = &config_arc;
+                        crate::adapters::tui::handlers::config::apply_markdown_config(
+                            &mut state,
+                            &config.markdown,
+                        );
                         state.needs_redraw = true;
                     }
                     AppEvent::ProfileSwitched {
@@ -8201,9 +8209,11 @@ pub fn render(
                     let liveness_ref: Option<&crate::domain::models::LivenessSnapshot> =
                         liveness_snapshot.as_ref();
                     let tab_id = state.active_tab_id;
+                    let code_cap_rows = state.code_max_rows;
                     let render_state = state.tab_render_states.entry(tab_id).or_default();
                     render_state.osc8_links =
                         crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
+                    render_state.set_code_cap(Some(code_cap_rows));
                     let open_prose_ref: Option<&str> = tab_manager_for_bar
                         .map(|tm| tm.active_tab().reducer.open_prose.as_deref())
                         .unwrap_or(None);

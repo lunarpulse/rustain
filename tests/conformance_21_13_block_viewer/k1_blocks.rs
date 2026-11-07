@@ -271,7 +271,10 @@ fn height_truth_covers_both_presentations_and_literal_has_no_spans() {
     let theme = Theme::dark();
     for source in fixtures {
         for width in [0, 1, 2, 3, 5, 10, 40, 80, 120] {
-            for presentation in [BlockPresentation::Stage, BlockPresentation::Window] {
+            for presentation in [
+                BlockPresentation::Stage { code_cap: None },
+                BlockPresentation::Window,
+            ] {
                 let opts = RenderOptions::completed().with_blocks(presentation);
                 assert_eq!(
                     compute_height(source, width, &theme, &opts),

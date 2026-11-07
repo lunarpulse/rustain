@@ -70,12 +70,19 @@ def _geometry(screen, hidden, draft=""):
     return lines, left, top, bw, bh, tabs, body_top, body_end
 
 
-def _rail(width, inner_height, tool, wrap=True):
-    """Exact registry-derived action order, fitted as the production rail is."""
+def _rail(width, inner_height, tool, wrap=True, active="Output"):
+    """Exact registry-derived action order, fitted as the production rail is.
+
+    21-13 (AC12): the Output tab is a Markdown body, so it offers `v` right after
+    the tab pair; the other tabs do not.
+    """
     label = "[Esc] Back"
     if inner_height < 4:
         label += f"  [w] Wrap {'on' if wrap else 'off'}  [c] Copy"
-    label += "  [Left/Right] Tab  [j/k] Scroll  [/] Search"
+    label += "  [Left/Right] Tab"
+    if active == "Output":
+        label += "  [v] Rendered"
+    label += "  [j/k] Scroll  [/] Search"
     ordinal = int(tool.rsplit("#", 1)[1])
     if ordinal > 1:
         label += "  [[] Previous"
@@ -108,7 +115,8 @@ def _inspector(screen, hidden, tool, active, draft="", anchors=(), *,
         tabs_width = inner_width-field_width-2
         query = "/ "+field if field is not None else search
         expected = expected[:tabs_width].ljust(tabs_width+2)+query[:field_width]
-    rail = LEGACY_RAIL if profile == "slice1" else _rail(inner_width, inner_height, tool, wrap)
+    rail = (LEGACY_RAIL if profile == "slice1"
+            else _rail(inner_width, inner_height, tool, wrap, active))
     if inside(tabs_y).rstrip() != expected.rstrip() or inside(top+bh-2).rstrip() != rail:
         return None
     if not compact:
@@ -295,7 +303,7 @@ def _deskcheck(directory, failed_directory):
                         torn = lines.copy(); torn[a:b] = [" "*width]*(b-a)
                         assert not predicate("\n".join(torn)), (stage, "half-draw")
                     assert not predicate(screen.replace("Tool · ", "Wrong · ", 1)), stage
-                    rail = _rail(bw-2, bh-2, tool)
+                    rail = _rail(bw-2, bh-2, tool, active=active)
                     assert not predicate(screen.replace(rail, " "*len(rail))), stage
                     wrong = lines.copy()
                     for y in range(body_top, body_end):

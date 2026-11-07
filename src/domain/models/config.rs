@@ -400,6 +400,48 @@ impl Default for NotificationsConfig {
     }
 }
 
+/// Markdown presentation (`[markdown]`, Story 21.13 D5). `code_max_rows` caps a
+/// fenced code block on the local Stage; the rest is reached in the block
+/// viewer. Read as an `i64` so a negative or zero value clamps instead of
+/// invalidating the whole config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkdownConfig {
+    #[serde(default = "MarkdownConfig::default_code_max_rows")]
+    pub code_max_rows: i64,
+}
+
+impl MarkdownConfig {
+    pub const MIN_CODE_MAX_ROWS: i64 = 1;
+    pub const MAX_CODE_MAX_ROWS: i64 = 1000;
+
+    fn default_code_max_rows() -> i64 {
+        30
+    }
+
+    /// The effective cap in rows, clamped to `[1, 1000]` with a warning.
+    pub fn code_max_rows(&self) -> u16 {
+        let clamped = self
+            .code_max_rows
+            .clamp(Self::MIN_CODE_MAX_ROWS, Self::MAX_CODE_MAX_ROWS);
+        if clamped != self.code_max_rows {
+            tracing::warn!(
+                value = self.code_max_rows,
+                clamped,
+                "markdown.code_max_rows outside [1, 1000]; clamped"
+            );
+        }
+        u16::try_from(clamped).unwrap_or(30)
+    }
+}
+
+impl Default for MarkdownConfig {
+    fn default() -> Self {
+        Self {
+            code_max_rows: Self::default_code_max_rows(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
     #[serde(default)]
@@ -774,6 +816,9 @@ pub struct AppConfig {
     /// Notification lifetimes (`[notifications]`). Story 21.1 AC1.
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Markdown presentation (`[markdown]`). Story 21.13 D5.
+    #[serde(default)]
+    pub markdown: MarkdownConfig,
     /// Tiered model router configuration. Story 7.1c, AC2.
     #[serde(default)]
     pub router: crate::domain::models::router::RouterConfig,
@@ -995,6 +1040,7 @@ impl Default for AppConfig {
             mouse: MouseConfig::default(),
             tool_progress: ToolProgressConfig::default(),
             notifications: NotificationsConfig::default(),
+            markdown: MarkdownConfig::default(),
             router: crate::domain::models::router::RouterConfig::default(),
             pricing: Self::default_pricing_catalog(),
             budget: BudgetConfig::default(),

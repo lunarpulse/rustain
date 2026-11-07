@@ -14,6 +14,7 @@ use ratatui::prelude::*;
 use serde::Serialize;
 
 use crate::adapters::tui::markdown::{self, RenderOptions};
+use crate::adapters::tui::presentation::markdown_body::{self, BodyMode};
 use crate::adapters::tui::presentation::viewer::{RowOrigin, row_origins};
 use crate::adapters::tui::theme::Theme;
 use crate::domain::models::{
@@ -521,6 +522,9 @@ enum PreparedBody<'a> {
 pub struct RenderedSource {
     pub lines: Vec<Line<'static>>,
     pub origins: Vec<Option<RowOrigin>>,
+    /// Rows that scroll sideways (Output only), and the widest of them.
+    pub wide: Vec<std::ops::Range<usize>>,
+    pub widest: usize,
 }
 
 impl PreparedSource<'_> {
@@ -546,6 +550,8 @@ impl PreparedSource<'_> {
             return RenderedSource {
                 lines: Vec::new(),
                 origins: Vec::new(),
+                wide: Vec::new(),
+                widest: 0,
             };
         }
         let text = self.logical_text();
@@ -583,7 +589,80 @@ impl PreparedSource<'_> {
                 }
             }
         }
-        RenderedSource { lines, origins }
+        RenderedSource {
+            lines,
+            origins,
+            wide: Vec::new(),
+            widest: 0,
+        }
+    }
+
+    /// Render the Output body as a Markdown body (Story 21.13 D15). Source is the
+    /// literal rendering above (every row scrolls sideways only when unwrapped);
+    /// Rendered lays the sanitized text out as markdown at `width`, and only the
+    /// rows of code blocks and tables wider than `width` scroll. Rendered rows are
+    /// their own search lines: a match is a match of what is displayed.
+    pub fn render_body(
+        &self,
+        width: usize,
+        wrap: bool,
+        theme: &Theme,
+        mode: BodyMode,
+    ) -> RenderedSource {
+        let unwrapped = mode == BodyMode::Source && !wrap;
+        let mut rendered = if mode == BodyMode::Source {
+            self.render(if wrap { width } else { usize::MAX }, theme)
+        } else {
+            let body = if self.logical_text().len() > markdown_body::RENDERED_BODY_MAX_BYTES {
+                // Too large to lay out as markdown on a key press: the raw rows at
+                // the inner width, behind one fixed notice.
+                let mut lines = self.render(width, theme).lines;
+                lines.insert(
+                    0,
+                    Line::styled(
+                        markdown_body::RENDERED_BODY_NOTICE,
+                        Style::default().fg(theme.colors.fg_muted),
+                    ),
+                );
+                markdown_body::BodyLayout {
+                    lines,
+                    wide: Vec::new(),
+                    widest: 0,
+                }
+            } else {
+                markdown_body::layout(self.logical_text(), width, theme, mode, wrap)
+            };
+            let origins = body
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(logical_line, line)| {
+                    Some(RowOrigin {
+                        logical_line,
+                        bytes: 0..line.spans.iter().map(|s| s.content.len()).sum(),
+                    })
+                })
+                .collect();
+            let mut lines = body.lines;
+            if self.dim_header {
+                if let Some(header) = lines.first_mut() {
+                    for span in &mut header.spans {
+                        span.style = span.style.fg(theme.colors.fg_muted);
+                    }
+                }
+            }
+            RenderedSource {
+                lines,
+                origins,
+                wide: body.wide,
+                widest: body.widest,
+            }
+        };
+        if unwrapped && !rendered.lines.is_empty() {
+            rendered.wide = std::iter::once(0..rendered.lines.len()).collect();
+            rendered.widest = rendered.lines.iter().map(Line::width).max().unwrap_or(0);
+        }
+        rendered
     }
 }
 

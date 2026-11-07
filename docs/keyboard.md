@@ -300,6 +300,7 @@ Also inherits: Inspector body.
 | `l` | Scroll wide rows right by one tab stop | local | portable |  |
 | `0` | Scroll wide rows to their first column | local | portable |  |
 | `$` | Scroll wide rows to their last column | local | portable |  |
+| `v` | Switch the body between rendered markdown and its source | local | portable |  |
 
 ## Block viewer
 
@@ -310,7 +311,11 @@ Also inherits: Markdown body.
 | `/` | Search the displayed rows of the block | local | portable |  |
 | `n` | Select the next search match, wrapping at the end | local | portable |  |
 | `N` | Select the previous search match, wrapping at the start | local | portable |  |
-| `c` | Copy the block's exact source, never its borders or markers | local | portable |  |
+| `c` | Copy the block's exact source, never its borders, markers or line numbers | local | portable |  |
+| `#` | Toggle source line numbers for code, or for a table shown as source | local | portable |  |
+| `w` | Toggle wrapping of a code block at the viewport width | local | portable |  |
+| `[` | Inspect the previous code block or table of this turn | local | portable |  |
+| `]` | Inspect the next code block or table of this turn | local | portable |  |
 | `Esc` | Back from the block viewer | local | portable |  |
 | `Ctrl+C` | Back from the block viewer without cancelling work | local | portable |  |
 | `Ctrl+X` | Open the Ctrl+X menu without closing the block viewer | local | portable |  |
@@ -319,7 +324,7 @@ Also inherits: Markdown body.
 
 ## Tool inspector
 
-Also inherits: Inspector body.
+Also inherits: Markdown body.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|

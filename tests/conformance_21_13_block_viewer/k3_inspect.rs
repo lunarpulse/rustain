@@ -243,5 +243,34 @@ fn smoke_frames_export() {
         f.press(Key::Char('G'));
         f.compose();
         write(&format!("{width}x{height}-end"), &f);
+        // Leg B: the capped Stage, then numbers, the table neighbour and its source.
+        f.press(Key::Esc);
+        f.paint();
+        // The Stage's scroll offset counts up from the bottom: 0 shows the end.
+        f.h.state.focused_item_id = None;
+        f.tabs.active_tab_mut().view_state.scroll_offset = 0;
+        f.h.state.set_scroll_offset(0);
+        f.paint();
+        write(&format!("{width}x{height}-stage-bottom"), &f);
+        focus(&mut f, &id);
+        super::support::open_focused(&mut f);
+        f.press(Key::Char('#'));
+        f.press(Key::Char('G'));
+        f.compose();
+        write(&format!("{width}x{height}-numbers-end"), &f);
+        if let InputAction::StepBlock { forward } = f.press(Key::Char(']')) {
+            let tab = f.tabs.active_tab();
+            block_viewer::step(
+                &mut f.h.state,
+                &tab.conversation,
+                tab.reducer.open_turn.as_ref(),
+                forward,
+            );
+        }
+        f.compose();
+        write(&format!("{width}x{height}-next"), &f);
+        f.press(Key::Char('v'));
+        f.compose();
+        write(&format!("{width}x{height}-source"), &f);
     }
 }

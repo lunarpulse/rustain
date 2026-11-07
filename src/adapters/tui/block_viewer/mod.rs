@@ -9,7 +9,8 @@ use ratatui::text::{Line, Span};
 use crate::adapters::tui::{
     app::InputAction,
     keymap::{
-        self, CommandId, Context, Host, Key, Resolved, table_block::BlockCmd,
+        self, CommandId, Context, Host, Key, Resolved,
+        table_block::{BlockCmd, BodyCmd},
         table_overlay::OverlayCmd,
     },
     markdown::{self, BlockKind, BlockMode, BlockRender, RenderOptions},
@@ -51,22 +52,37 @@ pub struct BlockSummary {
     pub total: usize,
 }
 
+/// Identity of the prepared rows: canonical parts revision, text length, mode,
+/// and (only while wrapping) the width and gutter the wrap was cut for.
+type Identity = (u64, usize, BlockMode, Option<(usize, bool)>);
+
 #[derive(Debug)]
 pub struct BlockViewerState {
     pub target: BlockTarget,
     pub mode: BlockMode,
+    /// Source line numbers in a gutter (code; a table only in Source mode).
+    pub numbers: bool,
+    /// Code wrapped at the viewport width (D13); off by default.
+    pub wrap: bool,
     pub viewer: Viewer,
     pub missing: bool,
     pub summary: Option<BlockSummary>,
     pub rows: Vec<Line<'static>>,
     pub row_widths: Vec<usize>,
+    /// 1-based source line of each row (`None` for chrome and continuations).
+    pub source_line: Vec<Option<usize>>,
     pub widest: usize,
     pub search: ViewerSearch,
     pub viewport: usize,
     pub cols: usize,
-    /// Identity of the prepared rows: canonical parts revision, text length, mode.
-    prepared: Option<(u64, usize, BlockMode)>,
-    searched: Option<(u64, usize, BlockMode)>,
+    /// Digits of the last source line (the gutter's number width).
+    digits: usize,
+    /// A toggle changed what the rows will be; `prepare` has not rebuilt them yet.
+    dirty: bool,
+    /// Horizontal keys issued while `dirty`, applied after the rebuild.
+    pending_horizontal: Vec<ViewerCmd>,
+    prepared: Option<Identity>,
+    searched: Option<Identity>,
     /// Rows that hold a search match, pre-styled once per commit or step (never
     /// per paint); every other row is painted straight from `rows`.
     marked: BTreeMap<usize, Line<'static>>,
@@ -77,23 +93,97 @@ impl BlockViewerState {
         Self {
             target,
             mode: BlockMode::Rendered,
+            numbers: false,
+            wrap: false,
             viewer: Viewer::default(),
             missing: false,
             summary: None,
             rows: Vec::new(),
             row_widths: Vec::new(),
+            source_line: Vec::new(),
             widest: 0,
             search: ViewerSearch::default(),
             viewport: 1,
             cols: 1,
+            digits: 1,
+            dirty: false,
+            pending_horizontal: Vec::new(),
             prepared: None,
             searched: None,
             marked: BTreeMap::new(),
         }
     }
 
-    /// Resolve the target against its owning turns; only a changed source or mode
-    /// re-renders, so an unchanged repaint does no block-sized work.
+    fn is_code(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|summary| matches!(summary.kind, BlockKind::Code { .. }))
+    }
+
+    /// `#`: code in both modes; a table only as source (rendered table rows do
+    /// not map one to one onto source lines). One rule for the key and the hint.
+    pub fn applies_numbers(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|summary| match summary.kind {
+                BlockKind::Code { .. } => true,
+                BlockKind::Table { .. } => self.mode == BlockMode::Source,
+            })
+    }
+
+    /// `w`: code only.
+    pub fn applies_wrap(&self) -> bool {
+        self.is_code()
+    }
+
+    /// Code is cut at the viewport only while wrap is on (and for code).
+    pub fn wrapped(&self) -> bool {
+        self.wrap && self.is_code()
+    }
+
+    pub fn has_previous(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|summary| summary.index > 1)
+    }
+
+    pub fn has_next(&self) -> bool {
+        self.summary
+            .as_ref()
+            .is_some_and(|summary| summary.index < summary.total)
+    }
+
+    /// Cells the line-number gutter takes left of the body (0 when off or when
+    /// it would leave no room for content).
+    pub fn gutter(&self) -> usize {
+        let width = self.digits + 3;
+        if self.numbers && self.applies_numbers() && width < self.cols {
+            width
+        } else {
+            0
+        }
+    }
+
+    /// Cells left for block content beside the gutter.
+    pub fn content_cols(&self) -> usize {
+        self.cols.saturating_sub(self.gutter()).max(1)
+    }
+
+    /// The gutter text of row `index`: right-aligned source line, then ` │ `.
+    pub fn gutter_text(&self, index: usize) -> String {
+        let number = self
+            .source_line
+            .get(index)
+            .copied()
+            .flatten()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        format!("{number:>width$} │ ", width = self.digits)
+    }
+
+    /// Resolve the target against its owning turns; only a changed source, mode,
+    /// wrap cut or gutter re-renders, so an unchanged repaint does no
+    /// block-sized work.
     pub fn prepare(
         &mut self,
         turns: &[Turn],
@@ -108,33 +198,83 @@ impl BlockViewerState {
             self.missing = true;
             return;
         };
-        let identity = (turn.parts.revision(), text.len(), self.mode);
+        let wrap = self.wrap.then_some((cols, self.numbers));
+        let identity = (turn.parts.revision(), text.len(), self.mode, wrap);
         if self.prepared != Some(identity) {
-            let render = BlockRender {
-                mode: self.mode,
-                wrap: None,
-            };
-            let Some(view) = markdown::render_block(text, self.target.ordinal, theme, &render)
-            else {
-                self.missing = true;
-                return;
-            };
+            // The wrap width depends on the gutter, whose width depends on the
+            // last line number: cut once, and again only if that width moved.
+            let mut view = None;
+            for _ in 0..2 {
+                let render = BlockRender {
+                    mode: self.mode,
+                    wrap: self.wrap.then(|| self.wrap_width()),
+                };
+                let Some(rendered) =
+                    markdown::render_block(text, self.target.ordinal, theme, &render)
+                else {
+                    self.missing = true;
+                    return;
+                };
+                let digits = rendered
+                    .source_line
+                    .iter()
+                    .flatten()
+                    .max()
+                    .map_or(1, |last| last.to_string().len());
+                let settled = digits == self.digits;
+                self.digits = digits;
+                view = Some(rendered);
+                if settled || !(self.wrap && self.numbers) {
+                    break;
+                }
+            }
+            let view = view.expect("one render ran");
             self.row_widths = view.rows.iter().map(Line::width).collect();
             self.widest = view.cells;
             self.rows = view.rows;
-            self.summary = Some(summarize(turn, &self.target, view.kind, theme));
+            self.source_line = view.source_line;
+            self.summary = Some(summarize(turn, &self.target, view.kind));
             self.prepared = Some(identity);
             self.searched = None;
         }
         self.missing = false;
-        self.viewer.top = self
+        let maximum = self.rows.len().saturating_sub(self.viewport);
+        self.viewer.top = if self.viewer.follow {
+            maximum
+        } else {
+            self.viewer.top.min(maximum)
+        };
+        self.viewer.h_off = self
             .viewer
-            .top
-            .min(self.rows.len().saturating_sub(self.viewport));
-        self.viewer.h_off = self.viewer.h_off.min(self.widest.saturating_sub(self.cols));
+            .h_off
+            .min(self.widest.saturating_sub(self.content_cols()));
         if !self.search.query().is_empty() && self.searched != self.prepared {
             self.project_search(theme);
+            // The rows changed under an open search: show its focused match again.
+            self.search
+                .jump(&mut self.viewer, self.rows.len(), self.viewport);
+            self.reveal_match();
         }
+        // Horizontal keys that arrived after a toggle act on the rebuilt rows.
+        self.dirty = false;
+        for command in std::mem::take(&mut self.pending_horizontal) {
+            if self.wide() {
+                let (widest, cols) = (self.widest, self.content_cols());
+                viewer::apply_horizontal(&mut self.viewer, command, widest, cols);
+            }
+        }
+    }
+
+    /// Content width a wrapped code row is cut at: the viewport minus the
+    /// gutter, and minus the box borders when the box is painted.
+    fn wrap_width(&self) -> usize {
+        let gutter = if self.numbers { self.digits + 3 } else { 0 };
+        let boxed = if self.mode == BlockMode::Rendered {
+            2
+        } else {
+            0
+        };
+        self.cols.saturating_sub(gutter + boxed).max(1)
     }
 
     /// Search matches the displayed rows: each row is one logical line.
@@ -191,7 +331,7 @@ impl BlockViewerState {
 
     /// Every cell of the displayed rows that a horizontal key could reveal.
     pub fn wide(&self) -> bool {
-        self.widest > self.cols
+        !self.wrapped() && self.widest > self.content_cols()
     }
 
     /// The row to paint: pre-styled when it holds a match, else borrowed as is.
@@ -217,8 +357,8 @@ impl BlockViewerState {
             column += crate::adapters::tui::text_geometry::cells(text);
             at += text.len();
         }
-        let inner = self.cols.saturating_sub(2).max(1);
-        let maximum = self.widest.saturating_sub(self.cols);
+        let inner = self.content_cols().saturating_sub(2).max(1);
+        let maximum = self.widest.saturating_sub(self.content_cols());
         if column < self.viewer.h_off + 1 || column >= self.viewer.h_off + 1 + inner {
             self.viewer.h_off = column.saturating_sub(1).min(maximum);
         }
@@ -287,13 +427,11 @@ fn resolve<'a>(
     })
 }
 
-fn summarize(turn: &Turn, target: &BlockTarget, kind: BlockKind, theme: &Theme) -> BlockSummary {
+fn summarize(turn: &Turn, target: &BlockTarget, kind: BlockKind) -> BlockSummary {
     let (mut before, mut total) = (0, 0);
     for part in &turn.parts {
         if let TurnPart::Prose { id, text } = part {
-            let count = markdown::render(text, 80, theme, &RenderOptions::completed())
-                .blocks
-                .len();
+            let count = markdown::block_count(text);
             if *id == target.part_id {
                 before = total;
             }
@@ -405,6 +543,17 @@ pub fn copy_source(
     let Some((_, text)) = resolve(&conversation.turns, open_turn, &target) else {
         return false;
     };
+    // Bound the work first: above the limit no block (sources, styled tree,
+    // rows) is ever built for a copy.
+    let limit = crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
+    match markdown::block_source_len(text, target.ordinal) {
+        None => return false,
+        Some(len) if len > limit => {
+            notify_failure(state, "block source exceeds the 8 MiB copy limit");
+            return true;
+        }
+        Some(_) => {}
+    }
     let render = BlockRender {
         mode: BlockMode::Rendered,
         wrap: None,
@@ -412,12 +561,67 @@ pub fn copy_source(
     let Some(view) = markdown::render_block(text, target.ordinal, &state.theme, &render) else {
         return false;
     };
-    if view.source.len() > crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES {
-        notify_failure(state, "block source exceeds the 8 MiB copy limit");
-    } else {
-        notify_copy(state, &view.source, copy);
-    }
+    notify_copy(state, &view.source, copy);
     true
+}
+
+/// Move the open viewer to the previous/next inspectable block of the same
+/// turn (D14): part order, then ordinal; never another turn. The frame keeps
+/// its id and depth, and its mode, numbers and wrap; position and search reset.
+pub fn step(
+    state: &mut TuiState,
+    conversation: &Conversation,
+    open_turn: Option<&Turn>,
+    forward: bool,
+) -> bool {
+    let Some(Surface::BlockViewer(BlockFrameKey(id))) =
+        state.modal_stack.top().map(|frame| frame.surface)
+    else {
+        return false;
+    };
+    let current = &state.block_viewers[&id];
+    if current.target.conversation_id != conversation.id {
+        return false;
+    }
+    let Some(turn) = open_turn
+        .into_iter()
+        .chain(&conversation.turns)
+        .find(|turn| turn.id == current.target.turn_id)
+    else {
+        return false;
+    };
+    let mut blocks = Vec::new();
+    for part in &turn.parts {
+        if let TurnPart::Prose { id, text } = part {
+            blocks.extend((0..markdown::block_count(text)).map(|ordinal| (*id, ordinal)));
+        }
+    }
+    let Some(at) = blocks.iter().position(|&(part, ordinal)| {
+        part == current.target.part_id && ordinal == current.target.ordinal
+    }) else {
+        return false;
+    };
+    let Some(&(part_id, ordinal)) = (if forward {
+        blocks.get(at + 1)
+    } else {
+        at.checked_sub(1).and_then(|before| blocks.get(before))
+    }) else {
+        return false;
+    };
+    let mut replacement = BlockViewerState::new(BlockTarget {
+        conversation_id: conversation.id.clone(),
+        turn_id: turn.id.clone(),
+        part_id,
+        ordinal,
+    });
+    (replacement.mode, replacement.numbers, replacement.wrap) =
+        (current.mode, current.numbers, current.wrap);
+    let (cols, viewport) = (current.cols, current.viewport);
+    replacement.prepare(&conversation.turns, open_turn, cols, viewport, &state.theme);
+    let Some(summary) = replacement.summary.clone().filter(|_| !replacement.missing) else {
+        return false;
+    };
+    reducer::retarget_block(state, id, replacement, title(&summary))
 }
 
 /// Discovery facts use the live conversation, never a stale copy selection.
@@ -552,9 +756,41 @@ pub fn on_key(state: &mut TuiState, key: Key, host: Host) -> InputAction {
             block.step_match(command == BlockCmd::NextMatch, &state.theme)
         }
         CommandId::Block(BlockCmd::Copy) => return InputAction::CopyBlockSource,
+        CommandId::Body(BodyCmd::ToggleMode) => {
+            block.mode = match block.mode {
+                BlockMode::Rendered => BlockMode::Source,
+                BlockMode::Source => BlockMode::Rendered,
+            };
+            // The rows change: start at the top, first column (nothing to keep).
+            block.viewer = Viewer::default();
+            block.dirty = true;
+        }
+        CommandId::Block(BlockCmd::Numbers) => {
+            if block.applies_numbers() {
+                block.numbers = !block.numbers;
+                block.dirty = true;
+            }
+        }
+        CommandId::Block(BlockCmd::Wrap) => {
+            if block.applies_wrap() {
+                block.wrap = !block.wrap;
+                block.viewer.h_off = 0;
+                block.dirty = true;
+            }
+        }
+        CommandId::Block(command @ (BlockCmd::PrevBlock | BlockCmd::NextBlock)) => {
+            return InputAction::StepBlock {
+                forward: command == BlockCmd::NextBlock,
+            };
+        }
         CommandId::Viewer(command) if command.horizontal() => {
-            if block.wide() {
-                viewer::apply_horizontal(&mut block.viewer, command, block.widest, block.cols);
+            if block.dirty {
+                // The rows are about to be rebuilt by a toggle: judge the key
+                // against the rebuilt rows, in order, at the next preparation.
+                block.pending_horizontal.push(command);
+            } else if block.wide() {
+                let (widest, cols) = (block.widest, block.content_cols());
+                viewer::apply_horizontal(&mut block.viewer, command, widest, cols);
             }
         }
         CommandId::Viewer(command) => viewer::apply(&mut block.viewer, command, rows, viewport),

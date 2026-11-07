@@ -315,6 +315,9 @@ rustain/
 **Terminal UI** — ratatui 0.30 + crossterm 0.29. Multi-tab streaming chat,
 read-only tool headers with a local tool inspector, vim-style navigation (`j`/`k`/`i`), command palette,
 @-mention autocomplete, context meter with cache breakdown, plan mode overlay.
+Long fenced code is capped on the Stage; focus a code block or table and press
+`[Enter] Inspect` to open it in a block viewer (columns, line numbers, wrap,
+rendered or source, copy of the exact source).
 Text is laid out by terminal cells and grapheme clusters, not bytes or code
 points: CJK text, emoji sequences (such as ZWJ families) and combining marks
 wrap, clip, pad and edit as whole glyphs, and the composer's height, caret and

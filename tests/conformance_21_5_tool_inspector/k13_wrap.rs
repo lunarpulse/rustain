@@ -297,15 +297,43 @@ fn clipping_preserves_unicode_graphemes_tab_stops_and_crlf_lines() {
         "an exactly fitting row has no clip marker"
     );
     let before = pixels(f.buffer(), b);
-    for key in [Key::Char('h'), Key::Char('l')] {
-        f.press(key);
-        f.paint();
-    }
+    // A wide glyph's continuation cell is not text (the backend diff leaves
+    // stale content there), so rows are read cell by cell skipping it.
+    let rows_of = |f: &Fixture| -> Vec<String> {
+        (0..b.height)
+            .map(|y| {
+                let (mut text, mut x) = (String::new(), 0);
+                while x < b.width {
+                    let symbol = f.buffer()[(b.x + x, b.y + y)].symbol();
+                    text.push_str(symbol);
+                    x += u16::try_from(unicode_width::UnicodeWidthStr::width(symbol).max(1))
+                        .unwrap();
+                }
+                text
+            })
+            .collect()
+    };
+    let before_rows = rows_of(&f);
+    f.press(Key::Char('h'));
+    f.paint();
     assert_eq!(
         pixels(f.buffer(), b),
         before,
-        "21-13, not wrap, owns horizontal scrolling"
+        "`h` at the first column moves nothing"
     );
+    // 21-13 (AC12) now owns horizontal scrolling of an unwrapped body: `l`
+    // moves every row one tab stop and `0` restores the exact cells.
+    f.press(Key::Char('l'));
+    f.paint();
+    assert_ne!(
+        pixels(f.buffer(), b),
+        before,
+        "`l` scrolls the unwrapped rows"
+    );
+    assert_eq!(f.buffer()[(b.x, b.y)].symbol(), "←");
+    f.press(Key::Char('0'));
+    f.paint();
+    assert_eq!(rows_of(&f), before_rows, "`0` restores every row");
     toggle(&mut f);
     assert_eq!(f.body_row(0).chars().next(), Some('A'));
 }

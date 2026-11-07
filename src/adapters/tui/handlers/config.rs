@@ -26,6 +26,16 @@ use crate::infrastructure::runtime::agent_core::AgentCore;
 
 use super::HandlerOutcome;
 
+/// Story 21.13 (D5): adopt `[markdown]` for the local Stage. Called at startup
+/// and after every config reload; the draw hands the value to each tab's
+/// `TabRenderState::set_code_cap`, which invalidates heights only on a change.
+pub fn apply_markdown_config(
+    state: &mut crate::adapters::tui::state::TuiState,
+    config: &crate::domain::models::MarkdownConfig,
+) {
+    state.code_max_rows = config.code_max_rows();
+}
+
 pub struct ReloadContext<'a> {
     pub cli: &'a Cli,
     pub config_store: &'a dyn ConfigStorePort,

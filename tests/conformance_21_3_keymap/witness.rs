@@ -49,6 +49,15 @@ pub const fn wp<R>(keys: &'static [Key], expect: &'static str, prep: fn(&mut R))
     }
 }
 
+// `derive` would demand `R: Clone`; a witness holds only references and a fn pointer.
+impl<R> Clone for W<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for W<R> {}
+
 pub struct Case<R: 'static = TuiState> {
     pub context: Context,
     /// Concrete surface used for inherited/shared-body witnesses and sweeps.

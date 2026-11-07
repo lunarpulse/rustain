@@ -305,3 +305,20 @@ fn config_show_notifications_override_is_a_known_key() {
 
     assert_no_provider_constructed("notifications override");
 }
+
+/// Story 21.13 D5: `[markdown]` is an `AppConfig` field, so a `-c
+/// markdown.code_max_rows=N` override is a known key and draws no warning, and
+/// the override is accepted by `config show`.
+#[test]
+#[serial]
+fn config_show_markdown_override_is_a_known_key() {
+    rustain::infrastructure::provider_factory::PROVIDER_CTOR_COUNT.store(0, Ordering::SeqCst);
+
+    Command::cargo_bin("rustain")
+        .unwrap()
+        .args(["-c", "markdown.code_max_rows=7", "config", "show", "--json"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("unknown config key").not());
+    assert_no_provider_constructed("markdown override");
+}

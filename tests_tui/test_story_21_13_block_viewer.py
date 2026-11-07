@@ -1,10 +1,13 @@
-"""21-13 native smoke (slice 13-A): the Stage `[Enter] Inspect` cue and the S-BLOCK
-window on a real debug binary at 80x24 (scene provider, one spawn).
+"""21-13 native smoke (slices 13-A and 13-B): the Stage `[Enter] Inspect` cue, the
+capped Stage and the S-BLOCK window on a real debug binary at 80x24 (scene
+provider, one spawn).
 
 Leg A: reply with a 45-line rust block (line 7 is 120 cells, ending `TAIL120`) and
-an 8-column table. `Esc` -> Chat, `g` -> the block header row carries `▸` and the
+an 8-column table. `Esc` -> Chat, `gg` -> the block header row carries `▸` and the
 cue; `Enter` -> the `Block · rust #1` window; `$` shows the tail of line 7 and no
-`→`; `0` returns; `Esc` backs to Chat with the same focused row.
+`→`; `0` returns; `G`, `c` (clipboard file), `Esc` back to the same Stage rows.
+Leg B: `G` shows the cap's `… 15 more lines` row inside the box; `Enter`, `#`, `G`
+line 45 with its number, `]` the table neighbour, `v` its markdown source, `Esc`.
 
 Offline first: RUSTAIN_BLOCK_VIEWER_DESKCHECK=1 with RUSTAIN_BLOCK_VIEWER_FRAMES=<dir>
 consumes only saved Rust paints (see conformance_21_13 `smoke_frames`); no binary,
@@ -107,6 +110,35 @@ def _end(screen):
             and any("// end-45" in row for row in _rows(screen)))
 
 
+CAP = r"│ │… 15 more lines +│"
+# Narrow sheets cut the column range with an explicit ellipsis; wider ones show it
+# whole or not at all (a window as wide as the block has nothing to scroll).
+STATUS_NUMBERS = (r"[│ ]*code 1/2 · rust · 45 lines · Rendered · numbers"
+                  r"( · col [\d/…-]+)?[│ ]*")
+
+
+def _capped(screen):
+    """The Stage with the cap's remainder row inside the code box."""
+    return _ready(screen) and _matches_row(screen, CAP)
+
+
+def _numbers_end(screen):
+    return (any("Block · rust #1" in row for row in _rows(screen))
+            and any("45 │ │// end-45" in row for row in _rows(screen)))
+
+
+def _next_table(screen):
+    return (any("Block · table #2" in row for row in _rows(screen))
+            and _matches_row(screen, r"[│ ]*table 2/2 · 8 cols × 3 rows · Rendered[│ ]*"))
+
+
+def _source_table(screen):
+    return (any("Block · table #2" in row for row in _rows(screen))
+            and _matches_row(screen, r"[│ ]*table 2/2 · 8 cols × 3 rows · Source · numbers"
+                                     r"( · col [\d/…-]+)?[│ ]*")
+            and _matches_row(screen, r"[│ ]*1 │ \| c1 \| c2 \| c3 .*\|[│ ]*"))
+
+
 def _interior():
     text = json.loads(SCENE.read_text())["personas"][PERSONA]["turns"][0]["content"][0]["text"]
     return text.split("```rust\n", 1)[1].split("\n```", 1)[0]
@@ -160,6 +192,24 @@ def _deskcheck():
     assert "col" not in _frame(frames, "130x30", "tail").split("\n")[1]
     assert _end(_frame(frames, "130x30", "end"))
     assert any(row.lstrip("│ ").startswith("└") for row in _rows(_frame(frames, "60x16", "end")))
+    # Leg B frames at every size. The capped Stage shows its remainder row; numbers,
+    # the neighbour and the source are generic window predicates, and each size shows
+    # its own end-of-body row (a 1-row body shows the bottom border, blank gutter).
+    for size in ("80x24", "60x16", "130x30"):
+        bottom = _frame(frames, size, "stage-bottom")
+        numbers_end = _frame(frames, size, "numbers-end")
+        nxt, source = _frame(frames, size, "next"), _frame(frames, size, "source")
+        assert _capped(bottom) and not _capped(_frame(frames, size, "marked")), size
+        assert _matches_row(numbers_end, STATUS_NUMBERS), size
+        assert _next_table(nxt) and not _next_table(source), size
+        assert _source_table(source) and not _source_table(nxt), size
+        assert not _capped(bottom.replace("more lines", "more line")), size
+        assert not _next_table(nxt.replace("Rendered", "Rend")), size
+        assert not _source_table(source.replace("· Source ·", "· Sour")), size
+    for size in ("80x24", "130x30"):
+        assert _numbers_end(_frame(frames, size, "numbers-end")), size
+    assert any(re.fullmatch(r"│? *│ └─+→?│?", row) for row in _rows(_frame(frames, "60x16", "numbers-end")))
+    assert not _numbers_end(_frame(frames, "80x24", "end"))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -284,6 +334,30 @@ def _spawn(binary, evidence, root, original_spawn, monkeypatch):
             screen = _wait(tui, lambda s: _back(s, stage_rows),
                            "back on the Stage with every Stage row restored")
             _capture(tui, evidence, "a-back", screen)
+            # Leg B (same spawn): the capped Stage, numbers, the neighbour and `v`.
+            tui.child.send("G")
+            screen = _wait(tui, _capped, "the Stage bottom with `… 15 more lines` inside the box")
+            _capture(tui, evidence, "b-stage-bottom", screen)
+            tui.child.send("gg")
+            screen = _wait(tui, _quiet_marked, "the code block focused again, no toast")
+            stage_rows_b = _stage_rows(screen)
+            tui.child.send("\r")
+            _wait(tui, _opened, "the Block window again")
+            tui.child.send("#")
+            _wait(tui, lambda s: _matches_row(s, STATUS_NUMBERS), "the numbers word in the status row")
+            tui.child.send("G")
+            screen = _wait(tui, _numbers_end, "line 45 with its number in the gutter")
+            _capture(tui, evidence, "b-numbers-end", screen)
+            tui.child.send("]")
+            screen = _wait(tui, _next_table, "the table neighbour (table 2/2) in Rendered")
+            _capture(tui, evidence, "b-next", screen)
+            tui.child.send("v")
+            screen = _wait(tui, _source_table, "the table's markdown source with numbers")
+            _capture(tui, evidence, "b-source", screen)
+            tui.child.send("\x1b")
+            screen = _wait(tui, lambda s: _back(s, stage_rows_b),
+                           "back on the Stage with every Stage row restored (leg B)")
+            _capture(tui, evidence, "b-back", screen)
         finally:
             try:
                 tui.stop()

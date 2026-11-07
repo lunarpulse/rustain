@@ -394,6 +394,39 @@ pub fn retarget_tool(
     true
 }
 
+/// Stepping a block viewer changes only the top frame's payload and title.
+pub fn retarget_block(
+    state: &mut TuiState,
+    id: u64,
+    replacement: crate::adapters::tui::block_viewer::BlockViewerState,
+    title: String,
+) -> bool {
+    if state
+        .modal_stack
+        .top()
+        .is_none_or(|frame| frame.id != id || !matches!(frame.surface, Surface::BlockViewer(_)))
+    {
+        return false;
+    }
+    let payload = state
+        .block_viewers
+        .get_mut(&id)
+        .expect("frame owns its block payload");
+    assert_eq!(
+        payload.target.conversation_id,
+        replacement.target.conversation_id
+    );
+    *payload = replacement;
+    state
+        .modal_stack
+        .all_frames_mut()
+        .find(|frame| frame.id == id)
+        .expect("the current frame exists")
+        .tool_title = Some(title);
+    state.needs_redraw = true;
+    true
+}
+
 /// Consume the payload preparation owed by a fresh frame, including a palette
 /// handoff whose effect is applied after key dispatch. Reopening never resets it.
 pub fn initialize_surface(state: &mut TuiState, surface: Surface) -> bool {
