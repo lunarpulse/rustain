@@ -43,10 +43,17 @@ fn blank(bytes: &mut [u8]) {
 // Lexical masking preserves byte offsets and physical lines. Nested comments, escaped
 // strings, raw strings and char literals cannot invent a brace or a banned identifier.
 fn code_only(source: &str) -> String {
+    code_only_with(source, false)
+}
+
+/// `keep_strings` leaves string and raw-string literals readable (comments and
+/// char literals stay masked): the OSC 8 introducer lives only in a literal.
+fn code_only_with(source: &str, keep_strings: bool) -> String {
     let mut b = source.as_bytes().to_vec();
     let mut i = 0;
     while i < b.len() {
         let start = i;
+        let mut literal = false;
         if b[i..].starts_with(b"//") {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
@@ -75,6 +82,7 @@ fn code_only(source: &str) -> String {
                 continue;
             }
             let hashes = j - i - 1;
+            literal = true;
             i = j + 1;
             while i < b.len() {
                 if b[i] == b'"'
@@ -87,6 +95,7 @@ fn code_only(source: &str) -> String {
                 i += 1;
             }
         } else if b[i] == b'"' {
+            literal = true;
             i += 1;
             while i < b.len() {
                 if b[i] == b'\\' {
@@ -115,7 +124,9 @@ fn code_only(source: &str) -> String {
             i += 1;
             continue;
         }
-        blank(&mut b[start..i]);
+        if !(keep_strings && literal) {
+            blank(&mut b[start..i]);
+        }
     }
     String::from_utf8(b).unwrap()
 }
@@ -136,8 +147,22 @@ fn item_end(code: &str, start: usize) -> usize {
     }
     panic!("unterminated source item at byte {start}")
 }
+/// Production text with comments and test items masked but string literals kept.
+fn production_literal(source: &str) -> String {
+    let (_, ranges) = production_ranges(source);
+    let mut bytes = code_only_with(source, true).into_bytes();
+    for (start, end) in ranges {
+        blank(&mut bytes[start..end]);
+    }
+    String::from_utf8(bytes).unwrap()
+}
 fn production_part(source: &str) -> String {
+    production_ranges(source).0
+}
+/// The masked production text and the byte ranges of its `#[cfg(test)]` items.
+fn production_ranges(source: &str) -> (String, Vec<(usize, usize)>) {
     let mut code = code_only(source);
+    let mut ranges = Vec::new();
     static CFG: LazyLock<Regex> = LazyLock::new(|| re(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]"));
     let mut cursor = 0;
     while let Some(m) = CFG.find_at(&code, cursor) {
@@ -164,9 +189,10 @@ fn production_part(source: &str) -> String {
         cursor = item_end(&code, at);
         let mut bytes = code.into_bytes();
         blank(&mut bytes[start..cursor]);
+        ranges.push((start, cursor));
         code = String::from_utf8(bytes).unwrap();
     }
-    code
+    (code, ranges)
 }
 fn scope(code: &str, at: usize) -> String {
     static NAMES: LazyLock<Regex> = LazyLock::new(|| re(r"\b(fn|struct|enum)\s+(\w+)"));
@@ -262,7 +288,7 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "render",
-        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search|tool_inspector)\s*::\s*render\w*\s*\("###,
+        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search|tool_inspector|block_viewer)\s*::\s*render\w*\s*\("###,
     ),
     // Payload presence cannot become a second open authority, regardless of read syntax.
     ("option", r"\.\s*(?:notification_log|quit_confirm)\b"),
@@ -289,6 +315,14 @@ const RULES: &[(&str, &str)] = &[
     ),
     ("a2b-payload-owner", r"\b(?:pub\s+)?(?:active|focused)\s*:"),
     ("legacy-painter", r"\bpaint_legacy\b"),
+    // Story 21.13 D17: one OSC 8 encoder, no inline block expansion, and the
+    // natural-width Window presentation only where blocks are laid out.
+    ("osc8-encoder", r"\]8;"),
+    (
+        "block-inline-expansion",
+        r"\b(?:expanded_code|code_expanded|expand_block|block_expanded)\b",
+    ),
+    ("block-window", r"\bBlockPresentation\s*::\s*Window\b"),
     (
         "tool-inspector-legacy",
         r"\b(?:ToolBlockState|tool_block_states|tool_block_states_version|peek_active|render_peek_overlay|PeekToolBlock|ToggleToolBlock|expanded_body_height|expanded_diff_body|TOGGLE_TOOL_BLOCK)\b",
@@ -352,14 +386,14 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
     });
     static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay|tool_inspector)\b",
+            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay|tool_inspector|block_viewer)\b",
         )
     });
     static TOOL_OPEN_ARM: LazyLock<Regex> =
         LazyLock::new(|| re(r"\bInputAction\s*::\s*InspectTool\s*=>\s*\{"));
     static TOOL_OPEN_ONLY: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"(?s)^\{\s*(?:crate\s*::\s*adapters\s*::\s*tui\s*::\s*)?tool_inspector\s*::\s*inspect_focused\s*\([^;{}]*\)\s*;\s*\}$",
+            r"(?s)^\{\s*(?:crate\s*::\s*adapters\s*::\s*tui\s*::\s*)?(?:tool_inspector|block_viewer)\s*::\s*inspect_focused\s*\([^;{}]*\)\s*;\s*\}$",
         )
     });
     static TOOL_REFRESH: LazyLock<Regex> =
@@ -385,6 +419,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
     }
     for (path, source) in files {
         let code = production_part(source);
+        let literal = production_literal(source);
         let (normalized, offsets) = tokens(&code);
         let own_payload = path.starts_with(PRESENTATION)
             || [
@@ -402,6 +437,15 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             if *rule == "interceptor" && path.starts_with(PRESENTATION) {
                 continue;
             }
+            if *rule == "block-window"
+                && (path.starts_with("src/adapters/tui/markdown/")
+                    || path == "src/adapters/tui/widgets/block_viewer.rs")
+            {
+                continue;
+            }
+            if *rule == "osc8-encoder" && path == "src/adapters/tui/widgets/hyperlink.rs" {
+                continue;
+            }
             if *rule == "variant" && path != "src/domain/models/visual.rs" {
                 continue;
             }
@@ -411,7 +455,12 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             {
                 continue;
             }
-            for m in pattern.find_iter(&code) {
+            let haystack = if *rule == "osc8-encoder" {
+                &literal
+            } else {
+                &code
+            };
+            for m in pattern.find_iter(haystack) {
                 if *rule == "focus-write" && code.as_bytes().get(m.end()) == Some(&b'=') {
                     continue;
                 }
@@ -463,6 +512,9 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "a2b-owner",
                     "a2b-payload-owner",
                     "legacy-painter",
+                    "osc8-encoder",
+                    "block-inline-expansion",
+                    "block-window",
                     "tool-inspector-legacy",
                     "field-string",
                     "field-tail",
@@ -1724,4 +1776,88 @@ fn k6_story21_5_step_and_copy_host_arms_are_single_owned_calls() {
             );
         }
     }
+}
+
+#[test]
+fn k6_story21_13_block_cutover_clauses_have_positive_controls_and_exact_allowlists() {
+    for (rule, text, allowed, denied) in [
+        (
+            "osc8-encoder",
+            "fn f(url: &str) -> String { format!(\"\\x1b]8;;{url}\\x07\") }\n// \\x1b]8;; in a comment is masked\nfn g() { let _ = ']'; }",
+            "src/adapters/tui/widgets/hyperlink.rs",
+            "src/adapters/tui/widgets/block_viewer.rs",
+        ),
+        (
+            "block-inline-expansion",
+            "fn f() { let _ = expand_block; }",
+            "",
+            "src/adapters/tui/widgets/block_viewer.rs",
+        ),
+        (
+            "block-window",
+            "fn f() { let _ = BlockPresentation::Window; }",
+            "src/adapters/tui/markdown/layout.rs",
+            "src/adapters/tui/widgets/chat_pane/mod.rs",
+        ),
+    ] {
+        let text = text.to_owned();
+        let errors = scan(&[(denied.into(), text.clone())], &[]);
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("{rule}|"))),
+            "{rule}: {errors:?}"
+        );
+        if !allowed.is_empty() {
+            let errors = scan(&[(allowed.into(), text.clone())], &[]);
+            assert!(
+                !errors.iter().any(|e| e.contains(&format!("{rule}|"))),
+                "{errors:?}"
+            );
+        }
+    }
+    // Stale-exemption check: the hyperlink.rs allowance is exercised by the real
+    // encoder, which the same scanner flags anywhere else; and a comment alone
+    // never trips the rule.
+    let encoder = include_str!("../../src/adapters/tui/widgets/hyperlink.rs");
+    let elsewhere = scan(
+        &[(
+            "src/adapters/tui/widgets/block_viewer.rs".into(),
+            encoder.into(),
+        )],
+        &[],
+    );
+    assert!(
+        elsewhere.iter().any(|e| e.contains("osc8-encoder|")),
+        "{elsewhere:?}"
+    );
+    let here = scan(
+        &[(
+            "src/adapters/tui/widgets/hyperlink.rs".into(),
+            encoder.into(),
+        )],
+        &[],
+    );
+    assert!(
+        !here.iter().any(|e| e.contains("osc8-encoder|")),
+        "{here:?}"
+    );
+    let comment = scan(
+        &[(
+            "src/x.rs".into(),
+            "// \\x1b]8;; only a comment\nfn f() {}".into(),
+        )],
+        &[],
+    );
+    assert!(
+        !comment.iter().any(|e| e.contains("osc8-encoder|")),
+        "{comment:?}"
+    );
+    // Block viewers are allowed to name Window only inside the widget.
+    let errors = scan(
+        &[(
+            "src/adapters/tui/widgets/block_viewer.rs".into(),
+            "fn f() { let _ = BlockPresentation::Window; }".into(),
+        )],
+        &[],
+    );
+    assert!(errors.is_empty(), "{errors:?}");
 }

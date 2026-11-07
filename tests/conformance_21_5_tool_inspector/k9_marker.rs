@@ -65,7 +65,7 @@ fn fixture(width: u16, height: u16, full: bool, status: S, command: &str) -> Fix
     f.focus_call(&id);
     // A second real paint settles the current owning ViewState before snapshots.
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(id.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(id.as_str()));
     assert_eq!(f.buffer().area, Rect::new(0, 0, width, height));
     assert_eq!(f.layout().input_area.height, if full { 10 } else { 3 });
     f
@@ -156,8 +156,8 @@ fn focused_header_replaces_both_leads_without_rows_cache_or_view_churn() {
                 assert_post_pass(&f, &plain, "Bash", true);
                 let marked = pixels(f.buffer(), area);
                 let selection = (
-                    f.h.state.focused_tool_id.clone(),
-                    f.h.state.selected_tool_id.clone(),
+                    f.h.state.focused_item_id.clone(),
+                    f.h.state.selected_item_id.clone(),
                 );
                 for _ in 0..3 {
                     f.paint();
@@ -183,8 +183,8 @@ fn focused_header_replaces_both_leads_without_rows_cache_or_view_churn() {
                     );
                     assert_eq!(
                         (
-                            f.h.state.focused_tool_id.clone(),
-                            f.h.state.selected_tool_id.clone()
+                            f.h.state.focused_item_id.clone(),
+                            f.h.state.selected_item_id.clone()
                         ),
                         selection
                     );
@@ -286,7 +286,7 @@ fn only_the_render_focused_invocation_receives_marker_or_inline_cue() {
     );
     let mut f = Fixture::new(130, 30, turn);
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(first.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(first.as_str()));
     let area = f.layout().chat_pane;
     f.press(Key::Char('i'));
     f.paint();

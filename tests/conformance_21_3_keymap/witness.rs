@@ -185,6 +185,7 @@ pub fn run<R: Runtime + 'static>(case: &Case<R>) {
             | Context::TasksReorder
             | Context::InspectorBody
             | Context::ToolInspector
+            | Context::BlockViewer
     );
     for key in &inherited {
         assert!(

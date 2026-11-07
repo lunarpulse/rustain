@@ -17,6 +17,8 @@
 
 use std::borrow::Cow;
 
+use ratatui::text::{Line, Span};
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -281,6 +283,48 @@ pub fn expand_tabs(text: &str, start: usize) -> Cow<'_, str> {
     }
     Cow::Owned(out)
 }
+
+/// The part of `line` that spans display cells `from_cell..from_cell + width`:
+/// the only horizontal slicer. Span styles are kept; a wide grapheme cut by
+/// either edge becomes spaces for its visible cells, so no half glyph is ever
+/// painted. Rows shorter than the window are returned unpadded.
+#[must_use]
+pub fn slice_line(line: &Line<'_>, from_cell: usize, width: usize) -> Line<'static> {
+    let end = from_cell.saturating_add(width);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in &line.spans {
+        let mut text = String::new();
+        for grapheme in span.content.graphemes(true) {
+            if col >= end {
+                break;
+            }
+            let cluster = cells(grapheme);
+            if cluster == 0 {
+                if col >= from_cell {
+                    text.push_str(grapheme);
+                }
+                continue;
+            }
+            let next = col + cluster;
+            if next > from_cell {
+                if col >= from_cell && next <= end {
+                    text.push_str(grapheme);
+                } else {
+                    text.push_str(&spaces(next.min(end) - col.max(from_cell)));
+                }
+            }
+            col = next;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    let mut sliced = Line::from(spans).style(line.style);
+    sliced.alignment = line.alignment;
+    sliced
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,5 +495,49 @@ mod tests {
             assert!(!out.chars().any(char::is_control));
         }
         assert_eq!(cells(&expand_tabs(&format!("{G}\tx"), 0)), 9);
+    }
+
+    #[test]
+    fn story21_13_slice_line_never_paints_half_a_glyph_and_keeps_styles() {
+        use ratatui::style::{Color, Style};
+        let plain = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let wide = Line::from(vec![
+            Span::styled("ab", Style::default().fg(Color::Red)),
+            Span::raw(format!("{C}{C}{G}{A}z")),
+        ]);
+        // cells: a0 b1 界2-3 界4-5 G6-7 é8 z9
+        assert_eq!(
+            plain(&slice_line(&wide, 0, 3)),
+            "ab ",
+            "cut right edge blanks"
+        );
+        assert_eq!(
+            plain(&slice_line(&wide, 3, 3)),
+            format!(" {C}"),
+            "cut left edge blanks"
+        );
+        assert_eq!(plain(&slice_line(&wide, 6, 3)), format!("{G}{A}"));
+        assert_eq!(
+            plain(&slice_line(&wide, 7, 3)),
+            format!(" {A}z"),
+            "a ZWJ cluster is cut as one"
+        );
+        assert_eq!(plain(&slice_line(&wide, 9, 8)), "z");
+        assert_eq!(
+            plain(&slice_line(&wide, 40, 8)),
+            "",
+            "past the end is empty"
+        );
+        assert_eq!(slice_line(&wide, 0, 2).spans[0].style.fg, Some(Color::Red));
+        for from in 0..12 {
+            for width in 0..12 {
+                assert!(cells(&plain(&slice_line(&wide, from, width))) <= width);
+            }
+        }
     }
 }

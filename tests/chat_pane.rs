@@ -628,21 +628,21 @@ fn test_compact_tool_cache_rebuild_preserves_boundaries() {
 // Story 19.9 A3 — every visible tool block is a keyboard inspection target
 // ---------------------------------------------------------------------------
 //
-// The defect these keystones pin: `find_focused_tool_id` used to return the
+// The defect these keystones pin: `find_focused_item` used to return the
 // conversation's FIRST tool call id whenever any block boundary landed in the
 // viewport's top three rows, and `event_loop.rs` writes that result back into
-// `state.focused_tool_id` every frame — so a `Read` before a `Write` made the
+// `state.focused_item_id` every frame — so a `Read` before a `Write` made the
 // `Write` unreachable by `Enter`, and undid the `Tab` cycle. Focus now follows
 // the visible block nearest the viewport top, and an explicit selection the
 // caller already holds is kept while its block stays on screen.
 //
 // Front door: `chat_pane::render_with_search` — the same entry
 // `event_loop.rs`'s composition root calls; the result travels to
-// `state.focused_tool_id` and is what `Enter` (`app.rs`) acts on.
+// `state.focused_item_id` and is what `Enter` (`app.rs`) acts on.
 
 /// One assistant turn: `Read` → result → `Write` → result → prose, plus the
 /// user message that precedes it. Ids are the canonical mirror ids used by
-/// `state.focused_tool_id` and the tool inspector target.
+/// `state.focused_item_id` and the tool inspector target.
 fn read_then_write_turn() -> (Conversation, String, String) {
     use rustain::domain::models::turn::TurnPart;
     use rustain::domain::models::{InvocationStatus, StopReason, ToolOutput, Turn, WriteDiffState};
@@ -722,7 +722,7 @@ fn bare_message(id: &str, role: MessageRole, content: &str) -> ChatMessage {
     }
 }
 
-/// Render through the production entry and return `(focused_tool_id,
+/// Render through the production entry and return `(focused_item_id,
 /// block_boundaries, total_content_height)`.
 #[allow(clippy::type_complexity)]
 fn focus_probe(
@@ -780,10 +780,11 @@ fn focus_probe_with_view(
                 chat_pane::ToolFocus {
                     current: current_focus,
                     inspector_marker: false,
+                    blocks: false,
                 },
             );
             *out.borrow_mut() = (
-                result.focused_tool_id,
+                result.focused_item_id,
                 result.block_boundaries,
                 result.total_content_height,
             );
@@ -794,7 +795,7 @@ fn focus_probe_with_view(
 
 /// A3(3)(a): a NON-FIRST tool block scrolled to the viewport top takes focus.
 ///
-/// Mutant (executed RED at Task 1): restore `find_focused_tool_id`'s
+/// Mutant (executed RED at Task 1): restore `find_focused_item`'s
 /// `all_tool_ids.into_iter().next()` return — this asserts `read_id` instead.
 // Covers: FR29 (collapsible tool blocks, plural)
 #[test]
@@ -896,7 +897,7 @@ fn focus_is_none_when_the_conversation_has_no_tool_blocks() {
 /// matching `Turn`) must contribute its blocks to the focus list too — attach
 /// mode and restored pre-turn conversations render through it.
 ///
-/// Mutant (executed RED at Task 1): delete the `tool_block_boundaries.push`
+/// Mutant (executed RED at Task 1): delete the `item_boundaries.push`
 /// in the `MessageRole::User | MessageRole::System` arm — focus can then only
 /// ever be `None` for this fixture.
 // Covers: FR29

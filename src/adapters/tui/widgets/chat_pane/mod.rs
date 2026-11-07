@@ -19,7 +19,7 @@ use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
 use crate::adapters::tui::widgets::tool_block;
 use crate::domain::clock::{Clock, current_braille_frame};
-use crate::domain::models::turn::tool_call_id_for;
+use crate::domain::models::turn::{block_item_id_for, is_block_item_id, tool_call_id_for};
 use crate::domain::models::{
     ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics, MessageRole,
     PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
@@ -170,6 +170,8 @@ fn legacy_streaming_lines(
 pub struct ToolFocus<'a> {
     pub current: Option<&'a str>,
     pub inspector_marker: bool,
+    /// The host can open S-BLOCK: committed code blocks and tables take focus.
+    pub blocks: bool,
 }
 
 /// Result of rendering the chat pane, including boundary data for navigation.
@@ -186,8 +188,8 @@ pub struct RenderResult {
     /// Used exclusively by the `{`/`}` keybindings to jump between user
     /// turns, skipping assistant responses.
     pub user_message_boundaries: Vec<usize>,
-    /// Tool block id at the top of the viewport (for focus/keyboard interaction).
-    pub focused_tool_id: Option<String>,
+    /// Stage item id (tool call or code/table block) that holds focus this frame.
+    pub focused_item_id: Option<String>,
     /// Feedback ids and exact clipped screen-row ranges painted by the chat.
     /// Hosts filter opaque coverage after all overlays, before acknowledging a
     /// successful draw. Offscreen and zero-height projections are absent.
@@ -1087,6 +1089,7 @@ pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> 
             height: 0,
             block_offsets: vec![],
             tool_block_offsets: vec![],
+            md_block_offsets: vec![],
         };
     }
 
@@ -1102,6 +1105,7 @@ pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> 
     let mut height: usize = 0;
     let mut block_offsets: Vec<usize> = Vec::new();
     let mut tool_block_offsets: Vec<(usize, String)> = Vec::new();
+    let mut md_block_offsets: Vec<(usize, String)> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
     let mut running_count: usize = 0;
 
@@ -1115,14 +1119,21 @@ pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> 
         height += blanks;
 
         match part {
-            TurnPart::Prose { text, .. } => {
+            TurnPart::Prose { id, text } => {
                 block_offsets.push(height);
-                height += crate::adapters::tui::markdown::compute_height(
+                let rendered = crate::adapters::tui::markdown::render(
                     text,
                     content_width,
                     theme,
                     &stage_options(RenderOptions::completed(), false),
                 );
+                md_block_offsets.extend(rendered.blocks.iter().map(|span| {
+                    (
+                        height + span.rows.start,
+                        block_item_id_for(&turn.id, *id, span.ordinal),
+                    )
+                }));
+                height += rendered.lines.len();
             }
             TurnPart::Reasoning { text, .. } => {
                 block_offsets.push(height);
@@ -1159,6 +1170,7 @@ pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> 
         height,
         block_offsets,
         tool_block_offsets,
+        md_block_offsets,
     }
 }
 
@@ -1173,6 +1185,7 @@ pub(super) fn collapsed_turn_height(
         height: 1,
         block_offsets: vec![],
         tool_block_offsets: vec![],
+        md_block_offsets: vec![],
     }
 }
 
@@ -1904,7 +1917,7 @@ fn render_with_search_impl(
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
-        focused_tool_id: None,
+        focused_item_id: None,
         visible_feedback_rows: Vec::new(),
     };
 
@@ -1914,14 +1927,14 @@ fn render_with_search_impl(
         && !streaming.is_streaming
         && feedback_blocks.is_empty()
     {
-        tab_render_state.tool_block_boundaries.clear();
+        tab_render_state.item_boundaries.clear();
         empty_state::render(frame, area, theme);
         return empty;
     }
 
     let width = area.width as usize;
     if width == 0 {
-        tab_render_state.tool_block_boundaries.clear();
+        tab_render_state.item_boundaries.clear();
         return empty;
     }
 
@@ -1962,7 +1975,9 @@ fn render_with_search_impl(
     // Story 19.9 A3: (start_line, tool_call_id) for every tool block in the
     // laid-out conversation. Parallel to `block_boundaries`, but id-carrying
     // and start-anchored, which is what makes per-block keyboard focus possible.
-    let mut tool_block_boundaries: Vec<(usize, String)> = Vec::new();
+    let mut item_boundaries: Vec<(usize, String)> = Vec::new();
+    // Exact ids of the focused turn's items (D7: membership by id, not prefix).
+    let mut focused_turn_items: Vec<String> = Vec::new();
     let mut message_boundaries: Vec<usize> = Vec::new();
     let mut user_message_boundaries: Vec<usize> = Vec::new();
     let mut cumulative_offset: usize = 0;
@@ -2005,6 +2020,7 @@ fn render_with_search_impl(
                                 if probe.height != l.height
                                     || probe.block_offsets != l.block_offsets
                                     || probe.tool_block_offsets != l.tool_block_offsets
+                                    || probe.md_block_offsets != l.md_block_offsets
                                 {
                                     tracing::warn!(
                                         "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
@@ -2050,9 +2066,23 @@ fn render_with_search_impl(
                     for offset in &layout.block_offsets {
                         block_boundaries.push(cumulative_offset + prefix_height + offset);
                     }
+                    let first_item = item_boundaries.len();
                     for (offset, id) in &layout.tool_block_offsets {
-                        tool_block_boundaries
+                        item_boundaries
                             .push((cumulative_offset + prefix_height + offset, id.clone()));
+                    }
+                    if focus.blocks {
+                        for (offset, id) in &layout.md_block_offsets {
+                            item_boundaries
+                                .push((cumulative_offset + prefix_height + offset, id.clone()));
+                        }
+                    }
+                    if view_state.focused_turn.as_ref() == Some(&turn.id) {
+                        focused_turn_items.extend(
+                            item_boundaries[first_item..]
+                                .iter()
+                                .map(|(_, id)| id.clone()),
+                        );
                     }
                 } else {
                     // TODO(S16.10-cleanup): No matching turn — fall back to legacy height calc
@@ -2072,7 +2102,7 @@ fn render_with_search_impl(
                         // A3: the block's START, before its height is added —
                         // `block_boundaries` keeps pushing the end (unchanged,
                         // it anchors scrolling), the focus list needs the start.
-                        tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
+                        item_boundaries.push((cumulative_offset + h, tc.id.clone()));
                         h += tool_block::tool_block_height(tc);
                         block_boundaries.push(cumulative_offset + h);
                     }
@@ -2116,7 +2146,7 @@ fn render_with_search_impl(
                     }
                 };
                 for tc in &msg.tool_calls {
-                    tool_block_boundaries.push((cumulative_offset + h, tc.id.clone()));
+                    item_boundaries.push((cumulative_offset + h, tc.id.clone()));
                     h += tool_block::tool_block_height(tc);
                     block_boundaries.push(cumulative_offset + h);
                 }
@@ -2181,8 +2211,21 @@ fn render_with_search_impl(
             }
             let layout = expanded_turn_height(ot, theme, width);
             // A3: a still-open turn's tool blocks are focusable too.
+            let first_item = item_boundaries.len();
             for (offset, id) in &layout.tool_block_offsets {
-                tool_block_boundaries.push((cumulative_offset + offset, id.clone()));
+                item_boundaries.push((cumulative_offset + offset, id.clone()));
+            }
+            if focus.blocks {
+                for (offset, id) in &layout.md_block_offsets {
+                    item_boundaries.push((cumulative_offset + offset, id.clone()));
+                }
+            }
+            if view_state.focused_turn.as_ref() == Some(&ot.id) {
+                focused_turn_items.extend(
+                    item_boundaries[first_item..]
+                        .iter()
+                        .map(|(_, id)| id.clone()),
+                );
             }
             let h = layout.height;
             cumulative_offset += h;
@@ -2754,49 +2797,62 @@ fn render_with_search_impl(
         });
     }
 
-    // A3: `tool_call_id_for` is `tc_{turn_id}_{part_id}`, so the focused turn's
-    // blocks are exactly the ids carrying this prefix — no parallel bookkeeping.
-    let focused_turn_prefix = view_state
-        .focused_turn
-        .as_ref()
-        .map(|t| format!("tc_{}_", t.0));
-    let focused_tool_id = find_focused_tool_id(
-        &tool_block_boundaries,
+    // Stage items (tool calls and code/table blocks) sit in render order.
+    item_boundaries.sort_by_key(|(start, _)| *start);
+    let focused_item_id = find_focused_item(
+        &item_boundaries,
         visible_start,
         visible_end,
         current_focus,
-        focused_turn_prefix.as_deref(),
+        view_state
+            .focused_turn
+            .is_some()
+            .then_some(focused_turn_items.as_slice()),
     );
-    // Decorate only an already laid-out, visible invocation header. This never
+    // Decorate only an already laid-out, visible item header. This never
     // participates in height/cache keys or adds a row, even when a cue cannot fit.
     if focus.inspector_marker
         && !show_terminal_origin_prefix
-        && let Some(id) = focused_tool_id.as_deref()
-        && let Some((start, _)) = tool_block_boundaries.iter().find(|(_, tool)| tool == id)
+        && let Some(id) = focused_item_id.as_deref()
+        && let Some((start, _)) = item_boundaries.iter().find(|(_, item)| item == id)
         && *start >= visible_start
         && *start < visible_end
         && let Some(line) = lines.get_mut(*start - visible_start)
-        && let Some(lead) = line
-            .spans
-            .iter_mut()
-            .find(|span| matches!(span.content.as_ref(), "┄ " | "┃ "))
     {
-        lead.content = "▸ ".into();
-        lead.style = Style::default()
-            .fg(theme.colors.accent)
-            .add_modifier(Modifier::BOLD);
-        if crate::adapters::tui::tool_inspector::project::contains_call(
-            &conversation.turns,
-            open_turn,
-            id,
-        ) && let Some(cue) = crate::adapters::tui::keymap::render_tips::inspect_tip()
-            && line.width() + 1 + geom::cells(&cue) <= width
-        {
-            line.spans.push(Span::raw(" "));
-            line.spans.push(Span::styled(
-                cue,
-                Style::default().add_modifier(Modifier::DIM),
-            ));
+        let is_block = is_block_item_id(id);
+        if let Some(lead) = line.spans.iter_mut().find(|span| {
+            matches!(span.content.as_ref(), "┄ " | "┃ ") || (is_block && span.content == "│ ")
+        }) {
+            lead.content = "▸ ".into();
+            lead.style = Style::default()
+                .fg(theme.colors.accent)
+                .add_modifier(Modifier::BOLD);
+            let resolvable = if is_block {
+                crate::adapters::tui::block_viewer::contains_block(
+                    &conversation.turns,
+                    open_turn,
+                    id,
+                )
+            } else {
+                crate::adapters::tui::tool_inspector::project::contains_call(
+                    &conversation.turns,
+                    open_turn,
+                    id,
+                )
+            };
+            if resolvable
+                && let Some(cue) = crate::adapters::tui::keymap::render_tips::inspect_tip()
+            {
+                if is_block {
+                    place_block_cue(line, &cue, width);
+                } else if line.width() + 1 + geom::cells(&cue) <= width {
+                    line.spans.push(Span::raw(" "));
+                    line.spans.push(Span::styled(
+                        cue,
+                        Style::default().add_modifier(Modifier::DIM),
+                    ));
+                }
+            }
         }
     }
 
@@ -2814,13 +2870,13 @@ fn render_with_search_impl(
         hyperlink::encode(frame.buffer_mut(), target, &run.url);
     }
 
-    tab_render_state.tool_block_boundaries = tool_block_boundaries;
+    tab_render_state.item_boundaries = item_boundaries;
     RenderResult {
         total_content_height,
         block_boundaries,
         message_boundaries,
         user_message_boundaries,
-        focused_tool_id,
+        focused_item_id,
         visible_feedback_rows,
     }
 }
@@ -2830,7 +2886,7 @@ fn render_with_search_impl(
 /// Story 19.9 A3 (FR29 — collapsible tool blocks, *plural*). The pre-19.9
 /// heuristic returned `all_tool_ids.first()` whenever ANY block boundary —
 /// prose, message or tool — landed in the viewport's top 3 rows, and
-/// `event_loop.rs` writes this result back into `state.focused_tool_id` every
+/// `event_loop.rs` writes this result back into `state.focused_item_id` every
 /// frame. Two consequences, both measured under a PTY at Task 0 (story Debug
 /// Log, T0.3(1)): a conversation whose first tool call was a `Read` made every
 /// later `Write`/`Bash` block permanently unreachable by keyboard, and the
@@ -2869,9 +2925,9 @@ fn render_with_search_impl(
 /// block was considered and rejected as out of scope (story 19.9 review
 /// ruling).
 ///
-/// `focused_turn_prefix` is `"tc_<turn_id>_"`. Ids are minted by
-/// `tool_call_id_for` as `tc_{turn_id}_{part_id}`, so turn membership is a
-/// prefix test and needs no second list to drift out of sync.
+/// `focused_turn_items` is the exact id list of the focused turn's tool calls
+/// and blocks (collected while laying the turn out), so membership is an id
+/// equality test, never a prefix test (Story 21.13 D7).
 ///
 /// ⚑ A3(2) as authored had two rules — a three-row window first, the keep-branch
 /// second — and both were corrected at T0.3(1) against the real product, under a
@@ -2890,20 +2946,20 @@ fn render_with_search_impl(
 ///
 /// The result subsumes the window, keeps all three A3(3) keystones true, and
 /// keeps every A3(3) mutant RED.
-fn find_focused_tool_id(
-    tool_block_boundaries: &[(usize, String)],
+fn find_focused_item(
+    item_boundaries: &[(usize, String)],
     visible_start: usize,
     visible_end: usize,
     current_focus: Option<&str>,
-    focused_turn_prefix: Option<&str>,
+    focused_turn_items: Option<&[String]>,
 ) -> Option<String> {
     let visible = |start: usize| start >= visible_start && start < visible_end;
     let in_focused_turn =
-        |id: &str| focused_turn_prefix.is_none_or(|prefix| id.starts_with(prefix));
+        |id: &str| focused_turn_items.is_none_or(|items| items.iter().any(|item| item == id));
 
     if let Some(current) = current_focus {
         if in_focused_turn(current)
-            && tool_block_boundaries
+            && item_boundaries
                 .iter()
                 .any(|(start, id)| id == current && visible(*start))
         {
@@ -2911,21 +2967,48 @@ fn find_focused_tool_id(
         }
     }
 
-    if let Some(prefix) = focused_turn_prefix {
-        if let Some((_, id)) = tool_block_boundaries
+    if let Some(items) = focused_turn_items {
+        if let Some((_, id)) = item_boundaries
             .iter()
-            .filter(|(start, id)| visible(*start) && id.starts_with(prefix))
+            .filter(|(start, id)| visible(*start) && items.contains(id))
             .min_by_key(|(start, _)| *start)
         {
             return Some(id.clone());
         }
     }
 
-    tool_block_boundaries
+    item_boundaries
         .iter()
         .filter(|(start, _)| visible(*start))
         .min_by_key(|(start, _)| *start)
         .map(|(_, id)| id.clone())
+}
+
+/// D8: write the Inspect cue over the right end of a code header or a table's
+/// top border (one `─` and one space kept on each side), or append it after the
+/// collapse line. A row without room keeps no cue; no row is added.
+fn place_block_cue(line: &mut Line<'_>, cue: &str, width: usize) {
+    let cue_cells = geom::cells(cue);
+    let line_width = line.width();
+    let Some(last) = line.spans.last_mut() else {
+        return;
+    };
+    let cue_style = Style::default().add_modifier(Modifier::DIM);
+    if let Some(body) = last.content.strip_suffix('┐') {
+        let dashes = body.chars().rev().take_while(|c| *c == '─').count();
+        if dashes < cue_cells + 4 {
+            return;
+        }
+        let keep = body.chars().count() - (cue_cells + 3);
+        let head: String = body.chars().take(keep).chain([' ']).collect();
+        let border = last.style;
+        last.content = head.into();
+        line.spans.push(Span::styled(cue.to_owned(), cue_style));
+        line.spans.push(Span::styled(" ─┐", border));
+    } else if last.content.starts_with("table · ") && line_width + 1 + cue_cells <= width {
+        line.spans.push(Span::raw(" "));
+        line.spans.push(Span::styled(cue.to_owned(), cue_style));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3110,7 +3193,7 @@ mod parts_aware_tests {
 
     /// `tool_block_offsets` must hold exactly one entry per `ToolInvocation`,
     /// in part order, with the canonical mirror id — otherwise
-    /// `find_focused_tool_id` cannot name a block other than the first.
+    /// `find_focused_item` cannot name a block other than the first.
     ///
     /// Mutant (executed RED at Task 1): delete the
     /// `tool_block_offsets.push(...)` in the `ToolInvocation` arm.
@@ -3778,6 +3861,7 @@ mod parts_aware_tests {
                 height: 5,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -3804,6 +3888,7 @@ mod parts_aware_tests {
                 height: 1,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -3861,6 +3946,7 @@ mod parts_aware_tests {
                 height: 5,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3869,6 +3955,7 @@ mod parts_aware_tests {
                 height: 8,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_w80).unwrap().height, 5);
@@ -5050,5 +5137,68 @@ mod parts_aware_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod story21_13_tests {
+    use super::*;
+
+    #[test]
+    fn story21_13_height_pass_carries_one_block_offset_per_code_block_and_table() {
+        let mut turn = Turn::new("claude".into(), 1_700_000_000_000);
+        let first = turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "Intro\n\n```rust\nfn a() {}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n".into(),
+        });
+        let layout = expanded_turn_height(&turn, &Theme::dark(), 80);
+        let ids: Vec<&str> = layout
+            .md_block_offsets
+            .iter()
+            .map(|(_, id)| id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                block_item_id_for(&turn.id, first, 0).as_str(),
+                block_item_id_for(&turn.id, first, 1).as_str(),
+            ]
+        );
+        assert!(layout.md_block_offsets[0].0 < layout.md_block_offsets[1].0);
+        assert!(layout.tool_block_offsets.is_empty());
+        // Width 0 has no rows and no items.
+        assert!(
+            expanded_turn_height(&turn, &Theme::dark(), 2)
+                .md_block_offsets
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn story21_13_cue_is_written_over_the_border_or_omitted_never_adding_cells() {
+        let border = Style::default().fg(Color::Blue);
+        let header = |dashes: usize| {
+            Line::from(vec![
+                Span::raw("▸ "),
+                Span::styled(format!("┌─ rust {}┐", "─".repeat(dashes)), border),
+            ])
+        };
+        let cue = "[Enter] Inspect";
+        let mut line = header(30);
+        let before = line.width();
+        place_block_cue(&mut line, cue, 80);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(line.width(), before, "overwrites border cells, adds none");
+        assert!(text.ends_with(" [Enter] Inspect ─┐"), "{text}");
+        assert!(text.starts_with("▸ ┌─ rust ─"), "{text}");
+        let mut tight = header(cue.len() + 3);
+        place_block_cue(&mut tight, cue, 80);
+        assert_eq!(tight.spans.len(), 2, "fewer than hint + 4 dashes: omitted");
+        let mut collapse = Line::from(vec![Span::raw("▸ "), Span::raw("table · 4 cols × 2 rows")]);
+        place_block_cue(&mut collapse, cue, 80);
+        assert!(collapse.spans.last().unwrap().content.contains("Inspect"));
+        let mut full = Line::from(vec![Span::raw("▸ "), Span::raw("table · 4 cols × 2 rows")]);
+        place_block_cue(&mut full, cue, 30);
+        assert_eq!(full.spans.len(), 2, "no room: omitted");
     }
 }

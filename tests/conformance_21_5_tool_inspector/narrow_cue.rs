@@ -16,7 +16,7 @@ fn target(width: u16, height: u16) -> Fixture {
     f.h.state.session_count = 1;
     f.h.state.theme.timing.status_hint_fade_sessions = 5;
     f.focus_call(&id);
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(id.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(id.as_str()));
     f
 }
 
@@ -57,7 +57,7 @@ fn narrow_cue_absent_input_and_covered_stage_do_not_advertise_inspect() {
         absent.h.state.session_count = 1;
         absent.h.state.theme.timing.status_hint_fade_sessions = 5;
         let painted = status(&mut absent);
-        assert!(absent.h.state.focused_tool_id.is_none());
+        assert!(absent.h.state.focused_item_id.is_none());
         assert!(absent.h.state.current_hint.is_some(), "hints are enabled");
         assert!(!painted.contains("Inspect"), "absent target: {painted}");
 

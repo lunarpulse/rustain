@@ -40,7 +40,7 @@ const DOC_ROWS: &[(HelpCat, &str, &str, &str)] = &[
     (HelpCat::ScrollMouse, "Ctrl+b", "Mouse wheel", "Scroll by wheel_lines (default 3 lines)"),
     (HelpCat::ScrollMouse, "Mouse wheel", "Shift+Wheel", "Scroll half page per tick"),
     (HelpCat::ScrollMouse, "Shift+Wheel", "Hold Shift", "Select text for copy (bypasses mouse capture)"),
-    (HelpCat::VimFold, "[[", "Tab", "Cycle tool calls in the expanded turn (needs 2+); else sidebar focus, else next tab"),
+    (HelpCat::VimFold, "[[", "Tab", "Cycle tool calls, code blocks, tables (needs 2+); else sidebar focus, else next tab"),
     (HelpCat::Input, "Ctrl+Enter", "Ctrl+X, Enter", "Send from any terminal (portable multi-line send)"),
     (HelpCat::Clipboard, "c", "Paste", "Attach image from clipboard"),
 ];

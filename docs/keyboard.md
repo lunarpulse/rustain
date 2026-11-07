@@ -106,7 +106,7 @@ Also inherits: Global.
 | `K` | Jump to the previous content block | local | portable |  |
 | `{` | Jump to previous / next user message | local | portable |  |
 | `}` | Jump to the next user message | local | portable |  |
-| `Tab` | Cycle tool calls in the expanded turn (needs 2+); else sidebar focus, else next tab | local | portable |  |
+| `Tab` | Cycle tool calls, code blocks, tables (needs 2+); else sidebar focus, else next tab | local | portable |  |
 | `z a` | Toggle fold on focused turn | local | portable |  |
 | `z c` | Collapse focused turn | local | portable |  |
 | `z o` | Expand focused turn | local | portable |  |
@@ -131,7 +131,7 @@ Also inherits: Global.
 | `9` | Switch to tab 9 | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
 | `c` | Copy focused content to clipboard | local | portable |  |
-| `Enter` | Inspect the focused tool call | local | portable |  |
+| `Enter` | Inspect the focused tool call, code block or table | local | portable |  |
 | `f` | Fork the conversation at the focused message | local | portable |  |
 | `R` | Rewind the conversation to the focused message | local | portable |  |
 | `m` | Toggle bookmark on current message | local | portable |  |
@@ -289,6 +289,33 @@ Also inherits: Caret text field.
 | `PgUp` | Scroll the inspector up one page | local | portable |  |
 | `g` | Jump to the first inspector row | local | portable |  |
 | `G` | Jump to the last inspector row | local | portable |  |
+
+## Markdown body
+
+Also inherits: Inspector body.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `h` | Scroll wide rows left by one tab stop | local | portable |  |
+| `l` | Scroll wide rows right by one tab stop | local | portable |  |
+| `0` | Scroll wide rows to their first column | local | portable |  |
+| `$` | Scroll wide rows to their last column | local | portable |  |
+
+## Block viewer
+
+Also inherits: Markdown body.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `/` | Search the displayed rows of the block | local | portable |  |
+| `n` | Select the next search match, wrapping at the end | local | portable |  |
+| `N` | Select the previous search match, wrapping at the start | local | portable |  |
+| `c` | Copy the block's exact source, never its borders or markers | local | portable |  |
+| `Esc` | Back from the block viewer | local | portable |  |
+| `Ctrl+C` | Back from the block viewer without cancelling work | local | portable |  |
+| `Ctrl+X` | Open the Ctrl+X menu without closing the block viewer | local | portable |  |
+| `Ctrl+P` | Open the command palette above the block viewer | local | portable |  |
+| `Ctrl+Q` | Ask to quit without closing the block viewer | local | portable |  |
 
 ## Tool inspector
 

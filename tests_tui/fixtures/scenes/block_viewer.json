@@ -1,0 +1,23 @@
+{
+  "scene": "block-viewer",
+  "personas": {
+    "scene-ci-block-viewer": {
+      "turns": [
+        {
+          "expect": "show blocks",
+          "content": [
+            {
+              "type": "text",
+              "text": "Here are the blocks.\n\n```rust\nfn line_01() {}\nfn line_02() {}\nfn line_03() {}\nfn line_04() {}\nfn line_05() {}\nfn line_06() {}\nlet w = \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxTAIL120\";\nfn line_08() {}\nfn line_09() {}\nfn line_10() {}\nfn line_11() {}\nfn line_12() {}\nfn line_13() {}\nfn line_14() {}\nfn line_15() {}\nfn line_16() {}\nfn line_17() {}\nfn line_18() {}\nfn line_19() {}\nfn line_20() {}\nfn line_21() {}\nfn line_22() {}\nfn line_23() {}\nfn line_24() {}\nfn line_25() {}\nfn line_26() {}\nfn line_27() {}\nfn line_28() {}\nfn line_29() {}\nfn line_30() {}\nfn line_31() {}\nfn line_32() {}\nfn line_33() {}\nfn line_34() {}\nfn line_35() {}\nfn line_36() {}\nfn line_37() {}\nfn line_38() {}\nfn line_39() {}\nfn line_40() {}\nfn line_41() {}\nfn line_42() {}\nfn line_43() {}\nfn line_44() {}\n// end-45\n```\n\n| c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 |\n|---|---|---|---|---|---|---|---|\n| r1c1 | r1c2 | r1c3 | r1c4 | r1c5 | r1c6 | r1c7 | r1c8 |\n| r2c1 | r2c2 | r2c3 | r2c4 | r2c5 | r2c6 | r2c7 | r2c8 |\n| r3c1 | r3c2 | r3c3 | r3c4 | r3c5 | r3c6 | r3c7 | r3c8 |\n"
+            }
+          ],
+          "stop_reason": "end_turn",
+          "usage": {
+            "input_tokens": 11,
+            "output_tokens": 60
+          }
+        }
+      ]
+    }
+  }
+}

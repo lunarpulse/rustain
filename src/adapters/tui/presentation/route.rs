@@ -165,6 +165,13 @@ pub fn route(
             crate::adapters::tui::tool_inspector::on_wheel(state, *delta),
         ));
     }
+    if matches!(surface, Surface::BlockViewer(_))
+        && let DomainInputEvent::MouseScroll(delta) = event
+    {
+        return Some(RouteEffect::Action(
+            crate::adapters::tui::block_viewer::on_wheel(state, *delta),
+        ));
+    }
     if surface == Surface::Login && Key::from_domain(event).is_none() {
         return Some(RouteEffect::Action(
             crate::adapters::tui::handlers::login::on_key(state, event),
@@ -210,6 +217,9 @@ pub fn route(
         Surface::ToolInspector(_) => RouteEffect::Action(
             crate::adapters::tui::tool_inspector::on_key(state, key, host),
         ),
+        Surface::BlockViewer(_) => {
+            RouteEffect::Action(crate::adapters::tui::block_viewer::on_key(state, key, host))
+        }
         Surface::DecisionPane => match decision_pane::handle_domain_event(state, event, facts) {
             Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),
             Some(PaneOutcome::Quit) => RouteEffect::QuitRequest,

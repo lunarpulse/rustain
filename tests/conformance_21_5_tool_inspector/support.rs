@@ -262,7 +262,7 @@ impl Fixture {
             self.tabs.active_tab_mut().view_state.scroll_offset = offset;
             self.h.state.set_scroll_offset(offset);
             self.paint();
-            if self.h.state.focused_tool_id.as_deref() == Some(wanted) {
+            if self.h.state.focused_item_id.as_deref() == Some(wanted) {
                 return;
             }
         }

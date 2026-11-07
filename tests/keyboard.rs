@@ -896,12 +896,12 @@ fn test_slash_ml_via_autocomplete_returns_execute_command() {
 
 // === Story 3-4: Image Attachment & Clipboard Operations ===
 
-// 10.9: 'c' key in Chat focus with focused_tool_id → CopyToClipboard
+// 10.9: 'c' key in Chat focus with focused_item_id → CopyToClipboard
 #[test]
 fn test_c_key_chat_focus_triggers_copy() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-    state.focused_tool_id = Some("tool_123".to_string());
+    state.focused_item_id = Some("tool_123".to_string());
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
     assert_eq!(action, InputAction::CopyToClipboard(String::new()));
@@ -912,7 +912,7 @@ fn test_c_key_chat_focus_triggers_copy() {
 fn test_c_key_chat_focus_no_tool_triggers_copy() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-    state.focused_tool_id = None;
+    state.focused_item_id = None;
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('c'));
     assert_eq!(action, InputAction::CopyToClipboard(String::new()));
@@ -921,7 +921,7 @@ fn test_c_key_chat_focus_no_tool_triggers_copy() {
 // === Story 19.9 review patch: `resolve_copy_content` keystone (FR116 AC6/AC8/AC9) ===
 // The resolver moved from `event_loop.rs` onto `TuiState` (non-budgeted) so the
 // copy priority is testable here: explicitly selected tool block > last
-// assistant message > empty. The render-derived `focused_tool_id` must NOT
+// assistant message > empty. The render-derived `focused_item_id` must NOT
 // widen the copy — keying on it was the FR116 regression the review caught.
 
 /// User message carrying one answered tool call, then an assistant reply.
@@ -984,22 +984,22 @@ fn copy_conversation() -> Conversation {
 fn test_resolve_copy_content_selected_tool_block_wins() {
     let mut state = TuiState::new(80, 24);
     let conversation = copy_conversation();
-    state.selected_tool_id = Some("tc_tool_1".to_string());
+    state.selected_item_id = Some("tc_tool_1".to_string());
 
     assert_eq!(state.resolve_copy_content(&conversation), "tool output");
 }
 
 // (b) THE REGRESSION PIN: render-derived focus alone must not widen the copy.
-// `focused_tool_id` is rewritten every frame from `find_focused_tool_id`'s
+// `focused_item_id` is rewritten every frame from `find_focused_item`'s
 // nearest-visible fallback, so with no explicit selection the LAST ASSISTANT
 // MESSAGE is copied even though a tool block is on screen. Fails if someone
-// re-points the resolver's guard back at `focused_tool_id`.
+// re-points the resolver's guard back at `focused_item_id`.
 #[test]
 fn test_resolve_copy_content_ignores_render_derived_focus() {
     let mut state = TuiState::new(80, 24);
     let conversation = copy_conversation();
-    state.selected_tool_id = None;
-    state.focused_tool_id = Some("tc_tool_1".to_string());
+    state.selected_item_id = None;
+    state.focused_item_id = Some("tc_tool_1".to_string());
 
     assert_eq!(state.resolve_copy_content(&conversation), "assistant reply");
 }
@@ -1012,8 +1012,8 @@ fn test_resolve_copy_content_empty_without_selection_or_assistant() {
     conversation
         .messages
         .retain(|m| m.role == MessageRole::User);
-    state.selected_tool_id = None;
-    state.focused_tool_id = None;
+    state.selected_item_id = None;
+    state.focused_item_id = None;
 
     assert_eq!(state.resolve_copy_content(&conversation), "");
 }

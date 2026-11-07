@@ -23,7 +23,7 @@ expression: tables(40)
 │ │ 界界界 │ éé 👨‍👩‍👧 │
 │ └────────┴───────┘
 │
-│ table · 7 cols × 1 rows
+│ table · 7 cols × 1 row
 │
 │ ┌───┬───┬───┐
 │ │ a │ b │   │

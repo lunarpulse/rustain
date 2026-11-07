@@ -752,6 +752,7 @@ fn test_evict_turns_not_in_drops_stale_entries() {
                 height: i + 1,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
     }
@@ -815,6 +816,7 @@ fn test_width_divergence_invalidates_cache() {
             height: 5,
             block_offsets: vec![],
             tool_block_offsets: vec![],
+            md_block_offsets: vec![],
         },
     );
 

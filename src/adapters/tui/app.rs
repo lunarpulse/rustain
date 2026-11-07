@@ -35,6 +35,8 @@ pub enum InputAction {
     },
     /// Copy the current tool tab from fresh owning canonical sources, not cells.
     CopyToolSource,
+    /// Copy the open block's exact source from the owning canonical parts.
+    CopyBlockSource,
     /// Event not handled by this focus mode.
     Ignored,
     RecipientThreadPage {
@@ -727,7 +729,7 @@ pub(crate) fn local_avail_ctx(state: &TuiState) -> crate::adapters::tui::keymap:
     ctx.frame_origin = !state.modal_stack.is_empty();
     ctx.stage_target = state.focus == FocusState::Chat
         && state.modal_stack.is_empty()
-        && state.focused_tool_id.is_some();
+        && state.focused_item_id.is_some();
     ctx
 }
 
@@ -1232,8 +1234,13 @@ fn execute(
         CommandId::Panel(cmd) => return exec_panel(state, cmd, key),
         CommandId::Overlay(cmd) => exec_overlay(state, context, cmd, key, host),
         CommandId::Inspector(cmd) => exec_inspector(state, cmd),
-        CommandId::Viewer(_) | CommandId::Tool(_) => {
-            crate::adapters::tui::tool_inspector::on_key(state, key, host)
+        CommandId::Viewer(_) | CommandId::Tool(_) | CommandId::Block(_) => {
+            match state.modal_stack.top().map(|frame| frame.surface) {
+                Some(Surface::BlockViewer(_)) => {
+                    crate::adapters::tui::block_viewer::on_key(state, key, host)
+                }
+                _ => crate::adapters::tui::tool_inspector::on_key(state, key, host),
+            }
         }
         CommandId::Leader(_) | CommandId::Permission(_) | CommandId::Card(_) => {
             InputAction::Consumed
@@ -1780,7 +1787,7 @@ fn exec_chat(state: &mut TuiState, cmd: ChatCmd, keys: &[Key]) -> InputAction {
         ChatCmd::SwitchToTab(n) => InputAction::SwitchToTab(usize::from(n)),
         ChatCmd::PasteClipboard => InputAction::RequestClipboardPaste,
         ChatCmd::Inspect => {
-            if state.focused_tool_id.is_some() {
+            if state.focused_item_id.is_some() {
                 InputAction::InspectTool
             } else {
                 InputAction::Consumed
@@ -1944,7 +1951,7 @@ fn edit_query(
                     Some(Surface::NotificationLog) => {
                         crate::adapters::tui::notification_log::reconcile_search(state);
                     }
-                    Some(Surface::ToolInspector(_)) => {}
+                    Some(Surface::ToolInspector(_) | Surface::BlockViewer(_)) => {}
                     _ => unreachable!("only inspector frames lend the child field"),
                 }
             }
@@ -2318,6 +2325,23 @@ fn exec_inspector_search(state: &mut TuiState, cmd: OverlayCmd) -> InputAction {
             OverlayCmd::InspectorSearch => tool.search.editor.open(),
             OverlayCmd::InspectorAccept => tool.accept_search(),
             OverlayCmd::InspectorBack => tool.clear_search(),
+            _ => return InputAction::Consumed,
+        }
+        state.needs_redraw = true;
+        return InputAction::Consumed;
+    }
+    if let Some(Surface::BlockViewer(key)) = state.modal_stack.top().map(|frame| frame.surface) {
+        let block = state
+            .block_viewers
+            .get_mut(&key.0)
+            .expect("frame owns block search");
+        if block.missing {
+            return InputAction::Consumed;
+        }
+        match cmd {
+            OverlayCmd::InspectorSearch => block.search.editor.open(),
+            OverlayCmd::InspectorAccept => block.accept_search(&state.theme),
+            OverlayCmd::InspectorBack => block.clear_search(),
             _ => return InputAction::Consumed,
         }
         state.needs_redraw = true;
@@ -5634,7 +5658,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_in_chat_focus_emits_cycle_invocation() {
+    fn tab_in_chat_focus_emits_cycle_item() {
         let mut state = make_state();
         state.focus = FocusState::Chat;
         let tab = DomainInputEvent::SpecialKey(DomainKey::Tab);

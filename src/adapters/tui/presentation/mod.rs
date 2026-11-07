@@ -53,6 +53,14 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
         {
             Context::InspectorSearch
         }
+        Surface::BlockViewer(key)
+            if state
+                .block_viewers
+                .get(&key.0)
+                .is_some_and(|block| !block.missing && block.search.editor.editing) =>
+        {
+            Context::InspectorSearch
+        }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
         _ => surface.context(),
     }
@@ -70,6 +78,11 @@ pub(crate) fn inspector_search_mut(
             .get_mut(&key.0)
             .filter(|tool| !tool.missing)
             .map(|tool| &mut tool.search.editor),
+        Surface::BlockViewer(key) => state
+            .block_viewers
+            .get_mut(&key.0)
+            .filter(|block| !block.missing)
+            .map(|block| &mut block.search.editor),
         _ => None,
     }
 }
@@ -101,6 +114,14 @@ pub fn consistent(state: &TuiState) -> bool {
                                     == Some(tool.target.conversation_id.as_str())
                             })
                     }
+                    Surface::BlockViewer(key) => {
+                        key.0 == frame.id
+                            && frame.tool_title.is_some()
+                            && state.block_viewers.get(&key.0).is_some_and(|block| {
+                                frame.conversation_id.as_deref()
+                                    == Some(block.target.conversation_id.as_str())
+                            })
+                    }
                     _ => frame.tool_title.is_none(),
                 }
         })
@@ -125,6 +146,15 @@ pub fn consistent(state: &TuiState) -> bool {
                 .all_frames()
                 .filter(
                     |frame| matches!(frame.surface, Surface::ToolInspector(key) if key.0 == *id),
+                )
+                .count()
+                == 1
+        })
+        && state.block_viewers.keys().all(|id| {
+            stack
+                .all_frames()
+                .filter(
+                    |frame| matches!(frame.surface, Surface::BlockViewer(key) if key.0 == *id),
                 )
                 .count()
                 == 1

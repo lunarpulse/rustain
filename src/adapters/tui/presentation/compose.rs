@@ -93,6 +93,17 @@ pub fn compose(
                 modal.title(),
                 show_caret,
             ),
+            Surface::BlockViewer(key) => crate::adapters::tui::widgets::block_viewer::render(
+                frame,
+                rect,
+                state
+                    .block_viewers
+                    .get(&key.0)
+                    .expect("Block frame owns its payload"),
+                theme,
+                modal.title(),
+                show_caret,
+            ),
             Surface::Search => {
                 rect = Rect::new(
                     shell.chat_pane.x,
@@ -218,7 +229,8 @@ pub fn compose(
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel
                 | Surface::Login
-                | Surface::ToolInspector(_) => theme.colors.accent,
+                | Surface::ToolInspector(_)
+                | Surface::BlockViewer(_) => theme.colors.accent,
                 Surface::BookmarkList | Surface::WaveOverlay | Surface::CrossSearch => {
                     theme.colors.accent
                 }

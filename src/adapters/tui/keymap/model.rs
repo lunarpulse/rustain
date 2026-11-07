@@ -9,6 +9,7 @@ use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::visual::DensityMode;
 
 use super::table::{GlobalCmd, LeaderCmd};
+use super::table_block::BlockCmd;
 use super::table_card::CardCmd;
 use super::table_chat::ChatCmd;
 use super::table_input::{FieldCmd, InputCmd};
@@ -365,6 +366,9 @@ pub enum Context {
     InspectorSearch,
     /// Read-only frame navigation without any Global or Chat inheritance.
     InspectorBody,
+    /// Horizontal block-local scrolling shared by every Markdown body window.
+    MarkdownBody,
+    BlockViewer,
     ToolInspector,
     /// The task-panel drill-down (focus Chat): its own keys plus only the
     /// non-character keys of Chat (`i`, `q`, `z`, `?` stay unreachable there).
@@ -421,7 +425,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 56] = [
+    pub const ALL: [Context; 58] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -437,6 +441,8 @@ impl Context {
         Context::CaretField,
         Context::InspectorSearch,
         Context::InspectorBody,
+        Context::MarkdownBody,
+        Context::BlockViewer,
         Context::ToolInspector,
         Context::ChatDrill,
         Context::ChatWave,
@@ -498,6 +504,8 @@ impl Context {
             Context::CaretField => "Caret text field",
             Context::InspectorSearch => "Inspector search",
             Context::InspectorBody => "Inspector body",
+            Context::MarkdownBody => "Markdown body",
+            Context::BlockViewer => "Block viewer",
             Context::ToolInspector => "Tool inspector",
             Context::ChatDrill => "Task drill-down",
             Context::ChatWave => "Chat (wave)",
@@ -566,6 +574,8 @@ impl Context {
             | Context::Card
             | Context::SkillTrustInspect
             | Context::Consent => &[],
+            Context::MarkdownBody => &[Context::InspectorBody],
+            Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector => &[Context::InspectorBody],
             // The decision cards own every key: the shared cue rows only (A8).
             Context::SkillTrust
@@ -733,6 +743,7 @@ pub enum CommandId {
     Card(CardCmd),
     Viewer(ViewerCmd),
     Tool(ToolCmd),
+    Block(BlockCmd),
 }
 
 macro_rules! command_from {
@@ -760,6 +771,7 @@ command_from!(
     Card(CardCmd),
     Viewer(ViewerCmd),
     Tool(ToolCmd),
+    Block(BlockCmd),
 );
 
 // ── rows ──────────────────────────────────────────────────────────────────

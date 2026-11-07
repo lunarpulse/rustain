@@ -499,6 +499,10 @@ pub struct CachedTurnLayout {
     /// boundary belongs to — which is exactly why keyboard focus could only
     /// ever resolve to the conversation's first tool call.
     pub tool_block_offsets: Vec<(usize, String)>,
+    /// Story 21.13: `(start_offset, block_item_id)` of every code block and
+    /// table of every `Prose` part, in part order (D7). Computed in the same
+    /// height pass; the host decides whether they take focus (local Stage only).
+    pub md_block_offsets: Vec<(usize, String)>,
 }
 
 /// Cache of rendered line heights, keyed by turn or message.
@@ -567,7 +571,7 @@ pub struct TabRenderState {
     pub height_cache: HeightCache,
     /// Last-painted absolute tool-header starts; moved from the Stage renderer.
     /// Adapter-side and tab-owned so selection never borrows another tab's layout.
-    pub tool_block_boundaries: Vec<(usize, String)>,
+    pub item_boundaries: Vec<(usize, String)>,
     pub cached_width: Option<u16>,
     pub team_proposal_reviews: BTreeMap<String, Arc<crate::domain::models::TeamProposal>>,
     /// Story 21.12 (D15): the output supports OSC 8, so Stage markdown links
@@ -2569,15 +2573,15 @@ pub struct TuiState {
     pub pending_anchor: Option<usize>,
     /// Currently focused tool block id (set by chat pane render when a tool block
     /// is at the top of the viewport after J/K navigation).
-    pub focused_tool_id: Option<String>,
+    pub focused_item_id: Option<String>,
     /// Explicitly selected tool block id — set ONLY by user intent (the `Tab`
     /// cycle inside a focused turn or `Enter` inspecting a call), never by
-    /// the render pass. The nearest-visible fallback in `find_focused_tool_id`
+    /// the render pass. The nearest-visible fallback in `find_focused_item`
     /// seats a block whenever any is on screen; copying must instead keep the
     /// last assistant message until a tool is explicitly selected.
-    /// `resolve_copy_content` reads THIS field; `focused_tool_id` stays the
+    /// `resolve_copy_content` reads THIS field; `focused_item_id` stays the
     /// render-derived signal that drives `Enter`.
-    pub selected_tool_id: Option<String>,
+    pub selected_item_id: Option<String>,
     /// Pending permission request awaiting user y/n/a/s/f response.
     pub pending_permission: Option<PendingPermission>,
     /// Queue for additional permission requests that arrive while one is displayed.
@@ -2702,6 +2706,8 @@ pub struct TuiState {
     pub modal_stack: crate::adapters::tui::presentation::ModalStack,
     /// Frame-owned tool bodies and viewers; only the reducer creates/releases entries.
     pub tool_inspectors: crate::adapters::tui::tool_inspector::ToolInspectors,
+    /// Frame-owned S-BLOCK payloads; only the reducer creates/releases entries.
+    pub block_viewers: crate::adapters::tui::block_viewer::BlockViewers,
     /// S-QUIT payload, present exactly while its stack frame is open.
     pub quit_confirm: Option<crate::adapters::tui::quit_confirm::QuitConfirmState>,
     /// Session notification store (Story 21.1): every transient notice of the
@@ -3163,8 +3169,8 @@ impl TuiState {
             user_message_boundaries: Vec::new(),
             tab_render_states: HashMap::new(),
             pending_anchor: None,
-            focused_tool_id: None,
-            selected_tool_id: None,
+            focused_item_id: None,
+            selected_item_id: None,
             pending_permission: None,
             permission_queue: PermissionQueue::default(),
             pending_feedback_input: None,
@@ -3207,6 +3213,7 @@ impl TuiState {
             leader_feedback: None,
             modal_stack: crate::adapters::tui::presentation::ModalStack::default(),
             tool_inspectors: Default::default(),
+            block_viewers: Default::default(),
             quit_confirm: None,
             notifications: {
                 let mut store = crate::adapters::tui::notifications::NotificationStore::default();
@@ -3375,24 +3382,24 @@ impl TuiState {
     /// Record an explicit user pick of a tool block (story 19.9 review patch:
     /// copy/peek decoupled from render-derived focus). An explicit pick is
     /// also the focus, so both signals move together.
-    pub fn select_tool_explicitly(&mut self, id: String) {
-        self.selected_tool_id = Some(id.clone());
-        self.focused_tool_id = Some(id);
+    pub fn select_item_explicitly(&mut self, id: String) {
+        self.selected_item_id = Some(id.clone());
+        self.focused_item_id = Some(id);
     }
 
     /// Clear BOTH tool-block signals. Used wherever the render-derived focus
     /// was already discarded (conversation reset, tab switch) so a stale
     /// explicit selection cannot leak across a conversation or tab boundary.
-    pub fn clear_tool_selection(&mut self) {
-        self.selected_tool_id = None;
-        self.focused_tool_id = None;
+    pub fn clear_item_selection(&mut self) {
+        self.selected_item_id = None;
+        self.focused_item_id = None;
     }
 
     /// Resolve what content `c` (copy) should place on the clipboard.
     /// Priority: explicitly selected tool block output > last assistant
-    /// message > empty. Reads `selected_tool_id`, NOT the render-derived
-    /// `focused_tool_id`: the latter is rewritten every frame by
-    /// `find_focused_tool_id`, whose nearest-visible fallback seats some block
+    /// message > empty. Reads `selected_item_id`, NOT the render-derived
+    /// `focused_item_id`: the latter is rewritten every frame by
+    /// `find_focused_item`, whose nearest-visible fallback seats some block
     /// whenever any is on screen, which after any tool-using turn would copy
     /// the tool block's raw output where the FR116 AC9 path (last assistant
     /// message) used to be the common case. Moved here from `event_loop.rs`
@@ -3403,8 +3410,33 @@ impl TuiState {
         &self,
         conversation: &crate::domain::models::Conversation,
     ) -> String {
+        self.resolve_copy_content_in(conversation, None)
+    }
+
+    /// As [`Self::resolve_copy_content`], with the still-open turn whose
+    /// committed prose parts can also hold a selected block.
+    pub fn resolve_copy_content_in(
+        &self,
+        conversation: &crate::domain::models::Conversation,
+        open_turn: Option<&crate::domain::models::Turn>,
+    ) -> String {
+        // Story 21.13: a selected code/table block copies its source, or nothing
+        // when the block can no longer be resolved: never another answer.
+        if let Some(id) = self
+            .selected_item_id
+            .as_deref()
+            .filter(|id| crate::domain::models::turn::is_block_item_id(id))
+        {
+            return crate::adapters::tui::block_viewer::source_of(
+                &conversation.turns,
+                open_turn,
+                id,
+                &self.theme,
+            )
+            .unwrap_or_default();
+        }
         // AC8: If a tool block is explicitly selected, copy its output
-        if let Some(tool_id) = &self.selected_tool_id {
+        if let Some(tool_id) = &self.selected_item_id {
             // Find the tool result in conversation messages
             for cm in conversation.messages.iter().rev() {
                 for tc in &cm.tool_calls {
@@ -3580,6 +3612,7 @@ mod tests {
             height: 42,
             block_offsets: vec![0, 10, 20],
             tool_block_offsets: vec![],
+            md_block_offsets: vec![],
         };
         cache.set(key.clone(), layout.clone());
         assert_eq!(cache.get(&key).unwrap().height, 42);
@@ -3613,6 +3646,7 @@ mod tests {
                 height: 5,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.invalidate_all();
@@ -3636,6 +3670,7 @@ mod tests {
                 height: 1,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3649,6 +3684,7 @@ mod tests {
                 height: 2,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.invalidate_turn(&t1);
@@ -3693,6 +3729,7 @@ mod tests {
                 height: 1,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3706,6 +3743,7 @@ mod tests {
                 height: 2,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.set(
@@ -3719,6 +3757,7 @@ mod tests {
                 height: 3,
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
+                md_block_offsets: vec![],
             },
         );
         cache.evict_turns_not_in([&t1, &t3].into_iter());

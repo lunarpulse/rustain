@@ -140,14 +140,14 @@ pub fn inspect_stage_tool(
                 None,
                 Default::default(),
             )
-            .focused_tool_id;
+            .focused_item_id;
         })
         .unwrap();
     assert!(
         focused.is_some(),
         "the real Stage renders an inspectable tool"
     );
-    state.focused_tool_id = focused;
+    state.focused_item_id = focused;
     assert!(rustain::adapters::tui::tool_inspector::inspect_focused(
         state,
         conversation,

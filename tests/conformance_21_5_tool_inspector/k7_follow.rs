@@ -26,7 +26,7 @@ fn running(count: usize) -> Fixture {
     set_tail(&mut f, count);
     f.paint();
     assert!(
-        f.h.state.focused_tool_id.is_some(),
+        f.h.state.focused_item_id.is_some(),
         "real Stage seats the running call"
     );
     f
@@ -72,7 +72,7 @@ fn shows(f: &Fixture, wanted: &str) -> bool {
 fn running_tool_opens_following_the_tail() {
     for invocation_status in [S::Pending, S::Running] {
         let mut f = running(16);
-        let id = f.h.state.focused_tool_id.clone().unwrap();
+        let id = f.h.state.focused_item_id.clone().unwrap();
         if let TurnPart::ToolInvocation { status, .. } = f.invocation_mut(&id) {
             *status = invocation_status;
         }

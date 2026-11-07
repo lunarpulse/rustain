@@ -389,7 +389,7 @@ fn same_turn_step_keeps_wrap_off_but_clears_query_and_all_viewers() {
     f.focus_call(&first);
     f.open();
     let frame = f.h.state.modal_stack.top().unwrap().id;
-    let stage_focus = f.h.state.focused_tool_id.clone();
+    let stage_focus = f.h.state.focused_item_id.clone();
     toggle(&mut f);
     assert_eq!(last_cell(&f, 0), "→");
     for _ in 0..2 {
@@ -460,7 +460,7 @@ fn same_turn_step_keeps_wrap_off_but_clears_query_and_all_viewers() {
         viewers,
         "cleared query cannot move any viewer"
     );
-    assert_eq!(f.h.state.focused_tool_id, stage_focus);
+    assert_eq!(f.h.state.focused_item_id, stage_focus);
 }
 
 #[test]

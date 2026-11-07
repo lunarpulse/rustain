@@ -5,7 +5,7 @@ use rustain::adapters::tui::{
     clipboard::ClipboardResult,
     handlers::{
         clipboard, scroll,
-        tool_focus::{CycleOutcome, cycle_invocation},
+        tool_focus::{CycleOutcome, cycle_item},
     },
     keymap::Key,
     notifications::{self, NoticeSeverity, NoticeSource},
@@ -339,7 +339,7 @@ fn launch(width: u16, height: u16, full: bool, spaced: bool) -> (Fixture, [Strin
     f.paint();
     // gg scrolls, but correctly retains any still-visible current header. Load
     // the fresh owning tab's unselected launch state instead of pinning a tool.
-    assert!(f.tabs.active_tab().focused_tool_id.is_none());
+    assert!(f.tabs.active_tab().focused_item_id.is_none());
     let launch_view = f.view();
     f.load();
     assert_eq!(
@@ -347,14 +347,14 @@ fn launch(width: u16, height: u16, full: bool, spaced: bool) -> (Fixture, [Strin
         launch_view,
         "the owning launch view is current before load"
     );
-    assert!(f.h.state.focused_tool_id.is_none());
+    assert!(f.h.state.focused_item_id.is_none());
     f.h.state.input_buffer = if full { FULL.into() } else { String::new() };
     f.h.state.cursor_position = f.h.state.input_buffer.chars().count();
     if f.h.state.focus == rustain::domain::models::FocusState::Input {
         assert_eq!(f.press(Key::Esc), InputAction::Consumed);
     }
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(bash.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(bash.as_str()));
     assert!(f.tabs.active_tab().view_state.focused_turn.is_none());
     (f, [bash, edit, write])
 }
@@ -362,7 +362,7 @@ fn launch(width: u16, height: u16, full: bool, spaced: bool) -> (Fixture, [Strin
 fn stage_tab(f: &mut Fixture, wanted: &str) {
     assert_eq!(f.press(Key::Tab), InputAction::CycleInvocationInFocusedTurn);
     let active = f.tabs.active_tab_mut();
-    let CycleOutcome::Cycled { tool_id } = cycle_invocation(
+    let CycleOutcome::Cycled { item_id } = cycle_item(
         &mut f.h.state,
         &mut active.view_state,
         &active.conversation.turns,
@@ -370,14 +370,14 @@ fn stage_tab(f: &mut Fixture, wanted: &str) {
     ) else {
         panic!("real Stage Tab must cycle this qualifying turn");
     };
-    assert_eq!(tool_id, wanted);
-    f.h.state.select_tool_explicitly(tool_id);
+    assert_eq!(item_id, wanted);
+    f.h.state.select_item_explicitly(item_id);
     f.h.state.set_scroll_offset(active.view_state.scroll_offset);
     f.h.state
         .set_auto_scroll(matches!(active.view_state.mode, AnchorMode::Following));
     f.h.state.needs_redraw = true;
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(wanted));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(wanted));
     assert_eq!(
         f.tabs.active_tab().view_state.focused_turn.as_ref(),
         Some(&f.conversation().turns[0].id)
@@ -505,7 +505,7 @@ fn leg_b(width: u16, height: u16, full: bool, dir: &Option<PathBuf>) {
     assert_eq!(f.cache(), cache);
     assert_eq!(key(&mut f, Key::Esc, "b-back", full, dir), before);
     marked(&f, "Edit");
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(ids[1].as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(ids[1].as_str()));
 
     // Same actual calls, with real prose between them: Tab must reveal a header
     // below the viewport, not merely change an invisible selected ID.

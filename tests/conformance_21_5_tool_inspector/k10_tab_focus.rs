@@ -1,10 +1,10 @@
 //! K10 / M9: the real Tab decoder reaches the owning-manager cycle effect.
 //! The host-only result installation below does not implement turn resolution
-//! or scrolling: both must come from production `cycle_invocation`.
+//! or scrolling: both must come from production `cycle_item`.
 use super::support::*;
 use rustain::adapters::tui::{
     app::InputAction,
-    handlers::tool_focus::{CycleOutcome, cycle_invocation},
+    handlers::tool_focus::{CycleOutcome, cycle_item},
     keymap::Key,
     state::HeightKey,
     widgets::chat_pane,
@@ -64,16 +64,16 @@ fn three(spaced: bool) -> (Fixture, [String; 3]) {
 fn tab(f: &mut Fixture) -> CycleOutcome {
     assert_eq!(f.press(Key::Tab), InputAction::CycleInvocationInFocusedTurn);
     let active = f.tabs.active_tab_mut();
-    let outcome = cycle_invocation(
+    let outcome = cycle_item(
         &mut f.h.state,
         &mut active.view_state,
         &active.conversation.turns,
         active.reducer.open_turn.as_ref(),
     );
-    if let CycleOutcome::Cycled { tool_id } = &outcome {
-        // Exactly the host's select_tool_explicitly + BlockJump snapshots.
+    if let CycleOutcome::Cycled { item_id } = &outcome {
+        // Exactly the host's select_item_explicitly + BlockJump snapshots.
         // Only the production helper may seat the canonical owner or scroll.
-        f.h.state.select_tool_explicitly(tool_id.clone());
+        f.h.state.select_item_explicitly(item_id.clone());
         f.h.state.set_scroll_offset(active.view_state.scroll_offset);
         f.h.state
             .set_auto_scroll(matches!(active.view_state.mode, AnchorMode::Following));
@@ -84,14 +84,14 @@ fn tab(f: &mut Fixture) -> CycleOutcome {
 
 fn cycled(f: &mut Fixture, expected: &str) {
     match tab(f) {
-        CycleOutcome::Cycled { tool_id } => assert_eq!(tool_id, expected),
+        CycleOutcome::Cycled { item_id } => assert_eq!(item_id, expected),
         CycleOutcome::Fallthrough => panic!("Tab failed to reach {expected}"),
     }
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(expected));
-    assert_eq!(f.h.state.selected_tool_id.as_deref(), Some(expected));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(expected));
+    assert_eq!(f.h.state.selected_item_id.as_deref(), Some(expected));
     f.paint();
     assert_eq!(
-        f.h.state.focused_tool_id.as_deref(),
+        f.h.state.focused_item_id.as_deref(),
         Some(expected),
         "the next real render must not reseat an offscreen selection"
     );
@@ -105,7 +105,7 @@ fn inspect_and_back(f: &mut Fixture, expected: &str, title: &str, output: &str) 
     assert!(f.h.screen_text().contains(output));
     assert_eq!(f.press(Key::Esc), InputAction::Consumed);
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(expected));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(expected));
     assert_eq!(f.view(), view);
     assert_eq!(f.cache(), cache);
 }
@@ -144,8 +144,8 @@ fn unchanged_state(f: &Fixture) -> String {
         (
             (f.view(), f.cache(), f.tabs.active_tab_id(), &s.focus),
             (
-                &s.focused_tool_id,
-                &s.selected_tool_id,
+                &s.focused_item_id,
+                &s.selected_item_id,
                 s.scroll_offset(),
                 s.auto_scroll()
             ),
@@ -322,8 +322,8 @@ fn tab_to_last_viewport_header_restores_following() {
         header,
         "target is just below viewport"
     );
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(first.as_str()));
-    assert!(matches!(tab(&mut f), CycleOutcome::Cycled { tool_id } if tool_id == last));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(first.as_str()));
+    assert!(matches!(tab(&mut f), CycleOutcome::Cycled { item_id } if item_id == last));
     assert_eq!(f.tabs.active_tab().view_state.scroll_offset, 0);
     assert!(matches!(
         f.tabs.active_tab().view_state.mode,
@@ -334,7 +334,7 @@ fn tab_to_last_viewport_header_restores_following() {
         "host auto_snapshot follows the owning view"
     );
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(last.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(last.as_str()));
 }
 
 #[test]
@@ -460,7 +460,7 @@ fn owner_resolution_uses_exact_canonical_id_and_never_crosses_turns() {
     cycled(&mut f, &second);
     inspect_and_back(&mut f, &second, "Tool · Write #2", "EXACT-SECOND");
     cycled(&mut f, &first);
-    assert_ne!(f.h.state.selected_tool_id.as_deref(), Some(other.as_str()));
+    assert_ne!(f.h.state.selected_item_id.as_deref(), Some(other.as_str()));
     assert_eq!(
         f.tabs.active_tab().view_state.focused_turn.as_ref(),
         Some(&f.conversation().turns[1].id),
@@ -473,7 +473,7 @@ fn owner_resolution_uses_exact_canonical_id_and_never_crosses_turns() {
     let explicit = f.conversation().turns[0].id.clone();
     f.tabs.active_tab_mut().view_state.focused_turn = Some(explicit.clone());
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(first.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(first.as_str()));
     cycled(&mut f, &other);
     assert_eq!(f.tabs.active_tab().view_state.focused_turn, Some(explicit));
     inspect_and_back(&mut f, &other, "Tool · Bash #1", "OTHER-TURN");
@@ -505,7 +505,7 @@ fn zero_and_single_invocation_preserve_sidebar_and_tab_fallthrough() {
             f.h.state.focus = FocusState::Chat;
             f.paint();
             assert_eq!(f.tabs.tab_count(), 2);
-            assert_eq!(f.h.state.focused_tool_id.is_some(), count == 1);
+            assert_eq!(f.h.state.focused_item_id.is_some(), count == 1);
             for focused in [false, true] {
                 f.tabs.active_tab_mut().view_state.focused_turn =
                     focused.then(|| f.conversation().turns[0].id.clone());
@@ -543,7 +543,7 @@ fn collapsed_turn_falls_through_but_the_same_expanded_turn_cycles() {
         .height_cache
         .invalidate_turn(&id);
     f.paint();
-    assert!(f.h.state.focused_tool_id.is_none());
+    assert!(f.h.state.focused_item_id.is_none());
     assert!(!f.h.screen_text().contains("k10-second"));
     fallthrough_unchanged(&mut f);
     {
@@ -563,7 +563,7 @@ fn collapsed_turn_falls_through_but_the_same_expanded_turn_cycles() {
             .is_collapsed(&f.conversation().turns[0])
     );
     assert!(
-        f.h.state.focused_tool_id.is_none(),
+        f.h.state.focused_item_id.is_none(),
         "collapsed Stage has no tool headers"
     );
     fallthrough_unchanged(&mut f);
@@ -598,7 +598,7 @@ fn no_visible_focus_does_not_guess_a_multi_tool_turn() {
     f.tabs.active_tab_mut().view_state.scroll_offset = offset;
     f.h.state.set_scroll_offset(offset);
     f.paint();
-    assert!(f.h.state.focused_tool_id.is_none());
+    assert!(f.h.state.focused_item_id.is_none());
     assert!(
         f.h.screen_text().contains("row 003"),
         "real error-body viewport control"
@@ -649,7 +649,7 @@ fn removed_render_focused_owner_does_not_select_from_another_turn() {
         .active_tab_mut()
         .conversation
         .rebuild_messages_mirror();
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(ids[1].as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(ids[1].as_str()));
     assert_eq!(
         f.tabs.active_tab().view_state.focused_turn.as_ref(),
         Some(&owner)

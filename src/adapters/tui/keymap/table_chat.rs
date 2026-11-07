@@ -54,7 +54,7 @@ pub enum ChatCmd {
     UserMessagePrev,
     /// `}`: jump to the next user message.
     UserMessageNext,
-    /// `Tab`: cycle tool invocations in the focused turn (else tab/sidebar cycling).
+    /// `Tab`: cycle tool calls, code blocks and tables in the focused turn (else tab/sidebar cycling).
     CycleInvocation,
     /// `Shift+Tab`: previous tab.
     PrevTab,
@@ -106,7 +106,7 @@ fn stage_target(ctx: &AvailCtx) -> Availability {
     if ctx.stage_target {
         Availability::Available
     } else {
-        Availability::Unavailable("Focus a tool call in Chat to inspect it")
+        Availability::Unavailable("Focus a tool call, code block or table in Chat to inspect it")
     }
 }
 
@@ -139,7 +139,7 @@ const CHAT: &[Binding] = &[
     c(&[Key::Char('K')], ChatCmd::BlockJumpPrev, "blocks").hint().local().does("Jump to the previous content block"),
     c(&[Key::Char('{')], ChatCmd::UserMessagePrev, "").local().help(N, "{ / }", "Jump to previous / next user message"),
     c(&[Key::Char('}')], ChatCmd::UserMessageNext, "").local().does("Jump to the next user message"),
-    c(&[Key::Tab], ChatCmd::CycleInvocation, "tools").hint().local().help(N, "Tab (Chat)", "Cycle tool calls in the expanded turn (needs 2+); else sidebar focus, else next tab"),
+    c(&[Key::Tab], ChatCmd::CycleInvocation, "items").hint().local().help(N, "Tab (Chat)", "Cycle tool calls, code blocks, tables (needs 2+); else sidebar focus, else next tab"),
     // ── vim z-prefix folds, bracket prose-anchor jumps (local sequences) ──
     c(&[Key::Char('z'), Key::Char('a')], ChatCmd::FoldToggle, "").local().help(V, "za", "Toggle fold on focused turn"),
     c(&[Key::Char('z'), Key::Char('c')], ChatCmd::FoldCollapse, "").local().help(V, "zc", "Collapse focused turn"),
@@ -167,7 +167,7 @@ const CHAT: &[Binding] = &[
     c(&[Key::Alt('v')], ChatCmd::PasteClipboard, "").local().alt("palette: paste image from clipboard").does("Paste an image or text from the system clipboard"),
     c(&[Key::Char('c')], ChatCmd::Copy, "").local().copy().help(HelpCat::Clipboard, "c", "Copy focused content to clipboard"),
     // ── the focused message / tool block ──
-    c(&[Key::Enter], ChatCmd::Inspect, "Inspect").hint().local().avail(stage_target).does("Inspect the focused tool call"),
+    c(&[Key::Enter], ChatCmd::Inspect, "Inspect").hint().local().avail(stage_target).does("Inspect the focused tool call, code block or table"),
     c(&[Key::Char('f')], ChatCmd::ForkAtMessage, "").local().does("Fork the conversation at the focused message"),
     c(&[Key::Char('R')], ChatCmd::RewindAtMessage, "").local().does("Rewind the conversation to the focused message"),
     c(&[Key::Char('m')], ChatCmd::ToggleBookmark, "").local().help(HelpCat::Search, "m", "Toggle bookmark on current message"),

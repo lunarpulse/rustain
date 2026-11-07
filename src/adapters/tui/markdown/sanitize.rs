@@ -179,9 +179,42 @@ fn repair_tables(text: &str) -> Option<String> {
     Some(out)
 }
 
+/// The line without block-quote markers and, when `lists`, list markers: a
+/// fence opened inside a container (`- ```md`, `1. ```md`, `> ```md`) still
+/// opens a fence, so its interior is never repaired as if it were a table.
+fn without_containers(line: &str, lists: bool) -> &str {
+    let mut rest = line;
+    loop {
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix('>') {
+            rest = after;
+            continue;
+        }
+        if lists {
+            let mut chars = trimmed.chars();
+            let marker = match chars.next() {
+                Some('-' | '*' | '+') => Some(1),
+                Some(digit) if digit.is_ascii_digit() => {
+                    let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+                    matches!(trimmed[digits..].chars().next(), Some('.' | ')'))
+                        .then_some(digits + 1)
+                }
+                _ => None,
+            };
+            if let Some(len) = marker
+                && trimmed[len..].starts_with(char::is_whitespace)
+            {
+                rest = &trimmed[len..];
+                continue;
+            }
+        }
+        return trimmed;
+    }
+}
+
 /// An opening fence found on a line: its character and length.
 fn opening_fence(line: &str) -> Option<(char, usize)> {
-    let trimmed = line.trim_start();
+    let trimmed = without_containers(line, true);
     let fence = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let run = trimmed.chars().take_while(|c| *c == fence).count();
     if run < 3 {
@@ -195,7 +228,7 @@ fn opening_fence(line: &str) -> Option<(char, usize)> {
 }
 
 fn closes_fence(line: &str, fence: char, length: usize) -> bool {
-    let trimmed = line.trim();
+    let trimmed = without_containers(line, false).trim();
     trimmed.chars().count() >= length && trimmed.chars().all(|c| c == fence)
 }
 

@@ -168,7 +168,7 @@ fn k4_edge_shapes_paint_empty_short_and_contained_tables_exactly() {
         trimmed(turn_rows(&source, inner))
     };
     assert_eq!(quote(27)[0], "│ ┌─────┬─────┬─────┬─────┐");
-    assert_eq!(quote(26), ["│ table · 4 cols × 1 rows"]);
+    assert_eq!(quote(26), ["│ table · 4 cols × 1 row"]);
     // Header cells are bold; body cells are not.
     let pane = paint_local(
         &turn_conversation(NATURAL),

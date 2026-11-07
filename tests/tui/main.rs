@@ -180,3 +180,6 @@ mod widget_in_context;
 
 #[path = "../conformance_21_5_tool_inspector.rs"]
 mod conformance_21_5_tool_inspector;
+
+#[path = "../conformance_21_13_block_viewer.rs"]
+mod conformance_21_13_block_viewer;

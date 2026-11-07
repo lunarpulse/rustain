@@ -37,41 +37,10 @@ enum PendingNavigation {
 
 impl PendingNavigation {
     fn apply(self, viewer: &mut Viewer, rows: usize, viewport: usize) {
-        use crate::adapters::tui::presentation::viewer::{self, ViewerCmd};
-        use crate::domain::models::view_state::ScrollDelta;
-        let command = match self {
-            Self::Key(command) => Some(command),
-            Self::Wheel(ScrollDelta::WheelUp(lines)) => {
-                viewer.top = viewer
-                    .top
-                    .min(rows.saturating_sub(viewport))
-                    .saturating_sub(usize::from(lines));
-                viewer.follow = false;
-                None
-            }
-            Self::Wheel(ScrollDelta::WheelDown(lines)) => {
-                viewer.top = viewer
-                    .top
-                    .saturating_add(usize::from(lines))
-                    .min(rows.saturating_sub(viewport));
-                viewer.follow = false;
-                None
-            }
-            Self::Wheel(delta) => match delta {
-                ScrollDelta::LineUp => Some(ViewerCmd::LineUp),
-                ScrollDelta::LineDown => Some(ViewerCmd::LineDown),
-                ScrollDelta::HalfPageUp => Some(ViewerCmd::HalfUp),
-                ScrollDelta::HalfPageDown => Some(ViewerCmd::HalfDown),
-                ScrollDelta::FullPageUp => Some(ViewerCmd::PageUp),
-                ScrollDelta::FullPageDown => Some(ViewerCmd::PageDown),
-                ScrollDelta::Top => Some(ViewerCmd::Top),
-                ScrollDelta::Bottom => Some(ViewerCmd::Tail),
-                ScrollDelta::ResumeFollowing | ScrollDelta::UnboundedRows(_) => None,
-                ScrollDelta::WheelUp(_) | ScrollDelta::WheelDown(_) => unreachable!(),
-            },
-        };
-        if let Some(command) = command {
-            viewer::apply(viewer, command, rows, viewport);
+        use crate::adapters::tui::presentation::viewer;
+        match self {
+            Self::Key(command) => viewer::apply(viewer, command, rows, viewport),
+            Self::Wheel(delta) => viewer::apply_scroll(viewer, delta, rows, viewport),
         }
     }
 }
@@ -392,7 +361,7 @@ pub fn stage_target(
     if state.focus != crate::domain::models::FocusState::Chat || !state.modal_stack.is_empty() {
         return false;
     }
-    let Some(focused) = state.focused_tool_id.as_deref() else {
+    let Some(focused) = state.focused_item_id.as_deref() else {
         return false;
     };
     project::contains_call(&conversation.turns, open_turn, focused)
@@ -404,7 +373,7 @@ pub fn inspect_focused(
     conversation: &crate::domain::models::Conversation,
     open_turn: Option<&crate::domain::models::Turn>,
 ) -> bool {
-    let Some(id) = state.focused_tool_id.as_deref() else {
+    let Some(id) = state.focused_item_id.as_deref() else {
         return false;
     };
     let target = ToolTarget {
@@ -438,7 +407,7 @@ pub fn inspect_focused(
         inspector.tabs = tabs;
         inspector.viewers[ToolTab::Output.index()].follow = following;
     }
-    state.selected_tool_id = Some(selected);
+    state.selected_item_id = Some(selected);
     true
 }
 
@@ -504,7 +473,7 @@ pub fn step(
     reducer::retarget_tool(state, id, replacement, title)
 }
 
-fn frame_rect(
+pub(crate) fn frame_rect(
     state: &crate::adapters::tui::state::TuiState,
     tab_count: usize,
 ) -> Option<ratatui::layout::Rect> {

@@ -60,6 +60,9 @@ const SITES: &[Site] = &[
         ["new", "render", "row_line", "fit", "shrink", "rule"]
     ),
     site!("widgets/hyperlink.rs", ["encode"]),
+    site!("text_geometry.rs", ["slice_line"]),
+    site!("block_viewer/mod.rs", ["window"]),
+    site!("widgets/block_viewer.rs", ["render", "status"]),
     site!(
         "widgets/chat_pane/mod.rs",
         [

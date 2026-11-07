@@ -194,7 +194,9 @@ pub fn render(
     } else if columns * MIN_COL + chrome <= width {
         shrink(&natural, width - chrome)
     } else {
-        let summary = format!("table · {columns} cols × {} rows", body.len());
+        let col_word = if columns == 1 { "col" } else { "cols" };
+        let row_word = if body.len() == 1 { "row" } else { "rows" };
+        let summary = format!("table · {columns} {col_word} × {} {row_word}", body.len());
         let shown = geom::ellipsize(&summary, width, ELLIPSIS);
         return vec![Line::from(Span::styled(shown.into_owned(), muted))];
     };

@@ -34,7 +34,7 @@ fn copy_key_requests_canonical_source_instead_of_the_chat_sentinel() {
     f.open();
     // A stale explicit copy selection is a real observable Chat-fallback control,
     // never the target of the frame that Enter actually resolved.
-    f.h.state.selected_tool_id = Some("stale-copy-selection".into());
+    f.h.state.selected_item_id = Some("stale-copy-selection".into());
     assert!(
         f.h.state
             .resolve_copy_content(f.conversation())
@@ -139,7 +139,7 @@ fn empty_tab_never_copies_the_last_assistant_message() {
         let mut f = Fixture::new(80, 24, turn);
         f.focus_call(&id);
         f.open();
-        f.h.state.selected_tool_id = None;
+        f.h.state.selected_item_id = None;
         assert!(
             f.h.state
                 .resolve_copy_content(f.conversation())
@@ -153,7 +153,7 @@ fn empty_tab_never_copies_the_last_assistant_message() {
         f.press(Key::Esc);
         // Enter intentionally selected a tool. Explicitly remove that selection
         // so this is a genuine last-assistant Chat positive control.
-        f.h.state.selected_tool_id = None;
+        f.h.state.selected_item_id = None;
         let expected = f.h.state.resolve_copy_content(f.conversation());
         assert!(!expected.is_empty());
         assert_eq!(copy(&mut f), [expected]);

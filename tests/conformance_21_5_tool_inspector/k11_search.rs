@@ -529,7 +529,7 @@ fn field_grapheme_edits_and_escape_never_touch_the_stage_or_full_composer() {
             f.h.state.cursor_position,
             f.h.state.input_scroll_offset,
         );
-        let focused = f.h.state.focused_tool_id.clone();
+        let focused = f.h.state.focused_item_id.clone();
         f.open();
         let frame = f.h.state.modal_stack.top().unwrap().clone();
         let top = f.tool().viewers[0].top;
@@ -601,7 +601,7 @@ fn field_grapheme_edits_and_escape_never_touch_the_stage_or_full_composer() {
         f.press(Key::Esc);
         f.paint();
         assert!(f.h.state.modal_stack.is_empty());
-        assert_eq!(f.h.state.focused_tool_id, focused);
+        assert_eq!(f.h.state.focused_item_id, focused);
         assert_eq!(pixels(f.buffer(), layout.chat_pane), stage);
         assert_eq!(pixels(f.buffer(), layout.input_area), composer);
         assert_eq!(f.view(), view);

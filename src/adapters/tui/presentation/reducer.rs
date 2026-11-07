@@ -293,7 +293,10 @@ pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
 /// Reopen truncates to the existing frame and retains its untouched payload.
 pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
     assert!(
-        !matches!(surface, Surface::DecisionPane | Surface::ToolInspector(_)),
+        !matches!(
+            surface,
+            Surface::DecisionPane | Surface::ToolInspector(_) | Surface::BlockViewer(_)
+        ),
         "identity-bearing frames open through their dedicated reducer"
     );
     open_frame(state, surface, None, None)
@@ -325,6 +328,34 @@ pub fn open_tool(
     open_frame(
         state,
         Surface::ToolInspector(ToolFrameKey(id)),
+        None,
+        Some(title),
+    )
+}
+
+/// Exact-target reopen retains the frame and cache; a new target owns a fresh key.
+pub fn open_block(
+    state: &mut TuiState,
+    payload: crate::adapters::tui::block_viewer::BlockViewerState,
+    title: String,
+) -> Opened {
+    use crate::adapters::tui::block_viewer::BlockFrameKey;
+    if let Some((&id, _)) = state
+        .block_viewers
+        .iter()
+        .find(|(_, block)| block.target == payload.target)
+    {
+        return open_frame(state, Surface::BlockViewer(BlockFrameKey(id)), None, None);
+    }
+    let id = state
+        .modal_stack
+        .last_id
+        .checked_add(1)
+        .expect("modal frame id overflow");
+    state.block_viewers.insert(id, payload);
+    open_frame(
+        state,
+        Surface::BlockViewer(BlockFrameKey(id)),
         None,
         Some(title),
     )
@@ -627,6 +658,9 @@ fn fresh_frame(
             Surface::ToolInspector(key) => {
                 Some(state.tool_inspectors[&key.0].target.conversation_id.clone())
             }
+            Surface::BlockViewer(key) => {
+                Some(state.block_viewers[&key.0].target.conversation_id.clone())
+            }
             _ => None,
         },
         decision,
@@ -685,7 +719,8 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
         | Surface::Login
-        | Surface::ToolInspector(_) => {}
+        | Surface::ToolInspector(_)
+        | Surface::BlockViewer(_) => {}
     }
 }
 
@@ -865,6 +900,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         Surface::QuitConfirm => state.quit_confirm.take().map(|quit| quit.caller_focus),
         Surface::ToolInspector(key) => {
             state.tool_inspectors.remove(&key.0);
+            None
+        }
+        Surface::BlockViewer(key) => {
+            state.block_viewers.remove(&key.0);
             None
         }
     };

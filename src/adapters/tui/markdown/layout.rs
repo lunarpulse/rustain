@@ -15,6 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::link::LinkRun;
 use super::table;
 use super::transform::{StyledBlock, StyledInline, StyledList};
+use super::{BlockKind, BlockPresentation, BlockSpan};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
@@ -41,10 +42,11 @@ struct Styles {
     rule: Style,
     code_bg: Style,
     code_border: Style,
+    blocks: BlockPresentation,
 }
 
 impl Styles {
-    fn new(theme: &Theme) -> Self {
+    fn new(theme: &Theme, blocks: BlockPresentation) -> Self {
         let colors = &theme.colors;
         Self {
             body: Style::default().fg(colors.fg_primary),
@@ -53,6 +55,7 @@ impl Styles {
             rule: Style::default().fg(colors.accent),
             code_bg: Style::default().bg(colors.code_block_bg),
             code_border: Style::default().fg(colors.code_block_border),
+            blocks,
         }
     }
 }
@@ -78,11 +81,27 @@ fn blank() -> Line<'static> {
 pub struct Rows {
     pub lines: Vec<Line<'static>>,
     pub links: Vec<LinkRun>,
+    pub blocks: Vec<BlockSpan>,
 }
 
 impl Rows {
     fn push(&mut self, line: Line<'static>) {
         self.lines.push(line);
+    }
+
+    fn record_block(&mut self, start: usize, kind: BlockKind) {
+        let end = self.lines.len();
+        let cells = self.lines[start..end]
+            .iter()
+            .map(line_cells)
+            .max()
+            .unwrap_or(0);
+        self.blocks.push(BlockSpan {
+            ordinal: 0,
+            kind,
+            rows: start..end,
+            cells,
+        });
     }
 
     /// Append `inner` unchanged.
@@ -92,6 +111,12 @@ impl Rows {
             run.line += base;
             run
         }));
+        self.blocks
+            .extend(inner.blocks.into_iter().map(|mut block| {
+                block.rows.start += base;
+                block.rows.end += base;
+                block
+            }));
         self.lines.extend(inner.lines);
     }
 
@@ -110,6 +135,15 @@ impl Rows {
             run.start_cell += cells;
             run
         }));
+        self.blocks
+            .extend(inner.blocks.into_iter().map(|mut block| {
+                block.rows.start += base;
+                block.rows.end += base;
+                if !block.rows.is_empty() {
+                    block.cells += cells;
+                }
+                block
+            }));
         for (row, mut line) in inner.lines.into_iter().enumerate() {
             line.spans.insert(
                 0,
@@ -124,16 +158,98 @@ impl Rows {
     }
 }
 
+pub(super) fn line_cells(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| geom::cells(&span.content))
+        .sum()
+}
+
 /// Lay the styled blocks out at `width` cells.
 #[must_use]
 pub fn layout(blocks: Vec<StyledBlock>, width: usize, theme: &Theme) -> Rows {
+    layout_with_blocks(blocks, width, theme, BlockPresentation::Stage)
+}
+
+pub(super) fn layout_with_blocks(
+    blocks: Vec<StyledBlock>,
+    width: usize,
+    theme: &Theme,
+    presentation: BlockPresentation,
+) -> Rows {
     if width == 0 {
         return Rows::default();
     }
-    let styles = Styles::new(theme);
+    let styles = Styles::new(theme, presentation);
     let mut rows = Rows::default();
     render_blocks(&blocks, width, 0, Separator::AfterEach, &styles, &mut rows);
+    for (ordinal, block) in rows.blocks.iter_mut().enumerate() {
+        block.ordinal = ordinal;
+    }
     rows
+}
+
+pub(super) fn inspect(
+    block: &StyledBlock,
+    theme: &Theme,
+    wrap: Option<usize>,
+) -> Option<(Vec<Line<'static>>, Vec<Option<usize>>)> {
+    let styles = Styles::new(theme, BlockPresentation::Window);
+    let mut rows = Rows::default();
+    let source_line = match block {
+        StyledBlock::Code { language, content } => {
+            if wrap == Some(0) {
+                return None;
+            }
+            let mut mapping = vec![None];
+            let mut displayed = Vec::new();
+            if !content.is_empty() {
+                for (index, line) in content.split('\n').enumerate() {
+                    let expanded = geom::expand_tabs(line, 0);
+                    let chunks = match wrap {
+                        Some(width) => geom::wrap_hard(&expanded, width),
+                        None => vec![expanded.as_ref()],
+                    };
+                    for (part, chunk) in chunks.iter().enumerate() {
+                        displayed.push((*chunk).to_owned());
+                        mapping.push((part == 0).then_some(index + 1));
+                    }
+                }
+            }
+            mapping.push(None);
+            let width = wrap.map_or_else(
+                || natural_code_width(language.as_deref(), content),
+                |width| width.saturating_add(2),
+            );
+            let inner = width - 2;
+            rows.lines.push(build_code_header(
+                language.as_deref(),
+                inner,
+                styles.code_border,
+            ));
+            for line in displayed {
+                rows.lines.push(Line::from(vec![
+                    Span::styled("│", styles.code_border),
+                    Span::styled(geom::pad_right(&line, inner), styles.code_bg),
+                    Span::styled("│", styles.code_border),
+                ]));
+            }
+            rows.lines.push(Line::from(Span::styled(
+                format!("└{}┘", "─".repeat(inner)),
+                styles.code_border,
+            )));
+            mapping
+        }
+        StyledBlock::Table(table) => {
+            render_block(block, 1, 0, &styles, &mut rows);
+            let mut mapping = vec![None, Some(1), None];
+            mapping.extend((0..table.rows.len()).map(|row| Some(row + 3)));
+            mapping.push(None);
+            mapping
+        }
+        _ => return None,
+    };
+    Some((rows.lines, source_line))
 }
 
 /// Lay user-typed text out as typed: every source line break and whitespace
@@ -201,16 +317,45 @@ fn render_block(block: &StyledBlock, width: usize, depth: usize, styles: &Styles
         StyledBlock::List(list) => render_list(list, width, depth, styles, out),
         StyledBlock::Quote(children) => render_quote(children, width, depth, styles, out),
         StyledBlock::Code { language, content } => {
+            let width = if styles.blocks == BlockPresentation::Window {
+                natural_code_width(language.as_deref(), content)
+            } else {
+                width
+            };
+            let start = out.lines.len();
             render_code_block(language.as_deref(), content, width, styles, &mut out.lines);
+            out.record_block(
+                start,
+                BlockKind::Code {
+                    language: language.clone(),
+                    lines: if content.is_empty() {
+                        0
+                    } else {
+                        content.split('\n').count()
+                    },
+                },
+            );
         }
         StyledBlock::Html(source) => render_html(source, width, styles, &mut out.lines),
         StyledBlock::Table(table) => {
+            let start = out.lines.len();
             out.lines.extend(table::render(
                 table,
-                width,
+                if styles.blocks == BlockPresentation::Window {
+                    usize::MAX
+                } else {
+                    width
+                },
                 styles.code_border,
                 styles.muted,
             ));
+            out.record_block(
+                start,
+                BlockKind::Table {
+                    cols: table.aligns.len(),
+                    rows: table.rows.len(),
+                },
+            );
         }
         StyledBlock::Rule => out.push(Line::from(Span::styled("─".repeat(width), styles.muted))),
     }
@@ -280,12 +425,23 @@ fn render_list(list: &StyledList, width: usize, depth: usize, styles: &Styles, o
             &mut inner,
         );
         if inner.lines.is_empty() {
+            out.extend(inner);
             out.push(Line::from(Span::raw(marker)));
             continue;
         }
         let hanging = Span::raw(geom::spaces(marker_cells));
         out.extend_prefixed(inner, &Span::raw(marker), &hanging, marker_cells);
     }
+}
+
+fn natural_code_width(language: Option<&str>, content: &str) -> usize {
+    let label = language.map_or(0, |lang| geom::cells(&clean_prose(lang)) + 4);
+    let code = content
+        .split('\n')
+        .map(|line| geom::cells(&geom::expand_tabs(line, 0)))
+        .max()
+        .unwrap_or(0);
+    label.max(code).max(1) + 2
 }
 
 /// Fenced code keeps its bordered container and language header; lines never
@@ -611,6 +767,7 @@ impl Wrapper {
         Rows {
             lines: self.lines,
             links: self.links,
+            blocks: Vec::new(),
         }
     }
 }

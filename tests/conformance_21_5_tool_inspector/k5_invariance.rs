@@ -40,7 +40,7 @@ fn open_scroll_back_leaves_stage_and_composer_identical() {
         !cache.0.is_empty(),
         "the production Stage populated a real turn cache"
     );
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(id.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(id.as_str()));
     f.open();
     for key in [
         Key::Char('j'),
@@ -92,7 +92,7 @@ fn open_scroll_back_leaves_stage_and_composer_identical() {
     assert!(f.h.state.modal_stack.is_empty());
     assert!(f.h.state.tool_inspectors.is_empty());
     assert_eq!(f.h.state.focus, FocusState::Chat);
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(id.as_str()));
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(id.as_str()));
     assert_eq!(f.view(), view);
     assert_eq!(f.cache(), cache);
     assert_eq!(serde_json::to_vec(f.conversation()).unwrap(), transcript);

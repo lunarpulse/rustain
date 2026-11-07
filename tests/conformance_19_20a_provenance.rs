@@ -1002,7 +1002,7 @@ fn assert_turn_boundaries_and_focus(width: u16) {
                             clipped.rows
                         );
                         assert_eq!(
-                            clipped.result.focused_tool_id.as_deref(),
+                            clipped.result.focused_item_id.as_deref(),
                             Some(id.as_str()),
                             "M34/M58: chrome shifts focused tool offsets along with painted starts"
                         );
@@ -1140,7 +1140,7 @@ async fn migrated_sessions_preserve_decorations_search_and_selected_tool_copy() 
                 }
                 if !collapsed {
                     let mut state = TuiState::new(60, 40);
-                    state.select_tool_explicitly(rendered.unwrap().focused_tool_id.unwrap());
+                    state.select_item_explicitly(rendered.unwrap().focused_item_id.unwrap());
                     assert_eq!(
                         state.resolve_copy_content(&loaded),
                         "SELECTED_TOOL_OUTPUT",

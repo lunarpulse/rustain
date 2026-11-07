@@ -22,6 +22,7 @@
 //! * [`RenderMode::Literal`] — user-typed text: no markdown, source line
 //!   breaks and whitespace kept (D12).
 
+mod block;
 pub mod highlight;
 pub mod layout;
 pub mod link;
@@ -32,6 +33,7 @@ pub mod transform;
 
 use ratatui::prelude::*;
 
+pub use block::render_block;
 pub use link::{LinkPresentation, LinkRun};
 
 use crate::adapters::tui::theme::Theme;
@@ -43,6 +45,53 @@ pub enum RenderMode {
     Completed,
     Literal,
 }
+/// Geometry policy for inspectable blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockPresentation {
+    Stage,
+    Window,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlockKind {
+    Code {
+        language: Option<String>,
+        lines: usize,
+    },
+    Table {
+        cols: usize,
+        rows: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockSpan {
+    pub ordinal: usize,
+    pub kind: BlockKind,
+    pub rows: std::ops::Range<usize>,
+    pub cells: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockMode {
+    Rendered,
+    Source,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockRender {
+    pub mode: BlockMode,
+    pub wrap: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BlockView {
+    pub kind: BlockKind,
+    pub rows: Vec<Line<'static>>,
+    pub source_line: Vec<Option<usize>>,
+    pub cells: usize,
+    pub source: String,
+}
 
 /// Pipeline configuration. There is deliberately no `Default`: a caller that
 /// forgets to choose a mode would silently get the wrong one. Links default to
@@ -52,6 +101,7 @@ pub enum RenderMode {
 pub struct RenderOptions {
     pub mode: RenderMode,
     pub links: LinkPresentation,
+    pub blocks: BlockPresentation,
 }
 
 impl RenderOptions {
@@ -78,6 +128,7 @@ impl RenderOptions {
         Self {
             mode,
             links: LinkPresentation::Explicit,
+            blocks: BlockPresentation::Stage,
         }
     }
 
@@ -85,6 +136,12 @@ impl RenderOptions {
     #[must_use]
     pub const fn with_links(mut self, links: LinkPresentation) -> Self {
         self.links = links;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_blocks(mut self, blocks: BlockPresentation) -> Self {
+        self.blocks = blocks;
         self
     }
 }
@@ -97,6 +154,7 @@ pub struct Rendered {
     /// empty unless the options asked for `Labeled { osc8: true }`. `line`
     /// indexes `lines`, `start_cell` is the first label cell of that line.
     pub links: Vec<LinkRun>,
+    pub blocks: Vec<BlockSpan>,
 }
 
 /// Debug-only count of pipeline runs on the current thread, used to prove the
@@ -136,16 +194,18 @@ pub fn render(content: &str, width: usize, theme: &Theme, opts: &RenderOptions) 
         return Rendered {
             lines: layout::literal(content, width, theme),
             links: Vec::new(),
+            blocks: Vec::new(),
         };
     }
     let sanitized = sanitize::sanitize(content, opts.mode);
     let parsed = parse::parse(&sanitized, opts.links);
     let styled = transform::transform(parsed, theme);
     let highlighted = highlight::highlight(styled, theme);
-    let rows = layout::layout(highlighted, width, theme);
+    let rows = layout::layout_with_blocks(highlighted, width, theme, opts.blocks);
     Rendered {
         lines: rows.lines,
         links: rows.links,
+        blocks: rows.blocks,
     }
 }
 

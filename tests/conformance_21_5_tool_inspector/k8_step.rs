@@ -74,7 +74,7 @@ fn brackets_never_leave_the_turn() {
     f.paint();
     assert_eq!(f.tool().tab, ToolTab::Diff);
     let frame_id = f.h.state.modal_stack.top().unwrap().id;
-    let stage_focus = f.h.state.focused_tool_id.clone();
+    let stage_focus = f.h.state.focused_item_id.clone();
     let view = f.view();
     let cache = f.cache();
     assert!(!rail(&f).contains("Next"));
@@ -97,12 +97,12 @@ fn brackets_never_leave_the_turn() {
     step(&mut f, Key::Char('['));
     assert_eq!(title(&f), "Tool · Bash #1");
     assert_eq!(f.h.state.modal_stack.top().unwrap().id, frame_id);
-    assert_eq!(f.h.state.focused_tool_id, stage_focus);
+    assert_eq!(f.h.state.focused_item_id, stage_focus);
     assert_eq!(f.view(), view);
     assert_eq!(f.cache(), cache);
     f.press(Key::Esc);
     f.paint();
-    assert_eq!(f.h.state.focused_tool_id, stage_focus);
+    assert_eq!(f.h.state.focused_item_id, stage_focus);
 }
 
 #[test]

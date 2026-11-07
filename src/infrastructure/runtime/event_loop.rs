@@ -1190,7 +1190,7 @@ pub async fn run(
                                     state.is_vscode,
                                     &state.modal_stack,
                                     state.pending_leader,
-                                    crate::adapters::tui::tool_inspector::stage_target(&state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref()),
+                                    crate::adapters::tui::block_viewer::stage_target(&state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref()),
                                 );
                             }
 
@@ -1965,7 +1965,7 @@ pub async fn run(
                                         state.input_buffer.clear();
                                         state.cursor_position = 0;
                                         state.input_scroll_offset = 0;
-                                        state.clear_tool_selection();
+                                        state.clear_item_selection();
                                         state.feedback_blocks.clear();
                                         crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::Carryover, &previous_conversation_id);
                                         crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::ContextWarning, &previous_conversation_id);
@@ -2148,7 +2148,7 @@ pub async fn run(
                                     }
                                 }
                                 InputAction::InspectTool => {
-                                    crate::adapters::tui::tool_inspector::inspect_focused(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref());
+                                    crate::adapters::tui::block_viewer::inspect_focused(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref());
                                 }
                                 InputAction::StepTool { forward } => {
                                     crate::adapters::tui::tool_inspector::step(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), forward);
@@ -2156,8 +2156,11 @@ pub async fn run(
                                 InputAction::CopyToolSource => {
                                     crate::adapters::tui::tool_inspector::copy::copy_source(&mut state, &conversation, Some(&tab_manager.active_tab().reducer), &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
+                                InputAction::CopyBlockSource => {
+                                    crate::adapters::tui::block_viewer::copy_source(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                }
                                 InputAction::CopyToClipboard(content) => {
-                                    handlers::clipboard::requested(&mut state, &conversation, content, &crate::adapters::tui::clipboard::copy_to_clipboard);
+                                    handlers::clipboard::requested_in(&mut state, &conversation, tab_manager.active_tab().reducer.open_turn.as_ref(), content, &crate::adapters::tui::clipboard::copy_to_clipboard);
                                 }
                                 InputAction::CopyTaskResult { plan_id, task_number } => {
                                     let content = plan_id.as_deref()
@@ -4253,9 +4256,9 @@ pub async fn run(
                                 InputAction::CycleInvocationInFocusedTurn => {
                                     tracing::debug!("CycleInvocationInFocusedTurn: dispatching");
                                     let active = tab_manager.active_tab_mut();
-                                    let outcome = handlers::tool_focus::cycle_invocation(&mut state, &mut active.view_state, &conversation.turns, active.reducer.open_turn.as_ref());
-                                    if let handlers::tool_focus::CycleOutcome::Cycled { tool_id } = outcome {
-                                        state.select_tool_explicitly(tool_id);
+                                    let outcome = handlers::tool_focus::cycle_item(&mut state, &mut active.view_state, &conversation.turns, active.reducer.open_turn.as_ref());
+                                    if let handlers::tool_focus::CycleOutcome::Cycled { item_id } = outcome {
+                                        state.select_item_explicitly(item_id);
                                         state.scroll_snapshot = tab_manager.active_tab().view_state.scroll_offset;
                                         state.auto_snapshot = matches!(tab_manager.active_tab().view_state.mode, crate::domain::models::AnchorMode::Following);
                                         state.needs_redraw = true;
@@ -7344,7 +7347,7 @@ fn save_active_tab(
     tab.block_boundaries = state.block_boundaries.clone();
     tab.message_boundaries = state.message_boundaries.clone();
     tab.user_message_boundaries = state.user_message_boundaries.clone();
-    tab.focused_tool_id = state.focused_tool_id.clone();
+    tab.focused_item_id = state.focused_item_id.clone();
     tab.feedback_blocks = state.feedback_blocks.clone();
     tab.team_send_blocks = state.team_send_blocks.clone();
     tab.pending_log_visit = state.pending_log_visit;
@@ -7383,10 +7386,10 @@ pub fn load_active_tab(
     state.block_boundaries = tab.block_boundaries.clone();
     state.message_boundaries = tab.message_boundaries.clone();
     state.user_message_boundaries = tab.user_message_boundaries.clone();
-    state.focused_tool_id = tab.focused_tool_id.clone();
+    state.focused_item_id = tab.focused_item_id.clone();
     // Selection is user intent, never persisted per tab — drop it so it cannot
     // leak across a tab boundary (story 19.9 review patch).
-    state.selected_tool_id = None;
+    state.selected_item_id = None;
     state.feedback_blocks = tab.feedback_blocks.clone();
     state.team_send_blocks = tab.team_send_blocks.clone();
     state.pending_log_visit = tab.pending_log_visit;
@@ -7446,7 +7449,7 @@ pub fn reset_stage_conversation(
     state.block_boundaries.clear();
     state
         .tab_render_state(state.active_tab_id)
-        .tool_block_boundaries
+        .item_boundaries
         .clear();
     state.message_boundaries.clear();
     state.user_message_boundaries.clear();
@@ -7666,6 +7669,12 @@ pub fn render(
         inspector_clock,
         tab_count,
     );
+    crate::adapters::tui::block_viewer::refresh(
+        state,
+        conversation,
+        tab_manager_for_bar.map(|tabs| &tabs.active_tab().reducer),
+        tab_count,
+    );
     notifications::begin_draw(state);
     let log_facts = notice_actions::log_facts(
         conversation,
@@ -7682,7 +7691,7 @@ pub fn render(
     let mut block_bounds: Vec<usize> = Vec::new();
     let mut msg_bounds: Vec<usize> = Vec::new();
     let mut user_msg_bounds: Vec<usize> = Vec::new();
-    let mut focused_tool_id: Option<String> = None;
+    let mut focused_item_id: Option<String> = None;
     let mut vp_height: u16 = state.viewport_height;
     let mut visible_feedback_rows = Vec::new();
     state.restore_unflushed_log_visits();
@@ -8221,15 +8230,16 @@ pub fn render(
                         liveness_ref,
                         open_prose_ref,
                         chat_pane::ToolFocus {
-                            current: state.focused_tool_id.as_deref(),
+                            current: state.focused_item_id.as_deref(),
                             inspector_marker: state.focus == FocusState::Chat && state.modal_stack.is_empty(),
+                            blocks: true,
                         },
                     );
                     content_height = result.total_content_height;
                     block_bounds = result.block_boundaries;
                     msg_bounds = result.message_boundaries;
                     user_msg_bounds = result.user_message_boundaries;
-                    focused_tool_id = result.focused_tool_id;
+                    focused_item_id = result.focused_item_id;
                     visible_feedback_rows = result.visible_feedback_rows;
                 }
 
@@ -8568,7 +8578,7 @@ pub fn render(
                 rendered_hint = crate::adapters::tui::hints::contextual_hint(
                     focus, state.session_count, theme.timing.status_hint_fade_sessions, state.is_vscode,
                     &state.modal_stack, state.pending_leader,
-                    *focus == FocusState::Chat && state.modal_stack.is_empty() && focused_tool_id.is_some(),
+                    *focus == FocusState::Chat && state.modal_stack.is_empty() && focused_item_id.is_some(),
                 );
                 let paint_status = |frame: &mut ratatui::Frame<'_>| {
                 status_bar::render(
@@ -8650,7 +8660,7 @@ pub fn render(
     state.block_boundaries = block_bounds;
     state.message_boundaries = msg_bounds;
     state.user_message_boundaries = user_msg_bounds;
-    state.focused_tool_id = focused_tool_id;
+    state.focused_item_id = focused_item_id;
     state.current_hint = rendered_hint;
     state.viewport_height = vp_height;
     state.log_visits_presented(visible_feedback_rows.iter().map(|(id, _)| id.as_str()));

@@ -5,6 +5,7 @@ pub mod apply_card;
 pub mod artifacts_panel;
 pub mod ask_user_question;
 pub mod autocomplete_popup;
+pub mod block_viewer;
 pub mod bookmark_list;
 pub mod cancel_plan_confirm_card;
 pub mod chat_pane;

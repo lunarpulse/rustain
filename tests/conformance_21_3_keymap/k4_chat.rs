@@ -75,7 +75,7 @@ fn salient(state: &TuiState) -> Salient {
         scroll: state.scroll_offset(),
         wave_selected: state.wave_overlay_selected,
         diverge_open: state.wave_diverge_open,
-        selected_tool: state.selected_tool_id.clone(),
+        selected_tool: state.selected_item_id.clone(),
     }
 }
 
@@ -286,11 +286,11 @@ fn witness(cmd: ChatCmd, keys: &[Key]) {
         }
         ChatCmd::Inspect => {
             let mut state = chat_state();
-            state.focused_tool_id = Some("tool-1".to_owned());
-            state.selected_tool_id = Some("previous-tool".to_owned());
+            state.focused_item_id = Some("tool-1".to_owned());
+            state.selected_item_id = Some("previous-tool".to_owned());
             assert_eq!(one(&mut state, Key::Enter), InputAction::InspectTool);
             assert_eq!(
-                state.selected_tool_id.as_deref(),
+                state.selected_item_id.as_deref(),
                 Some("previous-tool"),
                 "the runtime resolves the actual target before changing selection"
             );

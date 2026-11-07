@@ -332,6 +332,8 @@ impl ViewerSearch {
 pub struct Viewer {
     pub top: usize,
     pub follow: bool,
+    /// First visible display cell of every row (block-local horizontal scroll).
+    pub h_off: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -344,9 +346,23 @@ pub enum ViewerCmd {
     PageUp,
     Top,
     Tail,
+    ScrollLeft,
+    ScrollRight,
+    LeftEdge,
+    RightEdge,
+}
+
+impl ViewerCmd {
+    pub const fn horizontal(self) -> bool {
+        matches!(
+            self,
+            Self::ScrollLeft | Self::ScrollRight | Self::LeftEdge | Self::RightEdge
+        )
+    }
 }
 
 /// Apply a registry command against the last fitted body dimensions.
+/// Horizontal commands belong to [`apply_horizontal`] and change nothing here.
 pub fn apply(viewer: &mut Viewer, command: ViewerCmd, rows: usize, viewport: usize) {
     use ViewerCmd::*;
     let maximum = rows.saturating_sub(viewport);
@@ -360,9 +376,63 @@ pub fn apply(viewer: &mut Viewer, command: ViewerCmd, rows: usize, viewport: usi
         PageUp => top.saturating_sub(viewport.saturating_sub(1).max(1)),
         Top => 0,
         Tail => maximum,
+        ScrollLeft | ScrollRight | LeftEdge | RightEdge => return,
     }
     .min(maximum);
     viewer.follow = command == Tail;
+}
+
+/// Horizontal movement in display cells: `h`/`l` move one tab stop, the edges
+/// jump to `0` and `widest - cols`. The offset never goes negative or past the
+/// last cell, and is clamped again at paint after a resize.
+pub fn apply_horizontal(viewer: &mut Viewer, command: ViewerCmd, widest: usize, cols: usize) {
+    use ViewerCmd::*;
+    let maximum = widest.saturating_sub(cols);
+    let current = viewer.h_off.min(maximum);
+    // One tab stop, but never more than the cells between the two edge markers.
+    let step = text_geometry::TAB_STOP.min(cols.saturating_sub(2)).max(1);
+    viewer.h_off = match command {
+        ScrollLeft => current.saturating_sub(step),
+        ScrollRight => current.saturating_add(step),
+        LeftEdge => 0,
+        RightEdge => maximum,
+        _ => return,
+    }
+    .min(maximum);
+}
+
+/// Apply a wheel or scroll intent against the last fitted body dimensions.
+/// Follow-tail resumption and unbounded rows are the Stage's, never a body's.
+pub fn apply_scroll(
+    viewer: &mut Viewer,
+    delta: crate::domain::models::view_state::ScrollDelta,
+    rows: usize,
+    viewport: usize,
+) {
+    use crate::domain::models::view_state::ScrollDelta;
+    let maximum = rows.saturating_sub(viewport);
+    let command = match delta {
+        ScrollDelta::WheelUp(lines) => {
+            viewer.top = viewer.top.min(maximum).saturating_sub(usize::from(lines));
+            viewer.follow = false;
+            return;
+        }
+        ScrollDelta::WheelDown(lines) => {
+            viewer.top = viewer.top.saturating_add(usize::from(lines)).min(maximum);
+            viewer.follow = false;
+            return;
+        }
+        ScrollDelta::LineUp => ViewerCmd::LineUp,
+        ScrollDelta::LineDown => ViewerCmd::LineDown,
+        ScrollDelta::HalfPageUp => ViewerCmd::HalfUp,
+        ScrollDelta::HalfPageDown => ViewerCmd::HalfDown,
+        ScrollDelta::FullPageUp => ViewerCmd::PageUp,
+        ScrollDelta::FullPageDown => ViewerCmd::PageDown,
+        ScrollDelta::Top => ViewerCmd::Top,
+        ScrollDelta::Bottom => ViewerCmd::Tail,
+        ScrollDelta::ResumeFollowing | ScrollDelta::UnboundedRows(_) => return,
+    };
+    apply(viewer, command, rows, viewport);
 }
 
 /// Painting clamps again: keys can precede the first fitted paint or a resize.
@@ -448,13 +518,15 @@ mod tests {
         let mut viewer = Viewer {
             top: 7,
             follow: true,
+            ..Default::default()
         };
         search.jump(&mut viewer, 20, 5);
         assert_eq!(
             viewer,
             Viewer {
                 top: 7,
-                follow: true
+                follow: true,
+                ..Default::default()
             }
         );
         search.commit("absent".into());
@@ -464,7 +536,8 @@ mod tests {
             viewer,
             Viewer {
                 top: 7,
-                follow: true
+                follow: true,
+                ..Default::default()
             }
         );
     }
@@ -589,6 +662,7 @@ mod tests {
             let mut viewer = Viewer {
                 top: 20,
                 follow: true,
+                ..Default::default()
             };
             apply(&mut viewer, command, 100, 12);
             assert_eq!(viewer.top, expected, "{command:?}");
@@ -606,6 +680,7 @@ mod tests {
                 let mut viewer = Viewer {
                     top: usize::MAX,
                     follow: false,
+                    ..Default::default()
                 };
                 apply(&mut viewer, command, rows, viewport);
                 assert_eq!(viewer.top, 0, "{command:?} {rows}/{viewport}");
@@ -614,6 +689,7 @@ mod tests {
             let mut viewer = Viewer {
                 top: usize::MAX,
                 follow: false,
+                ..Default::default()
             };
             apply(&mut viewer, command, usize::MAX, 1);
             assert!(viewer.top < usize::MAX);

@@ -1745,6 +1745,7 @@ mod k8_stage {
                         height: 4,
                         block_offsets: vec![0],
                         tool_block_offsets: vec![],
+                        md_block_offsets: vec![],
                     },
                 );
                 render

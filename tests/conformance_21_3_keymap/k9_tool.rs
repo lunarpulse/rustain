@@ -62,7 +62,7 @@ fn stage(f: &Fixture) -> String {
         f.cache(),
         serde_json::to_vec(f.conversation()).unwrap(),
         (&s.input_buffer, s.cursor_position, s.input_scroll_offset),
-        (&s.focus, &s.focused_tool_id),
+        (&s.focus, &s.focused_item_id),
         (f.layout().chat_pane, f.layout().input_area)
     )
 }

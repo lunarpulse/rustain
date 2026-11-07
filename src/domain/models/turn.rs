@@ -517,6 +517,52 @@ pub fn tool_call_id_for(turn_id: &TurnId, pid: PartId) -> String {
     format!("tc_{}_{}", turn_id.0, pid.0)
 }
 
+/// Whether `candidate` has the shape minted by [`block_item_id_for`]:
+/// `md_<turn>_<part digits>_<ordinal digits>`; a tool id never does.
+pub fn is_block_item_id(candidate: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    candidate.strip_prefix("md_").is_some_and(|rest| {
+        rest.rsplit_once('_')
+            .and_then(|(head, ordinal)| {
+                let (turn, part) = head.rsplit_once('_')?;
+                Some(!turn.is_empty() && digits(part) && digits(ordinal))
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Stage item id of the `ordinal`-th code block or table (0-based) of a prose
+/// part: `md_{turn_id}_{part_id}_{ordinal}` (Story 21.13 D7).
+pub fn block_item_id_for(turn_id: &TurnId, pid: PartId, ordinal: usize) -> String {
+    format!("md_{}_{}_{}", turn_id.0, pid.0, ordinal)
+}
+
+/// The ordinal when `candidate` is a canonical block id of exactly this turn
+/// and part; ids are compared structurally, never by a bare prefix.
+pub fn block_ordinal_of(turn_id: &TurnId, pid: PartId, candidate: &str) -> Option<usize> {
+    let canonical = |digits: &str| {
+        !digits.is_empty()
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'))
+    };
+    let rest = candidate
+        .strip_prefix("md_")?
+        .strip_prefix(turn_id.0.as_str())?
+        .strip_prefix('_')?;
+    let (part, ordinal) = rest.split_once('_')?;
+    (canonical(part) && canonical(ordinal) && part.parse::<u64>() == Ok(pid.0))
+        .then(|| ordinal.parse().ok())?
+}
+
+/// Whether `candidate` is the id of a tool call or a code/table block of `turn`.
+pub fn item_belongs_to_turn(turn: &Turn, candidate: &str) -> bool {
+    turn.parts.iter().any(|part| match part {
+        TurnPart::ToolInvocation { id, .. } => tool_call_id_matches(&turn.id, *id, candidate),
+        TurnPart::Prose { id, .. } => block_ordinal_of(&turn.id, *id, candidate).is_some(),
+        _ => false,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Migration helper
 // ---------------------------------------------------------------------------
@@ -980,5 +1026,57 @@ mod tests {
         // No prose part because content is empty, but invocation part exists
         assert_eq!(turn.parts.len(), 1);
         assert!(matches!(&turn.parts[0], TurnPart::ToolInvocation { .. }));
+    }
+
+    #[test]
+    fn story21_13_block_ids_are_structural_and_turn_membership_is_exact() {
+        let mut turn = Turn::new("model".into(), 0);
+        let prose = turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "x".into(),
+        });
+        let tool = turn.push_part(|id| TurnPart::ToolInvocation {
+            id,
+            tool: "Bash".into(),
+            args: serde_json::json!({}),
+            status: InvocationStatus::Success,
+            started_at: 0,
+            ended_at: Some(1),
+        });
+        let block = block_item_id_for(&turn.id, prose, 3);
+        assert!(is_block_item_id(&block));
+        assert_eq!(block_ordinal_of(&turn.id, prose, &block), Some(3));
+        // Wrong turn, wrong part, non-canonical digits and tool ids are rejected.
+        let other = TurnId("other".into());
+        assert_eq!(block_ordinal_of(&other, prose, &block), None);
+        assert_eq!(
+            block_ordinal_of(&turn.id, PartId(prose.0 + 1), &block),
+            None
+        );
+        for bad in ["md_x_1_", "md__1_2", "tc_x_1", "md_x_1", "md_"] {
+            assert!(!is_block_item_id(bad), "{bad}");
+        }
+        assert_eq!(
+            block_ordinal_of(
+                &turn.id,
+                prose,
+                &format!("md_{}_{}_{}", turn.id.0, prose.0, "03")
+            ),
+            None
+        );
+        // `a` vs `a_1`: a bare prefix never decides turn membership.
+        let short = TurnId("a".into());
+        let long = TurnId("a_1".into());
+        let id = block_item_id_for(&long, PartId(2), 0);
+        assert_eq!(block_ordinal_of(&short, PartId(2), &id), None);
+        assert_eq!(block_ordinal_of(&long, PartId(2), &id), Some(0));
+        // Membership: the turn's own tool and block, nothing else.
+        assert!(item_belongs_to_turn(&turn, &block));
+        assert!(item_belongs_to_turn(
+            &turn,
+            &tool_call_id_for(&turn.id, tool)
+        ));
+        assert!(!item_belongs_to_turn(&turn, &id));
+        assert!(!item_belongs_to_turn(&turn, "md_provider_tool_id"));
     }
 }

@@ -5309,6 +5309,7 @@ pub(super) mod tests {
                     | Surface::WaveOverlay
                     | Surface::CrossSearch
                     | Surface::ToolInspector(_)
+                    | Surface::BlockViewer(_)
                     | Surface::Login => unreachable!("surface not offered attached"),
                 }
                 let before = (

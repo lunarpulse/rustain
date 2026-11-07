@@ -91,7 +91,7 @@ fn render_chat_pane_with_bookmarks(
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
-        focused_tool_id: None,
+        focused_item_id: None,
         visible_feedback_rows: Vec::new(),
     };
     terminal

@@ -43,7 +43,7 @@ pub struct TabState {
     pub block_boundaries: Vec<usize>,
     pub message_boundaries: Vec<usize>,
     pub user_message_boundaries: Vec<usize>,
-    pub focused_tool_id: Option<String>,
+    pub focused_item_id: Option<String>,
     pub feedback_blocks: BTreeMap<String, FeedbackBlock>,
     /// Story 19.17: inactive tabs retain typed send rows with their blocks.
     pub team_send_blocks:
@@ -131,7 +131,7 @@ impl TabState {
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
             user_message_boundaries: Vec::new(),
-            focused_tool_id: None,
+            focused_item_id: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
             pending_log_visit: None,
@@ -203,7 +203,7 @@ impl TabState {
             block_boundaries: Vec::new(),
             message_boundaries: Vec::new(),
             user_message_boundaries: Vec::new(),
-            focused_tool_id: None,
+            focused_item_id: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
             pending_log_visit: None,
@@ -224,7 +224,7 @@ impl TabState {
         self.block_boundaries.clear();
         self.message_boundaries.clear();
         self.user_message_boundaries.clear();
-        self.focused_tool_id = None;
+        self.focused_item_id = None;
         self.total_content_height = 0;
         self.pending_anchor = None;
     }

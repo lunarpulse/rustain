@@ -354,6 +354,10 @@ const MARKDOWN_SOURCES: &[(&str, &str)] = &[
         "link.rs",
         include_str!("../../src/adapters/tui/markdown/link.rs"),
     ),
+    (
+        "block.rs",
+        include_str!("../../src/adapters/tui/markdown/block.rs"),
+    ),
 ];
 
 /// The source before its trailing unit-test module.
@@ -460,7 +464,7 @@ fn private_parser_users(sources: &[(String, String)], allowed: &[&str]) -> Vec<S
 fn k10_gate_baseline_defects_stay_out_of_the_markdown_sources() {
     let violations = gate_violations(MARKDOWN_SOURCES);
     assert!(violations.is_empty(), "{}", violations.join("\n"));
-    assert_eq!(MARKDOWN_SOURCES.len(), 8, "the gate must stay scoped");
+    assert_eq!(MARKDOWN_SOURCES.len(), 9, "the gate must stay scoped");
     // 12-B allowlists exactly one domain module: the producer-side helper.
     let users = private_parser_users(&src_sources(), &["domain/services/markdown_source.rs"]);
     assert!(
@@ -670,7 +674,7 @@ fn k11_five_thousand_table_columns_collapse_in_bounded_time() {
                 .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
                 .collect();
             // The repair adds the column the 5,001-cell body row needs.
-            assert_eq!(text, ["table · 5001 cols × 1 rows", ""]);
+            assert_eq!(text, ["table · 5001 cols × 1 row", ""]);
         }
     }
 }

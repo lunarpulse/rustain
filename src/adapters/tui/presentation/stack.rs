@@ -17,6 +17,7 @@ pub enum Surface {
     WaveOverlay,
     CrossSearch,
     ToolInspector(crate::adapters::tui::tool_inspector::ToolFrameKey),
+    BlockViewer(crate::adapters::tui::block_viewer::BlockFrameKey),
 }
 
 impl Surface {
@@ -37,6 +38,7 @@ impl Surface {
             Self::WaveOverlay => "Wave",
             Self::CrossSearch => "Cross-Search",
             Self::ToolInspector(_) => "Tool",
+            Self::BlockViewer(_) => "Block",
         }
     }
 
@@ -57,6 +59,7 @@ impl Surface {
             Self::WaveOverlay => Context::WaveOverlay,
             Self::CrossSearch => Context::CrossSearch,
             Self::ToolInspector(_) => Context::ToolInspector,
+            Self::BlockViewer(_) => Context::BlockViewer,
         }
     }
 
@@ -73,6 +76,7 @@ impl Surface {
                 | Self::WaveOverlay
                 | Self::CrossSearch
                 | Self::ToolInspector(_)
+                | Self::BlockViewer(_)
         )
     }
 }

@@ -298,9 +298,10 @@ impl TestHarness {
                     None,
                     tab.reducer.open_prose.as_deref(),
                     chat_pane::ToolFocus {
-                        current: state.focused_tool_id.as_deref(),
+                        current: state.focused_item_id.as_deref(),
                         inspector_marker: state.focus == FocusState::Chat
                             && state.modal_stack.is_empty(),
+                        blocks: true,
                     },
                 );
                 state.total_content_height = result.total_content_height;

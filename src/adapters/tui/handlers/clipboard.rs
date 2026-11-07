@@ -13,8 +13,19 @@ pub fn requested(
     content: String,
     copy: &dyn Fn(&str) -> ClipboardResult,
 ) {
+    requested_in(state, conversation, None, content, copy);
+}
+
+/// As [`requested`], resolving a selected block of the still-open turn too.
+pub fn requested_in(
+    state: &mut TuiState,
+    conversation: &Conversation,
+    open_turn: Option<&crate::domain::models::Turn>,
+    content: String,
+    copy: &dyn Fn(&str) -> ClipboardResult,
+) {
     let content = if content.is_empty() {
-        state.resolve_copy_content(conversation)
+        state.resolve_copy_content_in(conversation, open_turn)
     } else {
         content
     };
@@ -75,7 +86,7 @@ mod tests {
         });
         conversation.turns.push(turn);
         conversation.rebuild_messages_mirror();
-        state.selected_tool_id = None;
+        state.selected_item_id = None;
         let copied = std::cell::RefCell::new(Vec::new());
         let copier = |text: &str| {
             copied.borrow_mut().push(text.to_owned());

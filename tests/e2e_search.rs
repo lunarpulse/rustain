@@ -128,7 +128,7 @@ fn render_once(
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
-        focused_tool_id: None,
+        focused_item_id: None,
         visible_feedback_rows: Vec::new(),
     };
     terminal
@@ -475,7 +475,7 @@ fn test_e2e_search_does_not_highlight_role_line_word() {
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
-        focused_tool_id: None,
+        focused_item_id: None,
         visible_feedback_rows: Vec::new(),
     };
     terminal
@@ -574,7 +574,7 @@ fn test_e2e_search_focused_ordinal_with_multiple_matches_in_one_message() {
         block_boundaries: Vec::new(),
         message_boundaries: Vec::new(),
         user_message_boundaries: Vec::new(),
-        focused_tool_id: None,
+        focused_item_id: None,
         visible_feedback_rows: Vec::new(),
     };
     // This render call must succeed and the focused ordinal lookup in

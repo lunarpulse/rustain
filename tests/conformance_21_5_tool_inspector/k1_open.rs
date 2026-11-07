@@ -32,8 +32,8 @@ fn enter_opens_the_render_focused_tool_not_a_stale_selection() {
     );
     let mut f = Fixture::new(80, 24, turn);
     f.focus_call(&second);
-    f.h.state.selected_tool_id = Some(first.clone());
-    assert_eq!(f.h.state.focused_tool_id.as_deref(), Some(second.as_str()));
+    f.h.state.selected_item_id = Some(first.clone());
+    assert_eq!(f.h.state.focused_item_id.as_deref(), Some(second.as_str()));
     f.open();
     assert_eq!(f.h.state.modal_stack.len(), 1);
     assert_eq!(
@@ -45,7 +45,7 @@ fn enter_opens_the_render_focused_tool_not_a_stale_selection() {
     assert!(screen.contains("[Output]"));
     assert!(screen.contains("SECOND-OUTPUT"));
     assert!(!screen.contains("FIRST-OUTPUT"));
-    assert_eq!(f.h.state.selected_tool_id.as_deref(), Some(second.as_str()));
+    assert_eq!(f.h.state.selected_item_id.as_deref(), Some(second.as_str()));
     let rect = f.frame_rect();
     assert_eq!(f.buffer()[(rect.x, rect.y)].symbol(), "┌");
     assert_eq!(
@@ -74,7 +74,7 @@ fn no_render_focused_tool_is_inert_but_input_enter_still_submits() {
     let mut turn = Turn::new("fixture-model".into(), 0);
     prose(&mut turn, "No tool invocation here.");
     let mut f = Fixture::new(80, 24, turn);
-    assert!(f.h.state.focused_tool_id.is_none());
+    assert!(f.h.state.focused_item_id.is_none());
     let before = serde_json::to_vec(f.conversation()).unwrap();
     assert!(matches!(
         f.press(Key::Enter),
@@ -123,14 +123,14 @@ fn inspect_tip_is_true_only_for_a_chat_stage_target() {
         .unwrap_or_default()
     };
     assert!(
-        f.h.state.focused_tool_id.is_some(),
+        f.h.state.focused_item_id.is_some(),
         "production-rendered positive control"
     );
     assert!(hint(&f).contains("[Enter] Inspect"));
     let mut no_tool = Turn::new("fixture-model".into(), 0);
     prose(&mut no_tool, "No visible tool.");
     let absent = Fixture::new(80, 24, no_tool);
-    assert!(absent.h.state.focused_tool_id.is_none());
+    assert!(absent.h.state.focused_item_id.is_none());
     assert!(!hint(&absent).contains("[Enter] Inspect"));
     f.h.state.focus = FocusState::Input;
     assert!(!hint(&f).contains("[Enter] Inspect"));
