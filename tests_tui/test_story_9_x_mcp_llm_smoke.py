@@ -93,13 +93,13 @@ def test_llm_uses_mcp_echo_tool_round_trip(tui_with_mcp):
     screen = tui.get_screen_text()
     # We accept three different success markers — any one proves the wire
     # works end-to-end (descriptor → tool_use → result back in conversation):
-    #   1. The tool-block "Success" marker for `[echo] echo` with PING input.
+    #   1. The humanized tool row `✓ [echo] echo PING` (Story 21.9: no status words, no JSON).
     #   2. The literal echo response "echo: PING" (collapsed view).
     #   3. The LLM-paraphrased response that includes "PING" along with a
     #      response-style verb. We allow paraphrase because the LLM may
     #      summarize the tool output in its own words.
     success_markers = [
-        'Success [echo] echo "{"message":"PING"}"',
+        "✓ [echo] echo PING",
         "echo: PING",
         "echo:PING",
     ]
@@ -107,7 +107,7 @@ def test_llm_uses_mcp_echo_tool_round_trip(tui_with_mcp):
         "PING" in screen and ("Echoed" in screen or "echoed" in screen)
     )
     assert matched, (
-        f"Expected one of: tool-block Success marker, echo: PING literal, "
+        f"Expected one of: tool-row `✓ [echo] echo PING`, echo: PING literal, "
         f"or paraphrased 'Echoed: PING'. This proves R1 (descriptor reached "
         f"LLM) and R2 (tool_use routed to MCP and result re-entered chat).\n"
         f"Screen:\n{screen}"

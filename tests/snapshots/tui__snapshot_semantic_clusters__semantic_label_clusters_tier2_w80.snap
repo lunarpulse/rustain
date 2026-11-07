@@ -10,9 +10,9 @@ You:
 │ ▸  · 2 reads in src/, 1 bash, 1 edit ✓
 You:
 # cluster_failure_containing_does_not_filter
-│ ┄ ✗ Error Read "src/a.rs" → running... (5.0s) ┄
-│ ┄ ✓ Success Read "src/b.rs" → running... (5.0s) ┄
-│ ┄ ✓ Success Read "src/c.rs" → running... (5.0s) ┄
+│ ┄ ✗ Read src/a.rs · 5.0s
+│ ┄ ✓ Read src/b.rs · 5.0s
+│ ┄ ✓ Read src/c.rs · 5.0s
 │
 You:
 # cluster_single_tool

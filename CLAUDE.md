@@ -36,7 +36,7 @@ rustain/src/
 │   │   ├── layout.rs                # compute_layout (60x16 min, 80x24 standard)
 │   │   ├── state.rs                 # TuiState (rendering state)
 │   │   ├── app.rs                   # handle_input, convert_crossterm_event
-│   │   └── widgets/                 # empty_state, chat_pane, status_bar, input_box
+│   │   └── widgets/                 # launchpad, tool_line, chat_pane, status_bar, input_box
 │   ├── cli/                         # CLI argument parsing (clap)
 │   └── noop.rs                      # NoOp adapter stubs for all ports
 ├── infrastructure/                  # OS/runtime concerns

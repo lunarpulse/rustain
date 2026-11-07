@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod hints;
 pub mod image;
 pub mod keymap;
+pub mod launchpad;
 pub mod layout;
 pub mod login_runtime;
 pub mod login_ui;

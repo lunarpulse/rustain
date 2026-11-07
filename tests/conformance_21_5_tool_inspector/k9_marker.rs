@@ -89,6 +89,9 @@ fn assert_post_pass(f: &Fixture, plain: &Buffer, needle: &str, fits: bool) {
         .rev()
         .find(|&x| !plain[(x, y)].symbol().trim().is_empty())
         .expect("nonempty header");
+    // A wide final glyph (the fitted row can now end on one) occupies two cells.
+    let last =
+        last + (unicode_width::UnicodeWidthStr::width(plain[(last, y)].symbol()).max(1) as u16 - 1);
     // The blank separator and the whole hint must fit after the original row.
     assert_eq!(last + 2 + hint.len() as u16 <= area.right(), fits);
     let mut restored = actual.clone();
@@ -210,9 +213,17 @@ fn focused_header_replaces_both_leads_without_rows_cache_or_view_churn() {
 
 #[test]
 fn long_unicode_summary_omits_the_entire_inline_cue_only_when_it_cannot_fit() {
-    let command = format!("printf 界e\u{301}🙂 {}", "界e\u{301}🙂".repeat(24));
-    for (width, height, fits) in [(60, 16, false), (130, 30, true)] {
-        let mut f = fixture(width, height, false, S::Success, &command);
+    let mid = format!("printf 界e\u{301}🙂 {}", "界e\u{301}🙂".repeat(6));
+    let long = format!("printf 界e\u{301}🙂 {}", "界e\u{301}🙂".repeat(24));
+    // Story 21.9: the row is fitted to the pane, so a command longer than the
+    // pane fills it and leaves no room for the cue; a medium one fits at 130
+    // and not at 60 (before, a 60-cell summary cap kept the 130-column row short).
+    for (command, width, height, fits) in [
+        (&mid, 60, 16, false),
+        (&mid, 130, 30, true),
+        (&long, 130, 30, false),
+    ] {
+        let mut f = fixture(width, height, false, S::Success, command);
         f.press(Key::Char('i'));
         f.paint();
         let plain = f.buffer().clone();

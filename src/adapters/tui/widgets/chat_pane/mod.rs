@@ -34,8 +34,8 @@ use crate::domain::services::message_builder::{ContextRef, split_context_prefix}
 use crate::domain::services::search::SearchMatch;
 use crate::domain::services::summary_labeler::compute_summary_label;
 
-use super::empty_state;
 use super::hyperlink;
+use super::launchpad;
 use super::plan_card;
 use crate::adapters::tui::markdown;
 use crate::adapters::tui::markdown::{LinkPresentation, LinkRun, RenderOptions, Rendered};
@@ -1534,6 +1534,7 @@ fn render_expanded_turn<'a>(
     sink: &mut LinkSink,
     reasoning: crate::domain::models::ReasoningDisplay,
     live_line: Option<Line<'static>>,
+    workspace_root: Option<&std::path::Path>,
 ) -> Vec<Line<'a>> {
     let content_width = width.saturating_sub(2); // gutter + space
     if content_width == 0 {
@@ -1627,6 +1628,7 @@ fn render_expanded_turn<'a>(
                     content_width as u16,
                     clock,
                     withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                    workspace_root,
                 );
                 lines.extend(tb_lines);
                 // Per-invocation live rail for running tools only
@@ -2042,7 +2044,7 @@ fn render_with_search_impl(
         && feedback_blocks.is_empty()
     {
         tab_render_state.item_boundaries.clear();
-        empty_state::render(frame, area, theme);
+        launchpad::render(frame, area, tab_render_state.launchpad.as_ref(), theme);
         return empty;
     }
 
@@ -2058,6 +2060,8 @@ fn render_with_search_impl(
     // Story 21.12 (D15): the output supports OSC 8. Link runs gathered by the
     // producers below are encoded onto the painted cells after the paint.
     let osc8 = tab_render_state.osc8_links;
+    let workspace_root = tab_render_state.workspace_root.clone();
+    let workspace_root = workspace_root.as_deref();
     let mut placed_runs: Vec<LinkRun> = Vec::new();
 
     // Invalidate cache if terminal width changed (O(1) divergence check — AC5)
@@ -2531,6 +2535,7 @@ fn render_with_search_impl(
                                 &mut sink,
                                 tab_render_state.reasoning,
                                 None,
+                                workspace_root,
                             )
                         };
                         let interrupted_line = (msg.stop_reason == Some(StopReason::Cancelled))
@@ -2632,6 +2637,7 @@ fn render_with_search_impl(
                                 area.width,
                                 clock,
                                 withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                                workspace_root,
                             );
                             for (j, line) in tb_lines.into_iter().enumerate() {
                                 let abs_line = tool_line_offset + j;
@@ -2687,6 +2693,7 @@ fn render_with_search_impl(
                             area.width,
                             clock,
                             withheld_tool_inputs.and_then(|inputs| inputs.get(&tc.id)),
+                            workspace_root,
                         );
                         for (j, line) in tb_lines.into_iter().enumerate() {
                             let abs_line = tool_line_offset + j;
@@ -2798,6 +2805,7 @@ fn render_with_search_impl(
                 &mut sink,
                 tab_render_state.reasoning,
                 live_line,
+                workspace_root,
             );
             place_runs(
                 &mut placed_runs,
@@ -3209,6 +3217,7 @@ mod parts_aware_tests {
             &mut LinkSink::off(),
             crate::domain::models::ReasoningDisplay::default(),
             None,
+            None,
         )
     }
 
@@ -3263,6 +3272,7 @@ mod parts_aware_tests {
                         None,
                         &mut sink,
                         crate::domain::models::ReasoningDisplay::default(),
+                        None,
                         None,
                     )
                     .len();
@@ -3384,6 +3394,7 @@ mod parts_aware_tests {
                             &mut LinkSink::off(),
                             display,
                             live_line,
+                            None,
                         )
                         .len();
                         assert_eq!(
@@ -3458,6 +3469,7 @@ mod parts_aware_tests {
                 Some(("needle", Some(focused))),
                 &mut LinkSink::off(),
                 display,
+                None,
                 None,
             );
             let mut found = Vec::new();
@@ -4567,7 +4579,7 @@ mod parts_aware_tests {
     }
 
     /// Fixture 8: Spinner digit-cliff — elapsed crosses 9.9s → 10.0s.
-    /// Keeps `tool_block.rs:139` `→ running... ({elapsed})` height-stable
+    /// Keeps the tool row's ` · {elapsed}` height-stable
     /// across the width-cliff where elapsed string gains a digit.
     #[test]
     fn parity_spinner_elapsed_digit_cliff() {

@@ -4,9 +4,9 @@ expression: text
 ---
 │ Let me check the relevant files.
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
-│ ┄ ✓ Success Grep "{}" → running... (5.0s) ┄
-│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
+│ ┄ ✓ Grep · 5.0s
+│ ┄ ✓ Bash · 5.0s
 │
 │ Found the relevant sections.
 │
@@ -18,16 +18,16 @@ expression: text
 │ The hexagonal architecture separates domain from adapters - I need to add the
 │ new model to domain/models/ and wire it through the ports.
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
-│ ┄ ✓ Success Edit "{}" → running... (5.0s) ┄
-│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
-│ ┄ ✓ Success Grep "{}" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
+│ ┄ ✓ Read · 5.0s
+│ ┄ ✓ Edit · 5.0s
+│ ┄ ✓ Bash · 5.0s
+│ ┄ ✓ Grep · 5.0s
 │
 │ All changes applied and tests pass.
 │
 │
 │ Here is the summary of everything done.
 │
-│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
+│ ┄ ✓ Bash · 5.0s
 │

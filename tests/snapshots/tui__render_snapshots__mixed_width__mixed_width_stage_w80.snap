@@ -6,5 +6,5 @@ expression: text
 │ 界 界 界  é́ 👨‍👩‍👧  family and 日 本 語 の テ キ ス ト が 続 き ま す , then a very long tail of
 │ ordinary words that must be clipped at a cell boundary
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
 │

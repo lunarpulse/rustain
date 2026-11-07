@@ -210,3 +210,210 @@ fn story21_9_smoke_frames_export() {
         save(&f, &dir, &size, "back");
     }
 }
+
+// ── slice 9-B: tool rows and the launchpad ──────────────────────────────────
+
+pub const TOOLS_ID: &str = "story21-9-tool-lines";
+pub const TOOLS_TITLE: &str = "Tool lines smoke";
+pub const TOOLS_BRANCH: &str = "smoke-21-9";
+
+fn tools_fixture_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests_tui/fixtures/sessions/story21_9_tool_lines.json")
+}
+
+/// `user`, then one assistant turn the reducer folds from four finished calls
+/// (Read with a range, Edit +12 −3, Write of a new 40-line file, Bash) whose
+/// durations are the fixture timestamps the smoke asserts.
+pub fn tools_conversation() -> Conversation {
+    let (mut state, clock) = test_reducer_state(1_700_000_000_000);
+    let mut feed = |chunk: StreamChunk| {
+        let _ = reduce(&mut state, chunk, &clock);
+    };
+    let old: String = (1..=3).map(|i| format!("old {i}\n")).collect();
+    let new: String = (1..=12).map(|i| format!("new {i}\n")).collect();
+    let content: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    let calls = [
+        (
+            "t1",
+            "Read",
+            json!({"file_path": "src/x.rs", "offset": 0, "limit": 80}),
+            300,
+            WriteDiffState::NotAWrite,
+        ),
+        (
+            "t2",
+            "Edit",
+            json!({"file_path": "src/parser.rs", "old_string": old, "new_string": new}),
+            100,
+            WriteDiffState::NotAWrite,
+        ),
+        (
+            "t3",
+            "Write",
+            json!({"file_path": "src/new.rs", "content": content}),
+            100,
+            WriteDiffState::NewFile,
+        ),
+        (
+            "t4",
+            "Bash",
+            json!({"command": "cargo test --lib"}),
+            2_000,
+            WriteDiffState::NotAWrite,
+        ),
+    ];
+    for (id, name, input, ms, diff) in calls {
+        feed(StreamChunk::ToolUse {
+            id: id.into(),
+            name: name.into(),
+            input,
+        });
+        feed(StreamChunk::TurnComplete {
+            stop_reason: StopReason::ToolUse,
+        });
+        clock.advance(Duration::from_millis(ms));
+        feed(StreamChunk::ToolResult {
+            id: id.into(),
+            content: "done".into(),
+            is_error: false,
+            operator_private: false,
+            diff,
+            images: Vec::new(),
+        });
+    }
+    feed(chunk_text("All four calls finished."));
+    feed(StreamChunk::TurnComplete {
+        stop_reason: StopReason::EndTurn,
+    });
+    let turn = state.committed_turn.take().expect("the turn committed");
+    let mut user = make_msg("u1", MessageRole::User);
+    user.content = "show the tool rows".to_owned();
+    let mut conversation = make_conversation(vec![user], vec![]);
+    conversation.id = TOOLS_ID.to_owned();
+    conversation.title = TOOLS_TITLE.to_owned();
+    conversation.turns.push(turn);
+    conversation.rebuild_messages_mirror();
+    conversation
+}
+
+#[test]
+#[ignore = "writes tests_tui/fixtures/sessions/story21_9_tool_lines.json"]
+fn story21_9_tools_session_fixture_generator() {
+    let persisted = PersistedConversation::from_conversation_with_exit(&tools_conversation(), true);
+    let json = serde_json::to_string_pretty(&persisted).unwrap();
+    std::fs::write(tools_fixture_path(), format!("{json}\n")).unwrap();
+}
+
+/// The committed tools fixture loads and its four calls carry the timestamps
+/// the smoke rows assert (0.3 s, 0.1 s, 0.1 s, 2.0 s).
+#[test]
+fn story21_9_committed_tools_fixture_loads_with_its_call_durations() {
+    let text = std::fs::read_to_string(tools_fixture_path()).expect("fixture committed");
+    let conversation = serde_json::from_str::<PersistedConversation>(&text)
+        .unwrap()
+        .to_conversation();
+    assert_eq!(conversation.id, TOOLS_ID);
+    let spans: Vec<_> = conversation.turns[0]
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            TurnPart::ToolInvocation {
+                tool,
+                started_at,
+                ended_at,
+                ..
+            } => Some((tool.as_str(), ended_at.unwrap() - started_at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        spans,
+        [
+            ("Read", 300),
+            ("Edit", 100),
+            ("Write", 100),
+            ("Bash", 2_000)
+        ]
+    );
+}
+
+/// Frames of the tool rows and the launchpad for the desk-check.
+#[test]
+#[ignore = "exports frames to $RUSTAIN_STAGE_POLISH_FRAMES for the smoke desk-check"]
+fn story21_9_smoke_frames_export_tools_and_launchpad() {
+    use rustain::adapters::tui::launchpad::LaunchpadEnv;
+    use rustain::domain::services::session_index::SessionIndex;
+    let dir = frames_dir().expect("RUSTAIN_STAGE_POLISH_FRAMES names the output directory");
+    std::fs::create_dir_all(&dir).unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir(workspace.path().join(".git")).unwrap();
+    std::fs::write(
+        workspace.path().join(".git/HEAD"),
+        format!("ref: refs/heads/{TOOLS_BRANCH}\n"),
+    )
+    .unwrap();
+    for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
+        let size = format!("{width}x{height}");
+        // The tool rows: the stored session, composer focus, scrolled to the top.
+        let conversation = tools_conversation();
+        let mut f = Fixture::new(width, height, conversation.turns[0].clone());
+        f.tabs.active_tab_mut().conversation = conversation;
+        f.load();
+        f.h.state.focus = rustain::domain::models::FocusState::Input;
+        // The live smoke unfolds with `zR` (a four-tool turn folds by default).
+        let turns = f.tabs.active_tab().conversation.turns.clone();
+        f.tabs.active_tab_mut().view_state.expand_all(&turns);
+        f.paint();
+        let top =
+            f.h.state
+                .total_content_height
+                .saturating_sub(usize::from(f.h.state.viewport_height));
+        f.tabs.active_tab_mut().view_state.scroll_offset = top;
+        f.h.state.set_scroll_offset(top);
+        f.paint();
+        save(&f, &dir, &size, "tools");
+        // The launchpad: a fresh conversation, the stored one listed under Recent.
+        let mut f = Fixture::new(width, height, tools_conversation().turns[0].clone());
+        {
+            let tab = f.tabs.active_tab_mut();
+            tab.conversation.turns.clear();
+            tab.conversation.messages.clear();
+            tab.conversation.id = "fresh".into();
+        }
+        f.load();
+        f.h.state.focus = rustain::domain::models::FocusState::Input;
+        f.h.state.terminal_width = width;
+        f.h.state.launchpad_env =
+            Some(LaunchpadEnv::new(workspace.path().to_path_buf(), |_| false));
+        let index = SessionIndex::build(vec![rustain::domain::models::ConversationSummary {
+            id: TOOLS_ID.into(),
+            title: TOOLS_TITLE.into(),
+            created_at: 1_699_999_000,
+            updated_at: 1_699_999_000,
+            message_count: 2,
+            has_fork_source: false,
+        }]);
+        f.h.conversation = f.tabs.active_tab().conversation.clone();
+        f.h.streaming = f.tabs.active_tab().streaming.clone();
+        f.refresh();
+        let count = f.tabs.tabs().len();
+        rustain::infrastructure::runtime::event_loop::render(
+            &mut f.h.terminal,
+            &mut f.h.state,
+            &f.h.conversation,
+            &f.h.streaming,
+            "claude-opus",
+            "anthropic",
+            &rustain::adapters::noop::NoOpSecurity,
+            count,
+            0,
+            Some(&mut f.tabs),
+            &index,
+            128_000,
+            &f.core,
+        )
+        .unwrap();
+        save(&f, &dir, &size, "launchpad");
+    }
+}

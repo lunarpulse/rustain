@@ -3286,6 +3286,9 @@ fn paint_attached(
         crate::adapters::tui::presentation::occlusion::OpaqueRects::new(transcript_area);
     tab_render_state.osc8_links =
         crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
+    if let Some(facts) = tab_render_state.launchpad.as_mut() {
+        facts.terminal_width = state.terminal_width;
+    }
     let mut result = chat_pane::render_attached(
         f,
         transcript_area,
@@ -3601,7 +3604,16 @@ pub async fn run_attached(
             "👁 Read-only. Another client is attached with write access. Detach the other to take over.",
         );
     }
-    let mut tab_render_state = TabRenderState::default();
+    let mut tab_render_state = TabRenderState {
+        workspace_root: Some(std::sync::Arc::from(workspace)),
+        launchpad: Some(
+            crate::infrastructure::runtime::launchpad_facts::attached_facts(
+                workspace,
+                state.terminal_width,
+            ),
+        ),
+        ..TabRenderState::default()
+    };
     // Story 19.16g — local, read-only journal access for the reminder and
     // `/team log`; nothing here creates a journal or sends a frame.
     let log_service = crate::infrastructure::transparency::TransparencyService::new(

@@ -177,7 +177,9 @@ pub use cron_config::{CronConfig, CronJob};
 pub use daemon_crash::{DaemonCrashRecord, LAST_N_CRASH_CAP};
 #[cfg(test)]
 pub use diff::display_diff;
-pub use diff::{DIFF_MAX_LINES, DiffKind, DiffLine, NotCapturedReason, WriteDiffState};
+pub use diff::{
+    DIFF_MAX_LINES, DiffKind, DiffLine, DiffStat, NotCapturedReason, WriteDiffState, diff_stat,
+};
 #[allow(unused_imports)]
 pub use execution_sandbox::{
     CapabilityGrant, ComponentRef, HostImport, PreopenGrant, ResourceCaps, SandboxInvocation,

@@ -4,7 +4,7 @@ expression: text
 ---
 │ Let me run the build.
 │
-│ ┄ ● Executing Bash "" → running... (0.0s) ┄
+│ ┄ ● Bash · 0.0s
 │ ⠸ Bash (4/4)
 │   line1_is_longer_than_eighty_characters_so_it_will_be_truncated_in_w80_but_not_here
 │   line2

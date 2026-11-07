@@ -85,6 +85,53 @@ pub fn palette_tip() -> String {
     format!("Tip: Type to filter, {} to select", Key::Enter.label())
 }
 
+/// The key texts of the launchpad (Story 21.9 D15), each read from a registry
+/// row that is available for this host and width. A missing field means the row
+/// is absent or unavailable here, so the launchpad does not name it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaunchpadKeys {
+    /// Leader Sign in (`^X i`).
+    pub sign_in: Option<String>,
+    /// Input mention popup (`@`; local only).
+    pub mention: Option<String>,
+    /// Input slash popup (`/`).
+    pub browse: Option<String>,
+    /// Input command palette.
+    pub palette: Option<String>,
+    /// Key-line items `<key> <label>`: Help, palette, Model, History, in that
+    /// order, only when available.
+    pub items: Vec<String>,
+}
+
+/// Generate the launchpad's keys for `host` under `avail`.
+pub fn launchpad_keys(host: Host, avail: &AvailCtx) -> LaunchpadKeys {
+    let available = |context: Context, command: CommandId| {
+        row(context, host, command).filter(|row| row.availability(avail).is_available())
+    };
+    let leader = |cmd: LeaderCmd| available(Context::Leader, cmd.into());
+    let input = |cmd: InputCmd| available(Context::Input, cmd.into());
+    let item = |row: Option<&'static Binding>| {
+        row.map(|row| format!("{} {}", row.compact_label(), row.label))
+    };
+    let palette = input(InputCmd::OpenPalette);
+    let items = [
+        item(leader(LeaderCmd::Help)),
+        item(palette),
+        item(leader(LeaderCmd::Model)),
+        item(leader(LeaderCmd::History)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    LaunchpadKeys {
+        sign_in: leader(LeaderCmd::SignIn).map(Binding::compact_label),
+        mention: input(InputCmd::OpenMentionPopup).map(Binding::compact_label),
+        browse: input(InputCmd::OpenSlashPopup).map(Binding::compact_label),
+        palette: palette.map(Binding::compact_label),
+        items,
+    }
+}
+
 /// The `hint()` rows of Chat as `key label` items. Consecutive letters of one
 /// case (`j`,`k` / `J`,`K`) share one item (`j/k scroll`).
 fn chat_items(host: Host, stage_target: bool) -> Vec<String> {

@@ -5,6 +5,7 @@ pub mod clock_util;
 pub mod composition;
 pub mod config;
 pub mod context;
+pub mod git_head;
 pub mod key_resolver;
 pub mod live_providers;
 pub mod logging;

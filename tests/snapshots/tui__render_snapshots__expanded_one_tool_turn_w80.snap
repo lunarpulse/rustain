@@ -4,5 +4,5 @@ expression: text
 ---
 │ Let me read the config file.
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
 │

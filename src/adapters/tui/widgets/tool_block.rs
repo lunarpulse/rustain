@@ -1,65 +1,17 @@
 //! ToolBlock widget — compact tool headers and inline errors on the Stage.
+//!
+//! The header row is the humanized line of [`super::tool_line`] (Story 21.9);
+//! this module keeps the error rows, the height rule and the display name.
+
+use std::path::Path;
 
 use ratatui::prelude::*;
 
+use super::tool_line;
 use crate::adapters::daemon::protocol::ToolInputWithheld;
-use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::domain::clock::Clock;
 use crate::domain::models::ToolCallInfo;
-
-/// Map a status chip string to its theme color.
-fn chip_color(chip: &str, theme: &Theme) -> ratatui::style::Color {
-    match chip {
-        "⋯ Validating" => theme.colors.tool_status_validating,
-        "⧖ Scheduled" => theme.colors.tool_status_scheduled,
-        "? Awaiting approval" => theme.colors.tool_status_awaiting,
-        "● Executing" => theme.colors.tool_status_executing,
-        "✓ Success" => theme.colors.tool_status_success,
-        "✗ Error" => theme.colors.tool_status_error,
-        "⊘ Cancelled" => theme.colors.tool_status_cancelled,
-        _ => theme.colors.fg_muted,
-    }
-}
-
-/// Extract a short summary from tool input for display.
-fn tool_summary(name: &str, input: &serde_json::Value) -> String {
-    match name {
-        "Bash" | "bash" => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            // Display summary only: a 60-cell budget with the `...` marker
-            // inside it. The raw command stays untouched in `tc.input`.
-            .map(|s| geom::ellipsize(s, 60, "...").into_owned())
-            .unwrap_or_default(),
-        "Read" | "read" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        "Write" | "write" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        _ => format!("{}", input),
-    }
-}
-
-/// Compute elapsed time string.
-fn elapsed_str(tc: &ToolCallInfo, clock: &dyn Clock) -> String {
-    let start = tc.started_at_ms.unwrap_or(0);
-    if start == 0 {
-        return String::new();
-    }
-
-    let end = tc
-        .completed_at_ms
-        .unwrap_or_else(|| clock.wall_now_ms().max(0) as u64);
-
-    let elapsed_secs = (end.saturating_sub(start)) as f64 / 1000.0;
-    format!("{:.1}s", elapsed_secs)
-}
 
 /// Project a tool name for display at the render boundary.
 ///
@@ -101,59 +53,35 @@ pub fn render_tool_block_lines<'a>(
     width: u16,
     clock: &dyn Clock,
 ) -> Vec<Line<'a>> {
-    render_tool_block_lines_attached(tc, theme, width, clock, None)
+    render_tool_block_lines_attached(tc, theme, width, clock, None, None)
 }
 
 /// Render attached tool input using the host's typed withholding reason.
 /// Standalone callers continue through `render_tool_block_lines` unchanged.
+///
+/// `width` is the cells the row may use; `workspace_root` makes workspace
+/// paths display relative (Story 21.9 D14).
 pub fn render_tool_block_lines_attached<'a>(
     tc: &ToolCallInfo,
     theme: &'a Theme,
-    _width: u16,
+    width: u16,
     clock: &dyn Clock,
     withheld: Option<&ToolInputWithheld>,
+    workspace_root: Option<&Path>,
 ) -> Vec<Line<'a>> {
-    let summary = withheld.map_or_else(|| tool_summary(&tc.name, &tc.input), |w| w.notice());
-    let elapsed = elapsed_str(tc, clock);
-
-    match &tc.result {
-        None => {
-            // Executing state
-            let mut spans = vec![Span::styled(
-                "┄ ",
-                Style::default().fg(theme.colors.tool_border_collapsed),
-            )];
-            if let Some(ref chip) = tc.status {
-                spans.push(Span::styled(
-                    format!("{} ", chip),
-                    Style::default().fg(chip_color(chip, theme)),
-                ));
-            }
-            spans.extend(vec![
-                Span::styled(
-                    display_tool_name(&tc.name).into_owned(),
-                    Style::default()
-                        .fg(theme.colors.tool_name)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" \"{}\"", summary),
-                    Style::default().fg(theme.colors.fg_secondary),
-                ),
-                Span::styled(
-                    format!(" → running... ({})", elapsed),
-                    Style::default().fg(theme.colors.fg_muted),
-                ),
-                Span::styled(
-                    " ┄",
-                    Style::default().fg(theme.colors.tool_border_collapsed),
-                ),
-            ]);
-            vec![Line::from(spans)]
-        }
-        Some(result) if result.is_error => {
-            // Error state
-            let mut header = vec![
+    let mut lines = vec![tool_line::header_line(
+        tc,
+        theme,
+        usize::from(width),
+        clock,
+        withheld,
+        workspace_root,
+    )];
+    if let Some(result) = &tc.result
+        && result.is_error
+    {
+        for err_line in result.content.lines() {
+            lines.push(Line::from(vec![
                 Span::styled(
                     "┃ ",
                     Style::default()
@@ -161,93 +89,13 @@ pub fn render_tool_block_lines_attached<'a>(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "✗ ",
-                    Style::default()
-                        .fg(theme.colors.error)
-                        .add_modifier(Modifier::BOLD),
+                    err_line.to_string(),
+                    Style::default().fg(theme.colors.error),
                 ),
-            ];
-            if let Some(ref chip) = tc.status {
-                header.push(Span::styled(
-                    format!("{} ", chip),
-                    Style::default().fg(chip_color(chip, theme)),
-                ));
-            }
-            header.extend(vec![
-                Span::styled(
-                    display_tool_name(&tc.name).into_owned(),
-                    Style::default()
-                        .fg(theme.colors.tool_name)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" \"{}\"", summary),
-                    Style::default().fg(theme.colors.fg_secondary),
-                ),
-                Span::styled(
-                    format!(" ({}) ┃", elapsed),
-                    Style::default().fg(theme.colors.fg_muted),
-                ),
-            ]);
-            let mut lines = vec![Line::from(header)];
-            // Error message lines
-            for err_line in result.content.lines() {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "┃ ",
-                        Style::default()
-                            .fg(theme.colors.error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        err_line.to_string(),
-                        Style::default().fg(theme.colors.error),
-                    ),
-                ]));
-            }
-            lines
-        }
-        Some(_) => {
-            let mut spans = vec![Span::styled(
-                "┄ ",
-                Style::default().fg(theme.colors.tool_border_collapsed),
-            )];
-            if let Some(ref chip) = tc.status {
-                spans.push(Span::styled(
-                    format!("{} ", chip),
-                    Style::default().fg(chip_color(chip, theme)),
-                ));
-            }
-            spans.extend(vec![
-                Span::styled(
-                    display_tool_name(&tc.name).into_owned(),
-                    Style::default()
-                        .fg(theme.colors.tool_name)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" \"{}\"", summary),
-                    Style::default().fg(theme.colors.fg_secondary),
-                ),
-                Span::styled(" → ", Style::default().fg(theme.colors.fg_muted)),
-                Span::styled(
-                    "✓",
-                    Style::default()
-                        .fg(theme.colors.success)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" ({})", elapsed),
-                    Style::default().fg(theme.colors.fg_muted),
-                ),
-                Span::styled(
-                    " ┄",
-                    Style::default().fg(theme.colors.tool_border_collapsed),
-                ),
-            ]);
-            vec![Line::from(spans)]
+            ]));
         }
     }
+    lines
 }
 
 #[cfg(test)]
@@ -299,8 +147,14 @@ mod tests {
             ] {
                 let mut tc = make_tool_call("Bash", result);
                 tc.input = serde_json::json!({"command": "secret-command"});
-                let lines =
-                    render_tool_block_lines_attached(&tc, &theme, 120, &clock, Some(&withheld));
+                let lines = render_tool_block_lines_attached(
+                    &tc,
+                    &theme,
+                    120,
+                    &clock,
+                    Some(&withheld),
+                    None,
+                );
                 let text = lines
                     .iter()
                     .map(Line::to_string)
@@ -309,7 +163,8 @@ mod tests {
                 assert!(text.contains(&withheld.notice()), "{text}");
                 assert!(!text.contains("secret-command"), "{text}");
                 assert_eq!(lines.len(), tool_block_height(&tc),);
-                let trusted = render_tool_block_lines_attached(&tc, &theme, 120, &clock, None);
+                let trusted =
+                    render_tool_block_lines_attached(&tc, &theme, 120, &clock, None, None);
                 assert!(
                     trusted
                         .iter()
@@ -338,7 +193,8 @@ mod tests {
         let theme = Theme::dark();
         let clock = test_clock();
         let withheld = ToolInputWithheld::PeerTier;
-        let lines = render_tool_block_lines_attached(&tc, &theme, 120, &clock, Some(&withheld));
+        let lines =
+            render_tool_block_lines_attached(&tc, &theme, 120, &clock, Some(&withheld), None);
         let text = lines
             .iter()
             .map(Line::to_string)
@@ -350,16 +206,16 @@ mod tests {
         assert!(!text.contains("secret-new"));
         assert_eq!(lines.len(), tool_block_height(&tc));
         let trusted = render_tool_block_lines(&tc, &theme, 120, &clock);
-        assert!(
-            trusted
-                .iter()
-                .any(|line| line.to_string().contains("secret-old"))
-        );
-        assert!(
-            trusted
-                .iter()
-                .any(|line| line.to_string().contains("secret-new"))
-        );
+        // The humanized line shows the exact change count, never the argument
+        // text itself (Story 21.9 D12: raw JSON is gone for every tool).
+        let trusted = trusted
+            .iter()
+            .map(Line::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(trusted.contains("+1 \u{2212}1"), "{trusted}");
+        assert!(!trusted.contains("secret-old"), "{trusted}");
+        assert!(!trusted.contains("secret-new"), "{trusted}");
     }
 
     #[test]
@@ -380,7 +236,8 @@ mod tests {
         let theme = Theme::dark();
         let clock = test_clock();
         let withheld = ToolInputWithheld::PeerTier;
-        let lines = render_tool_block_lines_attached(&tc, &theme, 120, &clock, Some(&withheld));
+        let lines =
+            render_tool_block_lines_attached(&tc, &theme, 120, &clock, Some(&withheld), None);
         let text = lines
             .iter()
             .map(Line::to_string)
@@ -464,7 +321,8 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let line_str: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(line_str.contains("Bash"));
-        assert!(line_str.contains("running..."));
+        assert!(line_str.contains("ls -la"));
+        assert!(!line_str.contains("running..."));
     }
 
     #[test]
@@ -526,17 +384,23 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_summary_bash() {
-        let summary = tool_summary("Bash", &serde_json::json!({"command": "ls -la"}));
-        assert_eq!(summary, "ls -la");
+    fn test_bash_row_shows_the_command() {
+        let tc = make_tool_call("Bash", None);
+        let line = render_tool_block_lines(&tc, &Theme::dark(), 80, &test_clock())
+            .remove(0)
+            .to_string();
+        assert!(line.starts_with("┄ Bash ls -la"), "{line}");
     }
 
     #[test]
-    fn test_tool_summary_truncation() {
-        let long_cmd = "a".repeat(100);
-        let summary = tool_summary("Bash", &serde_json::json!({"command": long_cmd}));
-        assert!(summary.len() <= 63);
-        assert!(summary.ends_with("..."));
+    fn test_bash_row_ellipsizes_a_long_command_inside_the_width() {
+        let mut tc = make_tool_call("Bash", None);
+        tc.input = serde_json::json!({"command": "a".repeat(100)});
+        let line = render_tool_block_lines(&tc, &Theme::dark(), 40, &test_clock())
+            .remove(0)
+            .to_string();
+        assert!(line.chars().count() <= 40, "{line}");
+        assert!(line.contains('…'), "{line}");
     }
 
     fn make_write_edit_call(

@@ -38,6 +38,24 @@ pub fn sanitize_tool_text_block(input: &str) -> Cow<'_, str> {
     sanitize_peer_text(input, true, false, true)
 }
 
+/// One safe display line of untrusted text (Story 21.9 D12/D17): terminal
+/// controls and bidi overrides are removed as in [`sanitize_tool_text_block`],
+/// then every whitespace run (newlines and tabs included) becomes one space
+/// and the ends are trimmed. Used for tool-line targets, git branch names and
+/// session titles, so no layer re-implements the rule.
+#[must_use]
+pub fn sanitize_display_line(input: &str) -> String {
+    let safe = sanitize_tool_text_block(input);
+    let mut out = String::with_capacity(safe.len());
+    for word in safe.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    out
+}
+
 fn sanitize_peer_text(
     input: &str,
     preserve_newlines: bool,

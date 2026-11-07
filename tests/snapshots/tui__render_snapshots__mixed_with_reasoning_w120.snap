@@ -8,5 +8,5 @@ expression: text
 │ ◇ Thinking · ~21 tokens
 │ The design uses a hexagonal architecture pattern which separates domain from adapters.
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
 │

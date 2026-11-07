@@ -570,24 +570,51 @@ fn paint_block(tc: &ToolCallInfo, width: u16) -> Painted {
 }
 
 #[test]
-fn k5b_tool_block_bash_summary_is_a_60_cell_display_excerpt() {
+fn k5b_tool_block_bash_target_is_a_grapheme_safe_display_excerpt() {
+    // Story 21.9 D14: the 60-cell `...` summary became a fit. At 40 cells the
+    // elapsed piece drops first, then the command keeps its head inside the
+    // 31 cells the lead, glyph, verb and spaces leave; the cut is whole
+    // graphemes with a one-cell `…`.
+    const WIDTH: u16 = 40;
+    const BUDGET: usize = 31;
     let a = |n: usize| "a".repeat(n);
     let cases: Vec<(String, String)> = vec![
-        (a(60), a(60)),
-        (a(61), format!("{}...", a(57))),
-        (C.repeat(30), C.repeat(30)),
-        (C.repeat(60), format!("{}...", C.repeat(28))),
-        (format!("{}{G}tail", a(56)), format!("{}...", a(56))),
-        (format!("{}{A}zzzz", a(56)), format!("{}{A}...", a(56))),
+        (a(20), a(20)),
+        (a(BUDGET), a(BUDGET)),
+        (a(BUDGET + 1), format!("{}…", a(BUDGET - 1))),
+        (C.repeat(15), C.repeat(15)),
+        (C.repeat(16), format!("{}…", C.repeat(15))),
     ];
     for (command, want) in cases {
-        let p = paint_block(&bash_call("Bash", &command), 130);
+        let p = paint_block(&bash_call("Bash", &command), WIDTH);
         let row = row_text(&p.buffer, 0);
-        let summary = row
-            .split_once("Bash \"")
-            .and_then(|(_, after)| after.split_once("\" →"))
-            .map(|(s, _)| s);
-        assert_eq!(summary, Some(want.as_str()), "row {row:?}");
+        let target = row
+            .strip_prefix("┄ ✓ Bash ")
+            .unwrap_or_else(|| panic!("row {row:?}"));
+        let target = target.strip_suffix(" · 2.3s").unwrap_or(target);
+        assert_eq!(target, want, "row {row:?}");
+        assert_whole_clusters(&p.buffer);
+    }
+    // Clusters (ZWJ family, combining accent) are never cut: the excerpt is a
+    // prefix of the command up to the `…`, whatever the cell widths are.
+    for command in [
+        format!("{}{G}tail", a(28)),
+        format!("{}{G}{G}{G}tail", a(26)),
+        format!("{}{A}zzzz", a(29)),
+        format!("{}{A}{A}{A}{A}zzzz", a(28)),
+    ] {
+        let p = paint_block(&bash_call("Bash", &command), WIDTH);
+        let row = row_text(&p.buffer, 0);
+        let target = row
+            .strip_prefix("┄ ✓ Bash ")
+            .unwrap_or_else(|| panic!("row {row:?}"));
+        let target = target.strip_suffix(" · 2.3s").unwrap_or(target);
+        let kept = target.strip_suffix('…').unwrap_or(target);
+        assert!(command.starts_with(kept), "{kept:?} of {command:?}");
+        assert!(
+            unicode_width::UnicodeWidthStr::width(target) <= BUDGET,
+            "{target:?}"
+        );
         assert_whole_clusters(&p.buffer);
     }
 }
@@ -614,7 +641,7 @@ fn k5b_tool_block_compact_header_keeps_display_names_and_source_input() {
             assert_eq!(row_cells(&p.buffer, 0), width as usize, "{name}@{width}");
             let header = row_text(&p.buffer, 0);
             assert!(
-                header.starts_with(&format!("┄ {display} ")),
+                header.starts_with(&format!("┄ ✓ {display} ")),
                 "{name}@{width}: {header:?}"
             );
             assert_eq!(call.input["command"].as_str(), Some(raw.as_str()));

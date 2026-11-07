@@ -4,11 +4,11 @@ expression: text
 ---
 │ Let me check the codebase.
 │
-│ ┄ ✓ Success Read "" → running... (5.0s) ┄
+│ ┄ ✓ Read · 5.0s
 │
 │ Now let me run the tests.
 │
-│ ┄ ✓ Success Bash "" → running... (5.0s) ┄
+│ ┄ ✓ Bash · 5.0s
 │
 │ Done - all green.
 │

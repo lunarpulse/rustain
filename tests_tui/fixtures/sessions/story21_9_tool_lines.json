@@ -1,0 +1,277 @@
+{
+  "id": "story21-9-tool-lines",
+  "title": "Tool lines smoke",
+  "messages": [
+    {
+      "id": "u1",
+      "role": "user",
+      "content": "show the tool rows",
+      "contentBlocks": [],
+      "toolCalls": [],
+      "createdAt": 1700000,
+      "tokenCount": null
+    },
+    {
+      "id": "CElU0Pj0H9n1S94l_J757",
+      "role": "assistant",
+      "content": "All four calls finished.",
+      "contentBlocks": [
+        {
+          "responseSpan": {
+            "toolCalls": 1
+          }
+        },
+        {
+          "responseSpan": {
+            "toolCalls": 1
+          }
+        },
+        {
+          "responseSpan": {
+            "toolCalls": 1
+          }
+        },
+        {
+          "responseSpan": {
+            "toolCalls": 1
+          }
+        },
+        {
+          "responseSpan": {
+            "text": "All four calls finished."
+          }
+        }
+      ],
+      "toolCalls": [
+        {
+          "id": "tc_CElU0Pj0H9n1S94l_J757_0",
+          "name": "Read",
+          "input": {
+            "file_path": "src/x.rs",
+            "limit": 80,
+            "offset": 0
+          },
+          "result": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          },
+          "startedAtMs": 1700000000000,
+          "completedAtMs": 1700000000300,
+          "status": "✓ Success",
+          "providerId": "t1"
+        },
+        {
+          "id": "tc_CElU0Pj0H9n1S94l_J757_2",
+          "name": "Edit",
+          "input": {
+            "file_path": "src/parser.rs",
+            "new_string": "new 1\nnew 2\nnew 3\nnew 4\nnew 5\nnew 6\nnew 7\nnew 8\nnew 9\nnew 10\nnew 11\nnew 12\n",
+            "old_string": "old 1\nold 2\nold 3\n"
+          },
+          "result": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          },
+          "startedAtMs": 1700000000300,
+          "completedAtMs": 1700000000400,
+          "status": "✓ Success",
+          "providerId": "t2"
+        },
+        {
+          "id": "tc_CElU0Pj0H9n1S94l_J757_4",
+          "name": "Write",
+          "input": {
+            "content": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\n",
+            "file_path": "src/new.rs"
+          },
+          "result": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "new_file"
+            }
+          },
+          "startedAtMs": 1700000000400,
+          "completedAtMs": 1700000000500,
+          "status": "✓ Success",
+          "providerId": "t3"
+        },
+        {
+          "id": "tc_CElU0Pj0H9n1S94l_J757_6",
+          "name": "Bash",
+          "input": {
+            "command": "cargo test --lib"
+          },
+          "result": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          },
+          "startedAtMs": 1700000000500,
+          "completedAtMs": 1700000002500,
+          "status": "✓ Success",
+          "providerId": "t4"
+        }
+      ],
+      "createdAt": 1700000000,
+      "tokenCount": null,
+      "stopReason": "endTurn"
+    }
+  ],
+  "turns": [
+    {
+      "id": "CElU0Pj0H9n1S94l_J757",
+      "parts": [
+        {
+          "kind": "toolInvocation",
+          "id": 0,
+          "tool": "Read",
+          "args": {
+            "file_path": "src/x.rs",
+            "limit": 80,
+            "offset": 0
+          },
+          "status": "success",
+          "started_at": 1700000000000,
+          "ended_at": 1700000000300
+        },
+        {
+          "kind": "toolResult",
+          "id": 1,
+          "refs": 0,
+          "output": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          }
+        },
+        {
+          "kind": "toolInvocation",
+          "id": 2,
+          "tool": "Edit",
+          "args": {
+            "file_path": "src/parser.rs",
+            "new_string": "new 1\nnew 2\nnew 3\nnew 4\nnew 5\nnew 6\nnew 7\nnew 8\nnew 9\nnew 10\nnew 11\nnew 12\n",
+            "old_string": "old 1\nold 2\nold 3\n"
+          },
+          "status": "success",
+          "started_at": 1700000000300,
+          "ended_at": 1700000000400
+        },
+        {
+          "kind": "toolResult",
+          "id": 3,
+          "refs": 2,
+          "output": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          }
+        },
+        {
+          "kind": "toolInvocation",
+          "id": 4,
+          "tool": "Write",
+          "args": {
+            "content": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\n",
+            "file_path": "src/new.rs"
+          },
+          "status": "success",
+          "started_at": 1700000000400,
+          "ended_at": 1700000000500
+        },
+        {
+          "kind": "toolResult",
+          "id": 5,
+          "refs": 4,
+          "output": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "new_file"
+            }
+          }
+        },
+        {
+          "kind": "toolInvocation",
+          "id": 6,
+          "tool": "Bash",
+          "args": {
+            "command": "cargo test --lib"
+          },
+          "status": "success",
+          "started_at": 1700000000500,
+          "ended_at": 1700000002500
+        },
+        {
+          "kind": "toolResult",
+          "id": 7,
+          "refs": 6,
+          "output": {
+            "content": "done",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          }
+        },
+        {
+          "kind": "prose",
+          "id": 8,
+          "text": "All four calls finished."
+        }
+      ],
+      "startedAt": 1700000000000,
+      "model": "",
+      "stopReason": "endTurn",
+      "responses": [
+        {
+          "end": 1,
+          "callIds": [
+            "t1"
+          ]
+        },
+        {
+          "end": 3,
+          "callIds": [
+            "t2"
+          ]
+        },
+        {
+          "end": 5,
+          "callIds": [
+            "t3"
+          ]
+        },
+        {
+          "end": 7,
+          "callIds": [
+            "t4"
+          ]
+        },
+        {
+          "end": 9
+        }
+      ]
+    }
+  ],
+  "createdAt": 1700000,
+  "sessionId": "test-session",
+  "forkSource": null,
+  "updatedAt": 1700000,
+  "lastResponseAt": 1700000,
+  "usage": null,
+  "cleanExit": true
+}

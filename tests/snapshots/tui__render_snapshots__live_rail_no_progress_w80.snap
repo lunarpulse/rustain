@@ -4,6 +4,6 @@ expression: text
 ---
 │ Let me run the build.
 │
-│ ┄ ● Executing Bash "" → running... (0.0s) ┄
+│ ┄ ● Bash · 0.0s
 │ ⠸ Bash
 │

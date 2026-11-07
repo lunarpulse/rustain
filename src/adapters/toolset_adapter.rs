@@ -27,6 +27,10 @@ use crate::domain::models::{SandboxPolicy, ToolDefinition, ToolProgressConfig, T
 use crate::domain::ports::{StoragePort, ToolSetPort};
 use crate::domain::services::plan_manager::PlanManager;
 
+/// Lines `Read` returns when the model gives no `limit`; the Stage's `Read`
+/// range display (Story 21.9 D12) uses the same value, so there is one owner.
+pub const READ_DEFAULT_LIMIT: usize = 2000;
+
 /// Active checkpoint context for file snapshotting within a turn.
 #[derive(Clone)]
 struct ToolExecutionContext {
@@ -486,7 +490,10 @@ impl ToolSetAdapter {
             .ok_or_else(|| ToolError::ExecutionFailed("Missing 'file_path' parameter".into()))?;
 
         let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(2000) as usize;
+        let limit = input
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(READ_DEFAULT_LIMIT as u64) as usize;
 
         let path = if std::path::Path::new(file_path).is_absolute() {
             PathBuf::from(file_path)
@@ -1034,7 +1041,7 @@ impl ToolSetPort for ToolSetAdapter {
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Maximum number of lines to read (default 2000)"
+                            "description": format!("Maximum number of lines to read (default {READ_DEFAULT_LIMIT})")
                         }
                     },
                     "required": ["file_path"]

@@ -596,6 +596,14 @@ pub struct TabRenderState {
     /// tests) hides nothing; the local host writes it only through
     /// `set_reasoning`, which drops every cached height on a change.
     pub reasoning: crate::domain::models::ReasoningDisplay,
+    /// Story 21.9 (D14): the workspace root tool lines display paths relative
+    /// to. Set once per tab by each host (a refresh, never per draw); `None`
+    /// shows paths as the model gave them.
+    pub workspace_root: Option<Arc<std::path::Path>>,
+    /// Story 21.9 (D17): what the empty conversation's launchpad shows, built
+    /// by `launchpad_facts::refresh` and replaced only when its key changes.
+    /// `None` paints the receipt-bound rows only.
+    pub launchpad: Option<crate::adapters::tui::launchpad::LaunchpadFacts>,
 }
 
 impl TabRenderState {
@@ -2814,6 +2822,9 @@ pub struct TuiState {
     /// Story 21.9 (D9): `[markdown] reasoning` — how the local Stage shows
     /// committed reasoning (default folded).
     pub reasoning_display: crate::domain::models::ReasoningDisplay,
+    /// Story 21.9 (D17): the workspace and live provider-lock query the local
+    /// launchpad refresh reads. `None` (tests, previews) skips the refresh.
+    pub launchpad_env: Option<crate::adapters::tui::launchpad::LaunchpadEnv>,
     /// Epic-10 hook: auto-trigger logic (e.g., InteractionState::Executing → Monitor)
     /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
     /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
@@ -3284,6 +3295,7 @@ impl TuiState {
             density_mode: Default::default(),
             code_max_rows: 30,
             reasoning_display: crate::domain::models::ReasoningDisplay::Folded,
+            launchpad_env: None,
             session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
             shadows_announced: std::collections::BTreeSet::new(),

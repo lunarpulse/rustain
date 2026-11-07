@@ -229,7 +229,7 @@ def _spawn_case(name, binary, evidence, root, original_spawn, monkeypatch, expec
         assert CANARY not in screen
         tui.send("\x1b")
         screen = _wait(tui, lambda s: "Login cancelled" in s
-                       and "Sign in to Anthropic" not in s and "Local shortcut" not in s,
+                       and "┌ Sign in to Anthropic" not in s and "Local shortcut" not in s,
                        "Login cancelled with the modal removed")
         _capture(tui, evidence, f"{name}-cancelled", screen)
         with socket.socket() as probe:

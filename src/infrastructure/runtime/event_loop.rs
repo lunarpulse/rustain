@@ -52,6 +52,7 @@ use crate::adapters::tui::widgets::{
 };
 use crate::adapters::tui::{accounts_runtime, login_runtime, login_ui::TuiLoginUi};
 use crate::domain::services::session_index::SessionIndex;
+use crate::infrastructure::runtime::launchpad_facts;
 use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
 #[cfg(feature = "a2a")]
 use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
@@ -464,6 +465,7 @@ pub async fn run(
     // Story 8.4b AC-9: seed initial density mode from config
     state.density_mode = config.layout.density_mode;
     crate::adapters::tui::handlers::config::apply_markdown_config(&mut state, &config.markdown);
+    launchpad_facts::install(&mut state, &workspace_path, &app_state.provider_registry);
 
     // P-23: Initialize active_profile snapshot from resolved profile
     {
@@ -7683,6 +7685,14 @@ pub fn render(
         conversation,
         tab_manager_for_bar.map(|tabs| &tabs.active_tab().reducer),
         tab_count,
+    );
+    launchpad_facts::refresh(
+        state,
+        conversation,
+        config_model,
+        provider_id,
+        session_index,
+        inspector_clock,
     );
     notifications::begin_draw(state);
     let log_facts = notice_actions::log_facts(

@@ -198,7 +198,7 @@ def _stage(screen, hidden, draft="", tool=None, *, marked=None, cue=False, profi
     if any("Tool · " in line or line.lstrip().startswith("┌─") for line in stage):
         return None
     headers = [match for line in stage
-               if (match := re.match(r'^(?:▶ )?│ (┄ |┃ |▸ )(?:✓ Success )?(Bash|Edit|Write) "', line))]
+               if (match := re.match(r'^(?:▶ )?│ (┄ |┃ |▸ )(?:[●✓✗⊘] )?(Bash|Edit|Write) ', line))]
     if tool is not None and (not headers or headers[0].group(2) != tool):
         return None
     markers = [match for match in headers if match.group(1) == "▸ "]

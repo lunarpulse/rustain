@@ -91,6 +91,15 @@ impl ProviderRegistry {
             .collect()
     }
 
+    /// Whether `id` is a locked (sign-in needed) provider: a read lock and one
+    /// map lookup, cheap enough for a per-frame key check (Story 21.9 D17).
+    pub fn is_locked(&self, id: &str) -> bool {
+        self.locked
+            .read()
+            .expect("ProviderRegistry lock poisoned")
+            .contains_key(id)
+    }
+
     /// Removes an available provider with its health, discovery status and
     /// sign-in hint (a provider whose last credential went away).
     pub fn unregister(&self, id: &str) {
@@ -327,5 +336,31 @@ impl ProviderRegistry {
 impl Default for ProviderRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod story21_9_tests {
+    use super::*;
+    use crate::domain::models::provider::LockedProvider;
+
+    fn locked(id: &str) -> LockedProvider {
+        LockedProvider {
+            provider_id: id.to_owned(),
+            display_name: id.to_owned(),
+            sign_in_hint: String::new(),
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn story21_9_is_locked_follows_register_locked_and_unlock() {
+        let registry = ProviderRegistry::new();
+        assert!(!registry.is_locked("openai"));
+        registry.register_locked(locked("openai"));
+        assert!(registry.is_locked("openai"));
+        assert!(!registry.is_locked("anthropic"), "only the named provider");
+        registry.unlock("openai");
+        assert!(!registry.is_locked("openai"));
     }
 }

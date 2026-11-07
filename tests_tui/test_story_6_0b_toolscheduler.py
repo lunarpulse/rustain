@@ -1,7 +1,7 @@
 """Story 6-0b: ToolScheduler with ToolCall 7-Variant FSM — TUI E2E tests.
 
 These tests verify the TUI-visible aspects of the ToolScheduler:
-- Status chips (✓ Success, ✗ Error) render inline in tool blocks
+- Status glyphs (✓ Read, ✗ Read: Story 21.9 humanized rows) render inline in tool blocks
 - Multiple tools complete successfully in a single turn (batch scheduling)
 - Tool execution lifecycle remains stable under normal and error conditions
 
@@ -37,7 +37,7 @@ class TestToolStatusChips:
     """TUI renders status chips inline with tool blocks (AC1-AC7)."""
 
     def test_read_tool_shows_success_chip(self, tui: RustainTUI):
-        """A successful Read tool displays the '✓ Success' chip.
+        """A successful Read tool displays the '✓ Read' row.
 
         Verifies that the scheduler's terminal Success state is bridged
         through the EventBus to the TUI and rendered as a status chip.
@@ -51,15 +51,15 @@ class TestToolStatusChips:
         if "Stream disconnected" in screen or "interrupted" in screen:
             pytest.skip("API stream disconnected — Read tool not exercised")
 
-        # The tool block should show the success status chip
-        tui.assert_screen_contains("✓ Success")
+        # The tool row should show the success glyph (Story 21.9: no status words)
+        tui.assert_screen_contains("✓ Read")
         # The tool name should also be visible
         tui.assert_screen_contains("Read")
         # The file content should also be visible
         tui.assert_screen_contains("hello from 6-0b")
 
     def test_read_missing_file_shows_error_chip(self, tui: RustainTUI):
-        """A failed Read tool (missing file) displays the '✗ Error' chip.
+        """A failed Read tool (missing file) displays the '✗ Read' row.
 
         Verifies that the scheduler's terminal Error state is bridged
         through the EventBus to the TUI and rendered as a status chip.
@@ -69,8 +69,8 @@ class TestToolStatusChips:
         )
         tui.wait_for_idle()
 
-        # The tool block should show the error status chip
-        tui.assert_screen_contains("✗ Error")
+        # The tool row should show the error glyph
+        tui.assert_screen_contains("✗ Read")
         # The tool name should also be visible
         tui.assert_screen_contains("Read")
 
@@ -112,8 +112,8 @@ class TestToolBatchScheduling:
             "Second file content not found on screen"
         )
 
-        # Both tools should show success chips
-        tui.assert_screen_contains("✓ Success")
+        # Both tools should show the success glyph
+        tui.assert_screen_contains("✓ Read")
 
     def test_mixed_success_and_error_tools(self, tui: RustainTUI):
         """One successful Read and one failed Read in the same turn.
@@ -131,10 +131,10 @@ class TestToolBatchScheduling:
         # Successful result visible
         tui.assert_screen_contains("ok content")
 
-        # Both chips should be visible on screen
+        # Both glyphs should be visible on screen
         screen = tui.get_screen_text()
-        assert "✓ Success" in screen, "Success chip not rendered"
-        assert "✗ Error" in screen, "Error chip not rendered"
+        assert "✓ Read" in screen, "Success glyph not rendered"
+        assert "✗ Read" in screen, "Error glyph not rendered"
 
 
 @pytest.mark.requires_api
@@ -165,7 +165,7 @@ class TestToolExecutionStability:
                 "API stream disconnected — tool error chip not rendered; "
                 "core invariant (Ready state) verified"
             )
-        tui.assert_screen_contains("✗ Error")
+        tui.assert_screen_contains("✗ Read")
 
     def test_subsequent_turn_after_tool_success(self, tui: RustainTUI):
         """After a tool succeeds, the next user message is processed normally.

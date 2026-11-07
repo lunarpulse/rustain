@@ -18,6 +18,29 @@ host-row reference is not saved and the card is not reconstructed on reload.
 Existing unmarked session rows, including older interrupted replies and ACP
 notices, retain their prior migration and persistence behavior.
 
+## The launchpad and the Stage tool rows
+
+An empty conversation shows the launchpad instead of a blank pane: the
+workspace and its git branch (read from `.git/HEAD`, no `git` process), the
+active model, provider and sign-in state, three things to try, up to three
+recent sessions of this workspace (newest first, with their age) and the keys
+that work in this host at this width. The recent sessions are informational;
+open one from the History panel (`Ctrl+X h`), which needs a terminal at least
+120 columns wide; the key line names it only where it is available. The attached
+client shows the workspace, its branch and the daemon it is attached to. The
+launchpad facts (git branch, sign-in state) are recomputed only when the
+conversation, model, provider or its lock state changes; the recent-session
+list is refreshed from memory on every draw of an empty conversation.
+
+Every tool call on the Stage is one row that reads like a sentence:
+`✓ Read src/x.rs:1-80 · 0.3s`, `✓ Edit src/parser.rs +12 −3 · 0.1s`,
+`✓ Write src/new.rs +40 · 0.1s`, `✓ Bash cargo test --lib · 2.0s`. The glyph is
+the status (`●` running, `✓` done, `✗` failed, `⊘` cancelled, `⋯` validating,
+`⧖` scheduled, `?` awaiting approval). Paths under the workspace show relative.
+Change counts are exact or absent: a Write whose diff was capped or never
+captured shows its line total (`40 lines`), never a partial count. Raw argument
+JSON is never shown, and terminal controls in arguments never reach the screen.
+
 ## ACP display-only diagnostics
 
 ACP warnings and errors are saved as display-only notices, separate from provider

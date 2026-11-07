@@ -327,6 +327,16 @@ const RULES: &[(&str, &str)] = &[
         "tool-inspector-legacy",
         r"\b(?:ToolBlockState|tool_block_states|tool_block_states_version|peek_active|render_peek_overlay|PeekToolBlock|ToggleToolBlock|expanded_body_height|expanded_diff_body|TOGGLE_TOOL_BLOCK)\b",
     ),
+    // Story 21.9 D19: the old tool-line shape (quoted summary, `→ running...`,
+    // `→ ✓`, closing ` ┄`) and the two-line welcome widget are gone.
+    ("tool-line-quoted-summary", r###"" \\"\{\}\\"""###),
+    ("tool-line-arrow-running", r###"→ running"###),
+    ("tool-line-arrow-done", r###"" +→ +""###),
+    ("tool-line-closing-border", r###"" ┄""###),
+    (
+        "welcome-widget",
+        r"\bempty_state\s*::|\bpub\s+mod\s+empty_state\b|\bwidgets\s*::\s*empty_state\b",
+    ),
     (
         "field-string",
         r"\b(?:query|filter_text)\s*:\s*(?:std\s*::\s*string\s*::\s*)?String\b",
@@ -455,7 +465,10 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
             {
                 continue;
             }
-            let haystack = if *rule == "osc8-encoder" {
+            if rule.starts_with("tool-line-") && !path.starts_with("src/adapters/tui/widgets/") {
+                continue;
+            }
+            let haystack = if *rule == "osc8-encoder" || rule.starts_with("tool-line-") {
                 &literal
             } else {
                 &code
@@ -516,6 +529,11 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "block-inline-expansion",
                     "block-window",
                     "tool-inspector-legacy",
+                    "tool-line-quoted-summary",
+                    "tool-line-arrow-running",
+                    "tool-line-arrow-done",
+                    "tool-line-closing-border",
+                    "welcome-widget",
                     "field-string",
                     "field-tail",
                 ]
@@ -1886,4 +1904,95 @@ fn k6_story21_13_block_cutover_clauses_have_positive_controls_and_exact_allowlis
             "{denied}: {errors:?}"
         );
     }
+}
+
+/// Story 21.9 D19: the retired tool-line format and the two-line welcome widget
+/// cannot come back in the widget tree. Each clause has a synthetic positive
+/// control; no clause carries an exemption (all are hard), so there is no
+/// stale-exemption entry to keep.
+#[test]
+fn k6_story21_9_old_tool_line_and_welcome_clauses_have_positive_controls() {
+    let owner = "src/adapters/tui/widgets/tool_block.rs";
+    for (rule, text) in [
+        (
+            "tool-line-quoted-summary",
+            "fn f(s: &str) -> String { format!(\" \\\"{}\\\"\", s) }",
+        ),
+        (
+            "tool-line-arrow-running",
+            "fn f(e: &str) -> String { format!(\" → running... ({})\", e) }",
+        ),
+        ("tool-line-arrow-done", "fn f() -> &'static str { \" → \" }"),
+        (
+            "tool-line-closing-border",
+            "fn f() -> &'static str { \" ┄\" }",
+        ),
+        (
+            "welcome-widget",
+            "use super::empty_state;\nfn f() { empty_state::render(); }",
+        ),
+    ] {
+        let errors = scan(&[(owner.into(), text.into())], &[]);
+        assert!(
+            errors.iter().any(|e| e.contains(&format!("{rule}|"))),
+            "{rule}: {errors:?}"
+        );
+        // The same text in a comment is masked, never a hit.
+        let commented = format!("// {}\nfn g() {{}}", text.replace('\n', " "));
+        assert!(
+            !scan(&[(owner.into(), commented)], &[])
+                .iter()
+                .any(|e| e.contains(&format!("{rule}|"))),
+            "{rule}: comments are masked"
+        );
+    }
+    // The tool-line clauses are scoped to the widget tree; the welcome clause is
+    // crate-wide.
+    for text in [
+        "fn f() -> &'static str { \" → \" }",
+        "fn f() -> &'static str { \" ┄\" }",
+    ] {
+        assert!(
+            !scan(&[("src/domain/x.rs".into(), text.into())], &[])
+                .iter()
+                .any(|e| e.contains("tool-line-")),
+            "{text}: outside the widget tree"
+        );
+    }
+    // Stale-exemption control: these clauses are hard, so no pin may exempt
+    // them; a pin naming one would be a stale or smuggled exemption.
+    for (path, owner, sites) in PINS {
+        for site in *sites {
+            assert!(
+                !site.starts_with("tool-line-") && !site.starts_with("welcome-widget|"),
+                "{path} ({owner}): {site}"
+            );
+        }
+    }
+    // The welcome clause is crate-wide: it trips in any production path.
+    for path in [
+        "src/domain/x.rs",
+        "src/infrastructure/runtime/event_loop.rs",
+    ] {
+        let errors = scan(
+            &[(path.into(), "fn f() { empty_state::render(); }".into())],
+            &[],
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("welcome-widget|")),
+            "{path}: {errors:?}"
+        );
+    }
+    // Controls: the shipped humanized builder trips none of them.
+    let line = include_str!("../../src/adapters/tui/widgets/tool_line.rs");
+    let shipped = scan(
+        &[("src/adapters/tui/widgets/tool_line.rs".into(), line.into())],
+        &[],
+    );
+    assert!(
+        !shipped
+            .iter()
+            .any(|e| e.contains("tool-line-") || e.contains("welcome-widget|")),
+        "{shipped:?}"
+    );
 }

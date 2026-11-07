@@ -239,6 +239,50 @@ pub fn capped_display_diff<'a>(
     rows.finish()
 }
 
+/// Exact changed-line counts of one edit (Story 21.9 D13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiffStat {
+    pub added: usize,
+    pub removed: usize,
+}
+
+/// Largest LCS table (cells) a per-frame stat may build: well under
+/// [`LCS_MAX_CELLS`], so the count is always the exact line diff and one Stage
+/// row never costs more than about a megabyte per paint.
+const STAT_MAX_CELLS: usize = 250_000;
+
+/// Count the added and removed rows of the line diff `original` → `new_content`
+/// in one pass over [`visit_diff`]: no row is stored. `None` when the changed
+/// middle is too large to count exactly within [`STAT_MAX_CELLS`]; a degraded
+/// all-removed/all-added count is never returned as if it were exact.
+pub fn diff_stat(original: &str, new_content: &str) -> Option<DiffStat> {
+    let old_count = original.lines().count();
+    let new_count = new_content.lines().count();
+    let prefix = original
+        .lines()
+        .zip(new_content.lines())
+        .take_while(|(old, new)| old == new)
+        .count();
+    let suffix = original
+        .lines()
+        .rev()
+        .take(old_count - prefix)
+        .zip(new_content.lines().rev().take(new_count - prefix))
+        .take_while(|(old, new)| old == new)
+        .count();
+    let (m, n) = (old_count - prefix - suffix, new_count - prefix - suffix);
+    if m > 0 && n > 0 && (m + 1).saturating_mul(n + 1) > STAT_MAX_CELLS {
+        return None;
+    }
+    let mut stat = DiffStat::default();
+    visit_diff(original, new_content, |line| match line.kind {
+        DiffKind::Added => stat.added += 1,
+        DiffKind::Removed => stat.removed += 1,
+        DiffKind::Context | DiffKind::Elided => {}
+    });
+    Some(stat)
+}
+
 /// Collapse runs of unchanged lines further than `context` from any change
 /// into a single `Elided` marker.
 #[cfg(test)]
@@ -851,6 +895,64 @@ mod tests {
             rows.iter()
                 .filter(|row| row.kind != DiffKind::Elided)
                 .all(|row| matches!(&row.content, Cow::Borrowed(_)))
+        );
+    }
+}
+
+#[cfg(test)]
+mod story21_9_tests {
+    use super::*;
+
+    #[test]
+    fn story21_9_diff_stat_matches_the_rows_of_the_line_diff() {
+        for (old, new) in [
+            ("", "a\nb"),
+            ("a\nb", ""),
+            ("a\nb\nc", "a\nX\nc"),
+            ("a\nb\nc\nd\ne\nf", "a\nB\nc\nd\ne\nF\nG"),
+            ("same\n", "same\n"),
+            ("a\r\nb\r\n", "a\r\nc\r\n"),
+        ] {
+            let rows = compute_diff(old, new);
+            let added = rows.iter().filter(|r| r.kind == DiffKind::Added).count();
+            let removed = rows.iter().filter(|r| r.kind == DiffKind::Removed).count();
+            assert_eq!(
+                diff_stat(old, new),
+                Some(DiffStat { added, removed }),
+                "{old:?} -> {new:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn story21_9_diff_stat_counts_context_as_neither() {
+        let stat = diff_stat("keep\nold\nkeep2", "keep\nnew\nkeep2").unwrap();
+        assert_eq!((stat.added, stat.removed), (1, 1));
+    }
+
+    #[test]
+    fn story21_9_diff_stat_is_none_past_the_per_frame_budget_and_never_over_counts() {
+        let old: String = (0..600).map(|i| format!("old {i}\n")).collect();
+        let new: String = (0..600).map(|i| format!("new {i}\n")).collect();
+        // 600 x 600 cells exceed the stat budget: no number rather than a degraded one.
+        assert_eq!(diff_stat(&old, &new), None);
+        // A pure add or delete never needs the table, however large.
+        let big: String = (0..5000).map(|i| format!("l {i}\n")).collect();
+        assert_eq!(
+            diff_stat("", &big),
+            Some(DiffStat {
+                added: 5000,
+                removed: 0
+            })
+        );
+        // A small change inside a large file is trimmed to its middle first.
+        let edited = big.replace("l 2500\n", "changed\n");
+        assert_eq!(
+            diff_stat(&big, &edited),
+            Some(DiffStat {
+                added: 1,
+                removed: 1
+            })
         );
     }
 }
