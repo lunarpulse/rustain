@@ -34,6 +34,7 @@ pub fn apply_markdown_config(
     config: &crate::domain::models::MarkdownConfig,
 ) {
     state.code_max_rows = config.code_max_rows();
+    state.reasoning_display = config.reasoning();
 }
 
 pub struct ReloadContext<'a> {

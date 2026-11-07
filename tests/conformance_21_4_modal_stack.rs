@@ -1746,6 +1746,7 @@ mod k8_stage {
                         block_offsets: vec![0],
                         tool_block_offsets: vec![],
                         md_block_offsets: vec![],
+                        reasoning_offsets: vec![],
                     },
                 );
                 render

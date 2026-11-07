@@ -503,6 +503,10 @@ pub struct CachedTurnLayout {
     /// table of every `Prose` part, in part order (D7). Computed in the same
     /// height pass; the host decides whether they take focus (local Stage only).
     pub md_block_offsets: Vec<(usize, String)>,
+    /// Story 21.9 D7: `(start_offset, reasoning_item_id)` of every committed
+    /// reasoning header, in part order. Computed in the same height pass; the
+    /// host decides whether they take focus (local Stage only).
+    pub reasoning_offsets: Vec<(usize, String)>,
 }
 
 /// Cache of rendered line heights, keyed by turn or message.
@@ -587,6 +591,11 @@ pub struct TabRenderState {
     /// the field is `pub` solely because existing tests build this struct with
     /// `..Default::default()` literals.
     pub code_cap: Option<u16>,
+    /// Story 21.9 (D6): how committed reasoning paints and is measured.
+    /// `Expanded` by default so a caller that never chose (the attached host,
+    /// tests) hides nothing; the local host writes it only through
+    /// `set_reasoning`, which drops every cached height on a change.
+    pub reasoning: crate::domain::models::ReasoningDisplay,
 }
 
 impl TabRenderState {
@@ -594,6 +603,14 @@ impl TabRenderState {
     pub fn set_code_cap(&mut self, cap: Option<u16>) {
         if self.code_cap != cap {
             self.code_cap = cap;
+            self.height_cache.invalidate_all();
+        }
+    }
+
+    /// Adopt a reasoning display; the height cache is invalidated only on a change.
+    pub fn set_reasoning(&mut self, display: crate::domain::models::ReasoningDisplay) {
+        if self.reasoning != display {
+            self.reasoning = display;
             self.height_cache.invalidate_all();
         }
     }
@@ -2794,6 +2811,9 @@ pub struct TuiState {
     /// Story 21.13 (D5): the local Stage's fenced-code cap in rows, from
     /// `[markdown] code_max_rows` (clamped to `[1, 1000]`, default 30).
     pub code_max_rows: u16,
+    /// Story 21.9 (D9): `[markdown] reasoning` — how the local Stage shows
+    /// committed reasoning (default folded).
+    pub reasoning_display: crate::domain::models::ReasoningDisplay,
     /// Epic-10 hook: auto-trigger logic (e.g., InteractionState::Executing → Monitor)
     /// MUST check this flag and skip the auto-switch when true. Story 8.4b establishes
     /// the contract; Story 10.x (multi-agent execution UX) implements the auto-trigger.
@@ -3263,6 +3283,7 @@ impl TuiState {
             current_hint: None,
             density_mode: Default::default(),
             code_max_rows: 30,
+            reasoning_display: crate::domain::models::ReasoningDisplay::Folded,
             session_overrides: std::collections::BTreeMap::new(),
             density_user_overridden: false,
             shadows_announced: std::collections::BTreeSet::new(),
@@ -3441,6 +3462,20 @@ impl TuiState {
         conversation: &crate::domain::models::Conversation,
         open_turn: Option<&crate::domain::models::Turn>,
     ) -> String {
+        // Story 21.9: a selected reasoning part copies its original text, or
+        // nothing when it can no longer be resolved.
+        if let Some(id) = self
+            .selected_item_id
+            .as_deref()
+            .filter(|id| crate::domain::models::turn::is_reasoning_item_id(id))
+        {
+            return crate::adapters::tui::block_viewer::reasoning_source_of(
+                &conversation.turns,
+                open_turn,
+                id,
+            )
+            .unwrap_or_default();
+        }
         // Story 21.13: a selected code/table block copies its source, or nothing
         // when the block can no longer be resolved: never another answer.
         if let Some(id) = self
@@ -3634,6 +3669,7 @@ mod tests {
             block_offsets: vec![0, 10, 20],
             tool_block_offsets: vec![],
             md_block_offsets: vec![],
+            reasoning_offsets: vec![],
         };
         cache.set(key.clone(), layout.clone());
         assert_eq!(cache.get(&key).unwrap().height, 42);
@@ -3668,6 +3704,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.invalidate_all();
@@ -3692,6 +3729,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.set(
@@ -3706,6 +3744,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.invalidate_turn(&t1);
@@ -3751,6 +3790,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.set(
@@ -3765,6 +3805,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.set(
@@ -3779,6 +3820,7 @@ mod tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.evict_turns_not_in([&t1, &t3].into_iter());

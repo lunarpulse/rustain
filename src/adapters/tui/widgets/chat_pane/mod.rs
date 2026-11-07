@@ -2,6 +2,8 @@ pub mod height_cache;
 pub mod virtual_scroll;
 pub mod word_wrap;
 
+pub(crate) mod reasoning;
+
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
@@ -19,7 +21,10 @@ use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
 use crate::adapters::tui::widgets::tool_block;
 use crate::domain::clock::{Clock, current_braille_frame};
-use crate::domain::models::turn::{block_item_id_for, is_block_item_id, tool_call_id_for};
+use crate::domain::models::turn::{
+    block_item_id_for, is_block_item_id, is_reasoning_item_id, reasoning_item_id_for,
+    tool_call_id_for,
+};
 use crate::domain::models::{
     ContentBlockType, Conversation, FeedbackBlock, InvocationStatus, LayoutMetrics, MessageRole,
     PartId, StopReason, StreamingState, SummaryTier, ToolCallInfo, ToolResultInfo, Turn, TurnId,
@@ -132,15 +137,28 @@ fn legacy_streaming_lines(
     streaming: &StreamingState,
     width: usize,
     theme: &Theme,
+    clock: &dyn Clock,
     sink: &mut LinkSink,
 ) -> ([Option<Line<'static>>; 2], Vec<Line<'static>>) {
     let has_error = streaming.current_blocks.contains(&ContentBlockType::Error);
     let mut prefix = [None, None];
     if streaming.current_text_buffer.is_empty() && !has_error {
-        prefix[0] = Some(Line::from(Span::styled(
-            "···",
-            Style::default().fg(theme.colors.fg_muted),
-        )));
+        // Story 21.9 D5: while the model thinks, the typing dots become the
+        // live thinking row (same single row, no geometry change).
+        prefix[0] = Some(if streaming.thinking_buffer.is_empty() {
+            Line::from(Span::styled(
+                "···",
+                Style::default().fg(theme.colors.fg_muted),
+            ))
+        } else {
+            reasoning::live_line(
+                theme,
+                width,
+                streaming.thinking_started_ms,
+                clock.wall_now_ms(),
+                &streaming.thinking_buffer,
+            )
+        });
         return (prefix, Vec::new());
     }
     prefix[0] = Some(Line::from(Span::styled(
@@ -1094,16 +1112,44 @@ fn adapter_shim(turn: &Turn, invocation: &TurnPart, result: Option<&TurnPart>) -
 /// - prose/reasoning → prose/reasoning: 1 (adjacent prose, rare)
 // Height is clock-independent — see AC6.
 pub(super) fn expanded_turn_height(turn: &Turn, theme: &Theme, width: usize) -> CachedTurnLayout {
-    expanded_turn_height_capped(turn, theme, width, None)
+    expanded_turn_height_capped(
+        turn,
+        theme,
+        width,
+        None,
+        crate::domain::models::ReasoningDisplay::default(),
+        false,
+    )
+}
+
+/// Whether an assistant turn paints any row of its own (Story 21.9 D11): a
+/// turn of only replay/result parts, or none, has height 0 and no gutter rail.
+/// The single predicate of the height pass and the paint.
+fn turn_has_rows(turn: &Turn, live_reasoning: bool) -> bool {
+    live_reasoning
+        || turn.parts.iter().any(|part| match part {
+            TurnPart::Prose { .. } | TurnPart::ToolInvocation { .. } => true,
+            TurnPart::Reasoning {
+                text,
+                duration_ms,
+                tokens,
+                ..
+            } => reasoning::visible(text, *duration_ms, *tokens),
+            TurnPart::ToolResult { .. } | TurnPart::ProviderReplay { .. } => false,
+        })
 }
 
 /// `expanded_turn_height` with the Stage's fenced-code cap (Story 21.13 D5):
-/// only committed Prose parts are capped; reasoning is not.
+/// only committed Prose parts are capped; reasoning is not. `reasoning` is the
+/// Stage's reasoning display and `live_reasoning` says whether the open turn
+/// paints its streaming `◇ Thinking…` row (Story 21.9 D5, D6).
 pub(super) fn expanded_turn_height_capped(
     turn: &Turn,
     theme: &Theme,
     width: usize,
     code_cap: Option<u16>,
+    reasoning: crate::domain::models::ReasoningDisplay,
+    live_reasoning: bool,
 ) -> CachedTurnLayout {
     let content_width = width.saturating_sub(2);
     if content_width == 0 {
@@ -1112,6 +1158,7 @@ pub(super) fn expanded_turn_height_capped(
             block_offsets: vec![],
             tool_block_offsets: vec![],
             md_block_offsets: vec![],
+            reasoning_offsets: vec![],
         };
     }
 
@@ -1128,6 +1175,7 @@ pub(super) fn expanded_turn_height_capped(
     let mut block_offsets: Vec<usize> = Vec::new();
     let mut tool_block_offsets: Vec<(usize, String)> = Vec::new();
     let mut md_block_offsets: Vec<(usize, String)> = Vec::new();
+    let mut reasoning_offsets: Vec<(usize, String)> = Vec::new();
     let mut prev: Option<&TurnPart> = None;
     let mut running_count: usize = 0;
 
@@ -1157,14 +1205,19 @@ pub(super) fn expanded_turn_height_capped(
                 }));
                 height += rendered.lines.len();
             }
-            TurnPart::Reasoning { text, .. } => {
+            TurnPart::Reasoning {
+                id,
+                text,
+                duration_ms,
+                tokens,
+            } => {
                 block_offsets.push(height);
-                height += crate::adapters::tui::markdown::compute_height(
-                    text,
-                    content_width,
-                    theme,
-                    &stage_options(RenderOptions::completed(), false),
-                );
+                let rows =
+                    reasoning::height(reasoning, text, *duration_ms, *tokens, content_width, theme);
+                if rows > 0 {
+                    reasoning_offsets.push((height, reasoning_item_id_for(&turn.id, *id)));
+                }
+                height += rows;
             }
             TurnPart::ToolInvocation { id, status, .. } => {
                 block_offsets.push(height);
@@ -1185,14 +1238,20 @@ pub(super) fn expanded_turn_height_capped(
         prev = Some(part);
     }
 
-    // Per-Running rail addend + trailing rail line
-    height += running_count + 1;
+    // Per-Running rail addend, the live thinking row, and the trailing rail
+    // line (only for a turn that paints rows, Story 21.9 D11).
+    // The live row is spaced like the committed reasoning part it becomes (P5).
+    height += running_count
+        + usize::from(live_reasoning)
+        + usize::from(live_reasoning && prev.is_some())
+        + usize::from(turn_has_rows(turn, live_reasoning));
 
     CachedTurnLayout {
         height,
         block_offsets,
         tool_block_offsets,
         md_block_offsets,
+        reasoning_offsets,
     }
 }
 
@@ -1208,6 +1267,7 @@ pub(super) fn collapsed_turn_height(
         block_offsets: vec![],
         tool_block_offsets: vec![],
         md_block_offsets: vec![],
+        reasoning_offsets: vec![],
     }
 }
 
@@ -1338,6 +1398,8 @@ pub fn build_layout_metrics(
                     theme,
                     width_usize,
                     tab_render_state.code_cap,
+                    tab_render_state.reasoning,
+                    false,
                 );
                 tab_render_state.height_cache.set(key, fresh.clone());
                 fresh
@@ -1470,6 +1532,8 @@ fn render_expanded_turn<'a>(
     withheld_tool_inputs: Option<&HashMap<String, ToolInputWithheld>>,
     search: Option<(&str, Option<usize>)>,
     sink: &mut LinkSink,
+    reasoning: crate::domain::models::ReasoningDisplay,
+    live_line: Option<Line<'static>>,
 ) -> Vec<Line<'a>> {
     let content_width = width.saturating_sub(2); // gutter + space
     if content_width == 0 {
@@ -1513,28 +1577,43 @@ fn render_expanded_turn<'a>(
                 let prose_lines = sink.take(rendered, lines.len());
                 lines.extend(prose_lines);
             }
-            TurnPart::Reasoning { text, .. } => {
-                // P2-2: italic fg_secondary — merge with existing span styles
-                let rendered = crate::adapters::tui::markdown::render(
+            TurnPart::Reasoning {
+                text,
+                duration_ms,
+                tokens,
+                ..
+            } => {
+                let rows = reasoning::lines(
+                    reasoning,
                     text,
+                    *duration_ms,
+                    *tokens,
                     content_width,
                     theme,
-                    &sink.options(RenderOptions::completed()),
+                    sink,
+                    lines.len(),
                 );
-                let reasoning_lines = sink.take(rendered, lines.len());
-                for line in reasoning_lines {
-                    let styled_spans: Vec<Span<'a>> = line
-                        .spans
-                        .into_iter()
-                        .map(|s| {
-                            let mut style = s.style;
-                            style = style
-                                .fg(theme.colors.fg_secondary)
-                                .add_modifier(Modifier::ITALIC);
-                            Span::styled(s.content.to_string(), style)
-                        })
-                        .collect();
-                    lines.push(Line::from(styled_spans));
+                let body_start = lines.len() + 1;
+                lines.extend(rows);
+                // Search ordinals follow the message content, where thinking
+                // now precedes the answer (review P3): an expanded body is
+                // highlighted, a folded one only counted.
+                if let Some((query, _)) = search.filter(|(query, _)| !query.is_empty()) {
+                    match reasoning {
+                        crate::domain::models::ReasoningDisplay::Expanded => {
+                            if body_start <= lines.len() {
+                                highlight_content_lines(
+                                    &mut lines[body_start..],
+                                    search,
+                                    &mut match_cursor,
+                                    theme,
+                                );
+                            }
+                        }
+                        crate::domain::models::ReasoningDisplay::Folded => {
+                            match_cursor += reasoning::match_count(text, query);
+                        }
+                    }
                 }
             }
             TurnPart::ToolInvocation {
@@ -1614,15 +1693,23 @@ fn render_expanded_turn<'a>(
         prev = Some(part);
     }
 
-    // Wrap in gutter and add trailing half-line gap
+    let has_live = live_line.is_some();
+    if has_live && prev.is_some() {
+        lines.push(Line::from(""));
+    }
+    lines.extend(live_line);
+    // Wrap in gutter and add the trailing half-line gap; a turn that paints no
+    // rows paints no rail either (Story 21.9 D11, DF-297).
     for run in &mut sink.runs[first_run..] {
         run.start_cell += GUTTER_CELLS;
     }
     let mut result = gutter_lines(lines, theme);
-    result.push(Line::from(Span::styled(
-        "│",
-        Style::default().fg(theme.colors.accent),
-    )));
+    if turn_has_rows(turn, has_live) {
+        result.push(Line::from(Span::styled(
+            "│",
+            Style::default().fg(theme.colors.accent),
+        )));
+    }
     result
 }
 
@@ -2047,12 +2134,15 @@ fn render_with_search_impl(
                                         theme,
                                         width,
                                         tab_render_state.code_cap,
+                                        tab_render_state.reasoning,
+                                        false,
                                     )
                                 };
                                 if probe.height != l.height
                                     || probe.block_offsets != l.block_offsets
                                     || probe.tool_block_offsets != l.tool_block_offsets
                                     || probe.md_block_offsets != l.md_block_offsets
+                                    || probe.reasoning_offsets != l.reasoning_offsets
                                 {
                                     tracing::warn!(
                                         "HeightCache divergence: turn={}, expansion={}, cached=({}, {:?}, {:?}), computed=({}, {:?}, {:?})",
@@ -2079,6 +2169,8 @@ fn render_with_search_impl(
                                     theme,
                                     width,
                                     tab_render_state.code_cap,
+                                    tab_render_state.reasoning,
+                                    false,
                                 )
                             };
                             #[cfg(debug_assertions)]
@@ -2109,7 +2201,11 @@ fn render_with_search_impl(
                             .push((cumulative_offset + prefix_height + offset, id.clone()));
                     }
                     if focus.blocks {
-                        for (offset, id) in &layout.md_block_offsets {
+                        for (offset, id) in layout
+                            .md_block_offsets
+                            .iter()
+                            .chain(&layout.reasoning_offsets)
+                        {
                             item_boundaries
                                 .push((cumulative_offset + prefix_height + offset, id.clone()));
                         }
@@ -2237,6 +2333,9 @@ fn render_with_search_impl(
     }
 
     // Open turn height (live streaming)
+    // Story 21.9 D5: a streaming reasoning run paints one live row inside the
+    // open turn's gutter (the local host; the attached host has no open turn).
+    let live_reasoning = open_turn.is_some() && !streaming.thinking_buffer.is_empty();
     let open_turn_height = if let Some(ot) = open_turn {
         // AC13 suppression check: skip if already in conversation.turns
         let already_committed = turn_map.contains_key(ot.id.0.as_str());
@@ -2246,14 +2345,25 @@ fn render_with_search_impl(
             if cumulative_offset > 0 {
                 cumulative_offset += spacing;
             }
-            let layout = expanded_turn_height_capped(ot, theme, width, tab_render_state.code_cap);
+            let layout = expanded_turn_height_capped(
+                ot,
+                theme,
+                width,
+                tab_render_state.code_cap,
+                tab_render_state.reasoning,
+                live_reasoning,
+            );
             // A3: a still-open turn's tool blocks are focusable too.
             let first_item = item_boundaries.len();
             for (offset, id) in &layout.tool_block_offsets {
                 item_boundaries.push((cumulative_offset + offset, id.clone()));
             }
             if focus.blocks {
-                for (offset, id) in &layout.md_block_offsets {
+                for (offset, id) in layout
+                    .md_block_offsets
+                    .iter()
+                    .chain(&layout.reasoning_offsets)
+                {
                     item_boundaries.push((cumulative_offset + offset, id.clone()));
                 }
             }
@@ -2293,7 +2403,7 @@ fn render_with_search_impl(
     // Attached streaming belongs to the same height model and clipped range as feedback.
     let mut legacy_sink = LinkSink::new(osc8);
     let (legacy_prefix, legacy_body) = if open_turn.is_none() && streaming.is_streaming {
-        legacy_streaming_lines(streaming, width, theme, &mut legacy_sink)
+        legacy_streaming_lines(streaming, width, theme, clock, &mut legacy_sink)
     } else {
         ([None, None], Vec::new())
     };
@@ -2419,6 +2529,8 @@ fn render_with_search_impl(
                                 withheld_tool_inputs,
                                 search,
                                 &mut sink,
+                                tab_render_state.reasoning,
+                                None,
                             )
                         };
                         let interrupted_line = (msg.stop_reason == Some(StopReason::Cancelled))
@@ -2666,6 +2778,15 @@ fn render_with_search_impl(
                 line_offset += spacing;
             }
             let mut sink = LinkSink::capped(osc8, tab_render_state.code_cap);
+            let live_line = live_reasoning.then(|| {
+                reasoning::live_line(
+                    theme,
+                    width.saturating_sub(2),
+                    streaming.thinking_started_ms,
+                    clock.wall_now_ms(),
+                    &streaming.thinking_buffer,
+                )
+            });
             let turn_lines = render_expanded_turn(
                 ot,
                 theme,
@@ -2675,6 +2796,8 @@ fn render_with_search_impl(
                 withheld_tool_inputs,
                 None,
                 &mut sink,
+                tab_render_state.reasoning,
+                live_line,
             );
             place_runs(
                 &mut placed_runs,
@@ -2857,8 +2980,11 @@ fn render_with_search_impl(
         && let Some(line) = lines.get_mut(*start - visible_start)
     {
         let is_block = is_block_item_id(id);
+        let is_reasoning = is_reasoning_item_id(id);
         if let Some(lead) = line.spans.iter_mut().find(|span| {
-            matches!(span.content.as_ref(), "┄ " | "┃ ") || (is_block && span.content == "│ ")
+            matches!(span.content.as_ref(), "┄ " | "┃ ")
+                || (is_block && span.content == "│ ")
+                || (is_reasoning && span.content == reasoning::LEAD)
         }) {
             lead.content = "▸ ".into();
             lead.style = Style::default()
@@ -2866,6 +2992,12 @@ fn render_with_search_impl(
                 .add_modifier(Modifier::BOLD);
             let resolvable = if is_block {
                 crate::adapters::tui::block_viewer::contains_block(
+                    &conversation.turns,
+                    open_turn,
+                    id,
+                )
+            } else if is_reasoning {
+                crate::adapters::tui::block_viewer::contains_reasoning(
                     &conversation.turns,
                     open_turn,
                     id,
@@ -3075,6 +3207,8 @@ mod parts_aware_tests {
             None,
             None,
             &mut LinkSink::off(),
+            crate::domain::models::ReasoningDisplay::default(),
+            None,
         )
     }
 
@@ -3109,10 +3243,27 @@ mod parts_aware_tests {
             });
             for cap in [None, Some(1), Some(3), Some(30)] {
                 for width in [20, 40, 80] {
-                    let height = expanded_turn_height_capped(&turn, &theme, width, cap).height;
+                    let height = expanded_turn_height_capped(
+                        &turn,
+                        &theme,
+                        width,
+                        cap,
+                        crate::domain::models::ReasoningDisplay::default(),
+                        false,
+                    )
+                    .height;
                     let mut sink = LinkSink::capped(false, cap);
                     let painted = render_expanded_turn(
-                        &turn, &theme, width, &clock, None, None, None, &mut sink,
+                        &turn,
+                        &theme,
+                        width,
+                        &clock,
+                        None,
+                        None,
+                        None,
+                        &mut sink,
+                        crate::domain::models::ReasoningDisplay::default(),
+                        None,
                     )
                     .len();
                     // The paint adds the per-turn trailing rail row the height pass counts.
@@ -3120,6 +3271,224 @@ mod parts_aware_tests {
                 }
             }
         }
+    }
+
+    /// Story 21.9 (AC1, AC7, K-3): for deterministic random part mixes, every
+    /// width in `1..=130` and both reasoning displays, the height pass counts
+    /// exactly the rows the paint makes, a live thinking row included.
+    #[test]
+    fn story21_9_height_equals_painted_rows_for_random_part_mixes() {
+        use crate::domain::models::ReasoningDisplay;
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let mut seed: u64 = 0x2109;
+        let mut next = move |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        let long = "a b c d e f g h i j k l m n o p q r s t u v w x y z ".repeat(4);
+        let prose = [
+            "short",
+            long.as_str(),
+            "```rust\nlet x = 1;\n```",
+            "- item\n- item two\n\n> quoted line",
+        ];
+        let thoughts = [
+            "weigh A against B",
+            "first\n\nsecond paragraph with several words to wrap around a narrow pane",
+            "```\ncode in thought\n```",
+        ];
+        for case in 0..40 {
+            let mut turn = Turn::new("claude".into(), 0);
+            for _ in 0..=next(5) {
+                match next(8) {
+                    0 | 1 => {
+                        let text = prose[next(prose.len() as u64) as usize];
+                        turn.push_part(|id| TurnPart::Prose {
+                            id,
+                            text: text.into(),
+                        });
+                    }
+                    2..=4 => {
+                        let text = thoughts[next(thoughts.len() as u64) as usize];
+                        let facts = next(4);
+                        turn.push_part(|id| TurnPart::Reasoning {
+                            id,
+                            text: text.into(),
+                            duration_ms: (facts & 1 == 1).then_some(4_200),
+                            tokens: (facts & 2 == 2).then_some(1_300),
+                        });
+                    }
+                    5 => {
+                        let call = turn.push_part(|id| TurnPart::ToolInvocation {
+                            id,
+                            tool: "Bash".into(),
+                            args: serde_json::json!({"command": "ls"}),
+                            status: InvocationStatus::Success,
+                            started_at: 0,
+                            ended_at: Some(1),
+                        });
+                        turn.push_part(|id| TurnPart::ToolResult {
+                            id,
+                            refs: call,
+                            output: crate::domain::models::ToolOutput {
+                                content: "out".into(),
+                                is_error: false,
+                                diff: crate::domain::models::WriteDiffState::NotAWrite,
+                                images: Vec::new(),
+                            },
+                        });
+                    }
+                    6 => {
+                        turn.push_part(|id| TurnPart::ToolInvocation {
+                            id,
+                            tool: "Bash".into(),
+                            args: serde_json::json!({"command": "sleep 9"}),
+                            status: InvocationStatus::Running,
+                            started_at: 0,
+                            ended_at: None,
+                        });
+                    }
+                    _ => {
+                        turn.push_part(|id| TurnPart::ProviderReplay {
+                            id,
+                            item: crate::domain::models::ProviderReplayItem {
+                                provider: "p".into(),
+                                model: "m".into(),
+                                payload: std::sync::Arc::new(serde_json::json!({})),
+                                scope: None,
+                            },
+                        });
+                    }
+                }
+            }
+            for display in [ReasoningDisplay::Folded, ReasoningDisplay::Expanded] {
+                for live in [false, true] {
+                    for width in 1..=130usize {
+                        let height =
+                            expanded_turn_height_capped(&turn, &theme, width, None, display, live)
+                                .height;
+                        let live_line = (live && width > 2).then(|| {
+                            reasoning::live_line(&theme, width - 2, Some(0), 1_000, "abcd")
+                        });
+                        let painted = render_expanded_turn(
+                            &turn,
+                            &theme,
+                            width,
+                            &clock,
+                            None,
+                            None,
+                            None,
+                            &mut LinkSink::off(),
+                            display,
+                            live_line,
+                        )
+                        .len();
+                        assert_eq!(
+                            height, painted,
+                            "case {case} {display:?} live {live} width {width}: {:?}",
+                            turn.parts
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Story 21.9 (D11, DF-297): a turn of replay/result parts only paints no
+    /// rail and has no height; one prose part keeps its rail.
+    #[test]
+    fn story21_9_a_turn_with_nothing_to_paint_has_no_rail() {
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let mut replay_only = Turn::new("claude".into(), 0);
+        replay_only.push_part(|id| TurnPart::ProviderReplay {
+            id,
+            item: crate::domain::models::ProviderReplayItem {
+                provider: "p".into(),
+                model: "m".into(),
+                payload: std::sync::Arc::new(serde_json::json!({})),
+                scope: None,
+            },
+        });
+        for turn in [Turn::new("claude".into(), 0), replay_only] {
+            let layout = expanded_turn_height(&turn, &theme, 80);
+            assert_eq!(layout.height, 0);
+            assert!(render_turn(&turn, &theme, 80, &clock).is_empty());
+        }
+        let mut one = Turn::new("claude".into(), 0);
+        one.push_part(|id| TurnPart::Prose {
+            id,
+            text: "x".into(),
+        });
+        assert!(expanded_turn_height(&one, &theme, 80).height >= 2);
+        assert!(!render_turn(&one, &theme, 80, &clock).is_empty());
+    }
+
+    /// Review P3: thinking precedes the answer in the message content, so the
+    /// search counts its matches first; a folded (unpainted) part still counts
+    /// and an expanded one is highlighted, keeping every prose ordinal true.
+    #[test]
+    fn story21_9_search_ordinals_count_thinking_that_precedes_the_answer() {
+        use crate::domain::models::ReasoningDisplay;
+        let theme = Theme::dark();
+        let clock = MockClock::at_wall_ms(1_700_000_000_000);
+        let mut turn = Turn::new("claude".into(), 0);
+        turn.push_part(|id| TurnPart::Reasoning {
+            id,
+            text: "a needle in thought".into(),
+            duration_ms: None,
+            tokens: None,
+        });
+        turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "a needle in the answer".into(),
+        });
+        // `(row text, painted with the focused style)` of every highlighted match.
+        let matches = |display: ReasoningDisplay, focused: usize| {
+            let lines = render_expanded_turn(
+                &turn,
+                &theme,
+                80,
+                &clock,
+                None,
+                None,
+                Some(("needle", Some(focused))),
+                &mut LinkSink::off(),
+                display,
+                None,
+            );
+            let mut found = Vec::new();
+            for line in &lines {
+                for span in &line.spans {
+                    if span.content == "needle" {
+                        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                        found.push((text, span.style == theme.search_highlight_focused));
+                    }
+                }
+            }
+            found
+        };
+        // Folded: only the answer's match is painted, and it is ordinal 1.
+        assert_eq!(
+            matches(ReasoningDisplay::Folded, 1),
+            [("│ a needle in the answer".to_owned(), true)]
+        );
+        assert_eq!(
+            matches(ReasoningDisplay::Folded, 0),
+            [("│ a needle in the answer".to_owned(), false)]
+        );
+        // Expanded: the thought is ordinal 0, the answer ordinal 1.
+        let expanded = matches(ReasoningDisplay::Expanded, 1);
+        assert_eq!(
+            expanded,
+            [
+                ("│ a needle in thought".to_owned(), false),
+                ("│ a needle in the answer".to_owned(), true)
+            ]
+        );
     }
 
     /// `render_message` with no link collection.
@@ -3157,6 +3526,8 @@ mod parts_aware_tests {
         TurnPart::Reasoning {
             id: PartId(0),
             text: text.to_string(),
+            duration_ms: None,
+            tokens: None,
         }
     }
 
@@ -3943,6 +4314,7 @@ mod parts_aware_tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -3970,6 +4342,7 @@ mod parts_aware_tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         assert!(tab_render_state.height_cache.get(&key).is_some());
@@ -4028,6 +4401,7 @@ mod parts_aware_tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         cache.set(
@@ -4037,6 +4411,7 @@ mod parts_aware_tests {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
         assert_eq!(cache.get(&key_w80).unwrap().height, 5);
@@ -4074,8 +4449,8 @@ mod parts_aware_tests {
         let cached = expanded_turn_height(&turn, &theme, 80);
         let rendered = render_turn(&turn, &theme, 80, &clock).len();
         assert_eq!(cached.height, rendered, "parity: empty turn");
-        // Empty turn: only trailing rail = 1
-        assert_eq!(cached.height, 1);
+        // Story 21.9 D11 (DF-297): an empty turn paints no rail and has no height.
+        assert_eq!(cached.height, 0);
     }
 
     #[test]

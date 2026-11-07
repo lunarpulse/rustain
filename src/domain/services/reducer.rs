@@ -62,8 +62,11 @@
 //! - **Error / Blocked** chunks append a `TurnPart::Prose` with the error content (mirrors
 //!   current `apply_chunk` behavior of pushing into `current_text_buffer` +
 //!   `ContentBlockType::Error`). A future story may want `TurnPart::Error` as a distinct variant.
-//! - **Reasoning** parts are committed by the reducer but the render path (S16.4) and the
-//!   ViewState fold policy (S16.3) need to decide whether `Reasoning` is collapsed-by-default.
+//! - **Reasoning** parts are committed by the reducer in chunk-run order (Story 21.9 D2: a
+//!   `Text` chunk flushes open thinking exactly as a `Thinking` chunk flushes open prose, so at
+//!   most one of the two buffers is open). Each part records its duration (first thinking chunk
+//!   to its flush) and, when the open response holds exactly one reasoning part, the provider's
+//!   reasoning tokens (D3). The Stage folds them (Story 21.9).
 //!
 //! # Cross-references
 //!
@@ -94,7 +97,9 @@ use crate::domain::models::{
 ///
 /// - `open_turn` — the current in-flight turn (None between turns).
 /// - `open_prose` — buffered prose deltas not yet committed to a `TurnPart::Prose`.
-/// - `open_reasoning` — buffered thinking deltas not yet committed to a `TurnPart::Reasoning`.
+/// - `open_reasoning` — buffered thinking deltas not yet committed to a `TurnPart::Reasoning`;
+///   `open_reasoning_started_ms` is when its first chunk arrived and `pending_reasoning_tokens`
+///   holds provider tokens stashed for it while it is still open (Story 21.9 D3).
 /// - `pending_invocations` — tool_use_id (wire-level) → PartId of the running ToolInvocation.
 /// - `progress` — tool_use_id → (k, n) progress; set via `set_progress()` by S16.9.
 /// - `last_running_tool` — most recently-running tool name; cleared when its result arrives.
@@ -105,6 +110,11 @@ pub struct ReducerState {
     pub open_turn: Option<Turn>,
     pub open_prose: Option<String>,
     open_reasoning: Option<String>,
+    /// Unix millis of the first thinking chunk of `open_reasoning` (Story 21.9 D3).
+    open_reasoning_started_ms: Option<i64>,
+    /// Provider-reported reasoning tokens stashed while the single reasoning
+    /// part of the open response is still open; applied when it is flushed.
+    pending_reasoning_tokens: Option<u32>,
     pub pending_invocations: HashMap<String, PartId>,
     /// Completed invocations (removed from `pending_invocations` on ToolResult,
     /// preserved here for mirror sync via `update_streaming_mirror`).
@@ -140,6 +150,8 @@ impl ReducerState {
             open_turn: None,
             open_prose: None,
             open_reasoning: None,
+            open_reasoning_started_ms: None,
+            pending_reasoning_tokens: None,
             pending_invocations: HashMap::new(),
             completed_invocations: HashMap::new(),
             progress: HashMap::new(),
@@ -243,21 +255,73 @@ impl ReducerState {
         }
     }
 
-    /// Flush the open reasoning buffer into a committed `TurnPart::Reasoning`.
-    fn flush_open_reasoning(&mut self) {
+    /// Flush the open reasoning buffer into a committed `TurnPart::Reasoning`,
+    /// recording how long it was open and any attributed provider tokens
+    /// (Story 21.9 D3). The facts reset whether or not a part is committed.
+    fn flush_open_reasoning(&mut self, clock: &dyn Clock) {
+        // Every `Text` chunk calls this: nothing open means no clock read.
+        if self.open_reasoning.is_none() {
+            return;
+        }
+        let started = self.open_reasoning_started_ms.take();
+        let tokens = self.pending_reasoning_tokens.take();
+        let now = unix_millis_from_clock(self, clock);
         if let Some(ref mut turn) = self.open_turn {
             if let Some(text) = self.open_reasoning.take() {
                 if !text.is_empty() {
-                    turn.push_part(|id| TurnPart::Reasoning { id, text });
+                    let duration_ms = started
+                        .map(|started| u64::try_from(now.saturating_sub(started)).unwrap_or(0));
+                    turn.push_part(|id| TurnPart::Reasoning {
+                        id,
+                        text,
+                        duration_ms,
+                        tokens,
+                    });
                 }
             }
         }
     }
 
     /// Flush both open prose and open reasoning buffers.
-    fn flush_all(&mut self) {
+    fn flush_all(&mut self, clock: &dyn Clock) {
         self.flush_open_prose();
-        self.flush_open_reasoning();
+        self.flush_open_reasoning(clock);
+    }
+
+    /// Attribute a response's provider-reported reasoning tokens (Story 21.9
+    /// D3): only when the open response holds exactly one reasoning part,
+    /// committed or still open. A `Usage` that arrives after the turn was
+    /// committed never reaches this (there is no open turn).
+    fn attribute_reasoning_tokens(&mut self, tokens: Option<u32>) {
+        let Some(tokens) = tokens else { return };
+        let Some(turn) = self.open_turn.as_mut() else {
+            return;
+        };
+        let from = turn.responses.last().map_or(0, |mark| mark.end);
+        let is_open = self
+            .open_reasoning
+            .as_deref()
+            .is_some_and(|t| !t.is_empty());
+        let committed = turn
+            .parts
+            .iter()
+            .skip(from)
+            .filter(|part| matches!(part, TurnPart::Reasoning { .. }))
+            .count();
+        match (committed, is_open) {
+            (0, true) => self.pending_reasoning_tokens = Some(tokens),
+            (1, false) => {
+                if let Some(TurnPart::Reasoning { tokens: slot, .. }) = turn
+                    .parts
+                    .iter_mut()
+                    .skip(from)
+                    .find(|part| matches!(part, TurnPart::Reasoning { .. }))
+                {
+                    *slot = Some(tokens);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Close the open response at a `TurnComplete` (Story 20.1d4a T2): every
@@ -306,6 +370,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
     match chunk {
         // ── Usage (handled first — no open turn required) ────────────────
         StreamChunk::Usage { usage, .. } => {
+            state.attribute_reasoning_tokens(usage.reasoning_tokens);
             state.pending_usage = Some(usage);
             ChunkAction::None
         }
@@ -313,6 +378,9 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         // ── Text ─────────────────────────────────────────────────────────
         StreamChunk::Text { content, .. } => {
             state.ensure_open_turn(clock);
+            // At most one of prose / reasoning is open (Story 21.9 D2): the
+            // thinking run ends where the answer starts.
+            state.flush_open_reasoning(clock);
             state
                 .open_prose
                 .get_or_insert_with(String::new)
@@ -324,6 +392,9 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         StreamChunk::Thinking { content, .. } => {
             state.ensure_open_turn(clock);
             state.flush_open_prose();
+            if state.open_reasoning.is_none() {
+                state.open_reasoning_started_ms = Some(unix_millis_from_clock(state, clock));
+            }
             state
                 .open_reasoning
                 .get_or_insert_with(String::new)
@@ -335,7 +406,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         // Committed for persistence only: no render, no redraw.
         StreamChunk::ProviderReplay { item } => {
             state.ensure_open_turn(clock);
-            state.flush_all();
+            state.flush_all(clock);
             if let Some(turn) = state.open_turn.as_mut() {
                 turn.push_part(|id| TurnPart::ProviderReplay { id, item });
             }
@@ -345,7 +416,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         // ── ToolUse ──────────────────────────────────────────────────────
         StreamChunk::ToolUse { id, name, input } => {
             state.ensure_open_turn(clock);
-            state.flush_all();
+            state.flush_all(clock);
 
             if state.pending_invocations.contains_key(&id) {
                 tracing::warn!("Duplicate ToolUse id: {} — ignoring", id);
@@ -385,7 +456,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
             ..
         } => {
             state.ensure_open_turn(clock);
-            state.flush_all();
+            state.flush_all(clock);
 
             let invocation_pid = match state.pending_invocations.remove(&id) {
                 Some(pid) => {
@@ -466,7 +537,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         StreamChunk::Error { content } => {
             tracing::warn!("Stream error chunk: {}", content);
             state.ensure_open_turn(clock);
-            state.flush_all();
+            state.flush_all(clock);
             if !content.is_empty() {
                 if let Some(turn) = state.open_turn.as_mut() {
                     turn.push_part(|id| TurnPart::Prose { id, text: content });
@@ -478,7 +549,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         StreamChunk::Blocked { content } => {
             tracing::warn!("Stream blocked chunk: {}", content);
             state.ensure_open_turn(clock);
-            state.flush_all();
+            state.flush_all(clock);
             if !content.is_empty() {
                 if let Some(turn) = state.open_turn.as_mut() {
                     turn.push_part(|id| TurnPart::Prose { id, text: content });
@@ -491,7 +562,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
         StreamChunk::TurnComplete { stop_reason } => match stop_reason {
             StopReason::ToolUse => {
                 state.ensure_open_turn(clock);
-                state.flush_all();
+                state.flush_all(clock);
                 state.mark_response();
                 // Do NOT commit — turn continues for tool results
                 ChunkAction::TurnContinuing
@@ -500,7 +571,7 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
                 if state.open_turn.is_none() {
                     state.ensure_open_turn(clock);
                 }
-                state.flush_all();
+                state.flush_all(clock);
                 state.mark_response();
                 if let Some(turn) = state.open_turn.as_mut() {
                     turn.stop_reason = Some(stop_reason.clone());
@@ -517,6 +588,8 @@ pub fn reduce(state: &mut ReducerState, chunk: StreamChunk, clock: &dyn Clock) -
 
                 state.open_prose = None;
                 state.open_reasoning = None;
+                state.open_reasoning_started_ms = None;
+                state.pending_reasoning_tokens = None;
                 state.pending_invocations.clear();
                 state.completed_invocations.clear();
                 state.progress.clear();
@@ -549,6 +622,10 @@ pub fn update_streaming_mirror(state: &ReducerState, mirror: &mut StreamingState
     mirror.is_streaming = state.open_turn.is_some();
     mirror.current_text_buffer = state.open_prose.clone().unwrap_or_default();
     mirror.thinking_buffer = state.open_reasoning.clone().unwrap_or_default();
+    mirror.thinking_started_ms = state
+        .open_reasoning
+        .as_ref()
+        .and(state.open_reasoning_started_ms);
     mirror.phase = if state.open_turn.is_none() {
         StreamingPhase::Idle
     } else if state.open_prose.is_some() {

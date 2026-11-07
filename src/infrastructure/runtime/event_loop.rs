@@ -6892,6 +6892,7 @@ pub async fn run(
                 crate::infrastructure::runtime::panel_bridge::tick_status(
                     &mut state, &conversation, tick_ms,
                 );
+                crate::infrastructure::runtime::panel_bridge::tick_live_reasoning(&mut state, &streaming);
 
                 if state.needs_redraw {
                                         let _ctx_window = active_context_window(&app_state, &router, &state, config);
@@ -8209,11 +8210,12 @@ pub fn render(
                     let liveness_ref: Option<&crate::domain::models::LivenessSnapshot> =
                         liveness_snapshot.as_ref();
                     let tab_id = state.active_tab_id;
-                    let code_cap_rows = state.code_max_rows;
+                    let (code_cap_rows, reasoning) = (state.code_max_rows, state.reasoning_display);
                     let render_state = state.tab_render_states.entry(tab_id).or_default();
                     render_state.osc8_links =
                         crate::adapters::tui::widgets::hyperlink::terminal_supports_osc8();
                     render_state.set_code_cap(Some(code_cap_rows));
+                    render_state.set_reasoning(reasoning);
                     let open_prose_ref: Option<&str> = tab_manager_for_bar
                         .map(|tm| tm.active_tab().reducer.open_prose.as_deref())
                         .unwrap_or(None);
@@ -8707,17 +8709,6 @@ pub fn resolve_resize_anchor(tab_manager: Option<&mut TabManager>, state: &mut T
     }
 }
 
-/// Truncate a string to `max_len` characters, appending "…" if truncated.
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let mut truncated: String = s.chars().take(max_len).collect();
-        truncated.push('…');
-        truncated
-    }
-}
-
 fn title_messages(conversation: &Conversation) -> Option<(String, String)> {
     let user = conversation
         .messages
@@ -8727,7 +8718,7 @@ fn title_messages(conversation: &Conversation) -> Option<(String, String)> {
         .messages
         .iter()
         .find(|m| !m.is_ephemeral_display() && m.role == MessageRole::Assistant)?;
-    Some((user.content.clone(), truncate(&assistant.content, 500)))
+    Some((user.content.clone(), conversation.excerpt(assistant)))
 }
 
 /// Generate a concise title for a conversation using the LLM provider.
@@ -9965,25 +9956,6 @@ mod tests {
     fn test_post_process_title_exactly_60_chars() {
         let exact = "A".repeat(60);
         assert_eq!(post_process_title(&exact), exact);
-    }
-
-    #[test]
-    fn test_truncate_short_string() {
-        assert_eq!(truncate("Hello", 10), "Hello");
-    }
-
-    #[test]
-    fn test_truncate_long_string() {
-        let long = "A".repeat(600);
-        let result = truncate(&long, 500);
-        assert_eq!(result.chars().count(), 501); // 500 chars + '…'
-        assert!(result.ends_with('…'));
-    }
-
-    #[test]
-    fn test_truncate_exact_length() {
-        let exact = "A".repeat(500);
-        assert_eq!(truncate(&exact, 500), exact);
     }
 
     // P1 (party-mode review 2026-04-12): base64 size guard in persist_image_attachments

@@ -42,6 +42,8 @@ fn golden_turn_serde_round_trip() {
     turn.push_part(|id| TurnPart::Reasoning {
         id,
         text: "The edit_file tool will fix the off-by-one.".into(),
+        duration_ms: None,
+        tokens: None,
     });
 
     turn.push_part(|id| TurnPart::ToolResult {
@@ -146,10 +148,12 @@ fn assert_parts_eq(a: &TurnPart, b: &TurnPart) {
             TurnPart::Reasoning {
                 id: id_a,
                 text: t_a,
+                ..
             },
             TurnPart::Reasoning {
                 id: id_b,
                 text: t_b,
+                ..
             },
         ) => {
             assert_eq!(id_a, id_b);

@@ -106,7 +106,7 @@ Also inherits: Global.
 | `K` | Jump to the previous content block | local | portable |  |
 | `{` | Jump to previous / next user message | local | portable |  |
 | `}` | Jump to the next user message | local | portable |  |
-| `Tab` | Cycle tool calls, code blocks, tables (needs 2+); else sidebar focus, else next tab | local | portable |  |
+| `Tab` | Cycle tools, thinking, code, tables (needs 2+); else sidebar focus, else next tab | local | portable |  |
 | `z a` | Toggle fold on focused turn | local | portable |  |
 | `z c` | Collapse focused turn | local | portable |  |
 | `z o` | Expand focused turn | local | portable |  |
@@ -131,7 +131,7 @@ Also inherits: Global.
 | `9` | Switch to tab 9 | local | portable |  |
 | `Alt+V` | Paste an image or text from the system clipboard | local | Alt (meta) | portable alternative: palette: paste image from clipboard |
 | `c` | Copy focused content to clipboard | local | portable |  |
-| `Enter` | Inspect the focused tool call, code block or table | local | portable |  |
+| `Enter` | Inspect the focused tool call, thinking, code block or table | local | portable |  |
 | `f` | Fork the conversation at the focused message | local | portable |  |
 | `R` | Rewind the conversation to the focused message | local | portable |  |
 | `m` | Toggle bookmark on current message | local | portable |  |

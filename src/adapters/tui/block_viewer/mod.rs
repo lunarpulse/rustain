@@ -2,6 +2,7 @@
 //! The Stage stays a read-only projection: this module never touches its caches.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 
 use ratatui::layout::{Margin, Rect};
 use ratatui::text::{Line, Span};
@@ -15,7 +16,9 @@ use crate::adapters::tui::{
     },
     markdown::{self, BlockKind, BlockMode, BlockRender, RenderOptions},
     presentation::{
-        Surface, reducer,
+        Surface,
+        markdown_body::{self, BodyMode},
+        reducer,
         viewer::{self, RowOrigin, Viewer, ViewerCmd, ViewerSearch},
     },
     state::TuiState,
@@ -23,7 +26,7 @@ use crate::adapters::tui::{
 };
 use crate::domain::models::{
     Conversation, PartId, Turn, TurnId, TurnPart,
-    turn::{block_ordinal_of, is_block_item_id},
+    turn::{block_ordinal_of, is_block_item_id, is_reasoning_item_id, reasoning_part_of},
     view_state::ScrollDelta,
 };
 use crate::domain::services::reducer::ReducerState;
@@ -35,13 +38,21 @@ pub type BlockViewers = BTreeMap<u64, BlockViewerState>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockFrameKey(pub u64);
 
-/// A Stage-bound block identity (D9): its turn, prose part and ordinal.
+/// What a block frame shows (Story 21.9 D8): one code block or table of a prose
+/// part, or the whole text of a reasoning part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockSubject {
+    Block { ordinal: usize },
+    Reasoning,
+}
+
+/// A Stage-bound identity (D9): its turn, the part and what of it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockTarget {
     pub conversation_id: String,
     pub turn_id: TurnId,
     pub part_id: PartId,
-    pub ordinal: usize,
+    pub subject: BlockSubject,
 }
 
 /// Where the block sits among the inspectable blocks of its turn.
@@ -67,6 +78,10 @@ pub struct BlockViewerState {
     pub viewer: Viewer,
     pub missing: bool,
     pub summary: Option<BlockSummary>,
+    /// The frame title of a reasoning subject (`Thinking · 4.2s · 1.3k tokens`).
+    pub heading: Option<String>,
+    /// Rows that scroll sideways (`h_off` applies); `None` = every row (blocks).
+    pub wide_rows: Option<Vec<Range<usize>>>,
     pub rows: Vec<Line<'static>>,
     pub row_widths: Vec<usize>,
     /// 1-based source line of each row (`None` for chrome and continuations).
@@ -98,6 +113,8 @@ impl BlockViewerState {
             viewer: Viewer::default(),
             missing: false,
             summary: None,
+            heading: None,
+            wide_rows: None,
             rows: Vec::new(),
             row_widths: Vec::new(),
             source_line: Vec::new(),
@@ -118,6 +135,35 @@ impl BlockViewerState {
         self.summary
             .as_ref()
             .is_some_and(|summary| matches!(summary.kind, BlockKind::Code { .. }))
+    }
+
+    /// The frame shows a reasoning part: no `#`, `w`, `[`, `]` apply.
+    pub fn is_reasoning(&self) -> bool {
+        self.target.subject == BlockSubject::Reasoning
+    }
+
+    /// The frame title once prepared (`None` before, or when missing).
+    pub fn frame_title(&self) -> Option<String> {
+        if self.missing {
+            return None;
+        }
+        match self.target.subject {
+            BlockSubject::Block { .. } => self.summary.as_ref().map(title),
+            BlockSubject::Reasoning => self.heading.clone(),
+        }
+    }
+
+    /// The horizontal offset row `index` is painted at: reasoning prose rows
+    /// never move, only the scrollable rows do.
+    pub fn row_h_off(&self, index: usize) -> usize {
+        let off = self
+            .viewer
+            .h_off
+            .min(self.widest.saturating_sub(self.content_cols()));
+        match &self.wide_rows {
+            Some(wide) if !markdown_body::is_wide_row(wide, index) => 0,
+            _ => off,
+        }
     }
 
     /// `#`: code in both modes; a table only as source (rendered table rows do
@@ -198,42 +244,20 @@ impl BlockViewerState {
             self.missing = true;
             return;
         };
-        let wrap = self.wrap.then_some((cols, self.numbers));
+        let wrap = match self.target.subject {
+            BlockSubject::Block { .. } => self.wrap.then_some((cols, self.numbers)),
+            // A reasoning body wraps at the viewport: its rows depend on the width.
+            BlockSubject::Reasoning => Some((cols, false)),
+        };
         let identity = (turn.parts.revision(), text.len(), self.mode, wrap);
         if self.prepared != Some(identity) {
-            // The wrap width depends on the gutter, whose width depends on the
-            // last line number: cut once, and again only if that width moved.
-            let mut view = None;
-            for _ in 0..2 {
-                let render = BlockRender {
-                    mode: self.mode,
-                    wrap: self.wrap.then(|| self.wrap_width()),
-                };
-                let Some(rendered) =
-                    markdown::render_block(text, self.target.ordinal, theme, &render)
-                else {
-                    self.missing = true;
-                    return;
-                };
-                let digits = rendered
-                    .source_line
-                    .iter()
-                    .flatten()
-                    .max()
-                    .map_or(1, |last| last.to_string().len());
-                let settled = digits == self.digits;
-                self.digits = digits;
-                view = Some(rendered);
-                if settled || !(self.wrap && self.numbers) {
-                    break;
-                }
+            let built = match self.target.subject {
+                BlockSubject::Block { ordinal } => self.build_block(turn, text, ordinal, theme),
+                BlockSubject::Reasoning => self.build_reasoning(turn, text, theme),
+            };
+            if !built {
+                return;
             }
-            let view = view.expect("one render ran");
-            self.row_widths = view.rows.iter().map(Line::width).collect();
-            self.widest = view.cells;
-            self.rows = view.rows;
-            self.source_line = view.source_line;
-            self.summary = Some(summarize(turn, &self.target, view.kind));
             self.prepared = Some(identity);
             self.searched = None;
         }
@@ -263,6 +287,81 @@ impl BlockViewerState {
                 viewer::apply_horizontal(&mut self.viewer, command, widest, cols);
             }
         }
+    }
+
+    /// Rows of one code block or table; `false` (and `missing`) when the
+    /// ordinal no longer exists.
+    fn build_block(&mut self, turn: &Turn, text: &str, ordinal: usize, theme: &Theme) -> bool {
+        // The wrap width depends on the gutter, whose width depends on the
+        // last line number: cut once, and again only if that width moved.
+        let mut view = None;
+        for _ in 0..2 {
+            let render = BlockRender {
+                mode: self.mode,
+                wrap: self.wrap.then(|| self.wrap_width()),
+            };
+            let Some(rendered) = markdown::render_block(text, ordinal, theme, &render) else {
+                self.missing = true;
+                return false;
+            };
+            let digits = rendered
+                .source_line
+                .iter()
+                .flatten()
+                .max()
+                .map_or(1, |last| last.to_string().len());
+            let settled = digits == self.digits;
+            self.digits = digits;
+            view = Some(rendered);
+            if settled || !(self.wrap && self.numbers) {
+                break;
+            }
+        }
+        let view = view.expect("one render ran");
+        self.row_widths = view.rows.iter().map(Line::width).collect();
+        self.widest = view.cells;
+        self.rows = view.rows;
+        self.source_line = view.source_line;
+        self.summary = Some(summarize(turn, &self.target, ordinal, view.kind));
+        self.heading = None;
+        self.wide_rows = None;
+        true
+    }
+
+    /// Rows of a reasoning part: the sanitized display projection through the
+    /// one markdown body layout (AD-2116: origin safety exactly once).
+    fn build_reasoning(&mut self, turn: &Turn, text: &str, theme: &Theme) -> bool {
+        let display = crate::domain::services::peer_text::sanitize_tool_text_block(text);
+        let mode = match self.mode {
+            BlockMode::Rendered => BodyMode::Rendered,
+            BlockMode::Source => BodyMode::Source,
+        };
+        let body = markdown_body::layout(&display, self.cols, theme, mode, false);
+        self.row_widths = body.lines.iter().map(Line::width).collect();
+        self.widest = body.widest;
+        self.source_line = vec![None; body.lines.len()];
+        self.rows = body.lines;
+        self.wide_rows = Some(body.wide);
+        self.digits = 1;
+        self.summary = None;
+        let (duration_ms, tokens) = turn
+            .parts
+            .iter()
+            .find_map(|part| match part {
+                TurnPart::Reasoning {
+                    id,
+                    duration_ms,
+                    tokens,
+                    ..
+                } if *id == self.target.part_id => Some((*duration_ms, *tokens)),
+                _ => None,
+            })
+            .unwrap_or((None, None));
+        self.heading = Some(format!(
+            "Thinking · {}",
+            crate::adapters::tui::widgets::chat_pane::reasoning::facts(text, duration_ms, tokens)
+        ));
+        true
     }
 
     /// Content width a wrapped code row is cut at: the viewport minus the
@@ -346,6 +445,12 @@ impl BlockViewerState {
             return;
         };
         let (line, start) = (found.logical_line, found.bytes.start);
+        // Prose rows of a reasoning body never move sideways.
+        if let Some(wide) = &self.wide_rows
+            && !markdown_body::is_wide_row(wide, line)
+        {
+            return;
+        }
         let mut column = 0usize;
         let mut at = 0usize;
         'spans: for span in &self.rows[line].spans {
@@ -421,13 +526,22 @@ fn resolve<'a>(
         .into_iter()
         .chain(turns)
         .find(|turn| turn.id == target.turn_id)?;
-    turn.parts.iter().find_map(|part| match part {
-        TurnPart::Prose { id, text } if *id == target.part_id => Some((turn, text.as_str())),
-        _ => None,
-    })
+    turn.parts
+        .iter()
+        .find_map(|part| match (part, target.subject) {
+            (TurnPart::Prose { id, text }, BlockSubject::Block { .. }) if *id == target.part_id => {
+                Some((turn, text.as_str()))
+            }
+            (TurnPart::Reasoning { id, text, .. }, BlockSubject::Reasoning)
+                if *id == target.part_id =>
+            {
+                Some((turn, text.as_str()))
+            }
+            _ => None,
+        })
 }
 
-fn summarize(turn: &Turn, target: &BlockTarget, kind: BlockKind) -> BlockSummary {
+fn summarize(turn: &Turn, target: &BlockTarget, ordinal: usize, kind: BlockKind) -> BlockSummary {
     let (mut before, mut total) = (0, 0);
     for part in &turn.parts {
         if let TurnPart::Prose { id, text } = part {
@@ -440,7 +554,7 @@ fn summarize(turn: &Turn, target: &BlockTarget, kind: BlockKind) -> BlockSummary
     }
     BlockSummary {
         kind,
-        index: before + target.ordinal + 1,
+        index: before + ordinal + 1,
         total,
     }
 }
@@ -463,7 +577,7 @@ fn title(summary: &BlockSummary) -> String {
     format!("Block · {label} #{}", summary.index)
 }
 
-/// The block target a Stage item id names in the live conversation.
+/// The block or reasoning target a Stage item id names in the live conversation.
 fn target_of(
     conversation: &Conversation,
     open_turn: Option<&Turn>,
@@ -479,7 +593,15 @@ fn target_of(
                         conversation_id: conversation.id.clone(),
                         turn_id: turn.id.clone(),
                         part_id: *id,
-                        ordinal,
+                        subject: BlockSubject::Block { ordinal },
+                    })
+                }
+                TurnPart::Reasoning { id, .. } => {
+                    reasoning_part_of(&turn.id, *id, item).then(|| BlockTarget {
+                        conversation_id: conversation.id.clone(),
+                        turn_id: turn.id.clone(),
+                        part_id: *id,
+                        subject: BlockSubject::Reasoning,
                     })
                 }
                 _ => None,
@@ -493,6 +615,34 @@ pub fn contains_block(turns: &[Turn], open_turn: Option<&Turn>, item: &str) -> b
         turn.parts.iter().any(|part| {
             matches!(part, TurnPart::Prose { id, .. }
                 if block_ordinal_of(&turn.id, *id, item).is_some())
+        })
+    })
+}
+
+/// Presence-only discovery of a reasoning part for the Stage hint.
+pub fn contains_reasoning(turns: &[Turn], open_turn: Option<&Turn>, item: &str) -> bool {
+    open_turn.into_iter().chain(turns).any(|turn| {
+        turn.parts.iter().any(|part| {
+            matches!(part, TurnPart::Reasoning { id, .. }
+                if reasoning_part_of(&turn.id, *id, item))
+        })
+    })
+}
+
+/// Exact original text of a reasoning Stage id (Chat `c` with a selected
+/// reasoning item): the bytes as received, never the display projection.
+/// All or nothing like the window's copy: above `COPY_MAX_BYTES` it is `None`
+/// and nothing is cloned (review P6).
+pub fn reasoning_source_of(turns: &[Turn], open_turn: Option<&Turn>, item: &str) -> Option<String> {
+    let limit = crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
+    open_turn.into_iter().chain(turns).find_map(|turn| {
+        turn.parts.iter().find_map(|part| match part {
+            TurnPart::Reasoning { id, text, .. }
+                if reasoning_part_of(&turn.id, *id, item) && text.len() <= limit =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
         })
     })
 }
@@ -546,7 +696,19 @@ pub fn copy_source(
     // Bound the work first: above the limit no block (sources, styled tree,
     // rows) is ever built for a copy.
     let limit = crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
-    match markdown::block_source_len(text, target.ordinal) {
+    let ordinal = match target.subject {
+        BlockSubject::Block { ordinal } => ordinal,
+        // A reasoning frame copies the original text, all or nothing.
+        BlockSubject::Reasoning => {
+            if text.len() > limit {
+                notify_failure(state, "reasoning text exceeds the 8 MiB copy limit");
+            } else {
+                notify_copy(state, text, copy);
+            }
+            return true;
+        }
+    };
+    match markdown::block_source_len(text, ordinal) {
         None => return false,
         Some(len) if len > limit => {
             notify_failure(state, "block source exceeds the 8 MiB copy limit");
@@ -558,7 +720,7 @@ pub fn copy_source(
         mode: BlockMode::Rendered,
         wrap: None,
     };
-    let Some(view) = markdown::render_block(text, target.ordinal, &state.theme, &render) else {
+    let Some(view) = markdown::render_block(text, ordinal, &state.theme, &render) else {
         return false;
     };
     notify_copy(state, &view.source, copy);
@@ -580,7 +742,7 @@ pub fn step(
         return false;
     };
     let current = &state.block_viewers[&id];
-    if current.target.conversation_id != conversation.id {
+    if current.target.conversation_id != conversation.id || current.is_reasoning() {
         return false;
     }
     let Some(turn) = open_turn
@@ -596,9 +758,14 @@ pub fn step(
             blocks.extend((0..markdown::block_count(text)).map(|ordinal| (*id, ordinal)));
         }
     }
-    let Some(at) = blocks.iter().position(|&(part, ordinal)| {
-        part == current.target.part_id && ordinal == current.target.ordinal
-    }) else {
+    let current_ordinal = match current.target.subject {
+        BlockSubject::Block { ordinal } => ordinal,
+        BlockSubject::Reasoning => return false,
+    };
+    let Some(at) = blocks
+        .iter()
+        .position(|&(part, ordinal)| part == current.target.part_id && ordinal == current_ordinal)
+    else {
         return false;
     };
     let Some(&(part_id, ordinal)) = (if forward {
@@ -612,7 +779,7 @@ pub fn step(
         conversation_id: conversation.id.clone(),
         turn_id: turn.id.clone(),
         part_id,
-        ordinal,
+        subject: BlockSubject::Block { ordinal },
     });
     (replacement.mode, replacement.numbers, replacement.wrap) =
         (current.mode, current.numbers, current.wrap);
@@ -636,6 +803,11 @@ pub fn stage_target(
                 && state.modal_stack.is_empty()
                 && contains_block(&conversation.turns, open_turn, id)
         }
+        Some(id) if is_reasoning_item_id(id) => {
+            state.focus == crate::domain::models::FocusState::Chat
+                && state.modal_stack.is_empty()
+                && contains_reasoning(&conversation.turns, open_turn, id)
+        }
         _ => crate::adapters::tui::tool_inspector::stage_target(state, conversation, open_turn),
     }
 }
@@ -651,7 +823,7 @@ pub fn inspect_focused(
     let Some((id, target)) = state
         .focused_item_id
         .clone()
-        .filter(|id| is_block_item_id(id))
+        .filter(|id| is_block_item_id(id) || is_reasoning_item_id(id))
         .and_then(|id| target_of(conversation, open_turn, &id).map(|target| (id, target)))
     else {
         return crate::adapters::tui::tool_inspector::inspect_focused(
@@ -664,10 +836,10 @@ pub fn inspect_focused(
     let body = frame_rect(state).map(|rect| parts(rect).body);
     let (cols, viewport) = body.map_or((1, 1), |b| (usize::from(b.width), usize::from(b.height)));
     fresh.prepare(&conversation.turns, open_turn, cols, viewport, &state.theme);
-    let Some(summary) = fresh.summary.clone().filter(|_| !fresh.missing) else {
+    let Some(frame_title) = fresh.frame_title() else {
         return false;
     };
-    reducer::open_block(state, fresh, title(&summary));
+    reducer::open_block(state, fresh, frame_title);
     state.selected_item_id = Some(id);
     true
 }
@@ -851,7 +1023,7 @@ mod tests {
             conversation_id: "c".into(),
             turn_id: turn.id.clone(),
             part_id: part,
-            ordinal: 0,
+            subject: BlockSubject::Block { ordinal: 0 },
         };
         (turn, target)
     }
@@ -904,7 +1076,7 @@ mod tests {
             conversation_id: "c".into(),
             turn_id: turn.id.clone(),
             part_id: part,
-            ordinal: 0,
+            subject: BlockSubject::Block { ordinal: 0 },
         };
         let theme = Theme::dark();
         let mut block = BlockViewerState::new(target);
@@ -980,5 +1152,27 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "200 paints took {elapsed:?}"
         );
+    }
+
+    /// Review P6: the chat `c` of a reasoning item is bounded at the 8 MiB copy
+    /// limit exactly like the window's copy.
+    #[test]
+    fn story21_9_chat_copy_of_reasoning_is_bounded_at_the_copy_limit() {
+        let limit = crate::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
+        for (len, copied) in [(limit, true), (limit + 1, false)] {
+            let mut turn = Turn::new("model".into(), 0);
+            let part = turn.push_part(|id| TurnPart::Reasoning {
+                id,
+                text: "x".repeat(len),
+                duration_ms: None,
+                tokens: None,
+            });
+            let item = crate::domain::models::turn::reasoning_item_id_for(&turn.id, part);
+            let got = reasoning_source_of(std::slice::from_ref(&turn), None, &item);
+            assert_eq!(got.is_some(), copied, "{len} bytes");
+            if let Some(text) = got {
+                assert_eq!(text.len(), len);
+            }
+        }
     }
 }

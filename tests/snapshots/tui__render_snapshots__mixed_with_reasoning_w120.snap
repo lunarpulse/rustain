@@ -5,6 +5,7 @@ expression: text
 │ Let me analyze this structure.
 │
 │
+│ ◇ Thinking · ~21 tokens
 │ The design uses a hexagonal architecture pattern which separates domain from adapters.
 │
 │ ┄ ✓ Success Read "" → running... (5.0s) ┄

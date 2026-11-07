@@ -400,14 +400,28 @@ impl Default for NotificationsConfig {
     }
 }
 
+/// How the local Stage shows committed reasoning (Story 21.9 D6): `Folded` is
+/// one `◇ Thinking · …` row; `Expanded` keeps that row and the body under it.
+/// The type's default is `Expanded` (nothing hidden for a caller that never
+/// chose); the `[markdown]` setting defaults to `Folded`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReasoningDisplay {
+    Folded,
+    #[default]
+    Expanded,
+}
+
 /// Markdown presentation (`[markdown]`, Story 21.13 D5). `code_max_rows` caps a
 /// fenced code block on the local Stage; the rest is reached in the block
 /// viewer. Read as an `i64` so a negative or zero value clamps instead of
-/// invalidating the whole config.
+/// invalidating the whole config. `reasoning` (Story 21.9 D9) is read as a
+/// string for the same reason: an unknown value never invalidates the config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarkdownConfig {
     #[serde(default = "MarkdownConfig::default_code_max_rows")]
     pub code_max_rows: i64,
+    #[serde(default = "MarkdownConfig::default_reasoning")]
+    pub reasoning: String,
 }
 
 impl MarkdownConfig {
@@ -416,6 +430,10 @@ impl MarkdownConfig {
 
     fn default_code_max_rows() -> i64 {
         30
+    }
+
+    fn default_reasoning() -> String {
+        "folded".to_owned()
     }
 
     /// The effective cap in rows, clamped to `[1, 1000]` with a warning.
@@ -432,12 +450,29 @@ impl MarkdownConfig {
         }
         u16::try_from(clamped).unwrap_or(30)
     }
+
+    /// The effective reasoning display: `"expanded"` expands; `"folded"` and
+    /// any unknown value fold (an unknown value warns).
+    pub fn reasoning(&self) -> ReasoningDisplay {
+        match self.reasoning.as_str() {
+            "expanded" => ReasoningDisplay::Expanded,
+            "folded" => ReasoningDisplay::Folded,
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "markdown.reasoning must be \"folded\" or \"expanded\"; folding"
+                );
+                ReasoningDisplay::Folded
+            }
+        }
+    }
 }
 
 impl Default for MarkdownConfig {
     fn default() -> Self {
         Self {
             code_max_rows: Self::default_code_max_rows(),
+            reasoning: Self::default_reasoning(),
         }
     }
 }

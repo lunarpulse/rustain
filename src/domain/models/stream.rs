@@ -184,6 +184,9 @@ pub struct StreamingState {
     pub phase: StreamingPhase,
     pub current_text_buffer: String,
     pub thinking_buffer: String,
+    /// Unix millis of the first thinking chunk of the open reasoning part
+    /// (Story 21.9 D5); `None` while nothing is thinking. Transient.
+    pub thinking_started_ms: Option<i64>,
     pub current_blocks: Vec<super::content::ContentBlockType>,
     pub active_tool_calls: std::collections::HashMap<String, super::tools::ToolCallInfo>,
     pub is_streaming: bool,
@@ -195,6 +198,7 @@ impl Default for StreamingState {
             phase: StreamingPhase::Idle,
             current_text_buffer: String::new(),
             thinking_buffer: String::new(),
+            thinking_started_ms: None,
             current_blocks: Vec::new(),
             active_tool_calls: std::collections::HashMap::new(),
             is_streaming: false,
@@ -206,6 +210,7 @@ impl StreamingState {
     /// Clear the thinking buffer (called on tab switch to avoid stale state).
     pub fn reset_thinking_buffer(&mut self) {
         self.thinking_buffer.clear();
+        self.thinking_started_ms = None;
     }
 }
 

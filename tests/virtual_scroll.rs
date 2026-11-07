@@ -753,6 +753,7 @@ fn test_evict_turns_not_in_drops_stale_entries() {
                 block_offsets: vec![],
                 tool_block_offsets: vec![],
                 md_block_offsets: vec![],
+                reasoning_offsets: vec![],
             },
         );
     }
@@ -817,6 +818,7 @@ fn test_width_divergence_invalidates_cache() {
             block_offsets: vec![],
             tool_block_offsets: vec![],
             md_block_offsets: vec![],
+            reasoning_offsets: vec![],
         },
     );
 

@@ -122,6 +122,18 @@ pub(crate) fn room_head_poll_due(state: &mut TuiState, tick_ms: u64) -> bool {
     }
 }
 
+/// Story 21.9 (review P4): the live `◇ Thinking… · <elapsed>` row advances with
+/// the clock, so a draw is due on every tick while the model is thinking, even
+/// between chunks.
+pub(crate) fn tick_live_reasoning(
+    state: &mut TuiState,
+    streaming: &crate::domain::models::StreamingState,
+) {
+    if !streaming.thinking_buffer.is_empty() {
+        state.needs_redraw = true;
+    }
+}
+
 pub(crate) fn tick_status(state: &mut TuiState, conversation: &Conversation, tick_ms: u64) {
     if let StatusState::Executing { elapsed_ms, .. } = &mut state.status {
         *elapsed_ms += tick_ms;

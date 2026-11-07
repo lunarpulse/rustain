@@ -183,3 +183,6 @@ mod conformance_21_5_tool_inspector;
 
 #[path = "../conformance_21_13_block_viewer.rs"]
 mod conformance_21_13_block_viewer;
+
+#[path = "../conformance_21_9_stage_polish.rs"]
+mod conformance_21_9_stage_polish;

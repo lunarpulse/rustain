@@ -22,26 +22,34 @@ fn plural(count: usize, one: &str, many: &str) -> String {
 /// `code 2/4 · rust · 45 lines · Rendered · col 1-76/122`; the column range only
 /// appears when something is wider than the viewport.
 fn status(state: &BlockViewerState) -> String {
-    let Some(summary) = &state.summary else {
-        return String::new();
+    let mut words = if state.is_reasoning() {
+        vec![
+            "thinking".to_owned(),
+            plural(state.rows.len(), "row", "rows"),
+        ]
+    } else {
+        let Some(summary) = &state.summary else {
+            return String::new();
+        };
+        let mut words = vec![match &summary.kind {
+            BlockKind::Code { .. } => format!("code {}/{}", summary.index, summary.total),
+            BlockKind::Table { .. } => format!("table {}/{}", summary.index, summary.total),
+        }];
+        match &summary.kind {
+            BlockKind::Code { language, lines } => {
+                words.extend(language.as_deref().map(block_viewer::safe_language));
+                words.push(plural(*lines, "line", "lines"));
+            }
+            BlockKind::Table { cols, rows } => {
+                words.push(format!(
+                    "{} × {}",
+                    plural(*cols, "col", "cols"),
+                    plural(*rows, "row", "rows")
+                ));
+            }
+        }
+        words
     };
-    let mut words = vec![match &summary.kind {
-        BlockKind::Code { .. } => format!("code {}/{}", summary.index, summary.total),
-        BlockKind::Table { .. } => format!("table {}/{}", summary.index, summary.total),
-    }];
-    match &summary.kind {
-        BlockKind::Code { language, lines } => {
-            words.extend(language.as_deref().map(block_viewer::safe_language));
-            words.push(plural(*lines, "line", "lines"));
-        }
-        BlockKind::Table { cols, rows } => {
-            words.push(format!(
-                "{} × {}",
-                plural(*cols, "col", "cols"),
-                plural(*rows, "row", "rows")
-            ));
-        }
-    }
     words.push(
         match state.mode {
             BlockMode::Rendered => "Rendered",
@@ -213,15 +221,11 @@ pub fn render(
             body.width.saturating_sub(gutter),
             body.height,
         );
-        let h_off = state
-            .viewer
-            .h_off
-            .min(state.widest.saturating_sub(state.content_cols()));
         for (offset, index) in range.enumerate() {
             let (line, left, right) = block_viewer::window(
                 state.painted(index),
                 state.row_widths[index],
-                h_off,
+                state.row_h_off(index),
                 usize::from(content.width),
             );
             let y = body.y + offset as u16;

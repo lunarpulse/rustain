@@ -298,6 +298,36 @@ impl Conversation {
             .map(|(index, _)| index)
     }
 
+    /// The answer text of an assistant message: its turn's `Prose` parts only,
+    /// never the model's thinking (Story 21.9: the mirror `content` reads
+    /// reasoning-then-prose). A message without a turn keeps its own content.
+    pub fn answer_text(&self, message: &ChatMessage) -> String {
+        match self.turns.iter().find(|turn| turn.id.0 == message.id) {
+            Some(turn) => turn
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    TurnPart::Prose { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            None => message.content.clone(),
+        }
+    }
+
+    /// The first 500 characters of [`Self::answer_text`] (`…` appended when cut):
+    /// what the title prompt shows the model as the assistant's reply.
+    pub fn excerpt(&self, message: &ChatMessage) -> String {
+        const MAX: usize = 500;
+        let answer = self.answer_text(message);
+        if answer.chars().count() <= MAX {
+            return answer;
+        }
+        let mut cut: String = answer.chars().take(MAX).collect();
+        cut.push('…');
+        cut
+    }
+
     /// Rebuild the legacy `messages` mirror from the authoritative `turns`.
     ///
     /// Preserves non-Assistant messages (User, System) that are not yet represented
@@ -1568,7 +1598,9 @@ mod tests {
         conversation.rebuild_messages_mirror();
         conversation.rebuild_messages_mirror();
         let row = &conversation.messages[1];
-        assert_eq!(row.content, "VTdone", "the display fold is unchanged");
+        // Story 21.9 D2: thinking now commits before the answer it precedes, so
+        // the display fold reads reasoning-then-prose; the spans below are unchanged.
+        assert_eq!(row.content, "TVdone", "the display fold follows part order");
         assert!(row.tool_calls.iter().all(|call| call.id.starts_with("tc_")));
         let ids: Vec<_> = row
             .tool_calls
@@ -1754,5 +1786,42 @@ mod tests {
         let call = &loaded.messages[0].tool_calls[0];
         assert!(call.id.starts_with("tc_legacy_"));
         assert_eq!(call.provider_id, None);
+    }
+
+    /// Story 21.9 (review P1): the title prompt reads the answer, never the
+    /// thinking the mirror `content` now leads with.
+    #[test]
+    fn story21_9_answer_text_is_the_prose_parts_only() {
+        let conversation = reduced_turn();
+        let mut conversation = conversation;
+        conversation.rebuild_messages_mirror();
+        let row = &conversation.messages[1];
+        assert_eq!(row.content, "TVdone", "the mirror leads with thinking");
+        assert_eq!(conversation.answer_text(row), "Vdone");
+        // A row without a turn keeps its own content.
+        let orphan = ChatMessage {
+            id: "no-turn".into(),
+            content: "kept".into(),
+            ..Default::default()
+        };
+        assert_eq!(conversation.answer_text(&orphan), "kept");
+    }
+
+    /// The three `truncate` pins of the event loop, moved with the helper (the
+    /// title prompt's 500-character cut now lives in `Conversation::excerpt`).
+    #[test]
+    fn story21_9_excerpt_keeps_the_old_truncate_contract() {
+        let message = |text: &str| ChatMessage {
+            id: "no-turn".into(),
+            content: text.into(),
+            ..Default::default()
+        };
+        let conversation = Conversation::default();
+        assert_eq!(conversation.excerpt(&message("Hello")), "Hello");
+        let result = conversation.excerpt(&message(&"A".repeat(600)));
+        assert_eq!(result.chars().count(), 501); // 500 chars + '…'
+        assert!(result.ends_with('…'));
+        let exact = "A".repeat(500);
+        assert_eq!(conversation.excerpt(&message(&exact)), exact);
     }
 }

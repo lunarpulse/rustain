@@ -913,6 +913,8 @@ mod tests {
         last.push_part(|id| TurnPart::Reasoning {
             id,
             text: "think".into(),
+            duration_ms: None,
+            tokens: None,
         });
         last.push_part(|id| TurnPart::Prose {
             id,

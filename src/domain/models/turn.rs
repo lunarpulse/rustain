@@ -235,9 +235,21 @@ pub enum TurnPart {
         refs: PartId,
         output: ToolOutput,
     },
+    /// Model thinking. `duration_ms` and `tokens` are facts the reducer records
+    /// (Story 21.9 D1): wall time from the first thinking chunk to the flush,
+    /// and the provider-reported reasoning tokens when attributable to this
+    /// part alone. Both absent for turns persisted before the facts existed.
     Reasoning {
         id: PartId,
         text: String,
+        #[serde(
+            default,
+            rename = "durationMs",
+            skip_serializing_if = "Option::is_none"
+        )]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tokens: Option<u32>,
     },
     /// Operator-private provider replay state; never rendered.
     ProviderReplay {
@@ -554,11 +566,44 @@ pub fn block_ordinal_of(turn_id: &TurnId, pid: PartId, candidate: &str) -> Optio
         .then(|| ordinal.parse().ok())?
 }
 
-/// Whether `candidate` is the id of a tool call or a code/table block of `turn`.
+/// Stage item id of the reasoning part `pid`: `rs_{turn_id}_{part_id}`
+/// (Story 21.9 D7).
+pub fn reasoning_item_id_for(turn_id: &TurnId, pid: PartId) -> String {
+    format!("rs_{}_{}", turn_id.0, pid.0)
+}
+
+/// Whether `candidate` has the shape minted by [`reasoning_item_id_for`]:
+/// `rs_<turn>_<part digits>`; a tool or block id never does.
+pub fn is_reasoning_item_id(candidate: &str) -> bool {
+    candidate.strip_prefix("rs_").is_some_and(|rest| {
+        rest.rsplit_once('_').is_some_and(|(turn, part)| {
+            !turn.is_empty() && !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())
+        })
+    })
+}
+
+/// Whether `candidate` is exactly the reasoning id of this turn and part: ids
+/// are compared structurally with canonical digits, never by a bare prefix.
+pub fn reasoning_part_of(turn_id: &TurnId, pid: PartId, candidate: &str) -> bool {
+    candidate
+        .strip_prefix("rs_")
+        .and_then(|rest| rest.strip_prefix(turn_id.0.as_str()))
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.bytes().all(|byte| byte.is_ascii_digit())
+                && (suffix == "0" || !suffix.starts_with('0'))
+                && suffix.parse::<u64>() == Ok(pid.0)
+        })
+}
+
+/// Whether `candidate` is the id of a tool call, a code/table block or a
+/// reasoning part of `turn`.
 pub fn item_belongs_to_turn(turn: &Turn, candidate: &str) -> bool {
     turn.parts.iter().any(|part| match part {
         TurnPart::ToolInvocation { id, .. } => tool_call_id_matches(&turn.id, *id, candidate),
         TurnPart::Prose { id, .. } => block_ordinal_of(&turn.id, *id, candidate).is_some(),
+        TurnPart::Reasoning { id, .. } => reasoning_part_of(&turn.id, *id, candidate),
         _ => false,
     })
 }
@@ -1078,5 +1123,48 @@ mod tests {
         ));
         assert!(!item_belongs_to_turn(&turn, &id));
         assert!(!item_belongs_to_turn(&turn, "md_provider_tool_id"));
+    }
+
+    #[test]
+    fn story21_9_reasoning_ids_are_structural_and_turn_membership_is_exact() {
+        let mut turn = Turn::new("m".into(), 0);
+        let think = turn.push_part(|id| TurnPart::Reasoning {
+            id,
+            text: "t".into(),
+            duration_ms: None,
+            tokens: None,
+        });
+        let prose = turn.push_part(|id| TurnPart::Prose {
+            id,
+            text: "p".into(),
+        });
+        let id = reasoning_item_id_for(&turn.id, think);
+        assert_eq!(id, format!("rs_{}_{}", turn.id.0, think.0));
+        assert!(is_reasoning_item_id(&id));
+        assert!(reasoning_part_of(&turn.id, think, &id));
+        // Wrong turn, wrong part, non-canonical digits, bare prefix and other
+        // item kinds are rejected.
+        let other = TurnId("other".into());
+        assert!(!reasoning_part_of(&other, think, &id));
+        assert!(!reasoning_part_of(&turn.id, prose, &id));
+        assert!(!reasoning_part_of(
+            &turn.id,
+            think,
+            &format!("rs_{}_{:02}", turn.id.0, think.0)
+        ));
+        assert!(!reasoning_part_of(&turn.id, think, "rs_"));
+        for bad in ["rs_", "rs__1", "rs_x_", "rs_x_a", "tc_x_1", "md_x_1_0"] {
+            assert!(!is_reasoning_item_id(bad), "{bad}");
+        }
+        // A turn-id that itself ends in digits cannot be confused with a part.
+        let long = TurnId("a_1".into());
+        let long_id = reasoning_item_id_for(&long, PartId(2));
+        assert!(!reasoning_part_of(&TurnId("a".into()), PartId(2), &long_id));
+        assert!(reasoning_part_of(&long, PartId(2), &long_id));
+        // Membership: the turn's own reasoning part, nothing else.
+        assert!(item_belongs_to_turn(&turn, &id));
+        assert!(!item_belongs_to_turn(&turn, &long_id));
+        assert!(!item_belongs_to_turn(&turn, "rs_provider_tool_id"));
+        assert!(!is_block_item_id(&id));
     }
 }

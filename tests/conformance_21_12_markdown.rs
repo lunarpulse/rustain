@@ -19,7 +19,7 @@
 //! * K9 links and OSC 8, K13 host suffix (`k9_k13_links.rs`).
 
 #[path = "conformance_21_12_markdown/support.rs"]
-mod support;
+pub(crate) mod support;
 
 #[path = "conformance_21_12_markdown/k1_lists.rs"]
 mod k1_lists;

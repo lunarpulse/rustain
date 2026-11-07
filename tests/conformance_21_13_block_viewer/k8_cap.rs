@@ -151,9 +151,14 @@ fn uncapped_surfaces_keep_every_row_and_the_same_text_committed_is_capped() {
         turn.push_part(|id| TurnPart::Reasoning {
             id,
             text: fence.clone(),
+            duration_ms: None,
+            tokens: None,
         });
         part(&mut turn, "Answer.");
         let mut f = Fixture::new(80, 140, turn);
+        // Story 21.9: the Stage folds reasoning by default; this pin is about
+        // the rows reasoning shows when expanded, so it asks for them.
+        f.h.state.reasoning_display = rustain::domain::models::ReasoningDisplay::Expanded;
         f.h.state.code_max_rows = rows;
         f.paint();
         f

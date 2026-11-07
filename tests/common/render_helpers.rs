@@ -219,6 +219,8 @@ pub fn reasoning(text: &str) -> TurnPart {
     TurnPart::Reasoning {
         id: PartId(0),
         text: text.to_string(),
+        duration_ms: None,
+        tokens: None,
     }
 }
 

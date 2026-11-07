@@ -14,6 +14,7 @@ expression: text
 │ Now I will analyze the architecture and make changes.
 │
 │
+│ ◇ Thinking · ~34 tokens
 │ The hexagonal architecture separates domain from adapters - I need to add the
 │ new model to domain/models/ and wire it through the ports.
 │

@@ -202,6 +202,23 @@ fn story21_1_tick_requests_a_redraw_only_when_a_toast_deadline_passed() {
 }
 
 #[test]
+fn story21_9_tick_requests_a_redraw_while_the_model_is_thinking() {
+    // Review P4: the live `◇ Thinking… · <elapsed>` row must advance between
+    // chunks, so a thinking buffer makes every tick ask for a draw.
+    let mut state = TuiState::new(160, 24);
+    let mut streaming = crate::domain::models::StreamingState::default();
+    state.needs_redraw = false;
+    super::panel_bridge::tick_live_reasoning(&mut state, &streaming);
+    assert!(!state.needs_redraw, "nothing thinks: no redraw");
+    streaming.thinking_buffer.push('x');
+    super::panel_bridge::tick_live_reasoning(&mut state, &streaming);
+    assert!(
+        state.needs_redraw,
+        "thinking: the elapsed segment must repaint"
+    );
+}
+
+#[test]
 fn story21_1_ticks_leave_the_typed_status_facts_alone() {
     // Old (S1): the delete-confirmation Flash was the one status flash left and
     // the tick left it alone. New (S2, AC13): `StatusState::Flash` is deleted and

@@ -333,6 +333,35 @@ The cap applies to the local Stage only and to completed replies: code in the
 reply that is still streaming, in reasoning, in system messages and in an
 attached session always shows every row.
 
+### Thinking (`[markdown] reasoning`)
+
+The model's thinking collapses to one muted row on the local Stage, in the
+place where it happened: `◇ Thinking · 4.2s · 1.3k tokens`. The duration runs
+from the first thinking chunk to the answer. The token count is the
+provider's own figure only when the provider reports reasoning tokens before
+the response ends (today the Responses API and Gemini CLI) and the response
+had exactly one thinking run; otherwise (OpenAI chat completions, which
+report usage after the end of the turn, and Anthropic, which reports none) it
+is an estimate marked `~` (bytes ÷ 4). While the model is still thinking
+the row reads `◇ Thinking… · 3.1s · ~120 tokens`.
+
+Focus the row with `Tab` (the `▸` marker and `[Enter] Inspect` appear) and
+press `Enter` to read the whole text in a window: `v` shows the source,
+`/` searches, `c` copies the exact original text. `[markdown] reasoning =
+"expanded"` keeps the text on the Stage under the header row instead.
+
+```toml
+[markdown]
+reasoning = "folded"   # default; "expanded" shows the text under the header
+```
+
+The value is the lowercase string `"folded"` or `"expanded"`. Any other string
+(including `"Expanded"`) is logged as a warning and folds, and the rest of the
+config is kept; a value that is not a string at all (for example `reasoning =
+3`) is a type error that invalidates the config like any other mistyped key.
+`/config reload` applies a change to every conversation without a restart. An
+attached session always shows its thinking expanded.
+
 ### Decisions that need an answer
 
 A few prompts are decisions, not notices, so they never expire: the startup

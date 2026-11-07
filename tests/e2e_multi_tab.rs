@@ -308,6 +308,7 @@ fn test_height_cache_invalidate_turn() {
             block_offsets: vec![],
             tool_block_offsets: vec![],
             md_block_offsets: vec![],
+            reasoning_offsets: vec![],
         },
     );
     cache.set(
@@ -317,6 +318,7 @@ fn test_height_cache_invalidate_turn() {
             block_offsets: vec![],
             tool_block_offsets: vec![],
             md_block_offsets: vec![],
+            reasoning_offsets: vec![],
         },
     );
     cache.invalidate_turn(&turn_a);

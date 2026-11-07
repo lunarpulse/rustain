@@ -1,0 +1,119 @@
+{
+  "id": "story21-9-stage-polish",
+  "title": "Stage polish smoke",
+  "messages": [
+    {
+      "id": "u1",
+      "role": "user",
+      "content": "explain <T> Vec<String> <b>b</b> *x*",
+      "contentBlocks": [],
+      "toolCalls": [],
+      "createdAt": 1700000,
+      "tokenCount": null
+    },
+    {
+      "id": "2Qc8MU0g36zA4y5dd9_Jn",
+      "role": "assistant",
+      "content": "Compare parser A and parser B.\n\nB has fewer cases.\u001b[0mParser B wins: it has fewer cases.",
+      "contentBlocks": [
+        {
+          "responseSpan": {
+            "reasoning": "Compare parser A and parser B.\n\nB has fewer cases.\u001b[0m",
+            "toolCalls": 1
+          }
+        },
+        {
+          "responseSpan": {
+            "text": "Parser B wins: it has fewer cases."
+          }
+        }
+      ],
+      "toolCalls": [
+        {
+          "id": "tc_2Qc8MU0g36zA4y5dd9_Jn_1",
+          "name": "Read",
+          "input": {
+            "file_path": "src/x.rs"
+          },
+          "result": {
+            "content": "fn main() {}",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          },
+          "startedAtMs": 1700000004200,
+          "completedAtMs": 1700000004200,
+          "status": "✓ Success",
+          "providerId": "toolu_smoke"
+        }
+      ],
+      "createdAt": 1700000000,
+      "tokenCount": null,
+      "stopReason": "endTurn"
+    }
+  ],
+  "turns": [
+    {
+      "id": "2Qc8MU0g36zA4y5dd9_Jn",
+      "parts": [
+        {
+          "kind": "reasoning",
+          "id": 0,
+          "text": "Compare parser A and parser B.\n\nB has fewer cases.\u001b[0m",
+          "durationMs": 4200,
+          "tokens": 1300
+        },
+        {
+          "kind": "toolInvocation",
+          "id": 1,
+          "tool": "Read",
+          "args": {
+            "file_path": "src/x.rs"
+          },
+          "status": "success",
+          "started_at": 1700000004200,
+          "ended_at": 1700000004200
+        },
+        {
+          "kind": "toolResult",
+          "id": 2,
+          "refs": 1,
+          "output": {
+            "content": "fn main() {}",
+            "isError": false,
+            "diff": {
+              "state": "not_a_write"
+            }
+          }
+        },
+        {
+          "kind": "prose",
+          "id": 3,
+          "text": "Parser B wins: it has fewer cases."
+        }
+      ],
+      "startedAt": 1700000000000,
+      "model": "",
+      "stopReason": "endTurn",
+      "responses": [
+        {
+          "end": 2,
+          "callIds": [
+            "toolu_smoke"
+          ]
+        },
+        {
+          "end": 4
+        }
+      ]
+    }
+  ],
+  "createdAt": 1700000,
+  "sessionId": "test-session",
+  "forkSource": null,
+  "updatedAt": 1700000,
+  "lastResponseAt": 1700000,
+  "usage": null,
+  "cleanExit": true
+}

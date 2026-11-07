@@ -207,9 +207,14 @@ fn only_committed_assistant_prose_takes_block_focus() {
     turn.push_part(|id| rustain::domain::models::TurnPart::Reasoning {
         id,
         text: fence.into(),
+        duration_ms: None,
+        tokens: None,
     });
     part(&mut turn, "Plain answer, no block.");
     let mut f = Fixture::new(80, 24, turn);
+    // Story 21.9: the Stage folds reasoning by default, which would paint no
+    // reasoning code at all; the pin is about the code it paints when shown.
+    f.h.state.reasoning_display = rustain::domain::models::ReasoningDisplay::Expanded;
     // The open streaming prose, a user message and a system message all carry code.
     f.tabs.active_tab_mut().reducer.open_prose = Some(fence.into());
     for (id, role) in [

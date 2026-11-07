@@ -965,6 +965,8 @@ mod tests {
         turn.push_part(|id| TurnPart::Reasoning {
             id,
             text: "thinking...".into(),
+            duration_ms: None,
+            tokens: None,
         });
         push_invocation(
             &mut turn,

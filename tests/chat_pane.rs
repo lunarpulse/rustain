@@ -182,6 +182,7 @@ fn test_chat_pane_typing_indicator() {
         current_blocks: vec![],
         active_tool_calls: Default::default(),
         thinking_buffer: String::new(),
+        thinking_started_ms: None,
     };
     let theme = Theme::dark();
 
@@ -225,6 +226,7 @@ fn test_chat_pane_streaming_text() {
         current_blocks: vec![],
         active_tool_calls: Default::default(),
         thinking_buffer: String::new(),
+        thinking_started_ms: None,
     };
     let theme = Theme::dark();
 
@@ -284,6 +286,7 @@ fn test_chat_pane_user_message_before_typing_indicator() {
         current_blocks: vec![],
         active_tool_calls: Default::default(),
         thinking_buffer: String::new(),
+        thinking_started_ms: None,
     };
     let theme = Theme::dark();
 
@@ -394,6 +397,7 @@ fn test_chat_pane_streaming_error() {
         current_blocks: vec![ContentBlockType::Error],
         active_tool_calls: Default::default(),
         thinking_buffer: String::new(),
+        thinking_started_ms: None,
     };
     let theme = Theme::dark();
 
