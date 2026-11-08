@@ -1290,7 +1290,10 @@ async fn k10_an_edited_local_reload_drops_the_signatures() {
             .iter_mut()
             .find(|message| message.role == MessageRole::Assistant)
             .expect("the reloaded assistant row");
-        assert_eq!(assistant.content, "TV", "the TUI mirror's fold of [V, T]: thinking commits before the answer (21-9 D2)");
+        assert_eq!(
+            assistant.content, "TV",
+            "the TUI mirror's fold of [V, T]: thinking commits before the answer (21-9 D2)"
+        );
         assistant.content = "VT edited".into();
     })
     .await;
