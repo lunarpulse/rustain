@@ -54,6 +54,7 @@ mod k1_stack {
             InputAction::FocusDecisions
         );
         decision_queue::open_waiting(&mut state, &LogFacts::default());
+        assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
         assert_eq!(state.modal_stack.len(), 4, "the pane must join the stack");
         let before: Vec<_> = state.modal_stack.iter().cloned().collect();
         let payload = state.notification_log.clone();
@@ -88,6 +89,7 @@ mod k1_stack {
             let action = press(&mut state, Key::Char(chord));
             if action == InputAction::FocusDecisions {
                 decision_queue::open_waiting(&mut state, &LogFacts::default());
+                assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
             }
         }
         assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
@@ -218,7 +220,7 @@ mod k1_stack {
             Surface::CommandPalette,
             Surface::Help,
             Surface::NotificationLog,
-            Surface::Decision,
+            Surface::DecisionQueue,
             Surface::QuitConfirm,
         ];
         let (mut reachable, mut blocked, mut reducer_only) = (0, 0, 0);
@@ -294,11 +296,8 @@ mod k1_stack {
                 let before = frames(&state);
                 let surface = surfaces[usize::from(opener)];
                 match surface {
-                    Surface::Decision => {
-                        assert!(decision_queue::focus_oldest(
-                            &mut state,
-                            &LogFacts::default()
-                        ));
+                    Surface::DecisionQueue => {
+                        decision_queue::open_waiting(&mut state, &LogFacts::default());
                     }
                     Surface::QuitConfirm => quit(&mut state),
                     _ => assert_eq!(
@@ -1004,6 +1003,7 @@ mod k7_surfaces {
                         InputAction::FocusDecisions
                     );
                     decision_queue::open_waiting(&mut state, &LogFacts::default());
+                    assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
                 }
                 assert_eq!(state.modal_stack.len(), 4);
                 assert_eq!(state.modal_stack.top().unwrap().surface, fifth);

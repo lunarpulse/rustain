@@ -47,8 +47,7 @@ async fn k06d_standalone_operator_and_policy_resolutions_reach_the_invocation() 
         vec![Some(PermissionResolution::Operator)],
         "the standalone session-grant decision itself is Operator"
     );
-    assert!(session.state.pending_permission.is_none());
-    assert!(session.state.permission_queue.is_empty());
+    assert!(session.state.decisions.is_empty());
     let requested = session.requested.clone();
 
     session.submit(vec![(tool, input.clone())]).await;
@@ -57,8 +56,7 @@ async fn k06d_standalone_operator_and_policy_resolutions_reach_the_invocation() 
         session.requested, requested,
         "the runtime session grant must execute the second submission without a new card"
     );
-    assert!(session.state.pending_permission.is_none());
-    assert!(session.state.permission_queue.is_empty());
+    assert!(session.state.decisions.is_empty());
     assert_eq!(
         *session.tools.executed.lock(),
         vec![(tool.into(), input.clone()), (tool.into(), input)],

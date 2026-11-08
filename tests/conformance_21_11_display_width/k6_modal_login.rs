@@ -1,8 +1,7 @@
 //! K6 (Story 21.11, AC6): modal/login/permission display-width preservation.
 //!
-//! Everything enters through the public renderers (`login_dialog::render`,
-//! `permission_prompt::render_permission_overlay`) and reads the painted
-//! `Buffer` back. The indexed fitter itself (`modal::fit_modal_indexed`, budget
+//! Everything enters through the public login renderer and permission row builder,
+//! and reads the painted `Buffer` back. The indexed fitter (`modal::fit_modal_indexed`, budget
 //! 3 and 0) is `pub(crate)` and is forced from the lib unit tests
 //! `adapters::tui::widgets::modal::tests::display_width_*`.
 //!
@@ -15,16 +14,14 @@ use super::support::*;
 use ratatui::buffer::Buffer;
 use rustain::adapters::tui::state::{
     AccountStep, FieldKind, LoginOrigin, LoginOverlayState, LoginSection, LoginView, OverlayMode,
-    PendingField, PendingPermission, RunningLogin,
+    PendingField, RunningLogin,
 };
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::login_dialog;
-use rustain::adapters::tui::widgets::permission_prompt::{
-    PermissionReaderState, render_permission_overlay,
-};
+use rustain::adapters::tui::widgets::permission_prompt::{ExactInput, PermissionCard, card_rows};
 use rustain::domain::events::{AccountListRow, AccountListing, LoginReply};
 use rustain::domain::models::ToolRisk;
-use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
+use rustain::domain::models::tool_call::ApprovalSource;
 use tokio_util::sync::CancellationToken;
 use unicode_width::UnicodeWidthStr;
 
@@ -422,18 +419,19 @@ fn story21_4_running_secret_body_and_keys_fit_minimum_and_wide_sheets() {
 
 fn permission_rows(tool_name: &str, width: u16) -> (Buffer, Vec<String>) {
     let theme = Theme::dark();
-    let pending = PendingPermission {
-        id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn {
-            conversation_id: "c1".into(),
-        },
-        tool_name: tool_name.to_owned(),
-        input: std::sync::Arc::new(serde_json::json!({"file_path": "/w/a.txt"})),
-        risk: ToolRisk::Standard,
+    let source = ApprovalSource::ForegroundTurn {
+        conversation_id: "c1".into(),
     };
-    let mut reader = PermissionReaderState::default();
+    let input = serde_json::json!({"file_path": "/w/a.txt"});
+    let card = PermissionCard {
+        source: &source,
+        tool_name,
+        risk: ToolRisk::Standard,
+        input: ExactInput::Ready(&input),
+    };
     let painted = paint(width, 24, |f| {
-        render_permission_overlay(f, f.area(), &pending, 0, &mut reader, &theme);
+        let rows = card_rows(&card, width, &theme, true);
+        f.render_widget(ratatui::widgets::Paragraph::new(rows.rail), f.area());
     });
     let text = rows(&painted.buffer)
         .into_iter()
@@ -448,10 +446,10 @@ fn permission_rows(tool_name: &str, width: u16) -> (Buffer, Vec<String>) {
 fn always_label_wraps_by_cells_for_mcp_server_names() {
     // (server, narrowest width at which `[y] [s] [a]` share one rail row).
     let cases = [
-        ("srv".to_owned(), 46),
-        (format!("{C}{C}"), 47),
-        (G.to_owned(), 45),
-        (A.to_owned(), 44),
+        ("srv".to_owned(), 44),
+        (format!("{C}{C}"), 45),
+        (G.to_owned(), 43),
+        (A.to_owned(), 42),
     ];
     for (server, exact) in cases {
         let tool = format!("mcp__{server}__Read");
@@ -459,19 +457,19 @@ fn always_label_wraps_by_cells_for_mcp_server_names() {
 
         let (buffer, painted) = permission_rows(&tool, exact);
         assert!(
-            painted.contains(&format!("┃ [y] Allow  [s] Session  {item}")),
+            painted.contains(&format!("[y] Allow  [s] Session  {item}")),
             "{server:?} at {exact}: {painted:?}"
         );
         assert_whole_clusters(&buffer);
 
         let (buffer, painted) = permission_rows(&tool, exact - 1);
         assert!(
-            painted.contains(&"┃ [y] Allow  [s] Session".to_owned()),
+            painted.contains(&"[y] Allow  [s] Session".to_owned()),
             "{server:?} at {}: {painted:?}",
             exact - 1
         );
         assert!(
-            painted.contains(&format!("┃ {item}")),
+            painted.contains(&item),
             "the item wraps whole, not clipped: {server:?} at {}: {painted:?}",
             exact - 1
         );
@@ -484,6 +482,6 @@ fn always_label_wraps_by_cells_for_mcp_server_names() {
 #[test]
 fn always_label_for_builtin_tools_is_unchanged() {
     let (_, painted) = permission_rows("Write", 80);
-    assert!(painted.contains(&"┃ [y] Allow  [s] Session  [a] Always".to_owned()));
-    assert!(painted.contains(&"┃ [n] Deny  [f] Deny + feedback  [r] Review".to_owned()));
+    assert!(painted.contains(&"[y] Allow  [s] Session  [a] Always".to_owned()));
+    assert!(painted.contains(&"[n] Deny  [f] Deny + feedback  [r] Review".to_owned()));
 }

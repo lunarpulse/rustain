@@ -72,7 +72,16 @@ const SITES: &[Site] = &[
         ]
     ),
     site!("widgets/login_dialog.rs", ["single_line"]),
-    site!("widgets/permission_prompt.rs", ["key_rows"]),
+    site!(
+        "widgets/permission_prompt.rs",
+        [
+            "key_rows",
+            "delimited_rows",
+            "receiving_rows",
+            "card_rows",
+            "review_rows"
+        ]
+    ),
     site!(
         "widgets/tab_bar.rs",
         ["truncate_to_cells", "render_tab_bar"]
@@ -149,9 +158,15 @@ const EXEMPT: &[(&str, &str, &str, &str)] = &[
     // cap, list count, ASCII constant).
     (
         "widgets/permission_prompt.rs",
-        "key_rows",
+        "delimited_rows",
         ".chars().count()",
         "fixed key prefix and body delimiter are single-cell ASCII/box glyph constants, not arbitrary input",
+    ),
+    (
+        "widgets/permission_prompt.rs",
+        "receiving_rows",
+        ".chars().count()",
+        "the fixed body delimiter consists of single-cell box/ASCII glyphs, not arbitrary input",
     ),
     (
         "handlers/config.rs",

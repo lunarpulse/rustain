@@ -51,10 +51,11 @@ cue and decides nothing, a raw `Ctrl+C` neither interrupts nor quits, and the ex
 the provider sees exactly one rejection.
 
 Leg D (3-C patch round, AC19, FR-21-3-c): a SEPARATE test (`test_keymap_truth_attached_permission_card_...`) drives the
-permission card natively: a daemon plus a rich attached terminal at 80x24 and a scripted loopback provider that streams a
+permission natively: a daemon plus a rich attached terminal at 80x24 and a scripted loopback provider that streams a
 `Bash` tool call. `x` typed before the arrival is composer text; the approval arrives with an empty composer and focus
-moves to Chat; the card paints `[y] Allow  [n] Deny`; `Esc` posts the cue (which names `[y] Allow  [n] Deny` inside the
-clip) and the card stays pending; a raw `Ctrl+C` neither interrupts nor quits; `n` denies once (one tool result reaches
+moves to the Permission decision frame; `Esc` and `Ctrl+C` each defer it without deciding;
+`Ctrl+X q` opens the Needs-you list and Enter reopens the selected permission;
+`n` denies once (one tool result reaches
 the provider, the command never ran).
 
 Evidence (screens, raw PTY bytes sent, requests, runtime logs, binary hash)
@@ -826,35 +827,62 @@ def test_keymap_truth_attached_permission_card_takes_chat_focus_80x24(tmp_path, 
         sent.append("Backspace")
         tui.send("\x7f")
         wait(lambda s: _composer(s) == "", "composer empty again")
-        # The approval arrives with an empty composer: the card takes Chat focus (cursor hidden)
-        # and paints the permission rail.
+        # The approval arrives with an empty composer and opens a decision frame.
+        def permission_frame(s):
+            rows = s.splitlines()
+            return (len(rows) == 24 and rows[0].startswith("┌ Decision: Permission ")
+                    and rows[19].startswith("└") and rows[19].endswith("┘")
+                    and all(row.startswith("│") and row.endswith("│") for row in rows[1:19])
+                    and all(rail in s for rail in ("[y] Allow", "[s] Session", "[a] Always",
+                                                   "[n] Deny", "[f] Deny + feedback", "[r] Review")))
+
+        def settle(predicate, label):
+            wait(predicate, label)
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                screen = tui.get_screen_text()
+                assert predicate(screen), f"{label} changed:\n{screen}"
+
+        def reopen():
+            sent.append("Ctrl+X q")
+            tui.send("\x18q")
+            def listed(s):
+                rows = s.splitlines()
+                return (len(rows) == 24 and rows[0].startswith("┌ Needs you ")
+                        and rows[19].startswith("└") and rows[19].endswith("┘")
+                        and all(row.startswith("│") and row.endswith("│") for row in rows[1:19])
+                        and any("▸ Permission · Bash" in row for row in rows)
+                        and "[Enter] Open  [Esc] Back  [Up/Down] Select" in s)
+            settle(listed, "complete Needs-you list")
+            sent.append("Enter")
+            tui.send("\r")
+            settle(permission_frame, "reopened permission frame beyond its guard")
+
         _command(tui)
-        screen = wait(lambda s: "[r] Review" in s and "[n] Deny" in s, "the approval card is painted")
+        screen = wait(permission_frame, "the complete approval frame")
         evidence.text("d-01-card.screen.txt", screen)
         assert tui._screen.cursor.hidden, f"the arrival took Chat focus:\n{screen}"
-        for rail in ("[y] Allow", "[s] Session", "[a] Always", "[n] Deny", "[f] Deny + feedback", "[r] Review"):
-            assert _stripped(rail) in _stripped(screen), (rail, screen)
         assert not canary.exists()
-        # Esc: one cue naming the explicit keys inside the clip; the card stays pending.
+        # Esc defers; the status chip remains and no result reaches the provider.
         sent.append("Esc")
         tui.send("\x1b")
-        screen = wait(_cue, "Esc posts the cue")
+        screen = wait(lambda s: "Decision: Permission" not in s
+                      and "Needs you (1) ^X q" in harness.status_row(s), "Esc defers the permission")
         evidence.text("d-02-esc-cue.screen.txt", screen)
-        cue_row = next(row for row in harness.toast_rows(screen, 3) if "never decide this card" in row)
-        assert "Press [y] Allow  [n] Deny" in cue_row, cue_row
-        assert "[y] Allow" in screen and not canary.exists(), screen
-        # Ctrl+C neither interrupts nor quits and decides nothing.
+        assert not canary.exists() and not _finished(stub)
+        reopen()
+        # Ctrl+C also defers without interrupting or quitting.
         sent.append("Ctrl+C")
         tui.send("\x03")
-        # The cue toast covers the card's second rail row at 80x24; the first row is the pending witness.
-        screen = wait(lambda s: "[y] Allow" in s and _cue(s), "Ctrl+C leaves the card pending")
+        screen = wait(lambda s: "Decision: Permission" not in s
+                      and "Needs you (1) ^X q" in harness.status_row(s), "Ctrl+C defers the permission")
         assert tui.child.isalive() and "[interrupted]" not in screen and "System · Quit" not in screen, screen
         assert not _finished(stub), "no decision was sent"
-        # The explicit key denies, once.
+        reopen()
         sent.append("n")
         tui.send("n")
         wait(lambda s: _finished(stub), "the provider receives the denial")
-        screen = wait(lambda s: "[y] Allow" not in s, "the card is gone")
+        screen = wait(lambda s: "Decision: Permission" not in s, "the frame is gone")
         evidence.text("d-03-denied.screen.txt", screen)
         assert not canary.exists(), "denial must execute nothing"
         results = [row for row in stub.rows() if row.get("turn") == 2 and row.get("tool_results") == 1]

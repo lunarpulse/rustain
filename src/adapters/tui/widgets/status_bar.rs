@@ -366,7 +366,8 @@ pub fn render(
         }
     }
     let reminder = log_reminder_text(log_awareness);
-    let cue = decision_queue::status_cue(badges.decisions);
+    let cue = decision_queue::status_cue(badges.decisions)
+        .or_else(|| decision_queue::mirror_cue(badges.mirror_waiting));
     let reserved_width = reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
         + cue.as_deref().map_or(0, |text| geom::cells(text) + 1);
     // The role is mandatory, its explanation is not: keep the complete state
@@ -560,11 +561,14 @@ pub fn render(
 
 /// What the status row's right edge may add beside the hint: the unseen
 /// warning/error badge and the waiting-decision cue. A bare `u64` is a badge
-/// with no decisions (the attached client, which has no decision producers).
+/// with no decisions.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NoticeBadges {
     pub unseen: u64,
     pub decisions: usize,
+    /// A read-only mirror's count of approvals waiting for the writer (it never
+    /// holds an actionable decision, so `decisions` stays 0 there).
+    pub mirror_waiting: usize,
     /// Story 21.3 A10: the rightmost segment (`^X menu` / pending prefix).
     pub tail: crate::adapters::tui::keymap::render::StatusTail,
 }
@@ -574,6 +578,7 @@ impl From<u64> for NoticeBadges {
         Self {
             unseen,
             decisions: 0,
+            mirror_waiting: 0,
             tail: Default::default(),
         }
     }
@@ -1651,7 +1656,7 @@ mod tests {
             let badges = NoticeBadges {
                 unseen: 0,
                 decisions: 2,
-                tail: Default::default(),
+                ..Default::default()
             };
             let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
             assert!(
@@ -1662,7 +1667,7 @@ mod tests {
             let badges = NoticeBadges {
                 unseen: 3,
                 decisions: 0,
-                tail: Default::default(),
+                ..Default::default()
             };
             let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
             assert!(
@@ -1676,7 +1681,7 @@ mod tests {
             let badges = NoticeBadges {
                 unseen: 3,
                 decisions: 2,
-                tail: Default::default(),
+                ..Default::default()
             };
             let row = draw_tail_bar(width, LogAwareness::Unseen(7), badges);
             assert!(

@@ -51,6 +51,8 @@ pub enum OverlayCmd {
     // Decision frame.
     PaneQuit, PaneBack, PaneEnter, PaneEsc, PaneYes, PaneNo, PaneSwitch, PanePause, PaneCompact,
     PaneScrollUp, PaneScrollDown,
+    // Needs-you list (S-QUEUE).
+    QueuePrev, QueueNext, QueueOpen, QueueBack,
     // Recipient surface.
     RecipientPrev, RecipientNext, RecipientClose, RecipientPageUp, RecipientPageDown,
     RecipientToggle,
@@ -89,7 +91,7 @@ const fn q(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::QuitConfirm, keys, CommandId::Overlay(cmd), "")
 }
 const fn d(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
-    bind(Context::Decision, keys, CommandId::Overlay(cmd), "").local()
+    bind(Context::Decision, keys, CommandId::Overlay(cmd), "")
 }
 const fn s(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::RecipientSurface, keys, CommandId::Overlay(cmd), "")
@@ -114,8 +116,13 @@ pub const ROWS: &[Binding] = &[
     bind(Context::CommandPalette, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Return to this command palette"),
     bind(Context::NotificationLog, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
     bind(Context::NotificationLog, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
-    bind(Context::Decision, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
-    bind(Context::Decision, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::Decision, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
+    bind(Context::Decision, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
+    bind(Context::DecisionQueue, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this list"),
+    bind(Context::DecisionQueue, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this list"),
+    bind(Context::DecisionCompose, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").te().does("Open the menu above this field"),
+    bind(Context::DecisionCompose, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").te().does("Open the command palette above this field"),
+    bind(Context::DecisionCompose, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").te().does("Ask to quit without leaving the field"),
     bind(Context::ModelSelector, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
     bind(Context::ModelSelector, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
@@ -252,6 +259,15 @@ pub const ROWS: &[Binding] = &[
     d(&[Key::Char('k')], OverlayCmd::PaneCompact).does("Compact the conversation (a context warning)"),
     d(&[Key::PageUp], OverlayCmd::PaneScrollUp).does("Scroll the decision body up"),
     d(&[Key::PageDown], OverlayCmd::PaneScrollDown).does("Scroll the decision body down"),
+    // ── Needs-you list (S-QUEUE): select, open, back; nothing here ever decides ──
+    bind(Context::DecisionQueue, &[Key::Up], CommandId::Overlay(OverlayCmd::QueuePrev), "Select").does("Select the previous waiting decision"),
+    bind(Context::DecisionQueue, &[Key::Char('k')], CommandId::Overlay(OverlayCmd::QueuePrev), "").does("Select the previous waiting decision"),
+    bind(Context::DecisionQueue, &[Key::Down], CommandId::Overlay(OverlayCmd::QueueNext), "Select").does("Select the next waiting decision"),
+    bind(Context::DecisionQueue, &[Key::Char('j')], CommandId::Overlay(OverlayCmd::QueueNext), "").does("Select the next waiting decision"),
+    bind(Context::DecisionQueue, &[Key::Enter], CommandId::Overlay(OverlayCmd::QueueOpen), "Open").does("Open the selected decision; opening never answers it"),
+    bind(Context::DecisionQueue, &[Key::Esc], CommandId::Overlay(OverlayCmd::QueueBack), "Back").does("Close the list and restore what it covered"),
+    bind(Context::DecisionQueue, &[Key::Ctrl('c')], CommandId::Overlay(OverlayCmd::QueueBack), "").does("Close the list (back one frame)"),
+    bind(Context::DecisionQueue, &[Key::Ctrl('q')], CommandId::Overlay(OverlayCmd::QuitRequest), "").does("Ask to quit (guarded by the quit confirmation)"),
     // ── Recipient surface ──
     s(&[Key::Char('p')], OverlayCmd::RecipientPrev).does("Show the earlier part of the thread"),
     s(&[Key::Char('l')], OverlayCmd::RecipientNext).does("Show the later part of the thread"),

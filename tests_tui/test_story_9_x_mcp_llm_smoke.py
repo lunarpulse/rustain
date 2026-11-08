@@ -33,6 +33,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from test_story_5_0b_permissions import _permission_ready
 
 
 pytestmark = [
@@ -158,6 +159,8 @@ def test_llm_calls_mcp_file_writer_without_path_permission_prompt(tui_with_mcp):
 
     # Deny so the live model doesn't loop.
     from keys import Permission
+    assert tui.wait_for_screen("[y] Allow", timeout=30), tui.get_screen_text()
+    _permission_ready(tui)
     tui.send(Permission.DENY)
 
 

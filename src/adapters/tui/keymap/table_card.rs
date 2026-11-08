@@ -79,10 +79,10 @@ pub const ROWS: &[Binding] = &[
     // ── shared parent: Esc / Ctrl+C never decide ──
     b(Context::Card, &[Key::Esc], CardCmd::Cue, "").does(CUE),
     b(Context::Card, &[Key::Ctrl('c')], CardCmd::Cue, "").does(CUE),
-    // ── permission feedback field (both hosts) ──
-    b(Context::Feedback, &[Key::Enter], CardCmd::Send, "Send").does("Send the feedback and deny the tool call"),
-    b(Context::Feedback, &[Key::Esc], CardCmd::Back, "Cancel").does("Cancel the feedback and return to the permission card"),
-    b(Context::Feedback, &[Key::Backspace], CardCmd::Erase, "").does("Delete the last character of the feedback"),
+    // ── the frame-owned text field (permission feedback; both hosts) ──
+    b(Context::DecisionCompose, &[Key::Enter], CardCmd::Send, "Send").does("Send the text and decide with it"),
+    b(Context::DecisionCompose, &[Key::Esc], CardCmd::Back, "Back").does("Leave the field and return to the undecided request"),
+    b(Context::DecisionCompose, &[Key::Ctrl('c')], CardCmd::Back, "").does("Leave the field without deciding (back one frame)"),
     // ── AskUserQuestion ──
     k(Context::Question, &[Key::Enter], CardCmd::Send, "Send").does("Send the answer"),
     k(Context::Question, &[Key::Ctrl('d')], CardCmd::Skip, "Skip question").does("Skip the question: the agent receives no answer"),
@@ -135,5 +135,5 @@ pub const ROWS: &[Binding] = &[
     bind(Context::TeamProposal, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Dismiss").does("Dismiss the proposal"),
     bind(Context::Consent, &[Key::Char('y')], CommandId::Card(CardCmd::Yes), "Allow once").attached().does("Allow the sender's request once"),
     bind(Context::Consent, &[Key::Char('a')], CommandId::Card(CardCmd::Always), "Always allow").attached().does("Always allow this sender's tool and remember it"),
-    bind(Context::Consent, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Reject").attached().does("Reject the sender's request"),
+    bind(Context::Consent, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Decline").attached().does("Decline the sender's request"),
 ];

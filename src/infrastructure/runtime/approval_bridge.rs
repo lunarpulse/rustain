@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use crate::adapters::tui::app::InputAction;
-use crate::adapters::tui::presentation::reducer;
-use crate::adapters::tui::state::{FeedbackInputState, PendingPermission, TuiState};
+use crate::adapters::tui::decision_queue::{
+    self, DecisionEffect, DecisionSubject, PermissionInput, PermissionPayload, Responder,
+};
+use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
-use crate::domain::models::visual::ConfirmationType;
-use crate::domain::models::{ApprovalOutcome, ApprovalScope, RequestId};
+use crate::domain::models::{ApprovalOutcome, RequestId};
 use crate::domain::services::approval_runtime::{
     ApprovalRuntime, ApprovalRuntimeEvent, PendingReview, ReviewScope,
 };
@@ -62,20 +63,9 @@ async fn run(
     }
 }
 
-fn contains(state: &TuiState, id: &RequestId) -> bool {
-    state
-        .pending_permission
-        .as_ref()
-        .is_some_and(|p| &p.id == id)
-        || state
-            .pending_feedback_input
-            .as_ref()
-            .is_some_and(|p| &p.pending_permission.id == id)
-        || state.permission_reader.review.as_ref() == Some(id)
-        || state.permission_queue.queue.iter().any(|p| &p.id == id)
-}
-
 /// Pure reducer: exact snapshots enter only from the private bridge, never raw events.
+/// A request is one item of the session decision queue (keyed by its request id);
+/// RU-6 decides whether its frame takes the keyboard (Story 21.6 6-B).
 pub fn apply(state: &mut TuiState, event: ApprovalRuntimeEvent, review: Option<PendingReview>) {
     match event {
         ApprovalRuntimeEvent::Requested {
@@ -85,157 +75,78 @@ pub fn apply(state: &mut TuiState, event: ApprovalRuntimeEvent, review: Option<P
             risk,
             consent_card,
         } => {
-            if contains(state, &id) {
+            if decision_queue::holds_request(state, &id) {
                 return;
             }
-            let pending = if let Some(review) = review {
-                PendingPermission {
-                    id: review.id,
-                    source: review.source,
-                    tool_name: review.tool,
-                    input: review.input,
-                    risk: review.risk,
-                }
+            let payload = if let Some(review) = review {
+                PermissionPayload::new(
+                    review.id,
+                    review.source,
+                    review.tool,
+                    review.risk,
+                    PermissionInput::Ready(review.input),
+                )
             } else if let Some(card) = consent_card {
                 // Sender consent retains its existing permission outcomes and card text.
-                PendingPermission {
+                PermissionPayload::new(
                     id,
                     source,
-                    tool_name: tool,
-                    input: Arc::new(serde_json::Value::String(card)),
+                    tool,
                     risk,
-                }
+                    PermissionInput::Ready(Arc::new(serde_json::Value::String(card))),
+                )
             } else {
                 // It was already resolved before the snapshot was acquired.
                 return;
             };
-            if state.pending_permission.is_some() || reducer::permission_modal_owns_focus(state) {
-                state.permission_queue.push(pending);
-            } else {
-                state.pending_permission = Some(pending);
-            }
-            reducer::raise_confirmation(state, ConfirmationType::Permission);
+            decision_queue::raise_permission(state, payload, Responder::Local);
             state.needs_redraw = true;
         }
         ApprovalRuntimeEvent::Resolved { id, .. } | ApprovalRuntimeEvent::Cancelled { id, .. } => {
-            state.permission_queue.queue.retain(|p| p.id != id);
-            let active = state
-                .pending_permission
-                .as_ref()
-                .is_some_and(|p| p.id == id);
-            let feedback = state
-                .pending_feedback_input
-                .as_ref()
-                .is_some_and(|p| p.pending_permission.id == id);
-            if active {
-                state.pending_permission = None;
-            }
-            if feedback {
-                state.pending_feedback_input = None;
-            }
-            if state.permission_reader.review.as_ref() == Some(&id) {
-                state.permission_reader = Default::default();
-            }
-            if active || feedback {
-                advance(state);
-            }
+            // Our own answer already removed the item; a request settled elsewhere
+            // leaves its open frame stale (Close only) or drops it from the queue.
+            decision_queue::withdraw_request(state, &id);
             state.needs_redraw = true;
         }
     }
 }
 
-/// Keep higher confirmations and feedback ownership; never steal their focus.
-pub fn advance(state: &mut TuiState) {
-    crate::adapters::tui::app::advance_deferred_permission(state);
-}
-
 /// The real key-dispatch effect consumer, shared by the loop and front-door tests.
+/// The frame resolved its item once and left the payload in the queue for this arm.
 pub async fn handle_action(state: &mut TuiState, action: &InputAction, runtime: &ApprovalRuntime) {
-    match action {
-        InputAction::PermissionAllow
-        | InputAction::PermissionDeny
-        | InputAction::PermissionAlwaysAllow
-        | InputAction::PermissionSessionAllow => {
-            if let Some(pending) = state.pending_permission.take() {
-                // The shown slot remains the pinned RequestId throughout Review.
-                let outcome = match action {
-                    InputAction::PermissionAllow => ApprovalOutcome::Once,
-                    InputAction::PermissionAlwaysAllow => ApprovalOutcome::AlwaysAndSave {
-                        scope: ApprovalScope::Tool(pending.tool_name),
-                    },
-                    InputAction::PermissionSessionAllow => ApprovalOutcome::AlwaysTool {
-                        tool_name: pending.tool_name,
-                    },
-                    _ => ApprovalOutcome::Reject { feedback: None },
-                };
-                let _ = runtime
-                    .resolve(
-                        &pending.id,
-                        outcome,
-                        crate::domain::models::PermissionResolution::Operator,
-                    )
-                    .await;
-                advance(state);
-            }
-        }
-        InputAction::PermissionDenyFeedback => {
-            if let Some(pending_permission) = state.pending_permission.take() {
-                state.pending_feedback_input = Some(FeedbackInputState {
-                    buffer: String::new(),
-                    cursor: 0,
-                    pending_permission,
-                });
-                reducer::raise_confirmation(state, ConfirmationType::PermissionFeedback);
-                state.needs_redraw = true;
-            }
-        }
-        InputAction::FeedbackInputChar(c) => {
-            if let Some(fi) = state.pending_feedback_input.as_mut()
-                && fi.buffer.len() + c.len_utf8() <= 2048
-            {
-                fi.buffer.push(*c);
-                fi.cursor += 1;
-                state.needs_redraw = true;
-            }
-        }
-        InputAction::FeedbackInputBackspace => {
-            if let Some(fi) = state.pending_feedback_input.as_mut() {
-                crate::adapters::tui::text_geometry::pop_grapheme(&mut fi.buffer);
-                fi.cursor = fi.buffer.chars().count();
-                state.needs_redraw = true;
-            }
-        }
-        InputAction::FeedbackInputSubmit => {
-            if let Some(fi) = state.pending_feedback_input.take() {
-                let feedback = (!fi.buffer.is_empty()).then_some(fi.buffer);
-                let _ = runtime
-                    .resolve(
-                        &fi.pending_permission.id,
-                        ApprovalOutcome::Reject {
-                            feedback: feedback.clone(),
-                        },
-                        crate::domain::models::PermissionResolution::Operator,
-                    )
-                    .await;
-                if let Some(feedback) = feedback {
-                    crate::adapters::tui::notifications::warning(
-                        state,
-                        crate::adapters::tui::notifications::NoticeSource::Approval,
-                        crate::domain::services::permission_chain::format_feedback_message(
-                            &feedback,
-                        ),
-                    );
-                }
-                advance(state);
-            }
-        }
-        InputAction::FeedbackInputCancel => {
-            if let Some(fi) = state.pending_feedback_input.take() {
-                state.pending_permission = Some(fi.pending_permission);
-                reducer::raise_confirmation(state, ConfirmationType::Permission);
-                state.needs_redraw = true;
-            }
-        }
-        _ => {}
+    let effect = match action {
+        InputAction::PermissionAllow => DecisionEffect::PermissionAllowOnce,
+        InputAction::PermissionSessionAllow => DecisionEffect::PermissionAllowSession,
+        InputAction::PermissionAlwaysAllow => DecisionEffect::PermissionAllowAlways,
+        InputAction::PermissionDeny => DecisionEffect::PermissionDeny,
+        InputAction::FeedbackInputSubmit => DecisionEffect::PermissionDenyFeedback,
+        _ => return,
+    };
+    let Some(DecisionSubject::Permission(payload)) = state.decisions.take_resolved() else {
+        return;
+    };
+    let Some(outcome) = payload.outcome(effect) else {
+        return;
+    };
+    let feedback = match &outcome {
+        ApprovalOutcome::Reject {
+            feedback: Some(text),
+        } => Some(text.clone()),
+        _ => None,
+    };
+    let _ = runtime
+        .resolve(
+            &payload.request_id,
+            outcome,
+            crate::domain::models::PermissionResolution::Operator,
+        )
+        .await;
+    if let Some(feedback) = feedback {
+        crate::adapters::tui::notifications::warning(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Approval,
+            crate::domain::services::permission_chain::format_feedback_message(&feedback),
+        );
     }
+    state.needs_redraw = true;
 }

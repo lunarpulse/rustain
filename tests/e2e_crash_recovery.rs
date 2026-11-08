@@ -169,7 +169,12 @@ fn test_e2e_recovery_enter_continues() {
             rustain::adapters::tui::presentation::Surface::Decision
         ));
         ready(&mut pane.0, &pane.1);
-        let outcome = decision_queue::handle_domain_event(&mut pane.0, &key, &LogFacts::default());
+        let outcome = decision_queue::handle_domain_event(
+            &mut pane.0,
+            &key,
+            &LogFacts::default(),
+            rustain::adapters::tui::keymap::Host::Local,
+        );
         assert_eq!(
             outcome,
             Some(PaneOutcome::Effect(DecisionEffect::RecoveryContinue)),
@@ -224,6 +229,7 @@ fn test_e2e_recovery_n_starts_fresh() {
         &mut pane.0,
         &DomainInputEvent::KeyPress('n'),
         &LogFacts::default(),
+        rustain::adapters::tui::keymap::Host::Local,
     );
     assert_eq!(
         outcome,

@@ -1,15 +1,16 @@
-//! PermissionCard widget — renders inline permission prompts in the chat stream.
+//! The rows of a tool permission as the decision frame paints them.
 //!
-//! Story 19.20c: the card shows the exact pending input (the shared `A2`
+//! Story 19.20c: the request shows the exact pending input (the shared `A2`
 //! presentation) in the host-delimited body region, first ≤ 4 wrapped rows,
-//! then TM-09's T5 marker; `[r] Review` opens the complete input. Standalone
-//! and the daemon-attached rich client paint through these same functions.
+//! then TM-09's T5 marker; `[r] Review` opens the complete input. Story 21.6 6-B:
+//! both hosts paint these rows inside the `Decision: Permission` frame (the frame
+//! owns the border, the title and the scrolling), so every row here is borderless.
 
 use ratatui::prelude::*;
 
 use crate::adapters::tui::keymap::Context;
 use crate::adapters::tui::keymap::render::{rail, rail_pair};
-use crate::adapters::tui::keymap::table_card::CardCmd;
+use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_permission::PermissionCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -22,8 +23,6 @@ use crate::domain::services::approval_presentation::{
 };
 use crate::domain::services::peer_text::sanitize_peer_text_line;
 
-const CARD_BORDER: &str = "┃ ";
-
 /// What a deciding surface holds of a request's exact input.
 #[derive(Clone, Copy, Debug)]
 pub enum ExactInput<'a> {
@@ -34,36 +33,22 @@ pub enum ExactInput<'a> {
     Receiving { summary: &'a str },
 }
 
-/// One pending tool approval as a card or Review renders it.
+/// One pending tool approval as the frame renders it.
 #[derive(Clone, Copy, Debug)]
 pub struct PermissionCard<'a> {
     pub source: &'a ApprovalSource,
     pub tool_name: &'a str,
     pub risk: ToolRisk,
     pub input: ExactInput<'a>,
-    /// Requests queued behind this one.
-    pub queue_len: usize,
 }
 
-/// The pinned Review reader: `header` and `footer` stay put while `body`
-/// scrolls (PageUp/PageDown).
-pub struct PermissionReview {
+/// The three regions of a permission frame body: the pinned header, the scrollable
+/// body and the key rail. Review fills the same regions with the complete input.
+#[derive(Debug)]
+pub struct FrameRows {
     pub header: Vec<Line<'static>>,
     pub body: Vec<Line<'static>>,
-    pub footer: Vec<Line<'static>>,
-}
-
-/// Fixed metadata must never starve the scrollable exact input or decision keys.
-/// Both terminal surfaces use the same allocation; metadata may be elided, input may not.
-pub(crate) fn permission_review_rows(
-    height: u16,
-    header_len: usize,
-    footer_len: usize,
-) -> (usize, usize, usize) {
-    let height = usize::from(height);
-    let footer = footer_len.min(height.saturating_sub(1));
-    let header = header_len.min(height.saturating_sub(footer + 1));
-    (header, height.saturating_sub(header + footer), footer)
+    pub rail: Vec<Line<'static>>,
 }
 
 /// Ellipses apply only to identity/source metadata, never to exact input.
@@ -73,186 +58,6 @@ fn bounded_metadata(text: &str, width: usize, limit: usize) -> Vec<String> {
         last.push('…');
     }
     rows
-}
-
-/// Story 19.20c: presentation-only state, pinned to the approval RequestId.
-#[derive(Default)]
-pub struct PermissionReaderState {
-    pub review: Option<crate::domain::models::RequestId>,
-    pub scroll: usize,
-    pub scroll_max: usize,
-    pub viewport_rows: usize,
-    cached: Option<PreparedPermission>,
-}
-
-struct PreparedPermission {
-    id: crate::domain::models::RequestId,
-    width: u16,
-    queue_len: usize,
-    card: Vec<Line<'static>>,
-    review: Option<PermissionReview>,
-}
-
-impl PermissionReaderState {
-    pub fn open(&mut self, id: crate::domain::models::RequestId) {
-        self.review = Some(id);
-        self.scroll = 0;
-    }
-
-    pub fn back(&mut self) {
-        self.review = None;
-        self.scroll = 0;
-    }
-
-    pub fn page(&mut self, down: bool) {
-        let step = self.viewport_rows.saturating_sub(1).max(1);
-        self.scroll = if down {
-            self.scroll.saturating_add(step).min(self.scroll_max)
-        } else {
-            self.scroll.saturating_sub(step)
-        };
-    }
-}
-
-pub(crate) fn paint_rows(frame: &mut Frame<'_>, area: Rect, rows: &[Line<'static>], scroll: usize) {
-    for (offset, line) in rows
-        .iter()
-        .skip(scroll)
-        .take(area.height as usize)
-        .enumerate()
-    {
-        frame.render_widget(
-            line,
-            Rect::new(area.x, area.y + offset as u16, area.width, 1),
-        );
-    }
-}
-
-/// Render the standalone permission owner, including deny-feedback. The same
-/// chat-pane viewport is used by the event loop and production-path tests.
-pub fn render_permission_surface(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    pending: Option<&crate::adapters::tui::state::PendingPermission>,
-    feedback: Option<&crate::adapters::tui::state::FeedbackInputState>,
-    queue_len: usize,
-    reader: &mut PermissionReaderState,
-    theme: &Theme,
-) -> Option<Rect> {
-    if let Some(feedback) = feedback {
-        let rows = render_feedback_input_lines(&feedback.buffer, theme);
-        let height = (rows.len() as u16).min(area.height);
-        let prompt = Rect::new(
-            area.x,
-            area.bottom().saturating_sub(height),
-            area.width,
-            height,
-        );
-        frame.render_widget(ratatui::widgets::Clear, prompt);
-        frame.render_widget(ratatui::widgets::Paragraph::new(rows), prompt);
-        Some(prompt)
-    } else {
-        pending.map(|pending| {
-            render_permission_overlay(frame, area, pending, queue_len, reader, theme)
-        })
-    }
-}
-
-/// Paint the actual standalone deciding surface. Layout is cached until the
-/// request or width changes; rendering never reads the approval runtime.
-pub fn render_permission_overlay(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    pending: &crate::adapters::tui::state::PendingPermission,
-    queue_len: usize,
-    reader: &mut PermissionReaderState,
-    theme: &Theme,
-) -> Rect {
-    let card = PermissionCard {
-        source: &pending.source,
-        tool_name: &pending.tool_name,
-        risk: pending.risk,
-        input: ExactInput::Ready(&pending.input),
-        queue_len,
-    };
-    if reader
-        .cached
-        .as_ref()
-        .is_none_or(|cached| cached.id != pending.id || cached.width != area.width)
-    {
-        reader.cached = Some(PreparedPermission {
-            id: pending.id.clone(),
-            width: area.width,
-            queue_len,
-            card: render_permission_card_lines(&card, area.width, theme),
-            review: None,
-        });
-    }
-    let cached = reader.cached.as_mut().expect("prepared above");
-    if cached.queue_len != queue_len {
-        cached.card = render_permission_card_lines(&card, area.width, theme);
-        cached.queue_len = queue_len;
-    }
-    if reader.review.as_ref() == Some(&pending.id) {
-        let review = cached
-            .review
-            .get_or_insert_with(|| render_permission_review(&card, area.width, theme));
-        frame.render_widget(ratatui::widgets::Clear, area);
-        let (header_rows, body_rows, footer_rows) =
-            permission_review_rows(area.height, review.header.len(), review.footer.len());
-        reader.viewport_rows = body_rows;
-        reader.scroll_max = review.body.len().saturating_sub(body_rows);
-        reader.scroll = reader.scroll.min(reader.scroll_max);
-        paint_rows(
-            frame,
-            Rect::new(area.x, area.y, area.width, header_rows as u16),
-            &review.header,
-            0,
-        );
-        paint_rows(
-            frame,
-            Rect::new(
-                area.x,
-                area.y + header_rows as u16,
-                area.width,
-                body_rows as u16,
-            ),
-            &review.body,
-            reader.scroll,
-        );
-        paint_rows(
-            frame,
-            Rect::new(
-                area.x,
-                area.bottom().saturating_sub(footer_rows as u16),
-                area.width,
-                footer_rows as u16,
-            ),
-            &review.footer,
-            0,
-        );
-        area
-    } else {
-        let height = cached.card.len().min(area.height as usize);
-        let prompt_area = Rect::new(
-            area.x,
-            area.bottom().saturating_sub(height as u16),
-            area.width,
-            height as u16,
-        );
-        let old_max = reader.scroll_max;
-        reader.viewport_rows = height;
-        reader.scroll_max = cached.card.len().saturating_sub(height);
-        // At the minimum viewport keep the decision keys visible initially;
-        // PageUp reaches the header/body instead of clipping the controls.
-        if reader.scroll_max != old_max {
-            reader.scroll = reader.scroll_max;
-        }
-        reader.scroll = reader.scroll.min(reader.scroll_max);
-        frame.render_widget(ratatui::widgets::Clear, prompt_area);
-        paint_rows(frame, prompt_area, &cached.card, reader.scroll);
-        prompt_area
-    }
 }
 
 fn source_prefix(source: &ApprovalSource) -> String {
@@ -298,14 +103,8 @@ fn always_label(tool_name: &str) -> String {
 
 /// Pack `(key, label)` items into rows of at most `width` cells; an item
 /// never splits across rows unless it alone is wider than a row.
-fn key_rows(
-    items: &[(String, String, Color)],
-    width: usize,
-    prefix: &'static str,
-    border: Style,
-    label: Style,
-) -> Vec<Line<'static>> {
-    let width = width.saturating_sub(prefix.chars().count()).max(1);
+fn key_rows(items: &[(String, String, Color)], width: usize, label: Style) -> Vec<Line<'static>> {
+    let width = width.max(1);
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut cells = usize::MAX;
     for (key, text, color) in items {
@@ -336,13 +135,7 @@ fn key_rows(
         row.push(Span::styled(format!(" {text}"), label));
         cells += item_cells;
     }
-    rows.into_iter()
-        .map(|spans| {
-            let mut line = vec![Span::styled(prefix, border)];
-            line.extend(spans);
-            Line::from(line)
-        })
-        .collect()
+    rows.into_iter().map(Line::from).collect()
 }
 
 fn delimited_rows(
@@ -350,12 +143,10 @@ fn delimited_rows(
     input: &serde_json::Value,
     width: usize,
     limit: usize,
-    border: Option<Style>,
     theme: &Theme,
 ) -> (Vec<Line<'static>>, bool) {
     let lines = body_lines(tool_name, input);
-    let border_cells = if border.is_some() { 2 } else { 0 };
-    let text_width = width.saturating_sub(border_cells + BODY_DELIMITER.chars().count());
+    let text_width = width.saturating_sub(BODY_DELIMITER.chars().count());
     let (rows, more) = approval_body_rows(&lines, text_width, limit);
     let delimiter = Style::default().fg(theme.colors.accent);
     let label = Style::default()
@@ -365,10 +156,7 @@ fn delimited_rows(
     let rendered = rows
         .into_iter()
         .map(|row| {
-            let mut spans = Vec::with_capacity(4);
-            if let Some(border) = border {
-                spans.push(Span::styled(CARD_BORDER, border));
-            }
+            let mut spans = Vec::with_capacity(3);
             spans.push(Span::styled(BODY_DELIMITER, delimiter));
             let (head, tail) = row.text.split_at(row.label_len);
             if !head.is_empty() {
@@ -381,16 +169,8 @@ fn delimited_rows(
     (rendered, more)
 }
 
-fn receiving_rows(
-    summary: &str,
-    width: usize,
-    border: Option<Style>,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let border_cells = if border.is_some() { 2 } else { 0 };
-    let text_width = width
-        .saturating_sub(border_cells + BODY_DELIMITER.chars().count())
-        .max(1);
+fn receiving_rows(summary: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let text_width = width.saturating_sub(BODY_DELIMITER.chars().count()).max(1);
     let delimiter = Style::default().fg(theme.colors.accent);
     let value = Style::default().fg(theme.colors.fg_primary);
     let summary = sanitize_peer_text_line(summary);
@@ -404,168 +184,150 @@ fn receiving_rows(
     let mut lines: Vec<Line<'static>> = rows
         .into_iter()
         .map(|row| {
-            let mut spans = Vec::with_capacity(3);
-            if let Some(border) = border {
-                spans.push(Span::styled(CARD_BORDER, border));
-            }
-            spans.push(Span::styled(BODY_DELIMITER, delimiter));
-            spans.push(Span::styled(row, value));
-            Line::from(spans)
+            Line::from(vec![
+                Span::styled(BODY_DELIMITER, delimiter),
+                Span::styled(row, value),
+            ])
         })
         .collect();
-    let mut notice = Vec::with_capacity(2);
-    if let Some(border) = border {
-        notice.push(Span::styled(CARD_BORDER, border));
-    }
-    notice.push(Span::styled(
+    lines.push(Line::from(Span::styled(
         "receiving exact input…",
         Style::default().fg(theme.colors.fg_secondary),
-    ));
-    lines.push(Line::from(notice));
+    )));
     lines
 }
 
-/// Story 19.20c `A2`/`A5` — the permission card at `width` cells: header
-/// (`┃ [source prefix] <Tool>` + queue indicator), the first ≤ 4 delimited
-/// body rows of the exact input, T5's marker whenever more exists, and the
-/// decision keys with `[r] Review` always offered. Exact input is never
-/// truncated in Review; long header/source metadata is marked with an ellipsis.
-pub fn render_permission_card_lines(
+/// Story 19.20c `A2`/`A5` — the request at `width` cells: the header
+/// (`[source prefix] <Tool>`), the first ≤ 4 delimited body rows of the exact input,
+/// T5's marker whenever more exists, and the decision keys with `[r] Review`
+/// always offered. `keys_live` is false while the frame's inert window runs (the
+/// keys paint muted). Exact input is never truncated in Review; long header/source
+/// metadata is marked with an ellipsis.
+pub fn card_rows(
     card: &PermissionCard<'_>,
     width: u16,
     theme: &Theme,
-) -> Vec<Line<'static>> {
+    keys_live: bool,
+) -> FrameRows {
     let width = usize::from(width).max(8);
-    let border = Style::default()
-        .fg(theme.colors.permission_border)
-        .add_modifier(Modifier::BOLD);
     let secondary = Style::default().fg(theme.colors.fg_secondary);
-    let mut lines = Vec::new();
-
+    let colour = |live: Color| {
+        if keys_live {
+            live
+        } else {
+            theme.colors.fg_muted
+        }
+    };
     let prefix = source_prefix(card.source);
     let tool = tool_label(card.tool_name);
-    let queue = if card.queue_len > 0 {
-        format!("  [{} more queued]", card.queue_len)
-    } else {
-        String::new()
-    };
-    let header = sanitize_peer_text_line(&format!("{prefix}{tool}{queue}")).into_owned();
+    let header_text = sanitize_peer_text_line(&format!("{prefix}{tool}")).into_owned();
     let prefix_len = sanitize_peer_text_line(&prefix).len();
-    for (index, row) in bounded_metadata(&header, width - 2, 2)
+    let header = bounded_metadata(&header_text, width, 2)
         .into_iter()
         .enumerate()
-    {
-        let mut spans = vec![Span::styled(CARD_BORDER, border)];
-        if index == 0 && prefix_len > 0 && prefix_len <= row.len() {
-            let (head, tail) = row.split_at(prefix_len);
-            spans.push(Span::styled(
-                head.to_owned(),
-                Style::default().fg(theme.colors.subagent_attribution),
-            ));
-            spans.push(Span::styled(
-                tail.to_owned(),
-                Style::default()
-                    .fg(theme.colors.tool_name)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                row,
-                Style::default()
-                    .fg(theme.colors.tool_name)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
+        .map(|(index, row)| {
+            let tool_style = Style::default()
+                .fg(theme.colors.tool_name)
+                .add_modifier(Modifier::BOLD);
+            if index == 0 && prefix_len > 0 && prefix_len <= row.len() {
+                let (head, tail) = row.split_at(prefix_len);
+                Line::from(vec![
+                    Span::styled(
+                        head.to_owned(),
+                        Style::default().fg(theme.colors.subagent_attribution),
+                    ),
+                    Span::styled(tail.to_owned(), tool_style),
+                ])
+            } else {
+                Line::from(Span::styled(row, tool_style))
+            }
+        })
+        .collect();
 
+    let mut body = Vec::new();
     match card.input {
         ExactInput::Ready(input) => {
-            let (body, more) = delimited_rows(
-                card.tool_name,
-                input,
-                width,
-                CARD_BODY_ROWS,
-                Some(border),
-                theme,
-            );
-            lines.extend(body);
+            let (rows, more) = delimited_rows(card.tool_name, input, width, CARD_BODY_ROWS, theme);
+            body.extend(rows);
             if more {
-                for row in wrap_text(MORE_MARKER, width - 2, usize::MAX).0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(CARD_BORDER, border),
-                        Span::styled(row, secondary),
-                    ]));
+                for row in wrap_text(MORE_MARKER, width, usize::MAX).0 {
+                    body.push(Line::from(Span::styled(row, secondary)));
                 }
             }
         }
-        ExactInput::Receiving { summary } => {
-            lines.extend(receiving_rows(summary, width, Some(border), theme));
-        }
+        ExactInput::Receiving { summary } => body.extend(receiving_rows(summary, width, theme)),
     }
 
-    lines.extend(key_rows(
+    let mut rail_rows = key_rows(
         &[
             (
                 rail(Context::Permission, PermissionCmd::AllowOnce),
                 "Allow".to_owned(),
-                theme.colors.success,
+                colour(theme.colors.success),
             ),
             (
                 rail(Context::Permission, PermissionCmd::AllowSession),
                 "Session".to_owned(),
-                theme.colors.accent,
+                colour(theme.colors.accent),
             ),
             (
                 rail(Context::Permission, PermissionCmd::AllowAlways),
                 always_label(card.tool_name),
-                theme.colors.warning,
+                colour(theme.colors.warning),
             ),
         ],
         width,
-        CARD_BORDER,
-        border,
         secondary,
-    ));
-    lines.extend(key_rows(
+    );
+    rail_rows.extend(key_rows(
         &[
             (
                 rail(Context::Permission, PermissionCmd::Deny),
                 "Deny".to_owned(),
-                theme.colors.error,
+                colour(theme.colors.error),
             ),
             (
                 rail(Context::Permission, PermissionCmd::DenyWithFeedback),
                 "Deny + feedback".to_owned(),
-                theme.colors.auto_sent_border,
+                colour(theme.colors.auto_sent_border),
             ),
             (
                 rail(Context::Permission, PermissionCmd::Review),
                 "Review".to_owned(),
-                theme.colors.accent,
+                colour(theme.colors.accent),
             ),
         ],
         width,
-        CARD_BORDER,
-        border,
         secondary,
     ));
-    lines
+    FrameRows {
+        header,
+        body,
+        rail: rail_rows,
+    }
 }
 
-/// Story 19.20c `A4`/`A5` — the pinned Review reader at `width` cells:
-/// heading `Exact tool input (not run yet) · <Tool>`, the source/risk row,
-/// every delimited body row (wrapped, nothing elided), and the footer keys.
-pub fn render_permission_review(
+/// Story 19.20c `A4`/`A5` — the Review reader at `width` cells: heading
+/// `Exact tool input (not run yet) · <Tool>`, the source/risk row, every delimited
+/// body row (wrapped, nothing elided), and the footer keys.
+pub fn review_rows(
     card: &PermissionCard<'_>,
     width: u16,
     theme: &Theme,
-) -> PermissionReview {
+    keys_live: bool,
+) -> FrameRows {
     let width = usize::from(width).max(8);
     let primary = Style::default()
         .fg(theme.colors.fg_primary)
         .add_modifier(Modifier::BOLD);
     let secondary = Style::default().fg(theme.colors.fg_secondary);
+    let colour = |live: Color| {
+        if keys_live {
+            live
+        } else {
+            theme.colors.fg_muted
+        }
+    };
     let tool = tool_label(card.tool_name);
     let mut header: Vec<Line<'static>> = bounded_metadata(
         &format!("Exact tool input (not run yet) · {tool}"),
@@ -588,147 +350,55 @@ pub fn render_permission_review(
     );
     let body = match card.input {
         ExactInput::Ready(input) => {
-            delimited_rows(card.tool_name, input, width, usize::MAX, None, theme).0
+            delimited_rows(card.tool_name, input, width, usize::MAX, theme).0
         }
-        ExactInput::Receiving { summary } => receiving_rows(summary, width, None, theme),
+        ExactInput::Receiving { summary } => receiving_rows(summary, width, theme),
     };
-    let footer = key_rows(
+    let rail_rows = key_rows(
         &[
             (
                 rail(Context::Permission, PermissionCmd::AllowOnce),
                 "Allow".to_owned(),
-                theme.colors.success,
+                colour(theme.colors.success),
             ),
             (
                 rail(Context::Permission, PermissionCmd::Deny),
                 "Deny".to_owned(),
-                theme.colors.error,
+                colour(theme.colors.error),
             ),
             (
                 rail(Context::Permission, PermissionCmd::DenyWithFeedback),
                 "Deny + feedback".to_owned(),
-                theme.colors.auto_sent_border,
+                colour(theme.colors.auto_sent_border),
             ),
             (
-                rail(Context::Permission, PermissionCmd::BackOrCue),
+                rail(Context::Decision, OverlayCmd::PaneEsc),
                 "Back".to_owned(),
-                theme.colors.fg_secondary,
+                colour(theme.colors.fg_secondary),
             ),
             (
                 rail_pair(
-                    Context::Permission,
-                    PermissionCmd::ReviewPageUp,
-                    PermissionCmd::ReviewPageDown,
+                    Context::Decision,
+                    OverlayCmd::PaneScrollUp,
+                    OverlayCmd::PaneScrollDown,
                 ),
                 "scroll".to_owned(),
-                theme.colors.fg_secondary,
+                colour(theme.colors.fg_secondary),
             ),
         ],
         width,
-        "",
-        secondary,
         secondary,
     );
-    PermissionReview {
+    FrameRows {
         header,
         body,
-        footer,
+        rail: rail_rows,
     }
-}
-
-/// Render feedback input lines for the deny-with-feedback mini-input (AC5).
-///
-/// Visual spec:
-/// ```text
-/// ┃ Feedback: <text>▋                                    ┃
-/// ┃ [Enter] send  [Esc] cancel                           ┃
-/// ```
-pub fn render_feedback_input_lines<'a>(buffer: &str, theme: &'a Theme) -> Vec<Line<'a>> {
-    let border_style = Style::default()
-        .fg(theme.colors.auto_sent_border)
-        .add_modifier(Modifier::BOLD);
-
-    vec![
-        // Line 1: Feedback: <buffer>▋
-        Line::from(vec![
-            Span::styled("┃ ", border_style),
-            Span::styled("Feedback: ", Style::default().fg(theme.colors.fg_secondary)),
-            Span::styled(
-                buffer.to_string(),
-                Style::default().fg(theme.colors.fg_primary),
-            ),
-            Span::styled("▋", Style::default().fg(theme.colors.fg_primary)),
-            Span::styled(" ┃", border_style),
-        ]),
-        // Line 2: [Enter] send  [Esc] cancel
-        Line::from(vec![
-            Span::styled("┃ ", border_style),
-            Span::styled(
-                rail(Context::Feedback, CardCmd::Send),
-                Style::default().fg(theme.colors.fg_secondary),
-            ),
-            Span::styled(" send  ", Style::default().fg(theme.colors.fg_secondary)),
-            Span::styled(
-                rail(Context::Feedback, CardCmd::Back),
-                Style::default().fg(theme.colors.fg_secondary),
-            ),
-            Span::styled(" cancel", Style::default().fg(theme.colors.fg_secondary)),
-            Span::styled(" ┃", border_style),
-        ]),
-    ]
-}
-
-/// Render a blocked command notice in the chat stream.
-#[allow(dead_code)]
-pub fn render_blocked_notice_lines<'a>(reason: &str, theme: &'a Theme) -> Vec<Line<'a>> {
-    let border_style = Style::default()
-        .fg(theme.colors.error_border)
-        .add_modifier(Modifier::BOLD);
-
-    vec![Line::from(vec![
-        Span::styled("┃ ", border_style),
-        Span::styled(
-            format!("{} ", crate::domain::models::visual::symbols::ERROR),
-            Style::default()
-                .fg(theme.colors.error)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            reason.to_string(),
-            Style::default().fg(theme.colors.fg_primary),
-        ),
-        Span::styled(" ┃", border_style),
-    ])]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::tool_call::ApprovalSource;
-
-    #[test]
-    fn test_feedback_input_renders_two_lines() {
-        let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines = render_feedback_input_lines("don't delete", &theme);
-        assert_eq!(lines.len(), 2);
-        let line1: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(line1.contains("Feedback:"));
-        assert!(line1.contains("don't delete"));
-        assert!(line1.contains("▋"), "cursor marker missing");
-        let line2: String = lines[1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(line2.contains("[Enter]"));
-        assert!(line2.contains("[Esc]"));
-    }
-
-    #[test]
-    fn test_blocked_notice_renders_one_line() {
-        let theme = crate::adapters::tui::theme::Theme::dark();
-        let lines = render_blocked_notice_lines("Command blocked: rm -rf /", &theme);
-        assert_eq!(lines.len(), 1);
-        let content: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(content.contains("✗"));
-        assert!(content.contains("Command blocked"));
-    }
 
     fn text(lines: &[Line<'_>]) -> Vec<String> {
         lines
@@ -748,7 +418,7 @@ mod tests {
         }
     }
 
-    /// `M01`/`M02`: the card shows exact field rows, never a JSON prefix, and
+    /// `M01`/`M02`: the request shows exact field rows, never a JSON prefix, and
     /// T5's marker whenever rows past the fourth exist.
     #[test]
     fn card_shows_exact_rows_then_the_more_marker() {
@@ -762,34 +432,41 @@ mod tests {
             tool_name: "Bash",
             risk: ToolRisk::Elevated,
             input: ExactInput::Ready(&input),
-            queue_len: 2,
         };
-        let rows = text(&render_permission_card_lines(&card, 80, &theme));
-        assert_eq!(rows[0], "┃ Bash  [2 more queued]");
-        assert_eq!(rows[1], "┃ │ command: cargo test");
-        assert_eq!(rows[4], "┃ │ line four");
+        let rows = card_rows(&card, 80, &theme, true);
+        assert_eq!(text(&rows.header), ["Bash"]);
+        let body = text(&rows.body);
+        assert_eq!(body[0], "│ command: cargo test");
+        assert_eq!(body[3], "│ line four");
         assert_eq!(
-            rows[5],
+            body[4],
             format!(
-                "┃ … more not shown — {} Review first",
+                "… more not shown — {} Review first",
                 rail(Context::Permission, PermissionCmd::Review)
             )
         );
-        assert!(!rows.iter().any(|row| row.contains("LATE-SUFFIX")));
-        assert!(!rows.iter().any(|row| row.contains('{')), "{rows:?}");
-        let review = rail(Context::Permission, PermissionCmd::Review);
-        assert!(
-            rows.iter()
-                .any(|row| row.contains(&format!("{review} Review")))
+        assert!(!body.iter().any(|row| row.contains("LATE-SUFFIX")));
+        assert!(!body.iter().any(|row| row.contains('{')), "{body:?}");
+        assert_eq!(
+            text(&rows.rail),
+            [
+                "[y] Allow  [s] Session  [a] Always",
+                "[n] Deny  [f] Deny + feedback  [r] Review"
+            ]
         );
-        let review = render_permission_review(&card, 80, &theme);
-        let body = text(&review.body);
-        assert_eq!(body.last().map(String::as_str), Some("│ LATE-SUFFIX"));
+        let review = review_rows(&card, 80, &theme, true);
+        assert_eq!(
+            text(&review.body).last().map(String::as_str),
+            Some("│ LATE-SUFFIX")
+        );
         assert_eq!(
             text(&review.header)[0],
             "Exact tool input (not run yet) · Bash"
         );
-        assert!(text(&review.footer).concat().contains("[Esc] Back"));
+        assert_eq!(
+            text(&review.rail),
+            ["[y] Allow  [n] Deny  [f] Deny + feedback  [Esc] Back  PgUp/PgDn scroll"]
+        );
     }
 
     /// `M07` / `A5`: at the 60-column floor every wrapped continuation row is
@@ -807,9 +484,8 @@ mod tests {
             tool_name: "mcp__filesystem_server_with_a_long_name__write",
             risk: ToolRisk::Standard,
             input: ExactInput::Ready(&input),
-            queue_len: 0,
         };
-        let review = render_permission_review(&card, 60, &theme);
+        let review = review_rows(&card, 58, &theme, true);
         let body = text(&review.body);
         assert!(body.iter().all(|row| row.starts_with("│ ")), "{body:?}");
         assert!(body.iter().all(|row| !row.chars().any(char::is_control)));
@@ -817,11 +493,15 @@ mod tests {
             body.iter().any(|row| row == "│ [y] Allow ┃ fake"),
             "{body:?}"
         );
-        let card_rows = text(&render_permission_card_lines(&card, 60, &theme));
-        assert!(card_rows.iter().all(|row| row.starts_with("┃ ")));
+        let rows = card_rows(&card, 58, &theme, true);
+        let shown: Vec<_> = text(&rows.body)
+            .into_iter()
+            .filter(|row| !row.starts_with("… more"))
+            .collect();
+        assert!(shown.iter().all(|row| row.starts_with("│ ")), "{shown:?}");
     }
 
-    /// An attached card before completion shows the summary and the receiving
+    /// An attached request before completion shows the summary and the receiving
     /// line, never body rows.
     #[test]
     fn receiving_card_shows_summary_and_receiving_line() {
@@ -834,14 +514,13 @@ mod tests {
             input: ExactInput::Receiving {
                 summary: "/w/big.bin…",
             },
-            queue_len: 0,
         };
-        let rows = text(&render_permission_card_lines(&card, 80, &theme));
-        assert_eq!(rows[1], "┃ │ /w/big.bin…");
-        assert_eq!(rows[2], "┃ receiving exact input…");
+        let rows = text(&card_rows(&card, 80, &theme, true).body);
+        assert_eq!(rows[0], "│ /w/big.bin…");
+        assert_eq!(rows[1], "receiving exact input…");
     }
 
-    /// A huge one-line summary never floods the card while parts arrive: at
+    /// A huge one-line summary never floods the frame while parts arrive: at
     /// most the card's body rows, the cut marked, keys still reachable.
     #[test]
     fn receiving_summary_is_bounded_to_the_card_body_rows() {
@@ -853,13 +532,36 @@ mod tests {
             tool_name: "Bash",
             risk: ToolRisk::Elevated,
             input: ExactInput::Receiving { summary: &summary },
-            queue_len: 0,
         };
-        let rows = text(&render_permission_card_lines(&card, 60, &theme));
-        let summary_rows: Vec<_> = rows.iter().filter(|row| row.starts_with("┃ │ ")).collect();
+        let all = card_rows(&card, 58, &theme, true);
+        let rows = text(&all.body);
+        let summary_rows: Vec<_> = rows.iter().filter(|row| row.starts_with("│ ")).collect();
         assert_eq!(summary_rows.len(), CARD_BODY_ROWS);
         assert!(summary_rows.last().unwrap().ends_with('…'));
-        assert!(rows.iter().any(|row| row == "┃ receiving exact input…"));
-        assert!(rows.iter().any(|row| row.contains("[r] Review")));
+        assert!(rows.iter().any(|row| row == "receiving exact input…"));
+        assert!(text(&all.rail).concat().contains("[r] Review"));
+    }
+
+    /// The inert window paints every key muted; the live rail uses the live colours.
+    #[test]
+    fn inert_keys_paint_muted() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let input = serde_json::json!({"command": "ls"});
+        let source = foreground();
+        let card = PermissionCard {
+            source: &source,
+            tool_name: "Bash",
+            risk: ToolRisk::Standard,
+            input: ExactInput::Ready(&input),
+        };
+        let key_colour = |rows: &FrameRows| rows.rail[0].spans[0].style.fg;
+        assert_eq!(
+            key_colour(&card_rows(&card, 80, &theme, false)),
+            Some(theme.colors.fg_muted)
+        );
+        assert_eq!(
+            key_colour(&card_rows(&card, 80, &theme, true)),
+            Some(theme.colors.success)
+        );
     }
 }

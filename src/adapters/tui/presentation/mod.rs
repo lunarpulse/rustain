@@ -63,6 +63,7 @@ pub fn frame_context(state: &TuiState, surface: Surface) -> super::keymap::Conte
             Context::InspectorSearch
         }
         Surface::WaveOverlay => super::handlers::wave_overlay::context(state),
+        Surface::Decision => super::decision_queue::frame_context(state),
         _ => surface.context(),
     }
 }
@@ -190,7 +191,7 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
     state.modal_stack.top().is_none_or(|frame| {
         !matches!(
             frame.surface,
-            Surface::Decision | Surface::QuitConfirm | Surface::Login
+            Surface::Decision | Surface::DecisionQueue | Surface::QuitConfirm | Surface::Login
         ) && !typing_context(frame_context(state, frame.surface))
     })
 }

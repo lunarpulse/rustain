@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -13,10 +13,16 @@ use rustain::adapters::noop::{
 use rustain::adapters::security_adapter::SecurityAdapter;
 use rustain::adapters::skill_activation::SkillActivator;
 use rustain::adapters::tui::app::{self, InputAction};
+use rustain::adapters::tui::decision_queue::{self, DecisionSubject, PermissionPayload};
+use rustain::adapters::tui::keymap::Host;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::adapters::tui::presentation::{self, Shell};
 use rustain::adapters::tui::state::TuiState;
-use rustain::adapters::tui::widgets::permission_prompt;
+use rustain::domain::clock::MockClock;
 use rustain::domain::errors::{ProviderError, ToolError};
 use rustain::domain::events::{AppEvent, ToolProgressEvent};
+use rustain::domain::models::NotificationsConfig;
 use rustain::domain::models::tool_call::{RequestId, ToolCall, ToolCallTransition};
 use rustain::domain::models::{
     AppConfig, CompletionOptions, ModelDescriptor, PermissionMode, PermissionResolution,
@@ -162,6 +168,8 @@ pub(crate) struct Fixture {
     pub(crate) closed: HashSet<RequestId>,
     pub(crate) requested: HashSet<RequestId>,
     pub(crate) errors: Vec<String>,
+    clock: Arc<MockClock>,
+    viewport: (u16, u16),
     bus: Arc<EventBus>,
     events: mpsc::UnboundedReceiver<AppEvent>,
     transitions: broadcast::Receiver<ToolCallTransition>,
@@ -187,8 +195,14 @@ impl Fixture {
         let (bus, events) = EventBus::new(512);
         let bus = Arc::new(bus);
         let bridge = approval_bridge::spawn(runtime.clone(), bus.clone());
+        let clock = Arc::new(MockClock::new(Instant::now()));
+        let mut state = TuiState::new(80, 24);
+        state.notifications =
+            NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
         Self {
-            state: TuiState::new(80, 24),
+            state,
+            clock,
+            viewport: (80, 24),
             runtime,
             tools,
             closed: HashSet::new(),
@@ -220,6 +234,7 @@ impl Fixture {
 
     pub(crate) async fn submit(&mut self, calls: Vec<(&'static str, Value)>) {
         let root = self.workspace.path().to_path_buf();
+        self.clock.advance(decision_queue::TYPING_GRACE);
         let provider = Arc::new(ScriptedProvider {
             calls,
             completions: AtomicUsize::new(0),
@@ -362,40 +377,58 @@ impl Fixture {
         .expect("real scheduler reaches every approval boundary")
     }
 
-    pub(crate) fn current_id(&self) -> RequestId {
-        self.state
-            .pending_permission
-            .as_ref()
+    pub(crate) fn permission(&self) -> &PermissionPayload {
+        match &decision_queue::current(&self.state, &LogFacts::default())
             .expect("shown approval")
-            .id
-            .clone()
+            .subject
+        {
+            DecisionSubject::Permission(payload) => payload,
+            other => panic!("expected permission, got {other:?}"),
+        }
+    }
+
+    pub(crate) fn current_id(&self) -> RequestId {
+        self.permission().request_id.clone()
     }
 
     pub(crate) fn paint(&mut self, width: u16, height: u16) -> Vec<String> {
+        self.viewport = (width, height);
+        if (self.state.terminal_width, self.state.terminal_height) != (width, height) {
+            app::handle_input(
+                &mut self.state,
+                &rustain::domain::events::DomainInputEvent::Resize(width, height),
+            );
+        }
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let layout = rustain::adapters::tui::layout::compute_layout(
+            ratatui::layout::Rect::new(0, 0, width, height),
+            &self.state.theme,
+            &self.state.input_buffer,
+            1,
+            false,
+            rustain::domain::models::DensityMode::Focus,
+        )
+        .expect("real minimum chat viewport");
+        let mut painted = false;
         terminal
             .draw(|frame| {
-                let layout = rustain::adapters::tui::layout::compute_layout(
-                    frame.area(),
-                    &self.state.theme,
-                    "",
-                    1,
-                    false,
-                    rustain::domain::models::DensityMode::Focus,
-                )
-                .expect("real minimum chat viewport");
-                let _ = permission_prompt::render_permission_surface(
+                let shell = Shell::new(frame.area(), &layout);
+                painted = presentation::compose(
                     frame,
-                    layout.chat_pane,
-                    self.state.pending_permission.as_ref(),
-                    self.state.pending_feedback_input.as_ref(),
-                    self.state.permission_queue.len(),
-                    &mut self.state.permission_reader,
-                    &self.state.theme,
+                    &self.state,
+                    &shell,
+                    Host::Local,
+                    &LogFacts::default(),
+                    &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                    |_| {},
                 );
             })
-            .expect("real permission overlay paint");
+            .expect("real permission frame paint");
+        if painted {
+            decision_queue::note_painted(&mut self.state);
+            self.clock.advance(decision_queue::INERT_AFTER_PAINT);
+        }
         terminal
             .backend()
             .buffer()
@@ -413,23 +446,46 @@ impl Fixture {
     }
 
     pub(crate) async fn key(&mut self, code: KeyCode) -> Option<InputAction> {
+        self.paint(self.viewport.0, self.viewport.1);
         self.raw(press(code)).await
     }
 
     pub(crate) async fn review_pages(&mut self, width: u16, height: u16) -> Vec<Vec<String>> {
+        use rustain::adapters::tui::decision_queue::PermissionInput;
+        use rustain::adapters::tui::widgets::permission_prompt::{
+            self, ExactInput, PermissionCard,
+        };
+        let payload = self.permission();
+        let input = match &payload.input {
+            PermissionInput::Ready(input) => input.as_ref(),
+            PermissionInput::Receiving { .. } => panic!("Review requires exact input"),
+        };
+        // The minimum supported body width produces an upper bound on the number
+        // of rows, even when successive pages consist of identical input.
+        let rows = permission_prompt::review_rows(
+            &PermissionCard {
+                source: &payload.source,
+                tool_name: &payload.tool_name,
+                risk: payload.risk,
+                input: ExactInput::Ready(input),
+            },
+            8,
+            &self.state.theme,
+            true,
+        )
+        .body
+        .len();
         let mut pages = vec![self.paint(width, height)];
-        // Overlapping pages via the production PageDown key also exercise
-        // footer ownership. Scroll exhaustion, not repeated text or time, ends traversal.
-        for _ in 0..1024 {
-            let previous_scroll = self.state.permission_reader.scroll;
+        for _ in 0..=(rows / 5 + 1) {
             self.key(KeyCode::PageDown).await;
-            let page = self.paint(width, height);
-            if self.state.permission_reader.scroll == previous_scroll {
-                return pages;
-            }
-            pages.push(page);
+            pages.push(self.paint(width, height));
         }
-        panic!("Review must have a finite reachable final page");
+        assert_eq!(
+            pages.last(),
+            pages.get(pages.len() - 2),
+            "Review reaches its final page"
+        );
+        pages
     }
 
     pub(crate) async fn finish(&mut self) {

@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use rustain::adapters::tui::app::{self, InputAction};
+use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::decision_queue::{
-    Arrival, DecisionDraft, DecisionKind, DecisionSubject, PaneOutcome, handle_domain_event,
+    self, Arrival, DecisionDraft, DecisionKind, DecisionSubject, PaneOutcome, handle_domain_event,
     note_painted, raise, raise_large_image, withdraw,
 };
+use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
 use rustain::adapters::tui::presentation::{Surface, reducer};
@@ -15,11 +16,13 @@ use rustain::domain::clock::MockClock;
 use rustain::domain::events::DomainInputEvent;
 use rustain::domain::models::NotificationsConfig;
 use rustain::domain::models::{FocusState, ImageAttachment};
-use rustain::domain::services::approval_runtime::{ApprovalRuntimeEvent, ReviewScope};
+use rustain::domain::services::approval_runtime::{
+    ApprovalRuntimeEvent, CancelReason, ReviewScope,
+};
 use rustain::infrastructure::runtime::approval_bridge;
 use serde_json::json;
 
-use super::harness::{Fixture, VIEWPORTS, press, request_id, text};
+use super::harness::{Fixture, VIEWPORTS, request_id, text};
 
 #[allow(clippy::duplicate_mod)]
 #[path = "../common/render_helpers.rs"]
@@ -47,8 +50,8 @@ async fn k05_review_decision_targets_pinned_request_not_queue() {
         a,
         "arrival cannot replace the reviewed slot"
     );
-    assert_eq!(f.state.permission_reader.review.as_ref(), Some(&a));
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert!(f.permission().reviewing);
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 2);
     for (width, height) in VIEWPORTS {
         let painted = text(&f.review_pages(width, height).await);
         assert!(painted.contains("PINNED-A-TAIL"));
@@ -63,6 +66,8 @@ async fn k05_review_decision_targets_pinned_request_not_queue() {
         matches!(resolved, ApprovalRuntimeEvent::Resolved { id, .. } if id == a),
         "Review decision must resolve A, not queued B"
     );
+    // Replaying the effect cannot consume or answer the promoted request.
+    approval_bridge::handle_action(&mut f.state, &InputAction::PermissionAllow, &f.runtime).await;
     assert_eq!(f.current_id(), b);
     assert!(
         f.runtime
@@ -97,12 +102,12 @@ async fn k05_review_feedback_escape_and_queue_keep_request_ownership() {
     let (event, _) = f.wait_requested().await;
     let b = request_id(&event);
     assert_eq!(f.current_id(), a);
-    assert_eq!(f.state.permission_reader.review.as_ref(), Some(&a));
+    assert!(f.permission().reviewing);
     assert!(matches!(
         f.key(KeyCode::Esc).await,
         Some(InputAction::Consumed)
     ));
-    assert!(f.state.permission_reader.review.is_none());
+    assert!(!f.permission().reviewing);
     assert_eq!(f.current_id(), a, "Review Esc is undecided");
     assert!(f.tools.executed.lock().is_empty());
     assert!(
@@ -113,15 +118,8 @@ async fn k05_review_feedback_escape_and_queue_keep_request_ownership() {
     );
     f.key(KeyCode::Char('r')).await;
     f.key(KeyCode::Char('f')).await;
-    assert_eq!(
-        f.state
-            .pending_feedback_input
-            .as_ref()
-            .expect("feedback owns A")
-            .pending_permission
-            .id,
-        a
-    );
+    assert_eq!(f.current_id(), a);
+    assert!(f.permission().feedback.is_some());
     for c in "feedback draft".chars() {
         f.key(KeyCode::Char(c)).await;
     }
@@ -129,57 +127,60 @@ async fn k05_review_feedback_escape_and_queue_keep_request_ownership() {
         .await;
     let (event, _) = f.wait_requested().await;
     let c = request_id(&event);
-    let feedback = f
-        .state
-        .pending_feedback_input
-        .as_ref()
-        .expect("arrival must not steal feedback");
-    assert_eq!(feedback.pending_permission.id, a);
-    assert_eq!(feedback.buffer, "feedback draft");
-    assert!(f.state.pending_permission.is_none());
-    assert_eq!(f.state.permission_queue.len(), 2);
-    let feedback_paint = f.paint(60, 16).join("\n");
-    assert!(
-        feedback_paint.contains("Feedback: feedback draft"),
-        "{feedback_paint}"
-    );
-    assert!(feedback_paint.contains("[Esc] cancel"), "{feedback_paint}");
-    assert!(matches!(
-        f.key(KeyCode::Esc).await,
-        Some(InputAction::FeedbackInputCancel)
-    ));
     assert_eq!(f.current_id(), a);
     assert_eq!(
-        f.state.permission_reader.review.as_ref(),
-        Some(&a),
-        "feedback Esc returns to the same pinned Review"
+        f.permission().feedback.as_ref().unwrap().as_str(),
+        "feedback draft"
     );
-    let restored_paint = f.paint(60, 16).join("\n");
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 3);
+    let feedback_paint = f.paint(60, 16).join("\n");
+    assert!(feedback_paint.contains("Feedback:"), "{feedback_paint}");
     assert!(
-        restored_paint.contains("Exact tool input (not run yet)"),
-        "{restored_paint}"
+        feedback_paint.contains("feedback draft"),
+        "{feedback_paint}"
     );
-    f.key(KeyCode::Esc).await;
-    assert!(f.state.permission_reader.review.is_none());
-    assert_eq!(f.current_id(), a);
-    // 3-C (A8): `Esc` no longer denies (was `PermissionDeny`): it posts one cue, the card
-    // stays current, and the explicit `n` denies each request once.
     assert!(matches!(
         f.key(KeyCode::Esc).await,
         Some(InputAction::Consumed)
     ));
     assert_eq!(f.current_id(), a);
+    assert!(
+        f.permission().reviewing,
+        "feedback Esc returns to the pinned Review"
+    );
+    let restored_paint = f.paint(60, 16).join("\n");
+    assert!(
+        restored_paint.contains("Decision: Permission"),
+        "{restored_paint}"
+    );
+    f.key(KeyCode::Esc).await;
+    assert!(!f.permission().reviewing);
+    assert_eq!(f.current_id(), a);
+    // Esc defers A; it cannot promote B or answer any request.
+    assert!(matches!(
+        f.key(KeyCode::Esc).await,
+        Some(InputAction::Consumed)
+    ));
+    assert!(f.state.modal_stack.is_empty());
+    assert!(f.state.decisions.items().next().unwrap().deferred);
+    assert!(f.tools.executed.lock().is_empty());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
+    // The queue selects the oldest non-deferred request.
+    assert_eq!(f.current_id(), b);
     assert!(matches!(
         f.key(KeyCode::Char('n')).await,
         Some(InputAction::PermissionDeny)
     ));
-    f.wait_closed(&a).await;
-    assert_eq!(f.current_id(), b);
-    f.key(KeyCode::Char('n')).await;
     f.wait_closed(&b).await;
     assert_eq!(f.current_id(), c);
     f.key(KeyCode::Char('n')).await;
     f.wait_closed(&c).await;
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
+    assert_eq!(f.current_id(), a);
+    f.key(KeyCode::Char('n')).await;
+    f.wait_closed(&a).await;
     f.finish().await;
     assert!(f.tools.executed.lock().is_empty());
 }
@@ -190,6 +191,7 @@ fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
         state,
         &DomainInputEvent::KeyPress(key),
         &LogFacts::default(),
+        Host::Local,
     )? {
         PaneOutcome::Effect(effect) => Some(effect.into_action()),
         _ => Some(InputAction::Consumed),
@@ -205,17 +207,13 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
     let id = f.current_id();
     f.paint(60, 16);
     f.key(KeyCode::Char('r')).await;
-    let permission_focus = f.state.focus.clone();
-    f.state.focus = FocusState::Chat;
     // Old -> new (21.6 6-A): the TuiState large-image slot is gone; the queued image
     // item (raised below) is the higher-priority confirmation and carries the image.
     // Old (19.20c): `handle_input` mapped Chat-focus `y` to ImageConfirmAttach itself.
     // New (21.1 S2, AC9/AC12): the confirmation is a decision-pane item that owns its
     // keys before approval does (the event loop's pane dispatch runs first), inert for
     // its first 500 ms; `handle_input` no longer maps the key.
-    let clock = Arc::new(MockClock::new(Instant::now()));
-    f.state.notifications =
-        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    // The requested image temporarily takes the decision frame.
     raise_large_image(
         &mut f.state,
         ImageAttachment {
@@ -229,13 +227,17 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
         pane_key(&mut f.state, 'y'),
         Some(InputAction::Consumed)
     ));
-    clock.advance(Duration::from_millis(501));
+    f.paint(60, 16);
     assert!(matches!(
         pane_key(&mut f.state, 'y'),
         Some(InputAction::ImageConfirmAttach)
     ));
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
     assert_eq!(f.current_id(), id);
-    assert_eq!(f.state.permission_reader.review.as_ref(), Some(&id));
+    f.key(KeyCode::Char('r')).await;
+    assert!(f.permission().reviewing);
     assert!(
         f.runtime
             .pending_review(&id, ReviewScope::AllTools)
@@ -247,7 +249,6 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
     // answered item left the queue (old: the fixture slot was cleared by hand to model
     // its completed higher-priority confirmation).
     assert!(!f.state.decisions.holds(DecisionKind::LargeImage));
-    f.state.focus = permission_focus;
     for key in ['y', 'n', 'a', 's', 'f', 'r'] {
         for modifiers in [
             KeyModifiers::CONTROL,
@@ -265,13 +266,13 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
                             | InputAction::PermissionDeny
                             | InputAction::PermissionAlwaysAllow
                             | InputAction::PermissionSessionAllow
-                            | InputAction::PermissionDenyFeedback
+                            | InputAction::FeedbackInputSubmit
                     )
                 ),
                 "modified {key} must not decide: {modifiers:?}"
             );
             assert_eq!(f.current_id(), id);
-            assert!(f.state.pending_feedback_input.is_none());
+            assert!(f.permission().feedback.is_none());
         }
         for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
             assert!(
@@ -287,7 +288,7 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
         }
     }
     assert!(f.tools.executed.lock().is_empty());
-    assert_eq!(f.state.permission_reader.review.as_ref(), Some(&id));
+    assert!(f.permission().reviewing);
     assert!(matches!(
         f.raw(Event::Key(KeyEvent::new(
             KeyCode::Char('c'),
@@ -302,7 +303,7 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
             KeyModifiers::CONTROL
         )))
         .await,
-        Some(InputAction::Consumed)
+        Some(InputAction::Quit)
     ));
     assert!(
         f.runtime
@@ -326,7 +327,12 @@ async fn k05_resolved_request_retires_open_review_before_next_decision() {
     let (event_a, snapshot_a) = f.wait_requested().await;
     let a = f.current_id();
     let mut other_consumer = TuiState::new(80, 24);
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    other_consumer.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
     approval_bridge::apply(&mut other_consumer, event_a, snapshot_a);
+    note_painted(&mut other_consumer);
+    clock.advance(Duration::from_millis(501));
     f.paint(80, 24);
     f.key(KeyCode::Char('r')).await;
     f.submit(vec![(
@@ -336,22 +342,35 @@ async fn k05_resolved_request_retires_open_review_before_next_decision() {
     .await;
     let (event_b, _) = f.wait_requested().await;
     let b = request_id(&event_b);
-    let raw = press(KeyCode::Char('y'));
-    let domain =
-        app::convert_crossterm_event(&raw, &Default::default()).expect("real raw conversion");
-    let decision = app::handle_operator_input(&mut other_consumer, &raw, &domain)
-        .expect("real decision dispatch");
+    let decision = pane_key(&mut other_consumer, 'y').expect("real decision dispatch");
     assert!(matches!(decision, InputAction::PermissionAllow));
     approval_bridge::handle_action(&mut other_consumer, &decision, &f.runtime).await;
     let (resolved, _) = f.next_approval().await;
     assert!(matches!(resolved, ApprovalRuntimeEvent::Resolved { id, .. } if id == a));
     assert!(
-        f.state.permission_reader.review.is_none(),
-        "resolved Review must retire immediately"
+        decision_queue::current(&f.state, &LogFacts::default())
+            .unwrap()
+            .is_stale()
     );
-    assert_eq!(f.current_id(), b, "only B may own the next key");
-    let rows = f.paint(80, 24).join("\n");
-    assert!(!rows.contains("A-EXECUTES"));
+    assert_eq!(f.current_id(), a);
+    assert!(matches!(
+        f.key(KeyCode::Char('n')).await,
+        Some(InputAction::Consumed)
+    ));
+    assert!(
+        f.runtime
+            .pending_review(&b, ReviewScope::AllTools)
+            .await
+            .is_some()
+    );
+    f.key(KeyCode::Esc).await;
+    assert!(
+        f.state.modal_stack.is_empty(),
+        "closing stale A must not open B"
+    );
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
+    assert_eq!(f.current_id(), b);
     f.key(KeyCode::Char('n')).await;
     f.wait_closed(&b).await;
     f.finish().await;
@@ -390,10 +409,7 @@ async fn k05_standalone_broadcast_lag_rescans_every_real_pending_request() {
         REQUESTS,
         "lag recovery must reissue all real pending requests before the final request"
     );
-    assert_eq!(
-        f.state.permission_queue.len() + usize::from(f.state.pending_permission.is_some()),
-        REQUESTS
-    );
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), REQUESTS);
     assert_eq!(
         f.current_id(),
         pending[0],
@@ -410,8 +426,8 @@ async fn k05_standalone_broadcast_lag_rescans_every_real_pending_request() {
     f.finish().await;
     assert_eq!(f.closed.len(), REQUESTS);
     assert!(f.tools.executed.lock().is_empty());
-    assert!(f.state.pending_permission.is_none());
-    assert_eq!(f.state.focus, FocusState::Input);
+    assert!(f.state.decisions.is_empty());
+    assert!(f.state.modal_stack.is_empty());
 }
 
 #[tokio::test]
@@ -434,11 +450,10 @@ async fn k05_higher_plan_confirmation_keeps_arrival_queued() {
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
     assert_eq!(f.state.focus, plan_focus);
-    assert!(
-        f.state.pending_permission.is_none(),
-        "approval arrival cannot steal a higher modal"
-    );
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
+    assert!(decision_queue::status_cue(decision_queue::waiting(&f.state)).is_some());
+    assert!(f.state.notifications.visible().count() > 0);
     assert!(
         f.paint(60, 16)
             .iter()
@@ -455,13 +470,16 @@ async fn k05_higher_plan_confirmation_keeps_arrival_queued() {
             .is_some()
     );
     assert!(f.tools.executed.lock().is_empty());
-    // Only the unrelated plan modal is seeded here. Its own dispatcher owns
-    // dismissal; approval admission is the shared production advance helper.
+    // Dismissing the unrelated plan must not open a queued decision by surprise.
     f.state.pending_plan_approval = None;
     f.state.focus = FocusState::Input;
-    approval_bridge::advance(&mut f.state);
+    decision_queue::settle(&mut f.state);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
     assert_eq!(f.current_id(), id);
-    assert!(f.paint(60, 16).join("\n").contains("AFTER-PLAN-CANARY"));
+    f.key(KeyCode::Char('r')).await;
+    assert!(text(&f.review_pages(60, 16).await).contains("AFTER-PLAN-CANARY"));
     f.key(KeyCode::Char('y')).await;
     f.wait_closed(&id).await;
     f.finish().await;
@@ -489,7 +507,7 @@ async fn k05_review_rewraps_same_request_on_resize() {
             "{width}×{height}: {painted}"
         );
         assert_eq!(f.current_id(), id);
-        assert_eq!(f.state.permission_reader.review.as_ref(), Some(&id));
+        assert!(f.permission().reviewing);
         assert!(f.tools.executed.lock().is_empty());
     }
     f.key(KeyCode::Char('y')).await;
@@ -510,7 +528,11 @@ async fn k05_passive_overlay_dismissals_surface_deferred_approval() {
         ("palette", KeyCode::Esc),
     ] {
         let mut f = Fixture::new(64).await;
-        f.state.focus = FocusState::Chat;
+        f.state.focus = if overlay == "which-key" {
+            FocusState::Chat
+        } else {
+            FocusState::Input
+        };
         f.state.input_buffer = "composer draft".into();
         match overlay {
             "help" => {
@@ -527,12 +549,20 @@ async fn k05_passive_overlay_dismissals_surface_deferred_approval() {
         f.submit(vec![("Bash", input.clone())]).await;
         let (event, _) = f.wait_requested().await;
         let id = request_id(&event);
-        assert!(f.state.pending_permission.is_none());
-        assert_eq!(f.state.permission_queue.len(), 1);
+        assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
+        assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+        assert!(decision_queue::status_cue(decision_queue::waiting(&f.state)).is_some());
+        assert!(f.state.notifications.visible().count() > 0);
         assert!(matches!(f.key(dismiss).await, Some(InputAction::Consumed)));
-        assert_eq!(f.current_id(), id, "{overlay} dismissal must hand off");
-        assert_eq!(f.state.permission_queue.len(), 0);
-        assert!(f.paint(60, 16).join("\n").contains("AFTER-PASSIVE-OVERLAY"));
+        assert!(
+            decision_queue::current(&f.state, &LogFacts::default()).is_none(),
+            "{overlay} must not open it"
+        );
+        decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+        f.key(KeyCode::Enter).await;
+        assert_eq!(f.current_id(), id);
+        f.key(KeyCode::Char('r')).await;
+        assert!(text(&f.review_pages(60, 16).await).contains("AFTER-PASSIVE-OVERLAY"));
         assert_eq!(f.state.input_buffer, "composer draft");
         f.key(KeyCode::Char('y')).await;
         f.wait_closed(&id).await;
@@ -557,8 +587,8 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
     assert_eq!(f.state.pending_leader, Some(Context::Chat));
-    assert!(f.state.pending_permission.is_none());
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
     // Old -> new (21.6 6-A): a queued, not-deferred image item replaces the slot as the
     // higher confirmation (Automatic + a pending leader: it waits, never opens a frame).
     assert_eq!(
@@ -576,15 +606,15 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     );
     f.key(KeyCode::Esc).await;
     assert_eq!(f.state.focus, FocusState::Chat);
-    assert!(
-        f.state.pending_permission.is_none(),
-        "image owner still blocks"
-    );
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
     assert!(f.tools.executed.lock().is_empty());
     withdraw(&mut f.state, DecisionKind::LargeImage);
     reducer::open(&mut f.state, Surface::Help);
     f.key(KeyCode::Esc).await;
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
     assert_eq!(f.current_id(), id);
     f.key(KeyCode::Char('n')).await;
     f.wait_closed(&id).await;
@@ -595,7 +625,6 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
 #[tokio::test]
 async fn k05_long_metadata_keeps_exact_review_and_controls_reachable() {
     use rustain::domain::models::tool_call::ApprovalSource;
-
     static TOOL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!("mcp__{}__{}", "server".repeat(350), "operation".repeat(250))
     });
@@ -603,32 +632,43 @@ async fn k05_long_metadata_keeps_exact_review_and_controls_reachable() {
     let input = json!({"first": "INPUT-HEAD", "last": format!("{}\nMETADATA-EXACT-TAIL", "value ".repeat(180))});
     let mut f = Fixture::new(64).await;
     f.submit(vec![(tool, input.clone())]).await;
-    f.wait_requested().await;
+    let (event, snapshot) = f.wait_requested().await;
     let id = f.current_id();
-    // Source attribution is display metadata, independent of decision identity.
-    f.state.pending_permission.as_mut().unwrap().source = ApprovalSource::ForegroundSubagent {
+    // Preserve the real request and exact snapshot while exercising long display metadata.
+    let mut snapshot = snapshot.expect("private exact snapshot");
+    snapshot.source = ApprovalSource::ForegroundSubagent {
         conversation_id: "long-source".into(),
         parent_tool_call_id: "parent-tool".into(),
         subagent_type: "source".repeat(400),
     };
+    reducer::close(&mut f.state, Surface::Decision);
+    f.state.decisions = Default::default();
+    approval_bridge::apply(&mut f.state, event, Some(snapshot));
+    assert_eq!(f.permission().request_id, id);
     for (width, height) in VIEWPORTS {
-        f.state.permission_reader.back();
+        if f.permission().reviewing {
+            f.key(KeyCode::Esc).await;
+        }
         let card = f.paint(width, height).join("\n");
-        assert!(card.contains("[r] Review"), "{width}×{height}: {card}");
-        assert!(card.contains("[y] Allow"), "{width}×{height}: {card}");
+        assert!(
+            card.contains("Decision: Permission"),
+            "{width}×{height}: {card}"
+        );
+        assert!(card.contains("Allow"), "{width}×{height}: {card}");
         f.key(KeyCode::Char('r')).await;
         let pages = f.review_pages(width, height).await;
         assert!(text(&pages).contains("METADATA-EXACT-TAIL"));
-        assert!(f.state.permission_reader.viewport_rows > 0);
+        assert!(f.permission().reviewing);
         for page in pages {
             let painted = page.join("\n");
             assert!(
-                painted.contains("risk:"),
-                "risk stays visible before source elision: {painted}"
+                painted.contains("Decision: Permission"),
+                "review remains in the permission frame: {painted}"
             );
-            assert!(painted.contains("[y] Allow"), "{painted}");
-            assert!(painted.contains("[n] Deny"), "{painted}");
-            assert!(painted.contains("[Esc] Back"), "{painted}");
+            assert!(painted.contains("risk:"), "{width}×{height}: {painted}");
+            assert!(painted.contains("Allow"), "{painted}");
+            assert!(painted.contains("Deny"), "{painted}");
+            assert!(painted.contains("Back"), "{painted}");
         }
     }
     f.key(KeyCode::Char('y')).await;
@@ -638,10 +678,93 @@ async fn k05_long_metadata_keeps_exact_review_and_controls_reachable() {
 }
 
 #[tokio::test]
-async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
-    use rustain::domain::models::OverlayType;
-    use rustain::domain::models::visual::ConfirmationType;
+async fn k05_cancelled_open_review_is_stale_until_closed() {
+    let mut f = Fixture::new(64).await;
+    f.submit(vec![(
+        "Bash",
+        json!({"command": "printf CANCELLED-CANARY"}),
+    )])
+    .await;
+    f.wait_requested().await;
+    let id = f.current_id();
+    let source = f.permission().source.clone();
+    f.key(KeyCode::Char('r')).await;
+    f.runtime
+        .cancel_by_source(&source, CancelReason::SourceAborted)
+        .await;
+    let (event, _) = f.next_approval().await;
+    assert!(
+        matches!(event, ApprovalRuntimeEvent::Cancelled { id: cancelled, .. } if cancelled == id)
+    );
+    assert!(
+        decision_queue::current(&f.state, &LogFacts::default())
+            .unwrap()
+            .is_stale()
+    );
+    assert!(matches!(
+        f.key(KeyCode::Char('y')).await,
+        Some(InputAction::Consumed)
+    ));
+    assert_eq!(f.current_id(), id);
+    assert!(f.tools.executed.lock().is_empty());
+    let painted = f.paint(80, 24).join("\n");
+    assert!(painted.contains("Close"), "{painted}");
+    f.key(KeyCode::Esc).await;
+    assert!(f.state.decisions.is_empty());
+    assert!(f.state.modal_stack.is_empty());
+    f.finish().await;
+    assert!(f.tools.executed.lock().is_empty());
+}
 
+#[tokio::test]
+async fn k05_answer_over_caller_does_not_promote_next_permission() {
+    let mut f = Fixture::new(64).await;
+    f.state.input_buffer = "protected draft".into();
+    reducer::open(&mut f.state, Surface::Help);
+    f.submit(vec![("Bash", json!({"command": "printf NESTED-A"}))])
+        .await;
+    let (event, _) = f.wait_requested().await;
+    let a = request_id(&event);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
+    assert_eq!(f.current_id(), a);
+    assert_eq!(f.state.modal_stack.len(), 2);
+    f.submit(vec![(
+        "Write",
+        json!({"file_path": "nested-b", "content": "B"}),
+    )])
+    .await;
+    let (event, _) = f.wait_requested().await;
+    let b = request_id(&event);
+    assert_eq!(f.current_id(), a);
+    f.key(KeyCode::Char('n')).await;
+    f.wait_closed(&a).await;
+    assert_eq!(
+        f.state.modal_stack.top().map(|frame| frame.surface),
+        Some(Surface::Help)
+    );
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert!(
+        f.runtime
+            .pending_review(&b, ReviewScope::AllTools)
+            .await
+            .is_some()
+    );
+    f.key(KeyCode::Esc).await;
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
+    assert_eq!(f.current_id(), b);
+    f.key(KeyCode::Char('n')).await;
+    f.wait_closed(&b).await;
+    f.finish().await;
+    assert!(f.tools.executed.lock().is_empty());
+}
+
+#[tokio::test]
+async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
+    // Feedback is a sub-context of the decision frame, not its own overlay.
     let mut f = Fixture::new(64).await;
     f.submit(vec![("Bash", json!({"command": "printf FEEDBACK-OWNER"}))])
         .await;
@@ -651,9 +774,7 @@ async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
     for c in "preserved draft".chars() {
         f.key(KeyCode::Char(c)).await;
     }
-    let feedback_focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::PermissionFeedback,
-    ));
+    assert!(f.permission().feedback.is_some());
     reducer::open(&mut f.state, Surface::Help);
     f.submit(vec![(
         "Bash",
@@ -663,12 +784,12 @@ async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
     let (event, _) = f.wait_requested().await;
     let queued = request_id(&event);
     f.key(KeyCode::Esc).await;
-    assert_eq!(f.state.focus, feedback_focus);
-    let feedback = f.state.pending_feedback_input.as_ref().unwrap();
-    assert_eq!(feedback.pending_permission.id, owner);
-    assert_eq!(feedback.buffer, "preserved draft");
-    assert!(f.state.pending_permission.is_none());
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert_eq!(f.current_id(), owner);
+    assert_eq!(
+        f.permission().feedback.as_ref().unwrap().as_str(),
+        "preserved draft"
+    );
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 2);
     assert!(
         f.paint(60, 16)
             .join("\n")
@@ -676,6 +797,7 @@ async fn k05_passive_dismissal_restores_feedback_without_advancing_its_queue() {
     );
     f.key(KeyCode::Enter).await;
     f.wait_closed(&owner).await;
+    // Answering from the base promotes the next same-kind item (A9).
     assert_eq!(f.current_id(), queued);
     f.key(KeyCode::Char('n')).await;
     f.wait_closed(&queued).await;
@@ -688,7 +810,8 @@ async fn k05_tool_inspector_back_hands_off_to_queued_permission() {
     use rustain::domain::models::{InvocationStatus, MessageRole, StopReason};
 
     let mut f = Fixture::new(64).await;
-    f.state.focus = FocusState::Chat;
+    f.state.focus = FocusState::Input;
+    f.state.input_buffer = "protected composer draft".into();
     let conversation = stage::make_conversation(
         vec![stage::make_msg("inspected-tool", MessageRole::Assistant)],
         vec![stage::make_turn(
@@ -706,16 +829,20 @@ async fn k05_tool_inspector_back_hands_off_to_queued_permission() {
         .await;
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
-    assert!(f.state.pending_permission.is_none());
-    assert_eq!(f.state.permission_queue.len(), 1);
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
     assert!(matches!(
         f.key(KeyCode::Esc).await,
         Some(InputAction::Consumed)
     ));
     assert!(f.state.modal_stack.is_empty());
     assert!(f.state.tool_inspectors.is_empty());
+    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    decision_queue::open_waiting(&mut f.state, &LogFacts::default());
+    f.key(KeyCode::Enter).await;
     assert_eq!(f.current_id(), id);
-    assert!(f.paint(60, 16).join("\n").contains("AFTER-PEEK"));
+    f.key(KeyCode::Char('r')).await;
+    assert!(text(&f.review_pages(60, 16).await).contains("AFTER-PEEK"));
     f.key(KeyCode::Char('n')).await;
     f.wait_closed(&id).await;
     f.finish().await;

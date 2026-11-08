@@ -986,6 +986,7 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
         emit(&mut h, Host::Local, "help-deferred");
         press_all(&mut h.state, &[Key::Ctrl('x'), Key::Char('q')]);
         decision_queue::open_waiting(&mut h.state, &LogFacts::default());
+        assert_eq!(press(&mut h.state, Key::Enter), InputAction::Consumed);
         emit(&mut h, Host::Local, "help-reopened-budget");
         decision_queue::note_painted(&mut h.state);
         clock.advance(decision_queue::INERT_AFTER_PAINT);
@@ -1216,16 +1217,15 @@ fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
                 InputAction::FocusDecisions
             );
             decision_queue::open_waiting(&mut state, &LogFacts::default());
-            if waiting == "actionable" {
+            if waiting != "empty" {
                 assert!(state.pending_leader.is_none());
-                assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+                assert_eq!(
+                    state.modal_stack.top().unwrap().surface,
+                    Surface::DecisionQueue
+                );
                 assert_eq!(state.modal_stack.iter().next(), frames.first());
             } else {
-                let expected = if waiting == "empty" {
-                    "No decisions waiting"
-                } else {
-                    "A decision is waiting in another tab — open that tab to answer it"
-                };
+                let expected = "No decisions waiting";
                 assert_eq!(state.pending_leader, Some(Context::Help));
                 assert_eq!(state.leader_feedback.as_ref().unwrap().message, expected);
                 assert_eq!(
@@ -1238,11 +1238,7 @@ fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
                 let top = (region.y..region.bottom())
                     .find(|&y| row(&painted, region, y).contains("┌ Ctrl+X "))
                     .expect("owning menu retained");
-                let prefix = if waiting == "empty" {
-                    expected
-                } else {
-                    "A decision is waiting in another tab"
-                };
+                let prefix = expected;
                 assert!(
                     (top + 1..region.bottom()).any(|y| row(&painted, region, y).contains(prefix))
                 );

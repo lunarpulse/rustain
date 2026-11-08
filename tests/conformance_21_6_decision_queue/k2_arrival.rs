@@ -256,12 +256,15 @@ fn k2_a_producer_for_another_conversation_waits_and_is_never_answered_in_the_act
     assert_eq!(toasts(&state), 1);
     let item = state.decisions.items().next().unwrap();
     assert_eq!(item.conversation_id.as_deref(), Some("b"));
-    // Ctrl+X q in a does not open it either: it says where it waits.
+    // The list includes b, but Enter in a cannot open it.
     decision_queue::open_waiting(&mut state, &f);
+    assert!(is_open(&state, Surface::DecisionQueue));
+    route(&mut state, &special(DomainKey::Enter), &f);
     assert!(!is_open(&state, Surface::Decision));
+    assert!(is_open(&state, Surface::DecisionQueue));
     ready(&mut state, &clock);
-    // Back in b the same chord focuses it.
-    decision_queue::open_waiting(&mut state, &facts("b"));
+    // Back in b, opening the selected row focuses the same item.
+    route(&mut state, &special(DomainKey::Enter), &facts("b"));
     assert!(is_open(&state, Surface::Decision));
     // Positive control: the same producer for the active conversation takes the frame.
     let (mut state, _clock) = clocked(80, 24);

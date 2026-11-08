@@ -109,6 +109,7 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
         "[?] Help",
         "[N] Notifications",
         "[X] Clear toasts",
+        "[Q] Decisions",
     ] {
         assert!(attached.contains(painted), "{painted}:\n{attached}");
         assert!(
@@ -138,6 +139,28 @@ fn width_and_host_unavailable_chords_are_qualified_and_answer_with_remedy() {
     );
     assert!(attached_panel_remedy().contains("/team status"));
     assert!(attached_panel_remedy().contains("Detach (Ctrl+X, D)"));
+}
+
+#[test]
+fn decisions_help_names_the_queue_for_both_hosts() {
+    use rustain::adapters::tui::keymap::table::LeaderCmd;
+    use rustain::adapters::tui::keymap::{Availability, CommandId, Resolved, resolve};
+    let help = rustain::adapters::tui::keymap::render_help::help_rows();
+    let row = help.iter().find(|row| row.key == "Ctrl+X, Q").unwrap();
+    assert_eq!(
+        row.description,
+        "Decisions: open the Needs-you queue (status cue: Needs you)"
+    );
+    for (host, avail) in [
+        (Host::Local, AvailCtx::local(130, DensityMode::Focus)),
+        (Host::Attached, AvailCtx::attached(130, false)),
+    ] {
+        let Resolved::Hit(row) = resolve(Context::Leader, host, &[Key::Char('q')]) else {
+            panic!("{host:?} has no Decisions row");
+        };
+        assert_eq!(row.command, CommandId::Leader(LeaderCmd::Decisions));
+        assert_eq!((row.avail)(&avail), Availability::Available);
+    }
 }
 
 #[test]

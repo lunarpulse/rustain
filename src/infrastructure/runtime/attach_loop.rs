@@ -55,10 +55,7 @@ use crate::adapters::daemon::protocol::{
 };
 use crate::adapters::rap::{AgentSigner, IdentityKeyStore};
 use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource, NotificationStore};
-use crate::adapters::tui::state::{
-    AttachInfo, AttachedApproval, AttachedApprovalPresentation, AttachedApprovals,
-    PendingConsentApproval, RecipientSurfaceTarget, TabRenderState, TuiState,
-};
+use crate::adapters::tui::state::{AttachInfo, RecipientSurfaceTarget, TabRenderState, TuiState};
 use crate::adapters::tui::terminal;
 use crate::adapters::tui::widgets::recipient_surface::{
     RecipientSurfaceAction, pinned_response, recipient_surface_actions, render_recipient_surface,
@@ -1084,38 +1081,6 @@ async fn recipient_surface_key(
     state.needs_redraw = true;
 }
 
-/// The consent card's lines, each wrapped to the card's inner `width` when
-/// longer than it (Story 19.18d `P22` dev smoke: the decision card renders
-/// without wrap, so an overlong line — the bound `[a]` clause is 115
-/// characters — was cut at the 60-column floor). A line that fits is kept
-/// byte-for-byte, double spaces included.
-fn consent_approval_card_lines(
-    pending: &PendingConsentApproval,
-    queued: usize,
-    width: usize,
-) -> Vec<ratatui::text::Line<'static>> {
-    use crate::adapters::tui::widgets::chat_pane::word_wrap::wrap_text;
-
-    let mut lines = Vec::new();
-    for line in pending.input_preview.lines() {
-        if width == 0 || crate::adapters::tui::text_geometry::cells(line) <= width {
-            lines.push(ratatui::text::Line::from(line.to_owned()));
-        } else {
-            lines.extend(
-                wrap_text(line, width)
-                    .into_iter()
-                    .map(ratatui::text::Line::from),
-            );
-        }
-    }
-    if queued > 0 {
-        lines.push(ratatui::text::Line::from(format!(
-            "  [{queued} more queued]"
-        )));
-    }
-    lines
-}
-
 fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
     use ratatui::text::Line;
     vec![
@@ -1132,362 +1097,6 @@ fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
             )
         )),
     ]
-}
-
-/// Story 19.20c: transient writer-only approval state. Consent/consolidation/
-/// retract confirmations keep precedence; generic permissions precede proposals.
-/// The pinned reader and feedback owner are request ids, never FIFO positions.
-
-/// Rewrap only on request/view/width/completion/queue changes, not on ticks.
-
-impl AttachedApproval {
-    fn card(
-        &self,
-        queue_len: usize,
-    ) -> crate::adapters::tui::widgets::permission_prompt::PermissionCard<'_> {
-        use crate::adapters::tui::widgets::permission_prompt::{ExactInput, PermissionCard};
-        PermissionCard {
-            source: &self.source,
-            tool_name: &self.tool,
-            risk: self.risk,
-            input: self.value.as_ref().map_or(
-                ExactInput::Receiving {
-                    summary: &self.summary,
-                },
-                ExactInput::Ready,
-            ),
-            queue_len,
-        }
-    }
-}
-
-impl AttachedApprovals {
-    fn shown(&self) -> Option<&crate::domain::models::tool_call::RequestId> {
-        self.feedback
-            .as_ref()
-            .map(|(id, _)| id)
-            .or(self.review.as_ref())
-            .or(self.order.front())
-    }
-
-    fn retire(&mut self, id: &crate::domain::models::tool_call::RequestId) {
-        let was_shown = self.shown() == Some(id);
-        self.pending.remove(id);
-        if self
-            .presentation
-            .as_ref()
-            .is_some_and(|view| &view.id == id)
-        {
-            self.presentation = None;
-        }
-        self.order.retain(|queued| queued != id);
-        if self.review.as_ref() == Some(id) {
-            self.review = None;
-        }
-        if self.feedback.as_ref().is_some_and(|(owner, _)| owner == id) {
-            self.feedback = None;
-        }
-        if self.painted.as_ref() == Some(id) {
-            self.painted = None;
-        }
-        if was_shown {
-            self.scroll = 0;
-            self.scroll_max = 0;
-        }
-    }
-
-    /// All private generic approval frames enter here from the socket arm.
-    /// A bad chunk permanently invalidates this transfer, not the decision.
-    fn apply(&mut self, frame: DaemonFrame, read_only: bool) -> Option<String> {
-        use crate::adapters::daemon::protocol::{ApprovalRefusal, ExactInputAssembly};
-        match frame {
-            DaemonFrame::ApprovalRequest {
-                request_id,
-                tool,
-                source,
-                risk,
-                summary,
-                input_bytes: Some(bytes),
-            } if !read_only => {
-                if !self.pending.contains_key(&request_id) {
-                    self.order.push_back(request_id.clone());
-                    self.pending.insert(
-                        request_id,
-                        AttachedApproval {
-                            tool,
-                            source,
-                            risk,
-                            summary,
-                            assembly: Some(ExactInputAssembly::new(bytes)),
-                            value: None,
-                        },
-                    );
-                }
-            }
-            DaemonFrame::ApprovalInputChunk {
-                request_id,
-                sequence,
-                data,
-            } if !read_only => {
-                if let Some(pending) = self.pending.get_mut(&request_id)
-                    && let Some(assembly) = pending.assembly.as_mut()
-                    && assembly.push(sequence, &data).is_err()
-                {
-                    pending.assembly = None;
-                }
-            }
-            DaemonFrame::ApprovalInputComplete { request_id, chunks } if !read_only => {
-                if let Some(pending) = self.pending.get_mut(&request_id)
-                    && let Some(assembly) = pending.assembly.take()
-                {
-                    pending.value = assembly.finish(chunks).ok();
-                }
-            }
-            DaemonFrame::ApprovalClosed { request_id } => self.retire(&request_id),
-            DaemonFrame::ApprovalRefused { request_id, reason } => {
-                if reason == ApprovalRefusal::NoLongerPending {
-                    self.retire(&request_id);
-                }
-                return Some(reason.to_string());
-            }
-            _ => {}
-        }
-        None
-    }
-
-    fn decide(
-        &mut self,
-        id: crate::domain::models::tool_call::RequestId,
-        outcome: crate::domain::models::ApprovalOutcome,
-        tx: &mpsc::UnboundedSender<ClientFrame>,
-    ) {
-        if tx
-            .send(ClientFrame::ApprovalResponse {
-                request_id: id.clone(),
-                outcome,
-            })
-            .is_ok()
-        {
-            self.retire(&id);
-        }
-    }
-
-    /// Same ownership gate as attached proposals: painted, writer, unmodified
-    /// Press, empty composer, and no higher-priority confirmation.
-    fn key(
-        &mut self,
-        key: crossterm::event::KeyEvent,
-        blocked: bool,
-        tx: &mpsc::UnboundedSender<ClientFrame>,
-    ) -> bool {
-        use crate::domain::models::{ApprovalOutcome, ApprovalScope};
-        use crossterm::event::{KeyCode, KeyEventKind};
-        if blocked {
-            return false;
-        }
-        let Some(id) = self.shown().cloned() else {
-            return false;
-        };
-        if self.painted.as_ref() != Some(&id) {
-            return false;
-        }
-        // `Ctrl+C` never decides the card (A8): back from Review, else one cue.
-        if key.code == KeyCode::Char('c')
-            && key.modifiers == crossterm::event::KeyModifiers::CONTROL
-        {
-            if key.kind == KeyEventKind::Press {
-                if self.review.is_some() {
-                    self.review = None;
-                    self.scroll = 0;
-                } else if self.feedback.is_none() {
-                    self.cue = true;
-                }
-            }
-            return true;
-        }
-        if key
-            .modifiers
-            .contains(crossterm::event::KeyModifiers::CONTROL)
-        {
-            return false;
-        }
-        if key.kind != KeyEventKind::Press {
-            return true;
-        }
-        if let Some((_, buffer)) = self.feedback.as_mut() {
-            match (key.code, key.modifiers) {
-                (KeyCode::Esc, modifiers) if modifiers.is_empty() => {
-                    self.feedback = None;
-                }
-                (KeyCode::Enter, modifiers) if modifiers.is_empty() => {
-                    let feedback = (!buffer.is_empty()).then(|| buffer.clone());
-                    self.decide(id, ApprovalOutcome::Reject { feedback }, tx);
-                }
-                (KeyCode::Backspace, modifiers) if modifiers.is_empty() => {
-                    buffer.pop();
-                }
-                (KeyCode::Char(c), modifiers)
-                    if modifiers.is_empty()
-                        || modifiers == crossterm::event::KeyModifiers::SHIFT =>
-                {
-                    buffer.push(c)
-                }
-                _ => {}
-            }
-            return true;
-        }
-        if !key.modifiers.is_empty() {
-            return true;
-        }
-        match key.code {
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(5);
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(5).min(self.scroll_max);
-            }
-            KeyCode::Esc if self.review.is_some() => {
-                self.review = None;
-                self.scroll = 0;
-            }
-            KeyCode::Char('r') => {
-                if self
-                    .pending
-                    .get(&id)
-                    .is_some_and(|pending| pending.value.is_some())
-                {
-                    self.review = Some(id);
-                    self.scroll = 0;
-                }
-            }
-            KeyCode::Char('f') => {
-                self.feedback = Some((id, String::new()));
-            }
-            KeyCode::Char('y') => self.decide(id, ApprovalOutcome::Once, tx),
-            KeyCode::Char('s') => {
-                let tool_name = self.pending[&id].tool.clone();
-                self.decide(id, ApprovalOutcome::AlwaysTool { tool_name }, tx);
-            }
-            KeyCode::Char('a') => {
-                let scope = ApprovalScope::Tool(self.pending[&id].tool.clone());
-                self.decide(id, ApprovalOutcome::AlwaysAndSave { scope }, tx);
-            }
-            KeyCode::Char('n') => self.decide(id, ApprovalOutcome::Reject { feedback: None }, tx),
-            KeyCode::Esc => self.cue = true,
-            _ => {}
-        }
-        true
-    }
-
-    fn paint(
-        &mut self,
-        f: &mut ratatui::Frame<'_>,
-        area: ratatui::layout::Rect,
-        theme: &crate::adapters::tui::theme::Theme,
-    ) -> Option<(
-        crate::domain::models::tool_call::RequestId,
-        ratatui::layout::Rect,
-    )> {
-        use crate::adapters::tui::widgets::permission_prompt::{
-            paint_rows, permission_review_rows, render_feedback_input_lines,
-            render_permission_card_lines, render_permission_review,
-        };
-        use ratatui::widgets::Clear;
-        let id = self.shown()?.clone();
-        let pending = self.pending.get(&id)?;
-        if area.width == 0 || area.height == 0 {
-            return None;
-        }
-        let queued = self.order.len().saturating_sub(1);
-        let reviewing = self.review.as_ref() == Some(&id);
-        let ready = pending.value.is_some();
-        if self.presentation.as_ref().is_none_or(|view| {
-            view.id != id
-                || view.width != area.width
-                || view.queued != queued
-                || view.reviewing != reviewing
-                || view.ready != ready
-        }) {
-            let card = pending.card(queued);
-            let (header, body, footer) = if reviewing {
-                let review = render_permission_review(&card, area.width, theme);
-                (review.header, review.body, review.footer)
-            } else {
-                (
-                    Vec::new(),
-                    render_permission_card_lines(&card, area.width, theme),
-                    Vec::new(),
-                )
-            };
-            self.presentation = Some(AttachedApprovalPresentation {
-                id: id.clone(),
-                width: area.width,
-                queued,
-                reviewing,
-                ready,
-                header,
-                body,
-                footer,
-            });
-        }
-        let view = self.presentation.as_ref()?;
-        let painted_area = if let Some((_, buffer)) = self.feedback.as_ref() {
-            crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
-                f.buffer_mut(),
-                render_feedback_input_lines(buffer, theme),
-                theme.colors.accent,
-                area,
-            )
-        } else if reviewing {
-            let (header_rows, body_rows, footer_rows) =
-                permission_review_rows(area.height, view.header.len(), view.footer.len());
-            self.scroll_max = view.body.len().saturating_sub(body_rows);
-            self.scroll = self.scroll.min(self.scroll_max);
-            f.render_widget(Clear, area);
-            paint_rows(
-                f,
-                ratatui::layout::Rect::new(area.x, area.y, area.width, header_rows as u16),
-                &view.header,
-                0,
-            );
-            paint_rows(
-                f,
-                ratatui::layout::Rect::new(
-                    area.x,
-                    area.y + header_rows as u16,
-                    area.width,
-                    body_rows as u16,
-                ),
-                &view.body,
-                self.scroll,
-            );
-            paint_rows(
-                f,
-                ratatui::layout::Rect::new(
-                    area.x,
-                    area.bottom().saturating_sub(footer_rows as u16),
-                    area.width,
-                    footer_rows as u16,
-                ),
-                &view.footer,
-                0,
-            );
-            area
-        } else {
-            let height = usize::from(area.height).min(view.body.len());
-            self.scroll_max = view.body.len().saturating_sub(height);
-            self.scroll = self.scroll.min(self.scroll_max);
-            let card_area = ratatui::layout::Rect {
-                y: area.bottom().saturating_sub(height as u16),
-                height: height as u16,
-                ..area
-            };
-            f.render_widget(Clear, card_area);
-            paint_rows(f, card_area, &view.body, self.scroll);
-            card_area
-        };
-        Some((id, painted_area))
-    }
 }
 
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
@@ -1572,6 +1181,14 @@ fn blocked_actions_notice(snapshot: &AttachSnapshot) -> Option<String> {
     })
 }
 
+fn seed_mirror_waiting(state: &mut TuiState, snapshot: &AttachSnapshot, read_only: bool) {
+    if read_only {
+        state
+            .decisions
+            .set_mirror_waiting(snapshot.retained_approvals + snapshot.pending_consent_cards);
+    }
+}
+
 /// Story 21.1 AC6: the daemon frames that are notices (an oversized frame, a
 /// daemon error or read-only refusal, the answer to a stop request) become
 /// store notices with the same TTL, S-LOG and badge as the local host. None is
@@ -1610,10 +1227,6 @@ fn apply_notice_frame(
         _ => {}
     }
     state.needs_redraw = true;
-}
-
-fn retained_approval_attach_notice(count: usize, read_only: bool) -> Option<String> {
-    (read_only && count > 0).then(|| format!("{count} approval(s) waiting for the writer"))
 }
 
 fn upsert_peer_row(
@@ -2215,15 +1828,26 @@ fn begin_attached_team_send(
     }
 }
 
+fn attached_decision_pending(state: &TuiState) -> bool {
+    use crate::adapters::tui::presentation::{self, Surface};
+    presentation::is_open(state, Surface::Decision)
+        || presentation::is_open(state, Surface::DecisionQueue)
+}
+
 fn attached_proposal_higher_confirmation(
     state: &TuiState,
-    consent: bool,
     consolidation: bool,
     retract: bool,
 ) -> bool {
-    consent
-        || consolidation
+    consolidation
         || retract
+        || attached_decision_pending(state)
+        || state
+            .decisions
+            .holds(crate::adapters::tui::decision_queue::DecisionKind::Permission)
+        || state
+            .decisions
+            .holds(crate::adapters::tui::decision_queue::DecisionKind::Consent)
         || state.pending_team_retract.is_some()
         || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
 }
@@ -2237,19 +1861,14 @@ fn attached_proposal_pending(
         .and_then(|id| state.pending_team_proposals.get(id))
 }
 
-/// FR-21-3-c: an approval, consent or consolidation card arrived. A writer with an empty
-/// composer takes Chat focus (where the card answers); a read-only client cannot answer
-/// and keeps its focus.
+/// A consolidation card may borrow Chat focus when the composer is empty.
 fn attached_card_arrived(state: &mut TuiState, read_only: bool) {
     crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, !read_only);
 }
 
 /// Same pending owners for overlay-close arrival reconciliation and settlement.
 fn attached_card_pending(state: &TuiState) -> bool {
-    !state.attached.approvals.pending.is_empty()
-        || !state.attached.consent.is_empty()
-        || state.attached.consolidation_token.is_some()
-        || state.attached.retract_confirm.is_some()
+    state.attached.consolidation_token.is_some() || state.attached.retract_confirm.is_some()
 }
 
 fn settle_attached_card_focus(state: &mut TuiState, read_only: bool) {
@@ -2259,15 +1878,88 @@ fn settle_attached_card_focus(state: &mut TuiState, read_only: bool) {
     }
 }
 
-/// One approval frame (request, input chunk, close, refusal): the card state, its notice and,
-/// when a request arrived, the card's focus (FR-21-3-c).
-fn apply_attached_approval_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
-    let arrived = matches!(frame, DaemonFrame::ApprovalRequest { .. });
-    if let Some(notice) = state.attached.approvals.apply(frame, read_only) {
-        notifications::warning(state, NoticeSource::Approval, notice);
-    }
-    if arrived && !state.attached.approvals.pending.is_empty() {
-        attached_card_arrived(state, read_only);
+/// Apply approval frames while keeping incomplete input outside the decision queue.
+fn apply_attached_approval_frame(
+    state: &mut TuiState,
+    assemblies: &mut HashMap<
+        crate::domain::models::tool_call::RequestId,
+        crate::adapters::daemon::protocol::ExactInputAssembly,
+    >,
+    frame: DaemonFrame,
+    read_only: bool,
+) {
+    use crate::adapters::daemon::protocol::{ApprovalRefusal, ExactInputAssembly};
+    use crate::adapters::tui::decision_queue::{
+        self, ConsentPayload, PermissionInput, PermissionPayload, Responder,
+    };
+    match frame {
+        DaemonFrame::ApprovalRequest {
+            request_id,
+            tool,
+            source,
+            risk,
+            summary,
+            input_bytes,
+        } if !read_only && !decision_queue::holds_request(state, &request_id) => {
+            if tool == "a2a/sender-consent" {
+                decision_queue::raise_consent(
+                    state,
+                    ConsentPayload {
+                        request_id,
+                        tool,
+                        input_preview: summary,
+                    },
+                );
+            } else if let Some(bytes) = input_bytes {
+                assemblies.insert(request_id.clone(), ExactInputAssembly::new(bytes));
+                decision_queue::raise_permission(
+                    state,
+                    PermissionPayload::new(
+                        request_id,
+                        source,
+                        tool,
+                        risk,
+                        PermissionInput::Receiving { summary },
+                    ),
+                    Responder::Attached,
+                );
+            }
+        }
+        DaemonFrame::ApprovalInputChunk {
+            request_id,
+            sequence,
+            data,
+        } if !read_only => {
+            if assemblies
+                .get_mut(&request_id)
+                .is_some_and(|assembly| assembly.push(sequence, &data).is_err())
+            {
+                assemblies.remove(&request_id);
+            }
+        }
+        DaemonFrame::ApprovalInputComplete { request_id, chunks } if !read_only => {
+            if let Some(assembly) = assemblies.remove(&request_id)
+                && let Ok(value) = assembly.finish(chunks)
+            {
+                decision_queue::complete_input(state, &request_id, value);
+            }
+        }
+        DaemonFrame::ApprovalClosed { request_id }
+        | DaemonFrame::ApprovalRefused {
+            request_id,
+            reason: ApprovalRefusal::NoLongerPending,
+        } => {
+            assemblies.remove(&request_id);
+            if read_only {
+                state.decisions.retire_mirror(&request_id.0);
+            } else {
+                decision_queue::withdraw_request(state, &request_id);
+            }
+        }
+        DaemonFrame::ApprovalRefused { reason, .. } => {
+            notifications::warning(state, NoticeSource::Approval, reason.to_string());
+        }
+        _ => {}
     }
     state.needs_redraw = true;
 }
@@ -2277,26 +1969,9 @@ fn attached_notice_badges(
 ) -> crate::adapters::tui::widgets::status_bar::NoticeBadges {
     crate::adapters::tui::widgets::status_bar::NoticeBadges {
         unseen: state.notifications.unseen(),
-        decisions: state.attached.approvals.pending.len(),
+        decisions: crate::adapters::tui::decision_queue::waiting(state),
+        mirror_waiting: state.decisions.mirror_waiting(),
         tail: attach_keys::status_tail(state),
-    }
-}
-
-fn apply_attached_consent_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
-    if let DaemonFrame::ApprovalRequest {
-        request_id,
-        tool,
-        summary,
-        ..
-    } = frame
-    {
-        state.attached.consent.push_back(PendingConsentApproval {
-            request_id,
-            tool,
-            input_preview: summary,
-        });
-        attached_card_arrived(state, read_only);
-        state.needs_redraw = true;
     }
 }
 
@@ -3223,7 +2898,6 @@ fn paint_attached(
     attach_info: &AttachInfo,
 ) -> Option<chat_pane::RenderResult> {
     let read_only = attach_info.read_only;
-    let mut visible_approval = None;
     let area = f.area();
     let Some(mut layout) = crate::adapters::tui::layout::compute_layout(
         area,
@@ -3245,10 +2919,9 @@ fn paint_attached(
         ));
     let proposal_higher = attached_proposal_higher_confirmation(
         state,
-        !state.attached.consent.is_empty(),
         state.pending_consolidation_card.is_some(),
         state.attached.retract_confirm.is_some(),
-    ) || (!read_only && !state.attached.approvals.pending.is_empty());
+    );
     let proposal_card = prepare_attached_proposal(
         state,
         tab_render_state,
@@ -3260,9 +2933,8 @@ fn paint_attached(
     let peer_card = if state.recipient_surface.is_none()
         && state.attached.retract_confirm.is_none()
         && state.pending_consolidation_card.is_none()
-        && state.attached.consent.is_empty()
+        && !proposal_higher
         && attached_proposal_pending(state).is_none()
-        && state.attached.approvals.pending.is_empty()
     {
         pending_peer_card(conversation, &state.retro_left_out).map(|pending| {
             peer_response_card_lines(
@@ -3350,7 +3022,9 @@ fn paint_attached(
     // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
     // bottom-anchored inline grammar the local TUI uses (bordered + accent,
     // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
-    if let Some(card) = &state.pending_consolidation_card {
+    if !attached_decision_pending(state)
+        && let Some(card) = &state.pending_consolidation_card
+    {
         use crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines;
         use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
         let card_lines =
@@ -3368,7 +3042,9 @@ fn paint_attached(
     use crate::adapters::tui::widgets::inline_card::{
         render_bottom_anchored_card, render_bottom_anchored_decision_card,
     };
-    if let Some((_, preview)) = &state.attached.retract_confirm {
+    if !attached_decision_pending(state)
+        && let Some((_, preview)) = &state.attached.retract_confirm
+    {
         opaque.host(Some(render_bottom_anchored_card(
             f.buffer_mut(),
             retract_confirm_lines(preview),
@@ -3383,20 +3059,10 @@ fn paint_attached(
             layout.chat_pane,
         );
     }
-    if let Some(pending) = state.attached.consent.front() {
-        opaque.host(Some(render_bottom_anchored_decision_card(
-            f.buffer_mut(),
-            consent_approval_card_lines(
-                pending,
-                state.attached.consent.len().saturating_sub(1),
-                usize::from(layout.chat_pane.width.saturating_sub(2)),
-            ),
-            state.theme.colors.accent,
-            layout.chat_pane,
-        )));
-    }
     // Story 19.21c: the retract card owns every key while open, so it paints last.
-    if let Some(pending) = &state.pending_team_retract {
+    if !attached_decision_pending(state)
+        && let Some(pending) = &state.pending_team_retract
+    {
         opaque.host(Some(render_bottom_anchored_decision_card(
             f.buffer_mut(),
             crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(
@@ -3426,28 +3092,6 @@ fn paint_attached(
     );
     // Inline cards can leave fewer than five rows; paging must not skip visible content.
     state.viewport_height = transcript_area.height;
-    let approval_higher = attached_proposal_higher_confirmation(
-        state,
-        !state.attached.consent.is_empty(),
-        state.pending_consolidation_card.is_some(),
-        state.attached.retract_confirm.is_some(),
-    );
-    if !read_only
-        && !approval_higher
-        && matches!(state.focus, FocusState::Chat | FocusState::Input)
-        && crate::adapters::tui::handlers::recipient_actions::pending_composition(state)
-            .unwrap_or(&state.input_buffer)
-            .is_empty()
-    {
-        if let Some((id, rect)) = state
-            .attached
-            .approvals
-            .paint(f, layout.chat_pane, &state.theme)
-        {
-            visible_approval = Some(id);
-            opaque.host(Some(rect));
-        }
-    }
     let paint_status = |f: &mut ratatui::Frame<'_>| {
         status_bar::render(
             f,
@@ -3484,7 +3128,7 @@ fn paint_attached(
         );
     };
     shell.chat_pane = layout.chat_pane;
-    crate::adapters::tui::presentation::compose(
+    let decision_painted = crate::adapters::tui::presentation::compose(
         f,
         state,
         &shell,
@@ -3493,6 +3137,9 @@ fn paint_attached(
         &mut opaque,
         paint_status,
     );
+    if decision_painted {
+        crate::adapters::tui::decision_queue::note_painted(state);
+    }
     result
         .visible_feedback_rows
         .retain(|(_, rows)| opaque.presented(rows));
@@ -3500,7 +3147,6 @@ fn paint_attached(
     state.scroll_snapshot = view.scroll_offset;
     state.auto_snapshot = matches!(view.mode, crate::domain::models::AnchorMode::Following);
     state.team_proposal_visible = visible_proposal;
-    state.attached.approvals.painted = visible_approval;
     Some(result)
 }
 
@@ -3572,6 +3218,7 @@ pub async fn run_attached(
     let mut session_manager = SessionManager::new(SessionState::Empty);
     let mut lifecycle =
         crate::infrastructure::runtime::tui_turn_lifecycle::TuiTurnLifecycle::default();
+    let mut approval_assemblies = HashMap::new();
     let mut attached_team_requests = AttachedTeamRequests::default();
     let mut attached_interrupt =
         crate::infrastructure::runtime::attach_interrupt::AttachedInterrupt::new(read_only);
@@ -3593,9 +3240,7 @@ pub async fn run_attached(
     if let Some(notice) = blocked_actions_notice(&snapshot) {
         notifications::warning(&mut state, NoticeSource::Attached, notice);
     }
-    if let Some(notice) = retained_approval_attach_notice(snapshot.retained_approvals, read_only) {
-        notifications::info(&mut state, NoticeSource::Attached, notice);
-    }
+    seed_mirror_waiting(&mut state, &snapshot, read_only);
     if read_only {
         // AC6 #2 — one-time, never-silent notice.
         notifications::info(
@@ -3663,7 +3308,6 @@ pub async fn run_attached(
         }
         if drawn.is_err() {
             state.team_proposal_visible = None;
-            state.attached.approvals.painted = None;
         }
 
         tokio::select! {
@@ -3791,15 +3435,12 @@ pub async fn run_attached(
                                 | DaemonFrame::InterruptResult { .. }))) => {
                                 apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
                             }
-                            Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. })) if matches!(&frame, DaemonFrame::ApprovalRequest { tool, .. } if tool == "a2a/sender-consent") => {
-                                apply_attached_consent_frame(&mut state, frame, read_only);
-                            }
                             Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
                             | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
                             | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
                             | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
                             | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
-                                apply_attached_approval_frame(&mut state, frame, read_only);
+                                apply_attached_approval_frame(&mut state, &mut approval_assemblies, frame, read_only);
                             }
                             Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
                                 apply_attached_consolidation_frame(&mut state, frame, read_only);
@@ -3820,9 +3461,11 @@ pub async fn run_attached(
                             | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
                             | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
                             | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
-                                let confirmation_busy = !state.attached.consent.is_empty()
-                                    || state.attached.consolidation_token.is_some() || state.attached.retract_confirm.is_some()
-                                    || attached_proposal_pending(&state).is_some() || !state.attached.approvals.pending.is_empty();
+                                let confirmation_busy = attached_proposal_higher_confirmation(
+                                    &state,
+                                    state.attached.consolidation_token.is_some(),
+                                    state.attached.retract_confirm.is_some(),
+                                ) || attached_proposal_pending(&state).is_some();
                                 let _ = apply_attached_team_frame(
                                     &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
                                 );
@@ -3878,11 +3521,11 @@ pub async fn run_attached(
         );
                     }
                     _ = tick.tick() => {
+                        crate::adapters::tui::decision_queue::tick(&mut state);
                         log_awareness.tick(&mut state.log_awareness);
                         // Story 21.1 AC6: attached notices expire — the tick requests the
                         // deadline redraw (the draw's `begin_draw` does the sweep).
                         notifications::tick(&mut state);
-                        crate::adapters::tui::decision_queue::tick(&mut state);
                     }
                 }
     };
@@ -4248,7 +3891,6 @@ mod tests {
     #[tokio::test]
     async fn story21_4_attached_card_and_leader_cover_the_only_projected_row() {
         use crate::adapters::tui::keymap::Key;
-        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
         for read_only in [false, true] {
             for (width, height) in [(60, 16), (80, 24), (130, 30)] {
                 for card in [false, true] {
@@ -4280,21 +3922,15 @@ mod tests {
                     rig.state.log_awareness.presented.clear();
                     rig.state.pending_log_visit = Some(visit);
                     if card {
-                        apply_attached_consent_frame(
+                        apply_attached_consolidation_frame(
                             &mut rig.state,
-                            DaemonFrame::ApprovalRequest {
-                                request_id: RequestId("opaque-consent-control".into()),
-                                tool: "a2a/sender-consent".into(),
-                                source: ApprovalSource::ForegroundTurn {
-                                    conversation_id: rig.domain_tab.conversation.id.clone(),
-                                },
-                                risk: crate::domain::models::ToolRisk::Standard,
-                                summary: "actual opaque sender consent".into(),
-                                input_bytes: None,
+                            DaemonFrame::ConsolidationProposed {
+                                token: crate::adapters::daemon::protocol::ProposalToken(1),
+                                proposals: vec![],
                             },
                             read_only,
                         );
-                        assert_eq!(rig.state.attached.consent.len(), 1);
+                        assert!(rig.state.attached.consolidation_token.is_some());
                     } else {
                         rig.key(Key::Ctrl('x')).await;
                         assert!(rig.state.pending_leader.is_some());
@@ -4305,7 +3941,7 @@ mod tests {
                         covered.backend().buffer()
                             [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
                             .symbol(),
-                        if card { "╝" } else { "┘" },
+                        "┘",
                         "the actual opaque bottom rail covers the observed row: {screen}"
                     );
                     assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
@@ -4531,28 +4167,12 @@ mod tests {
     async fn story21_4_attached_state_owned_card_answers_reach_the_actual_wire() {
         use crate::adapters::tui::keymap::Key;
         use crate::adapters::tui::presentation::{self, Surface};
-        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
-        use crate::domain::models::{ApprovalOutcome, ToolRisk};
-        for kind in ["consent", "consolidation", "retract", "approval"] {
+        for kind in ["consolidation", "retract"] {
             let mut rig = attach_keys::tests::Rig::new(false);
             rig.key(Key::Ctrl('p')).await;
             rig.type_text("query").await;
             let frame = rig.state.modal_stack.top().unwrap().clone();
             match kind {
-                "consent" => apply_attached_consent_frame(
-                    &mut rig.state,
-                    DaemonFrame::ApprovalRequest {
-                        request_id: RequestId("consent-wire".into()),
-                        tool: "a2a/sender-consent".into(),
-                        source: ApprovalSource::ForegroundTurn {
-                            conversation_id: rig.domain_tab.conversation.id.clone(),
-                        },
-                        risk: ToolRisk::Standard,
-                        summary: "real sender consent".into(),
-                        input_bytes: None,
-                    },
-                    false,
-                ),
                 "consolidation" => apply_attached_consolidation_frame(
                     &mut rig.state,
                     DaemonFrame::ConsolidationProposed {
@@ -4572,20 +4192,6 @@ mod tests {
                     ));
                     attached_card_arrived(&mut rig.state, false);
                 }
-                "approval" => apply_attached_approval_frame(
-                    &mut rig.state,
-                    DaemonFrame::ApprovalRequest {
-                        request_id: RequestId("approval-wire".into()),
-                        tool: "Bash".into(),
-                        source: ApprovalSource::ForegroundTurn {
-                            conversation_id: rig.domain_tab.conversation.id.clone(),
-                        },
-                        risk: ToolRisk::Standard,
-                        summary: "real approval request".into(),
-                        input_bytes: Some(2),
-                    },
-                    false,
-                ),
                 _ => unreachable!(),
             }
             rig.key(Key::Char('y')).await;
@@ -4597,23 +4203,13 @@ mod tests {
             assert_eq!(rig.state.focus, FocusState::Chat);
             let painted = rig.paint();
             assert!(attached_screen(&painted).contains(match kind {
-                "consent" => "consent",
                 "consolidation" => "memory",
                 "retract" => "Retract",
-                _ => "Bash",
+                _ => unreachable!(),
             }));
             rig.key(Key::Char('y')).await;
             let frames = rig.frames();
             match (kind, frames.as_slice()) {
-                (
-                    "consent",
-                    [
-                        ClientFrame::ApprovalResponse {
-                            request_id,
-                            outcome: ApprovalOutcome::Once,
-                        },
-                    ],
-                ) => assert_eq!(request_id.0, "consent-wire"),
                 (
                     "consolidation",
                     [
@@ -4632,15 +4228,6 @@ mod tests {
                         },
                     ],
                 ) => assert_eq!(message_id, "peer-response-owned-wire"),
-                (
-                    "approval",
-                    [
-                        ClientFrame::ApprovalResponse {
-                            request_id,
-                            outcome: ApprovalOutcome::Once,
-                        },
-                    ],
-                ) => assert_eq!(request_id.0, "approval-wire"),
                 other => {
                     panic!("state-owned answer must use its actual request identity: {other:?}")
                 }
@@ -4867,29 +4454,30 @@ mod tests {
             ('n', ApprovalOutcome::Reject { feedback: None }),
         ] {
             let mut rig = attach_keys::tests::Rig::new(false);
+            rig.state.input_buffer = "draft".into();
+            rig.state.cursor_position = 5;
             rig.key(Key::Ctrl('x')).await;
             rig.key(Key::Char('?')).await;
             let owner = rig.state.modal_stack.top().unwrap().clone();
-            apply_attached_consent_frame(
-                &mut rig.state,
-                DaemonFrame::ApprovalRequest {
-                    request_id: RequestId("real-consent-dispatch".into()),
-                    tool: "a2a/sender-consent".into(),
-                    source: ApprovalSource::ForegroundTurn {
-                        conversation_id: rig.domain_tab.conversation.id.clone(),
-                    },
-                    risk: ToolRisk::Standard,
-                    summary: summary.clone(),
-                    input_bytes: None,
+            rig.approval_frame(DaemonFrame::ApprovalRequest {
+                request_id: RequestId("real-consent-dispatch".into()),
+                tool: "a2a/sender-consent".into(),
+                source: ApprovalSource::ForegroundTurn {
+                    conversation_id: rig.domain_tab.conversation.id.clone(),
                 },
-                false,
-            );
+                risk: ToolRisk::Standard,
+                summary: summary.clone(),
+                input_bytes: None,
+            });
             rig.key(Key::Char(key)).await;
             assert_eq!(rig.state.modal_stack.top(), Some(&owner));
-            assert_eq!(rig.state.attached.consent.len(), 1);
+            assert_eq!(rig.state.decisions.undecided(), 1);
             assert!(rig.frames().is_empty(), "covered consent owns no keys");
             rig.key(Key::Esc).await;
-            assert_eq!(rig.state.focus, FocusState::Chat);
+            rig.key(Key::Ctrl('x')).await;
+            rig.key(Key::Char('q')).await;
+            rig.key(Key::Enter).await;
+            rig.ready();
             let screen = attached_screen(&rig.paint());
             for label in ["Allow once", "Always allow", "Decline"] {
                 assert!(
@@ -4902,34 +4490,30 @@ mod tests {
                 matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse { request_id, outcome }]
                 if request_id.0 == "real-consent-dispatch" && outcome == &expected)
             );
-            assert!(rig.state.attached.consent.is_empty());
+            assert!(rig.state.decisions.is_empty());
             assert_eq!(rig.state.focus, FocusState::Input);
             rig.key(Key::Char(key)).await;
-            assert_eq!(rig.state.input_buffer, key.to_string());
+            assert_eq!(rig.state.input_buffer, format!("draft{key}"));
             assert!(
                 rig.frames().is_empty(),
                 "an empty consent queue never answers"
             );
         }
         let mut reader = attach_keys::tests::Rig::new(true);
-        apply_attached_consent_frame(
-            &mut reader.state,
-            DaemonFrame::ApprovalRequest {
-                request_id: RequestId("reader-consent".into()),
-                tool: "a2a/sender-consent".into(),
-                source: ApprovalSource::ForegroundTurn {
-                    conversation_id: reader.domain_tab.conversation.id.clone(),
-                },
-                risk: ToolRisk::Standard,
-                summary,
-                input_bytes: None,
+        reader.approval_frame(DaemonFrame::ApprovalRequest {
+            request_id: RequestId("reader-consent".into()),
+            tool: "a2a/sender-consent".into(),
+            source: ApprovalSource::ForegroundTurn {
+                conversation_id: reader.domain_tab.conversation.id.clone(),
             },
-            true,
-        );
+            risk: ToolRisk::Standard,
+            summary,
+            input_bytes: None,
+        });
         reader.key(Key::Char('y')).await;
         assert_eq!(reader.state.focus, FocusState::Input);
         assert_eq!(reader.state.input_buffer, "y");
-        assert_eq!(reader.state.attached.consent.len(), 1);
+        assert!(reader.state.decisions.is_empty());
         assert!(
             reader.frames().is_empty(),
             "read-only arrival cannot take the composer's typing"
@@ -4939,9 +4523,10 @@ mod tests {
     // Supporting seams; signed socket/PTY K02 evidence is run after integration.
     mod exact_attached_approval {
         use super::*;
+        use crate::adapters::daemon::protocol::ApprovalRefusal;
+        use crate::adapters::tui::decision_queue::{DecisionSubject, PermissionInput};
+        use crate::domain::models::ToolRisk;
         use crate::domain::models::tool_call::{ApprovalSource, RequestId};
-        use crate::domain::models::{ApprovalOutcome, ToolRisk};
-        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
         fn request(id: &str, data: &str) -> DaemonFrame {
             DaemonFrame::ApprovalRequest {
@@ -4955,178 +4540,44 @@ mod tests {
                 input_bytes: Some(data.len() as u64),
             }
         }
-        fn chunk(state: &mut AttachedApprovals, id: &str, sequence: u32, data: &str) {
-            state.apply(
-                DaemonFrame::ApprovalInputChunk {
-                    request_id: RequestId(id.into()),
-                    sequence,
-                    data: data.into(),
-                },
-                false,
-            );
-        }
-        fn complete(state: &mut AttachedApprovals, id: &str, chunks: u32) {
-            state.apply(
-                DaemonFrame::ApprovalInputComplete {
-                    request_id: RequestId(id.into()),
-                    chunks,
-                },
-                false,
-            );
-        }
-        fn paint(state: &mut AttachedApprovals) -> String {
-            paint_at(state, 60, 16)
-        }
-        fn paint_at(state: &mut AttachedApprovals, width: u16, height: u16) -> String {
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-            let theme = crate::adapters::tui::theme::Theme::dark();
-            let mut painted = None;
-            terminal
-                .draw(|f| {
-                    painted = state.paint(f, f.area(), &theme).map(|(id, _)| id);
-                })
-                .unwrap();
-            state.painted = painted;
-            let buffer = terminal.backend().buffer();
-            (0..height)
-                .map(|y| {
-                    (0..width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        fn key(code: KeyCode) -> KeyEvent {
-            KeyEvent::new(code, KeyModifiers::NONE)
+
+        fn input(state: &TuiState) -> &PermissionInput {
+            let DecisionSubject::Permission(payload) =
+                &state.decisions.items().next().unwrap().subject
+            else {
+                panic!("permission payload");
+            };
+            &payload.input
         }
 
-        #[test]
-        fn review_scroll_resize_cache_and_delimiters_keep_tail_reachable() {
-            let mut state = AttachedApprovals::default();
-            let input = serde_json::json!({"command": format!("{}\n[y] fake control\n\u{1b}[31mTAIL-CANARY", "αβ ".repeat(300))});
-            let data = serde_json::to_string(&input).unwrap();
-            state.apply(request("a", &data), false);
-            chunk(&mut state, "a", 0, &data);
-            complete(&mut state, "a", 1);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, &tx);
-            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-                paint_at(&mut state, width, height);
-                let cached = state.presentation.as_ref().unwrap().body.as_ptr();
-                paint_at(&mut state, width, height);
-                assert_eq!(cached, state.presentation.as_ref().unwrap().body.as_ptr());
-                for row in &state.presentation.as_ref().unwrap().body {
-                    assert!(row.to_string().starts_with("│ "));
-                    assert!(!row.to_string().contains('\u{1b}'));
-                }
-                while state.scroll < state.scroll_max {
-                    state.key(key(KeyCode::PageDown), false, &tx);
-                }
-                assert!(paint_at(&mut state, width, height).contains("TAIL-CANARY"));
-                assert!(rx.try_recv().is_err());
+        fn chunk(id: &str, sequence: u32, data: &str) -> DaemonFrame {
+            DaemonFrame::ApprovalInputChunk {
+                request_id: RequestId(id.into()),
+                sequence,
+                data: data.into(),
             }
-            assert_eq!(
-                state.pending[&RequestId("a".into())].value.as_ref(),
-                Some(&input)
-            );
         }
 
-        #[test]
-        fn long_tool_and_source_metadata_leave_review_and_decisions_reachable() {
-            let mut state = AttachedApprovals::default();
-            let input = serde_json::json!({
-                "first": "METADATA-INPUT-HEAD",
-                "last": format!("{}\nMETADATA-INPUT-TAIL", "exact ".repeat(250)),
-            });
-            let data = serde_json::to_string(&input).unwrap();
-            let mut frame = request("long-metadata", &data);
-            if let DaemonFrame::ApprovalRequest { tool, source, .. } = &mut frame {
-                *tool = format!("mcp__{}__{}", "server".repeat(350), "operation".repeat(250));
-                *source = ApprovalSource::ForegroundSubagent {
-                    conversation_id: "c".into(),
-                    parent_tool_call_id: "parent".into(),
-                    subagent_type: "source".repeat(400),
-                };
+        fn complete(id: &str, chunks: u32) -> DaemonFrame {
+            DaemonFrame::ApprovalInputComplete {
+                request_id: RequestId(id.into()),
+                chunks,
             }
-            state.apply(frame, false);
-            chunk(&mut state, "long-metadata", 0, &data);
-            complete(&mut state, "long-metadata", 1);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            for (width, height) in [(60, 16), (80, 24), (130, 30)] {
-                // Use the real attached chat allocation, not the whole terminal.
-                let theme = crate::adapters::tui::theme::Theme::dark();
-                let layout = crate::adapters::tui::layout::compute_layout(
-                    ratatui::layout::Rect::new(0, 0, width, height),
-                    &theme,
-                    "",
-                    1,
-                    false,
-                    DensityMode::Focus,
-                )
-                .unwrap();
-                let pane_height = layout.chat_pane.height;
-                state.review = None;
-                state.scroll = 0;
-                let card = paint_at(&mut state, width, pane_height);
-                assert!(card.contains("[r] Review"), "{card}");
-                assert!(card.contains("[y] Allow"), "{card}");
-                assert!(state.key(key(KeyCode::Char('r')), false, &tx));
-                let mut painted = String::new();
-                loop {
-                    let page = paint_at(&mut state, width, pane_height);
-                    assert!(page.contains("[y] Allow"), "{page}");
-                    assert!(page.contains("[n] Deny"), "{page}");
-                    assert!(page.contains("[Esc] Back"), "{page}");
-                    painted.push_str(&page);
-                    if state.scroll == state.scroll_max {
-                        break;
-                    }
-                    let before = state.scroll;
-                    assert!(state.key(key(KeyCode::PageDown), false, &tx));
-                    assert!(state.scroll > before);
-                }
-                assert!(painted.contains("METADATA-INPUT-HEAD"));
-                assert!(painted.contains("METADATA-INPUT-TAIL"));
-                assert_eq!(
-                    state.pending[&RequestId("long-metadata".into())]
-                        .value
-                        .as_ref(),
-                    Some(&input)
-                );
-                assert!(rx.try_recv().is_err(), "scrolling is not a decision");
-            }
-            assert!(state.key(key(KeyCode::Char('n')), false, &tx));
-            assert!(matches!(
-                rx.try_recv().unwrap(),
-                ClientFrame::ApprovalResponse { request_id, outcome: ApprovalOutcome::Reject { feedback: None } }
-                    if request_id == RequestId("long-metadata".into())
-            ));
         }
 
         #[test]
         fn rich_exact_receiving_until_valid_complete() {
-            let mut state = AttachedApprovals::default();
+            let mut state = TuiState::new(80, 24);
+            let mut assemblies = HashMap::new();
             let data = r#"{"command":"unique exact tail"}"#;
-            state.apply(request("a", data), false);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            assert!(paint(&mut state).contains("receiving exact input…"));
-            state.key(key(KeyCode::Char('r')), false, &tx);
-            assert!(state.review.is_none());
-            chunk(&mut state, "a", 0, data);
-            assert!(state.pending[&RequestId("a".into())].value.is_none());
-            assert!(paint(&mut state).contains("receiving exact input…"));
-            complete(&mut state, "a", 1);
-            assert_eq!(
-                state.pending[&RequestId("a".into())].value,
-                Some(serde_json::json!({"command": "unique exact tail"}))
-            );
-            assert!(paint(&mut state).contains("unique exact tail"));
-            state.key(key(KeyCode::Char('r')), false, &tx);
-            assert!(paint(&mut state).contains("Exact tool input (not run yet)"));
-            assert!(rx.try_recv().is_err());
+            apply_attached_approval_frame(&mut state, &mut assemblies, request("a", data), false);
+            assert!(matches!(input(&state), PermissionInput::Receiving { .. }));
+            apply_attached_approval_frame(&mut state, &mut assemblies, chunk("a", 0, data), false);
+            assert!(matches!(input(&state), PermissionInput::Receiving { .. }));
+            apply_attached_approval_frame(&mut state, &mut assemblies, complete("a", 1), false);
+            assert!(matches!(input(&state), PermissionInput::Ready(value)
+                if **value == serde_json::json!({"command": "unique exact tail"})));
+            assert!(assemblies.is_empty());
         }
 
         #[test]
@@ -5140,286 +4591,94 @@ mod tests {
                 "wrong-request",
                 "wrong-count",
             ] {
-                let mut state = AttachedApprovals::default();
-                state.apply(request("a", data), false);
-                match fault {
-                    "partial" => chunk(&mut state, "a", 0, &data[..5]),
-                    "duplicate" => {
-                        chunk(&mut state, "a", 0, data);
-                        chunk(&mut state, "a", 0, data);
-                    }
-                    "out-of-order" => {
-                        chunk(&mut state, "a", 1, data);
-                        chunk(&mut state, "a", 0, data);
-                    }
-                    "overflow" => chunk(&mut state, "a", 0, &format!("{data}x")),
-                    "wrong-request" => chunk(&mut state, "b", 0, data),
-                    "wrong-count" => chunk(&mut state, "a", 0, data),
-                    _ => unreachable!(),
-                }
-                complete(&mut state, "a", if fault == "wrong-count" { 2 } else { 1 });
-                assert!(
-                    state.pending[&RequestId("a".into())].value.is_none(),
-                    "{fault}"
-                );
-                assert!(
-                    paint(&mut state).contains("receiving exact input…"),
-                    "{fault}"
-                );
-            }
-        }
-
-        #[test]
-        fn review_pins_request_while_another_queued_and_decides_once() {
-            let mut state = AttachedApprovals::default();
-            let a = r#"{"command":"first exact input"}"#;
-            let b = r#"{"command":"second secret input"}"#;
-            state.apply(request("a", a), false);
-            chunk(&mut state, "a", 0, a);
-            complete(&mut state, "a", 1);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, &tx);
-            state.apply(request("b", b), false);
-            chunk(&mut state, "b", 0, b);
-            complete(&mut state, "b", 1);
-            state.order.swap(0, 1);
-            let text = paint(&mut state);
-            assert!(text.contains("first exact input") && !text.contains("second secret input"));
-            state.key(key(KeyCode::Char('y')), false, &tx);
-            assert!(
-                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
-                request_id, outcome: ApprovalOutcome::Once,
-            } if request_id.0 == "a")
-            );
-            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
-            assert!(rx.try_recv().is_err());
-            assert!(state.pending.contains_key(&RequestId("b".into())));
-        }
-
-        #[test]
-        fn closed_review_and_feedback_retire_and_ignore_late_parts() {
-            let mut state = AttachedApprovals::default();
-            let data = r#"{"command":"exact tail"}"#;
-            state.apply(request("a", data), false);
-            chunk(&mut state, "a", 0, data);
-            complete(&mut state, "a", 1);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            paint(&mut state);
-            state.key(key(KeyCode::Char('r')), false, &tx);
-            paint(&mut state);
-            state.key(key(KeyCode::Char('f')), false, &tx);
-            state.apply(
-                DaemonFrame::ApprovalClosed {
-                    request_id: RequestId("a".into()),
-                },
-                false,
-            );
-            chunk(&mut state, "a", 0, data);
-            complete(&mut state, "a", 1);
-            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
-            assert!(state.review.is_none() && state.feedback.is_none());
-            assert!(state.pending.is_empty() && state.order.is_empty() && state.painted.is_none());
-            assert!(rx.try_recv().is_err());
-        }
-
-        #[test]
-        fn only_writer_painted_empty_composer_unmodified_press_decides() {
-            let data = r#"{"command":"ok"}"#;
-            let mut state = AttachedApprovals::default();
-            state.apply(request("a", data), false);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            assert!(!state.key(key(KeyCode::Char('y')), false, &tx));
-            paint(&mut state);
-            assert!(!state.key(key(KeyCode::Char('y')), true, &tx));
-            assert!(!state.key(key(KeyCode::Char('y')), true, &tx));
-            for modifiers in [
-                KeyModifiers::SHIFT,
-                KeyModifiers::ALT,
-                KeyModifiers::CONTROL,
-            ] {
-                state.key(KeyEvent::new(KeyCode::Char('y'), modifiers), false, &tx);
-            }
-            for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
-                state.key(
-                    KeyEvent::new_with_kind(KeyCode::Char('y'), KeyModifiers::NONE, kind),
+                let mut state = TuiState::new(80, 24);
+                let mut assemblies = HashMap::new();
+                apply_attached_approval_frame(
+                    &mut state,
+                    &mut assemblies,
+                    request("a", data),
                     false,
-                    &tx,
                 );
-            }
-            assert!(rx.try_recv().is_err());
-            state.key(key(KeyCode::Char('s')), false, &tx);
-            assert!(
-                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
-                request_id, outcome: ApprovalOutcome::AlwaysTool { tool_name },
-            } if request_id.0 == "a" && tool_name == "Bash")
-            );
-            assert!(rx.try_recv().is_err());
-        }
-
-        #[test]
-        fn feedback_and_failed_enqueue_preserve_ownership() {
-            let data = r#"{"command":"ok"}"#;
-            let mut state = AttachedApprovals::default();
-            state.apply(request("a", data), false);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            paint(&mut state);
-            state.key(key(KeyCode::Char('f')), false, &tx);
-            state.key(key(KeyCode::Char('x')), false, &tx);
-            state.key(key(KeyCode::Enter), false, &tx);
-            assert!(
-                matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
-                outcome: ApprovalOutcome::Reject { feedback: Some(feedback) }, ..
-            } if feedback == "x")
-            );
-            state.apply(request("b", data), false);
-            paint(&mut state);
-            drop(rx);
-            state.key(key(KeyCode::Char('y')), false, &tx);
-            assert!(state.pending.contains_key(&RequestId("b".into())));
-        }
-
-        /// 21-3 3-C (AC16, M12): `Esc` and `Ctrl+C` never decide an approval: no frame is sent,
-        /// the card stays pending and the host is asked for one cue; `n` still rejects once.
-        #[test]
-        fn story21_3_attached_esc_on_approval_is_a_noop_with_a_cue() {
-            let data = r#"{"command":"ok"}"#;
-            for pressed in [
-                key(KeyCode::Esc),
-                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            ] {
-                let mut state = AttachedApprovals::default();
-                state.apply(request("a", data), false);
-                chunk(&mut state, "a", 0, data);
-                complete(&mut state, "a", 1);
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                paint(&mut state);
-                assert!(state.key(pressed, false, &tx), "{pressed:?} is consumed");
-                assert!(rx.try_recv().is_err(), "{pressed:?} sends no decision");
-                assert!(
-                    state.pending.contains_key(&RequestId("a".into())),
-                    "{pressed:?}"
+                let parts = match fault {
+                    "partial" => vec![chunk("a", 0, &data[..5])],
+                    "duplicate" => vec![chunk("a", 0, data), chunk("a", 0, data)],
+                    "out-of-order" => vec![chunk("a", 1, data), chunk("a", 0, data)],
+                    "overflow" => vec![chunk("a", 0, &format!("{data}x"))],
+                    "wrong-request" => vec![chunk("b", 0, data)],
+                    _ => vec![chunk("a", 0, data)],
+                };
+                for part in parts {
+                    apply_attached_approval_frame(&mut state, &mut assemblies, part, false);
+                }
+                apply_attached_approval_frame(
+                    &mut state,
+                    &mut assemblies,
+                    complete("a", if fault == "wrong-count" { 2 } else { 1 }),
+                    false,
                 );
                 assert!(
-                    std::mem::take(&mut state.cue),
-                    "{pressed:?} asks for the cue"
+                    matches!(input(&state), PermissionInput::Receiving { .. }),
+                    "{fault}"
                 );
-                // With the review open the same key only goes back: no cue.
-                state.key(key(KeyCode::Char('r')), false, &tx);
-                paint(&mut state);
-                state.key(pressed, false, &tx);
-                assert!(
-                    state.review.is_none() && !state.cue,
-                    "{pressed:?} backs out of review"
-                );
-                paint(&mut state);
-                // Positive control: `n` rejects, once.
-                state.key(key(KeyCode::Char('n')), false, &tx);
-                assert!(matches!(
-                    rx.try_recv().unwrap(),
-                    ClientFrame::ApprovalResponse { request_id, outcome }
-                        if request_id.0 == "a" && outcome == ApprovalOutcome::Reject { feedback: None }
-                ));
-                assert!(rx.try_recv().is_err());
             }
         }
 
         #[test]
-        fn always_deny_escape_and_refusal_lifecycle() {
-            use crate::adapters::daemon::protocol::ApprovalRefusal;
-            use crate::domain::models::ApprovalScope;
+        fn duplicate_and_refusal_lifecycle() {
+            let mut state = TuiState::new(80, 24);
+            state.input_buffer = "draft".into();
+            let mut assemblies = HashMap::new();
             let data = r#"{"command":"ok"}"#;
-            for (code, expected) in [
-                (
-                    KeyCode::Char('a'),
-                    ApprovalOutcome::AlwaysAndSave {
-                        scope: ApprovalScope::Tool("Bash".into()),
-                    },
-                ),
-                (
-                    KeyCode::Char('n'),
-                    ApprovalOutcome::Reject { feedback: None },
-                ),
-            ] {
-                let mut state = AttachedApprovals::default();
-                state.apply(request("a", data), false);
-                chunk(&mut state, "a", 0, data);
-                complete(&mut state, "a", 1);
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                paint(&mut state);
-                state.key(key(KeyCode::Char('r')), false, &tx);
-                paint(&mut state);
-                state.key(key(KeyCode::Esc), false, &tx);
-                assert!(state.review.is_none() && state.pending.len() == 1);
-                assert!(rx.try_recv().is_err());
-                paint(&mut state);
-                state.key(key(code), false, &tx);
-                assert!(
-                    matches!(rx.try_recv().unwrap(), ClientFrame::ApprovalResponse {
-                    request_id, outcome,
-                } if request_id.0 == "a" && outcome == expected)
-                );
-            }
-            let mut state = AttachedApprovals::default();
-            state.apply(request("a", data), false);
+            apply_attached_approval_frame(&mut state, &mut assemblies, request("a", data), false);
+            apply_attached_approval_frame(&mut state, &mut assemblies, chunk("a", 0, data), false);
+            apply_attached_approval_frame(&mut state, &mut assemblies, request("a", data), false);
+            apply_attached_approval_frame(&mut state, &mut assemblies, complete("a", 1), false);
+            assert_eq!(state.decisions.undecided(), 1);
+            assert!(matches!(input(&state), PermissionInput::Ready(_)));
             for reason in [
                 ApprovalRefusal::WriterOnly,
                 ApprovalRefusal::IssuedElsewhere,
             ] {
-                assert_eq!(
-                    state.apply(
-                        DaemonFrame::ApprovalRefused {
-                            request_id: RequestId("a".into()),
-                            reason,
-                        },
-                        false
-                    ),
-                    Some(reason.to_string())
+                apply_attached_approval_frame(
+                    &mut state,
+                    &mut assemblies,
+                    DaemonFrame::ApprovalRefused {
+                        request_id: RequestId("a".into()),
+                        reason,
+                    },
+                    false,
                 );
-                assert_eq!(state.pending.len(), 1);
+                assert_eq!(state.decisions.undecided(), 1);
+                assert!(
+                    state
+                        .notifications
+                        .records()
+                        .any(|notice| notice.source == NoticeSource::Approval
+                            && notice.message == reason.to_string())
+                );
             }
-            state.apply(
+            apply_attached_approval_frame(
+                &mut state,
+                &mut assemblies,
                 DaemonFrame::ApprovalRefused {
                     request_id: RequestId("a".into()),
                     reason: ApprovalRefusal::NoLongerPending,
                 },
                 false,
             );
-            assert!(state.pending.is_empty() && state.order.is_empty());
-        }
-
-        #[test]
-        fn retained_count_is_read_only_point_in_time_notice() {
-            assert_eq!(
-                retained_approval_attach_notice(2, true).as_deref(),
-                Some("2 approval(s) waiting for the writer")
-            );
-            assert!(retained_approval_attach_notice(0, true).is_none());
-            assert!(retained_approval_attach_notice(2, false).is_none());
+            assert!(state.decisions.is_empty());
         }
 
         #[test]
         fn read_only_never_admits_private_input() {
-            let mut state = AttachedApprovals::default();
+            let mut state = TuiState::new(80, 24);
+            let mut assemblies = HashMap::new();
             let data = r#"{"command":"private"}"#;
-            state.apply(request("a", data), true);
-            state.apply(
-                DaemonFrame::ApprovalInputChunk {
-                    request_id: RequestId("a".into()),
-                    sequence: 0,
-                    data: data.into(),
-                },
-                true,
-            );
-            state.apply(
-                DaemonFrame::ApprovalInputComplete {
-                    request_id: RequestId("a".into()),
-                    chunks: 1,
-                },
-                true,
-            );
-            assert!(state.pending.is_empty() && state.order.is_empty());
-            assert!(paint(&mut state).trim().is_empty());
+            for frame in [request("a", data), chunk("a", 0, data), complete("a", 1)] {
+                apply_attached_approval_frame(&mut state, &mut assemblies, frame, true);
+            }
+            assert!(state.decisions.is_empty());
+            assert!(assemblies.is_empty());
         }
     }
 
@@ -6315,17 +5574,9 @@ mod tests {
         #[test]
         fn attached_proposal_higher_confirmations_and_raw_key_fences_keep_ownership() {
             let mut surface = Surface::new("body");
-            for (consent, consolidation, retract) in [
-                (true, false, false),
-                (false, true, false),
-                (false, false, true),
-            ] {
-                let higher = attached_proposal_higher_confirmation(
-                    &surface.state,
-                    consent,
-                    consolidation,
-                    retract,
-                );
+            for (consolidation, retract) in [(true, false), (false, true)] {
+                let higher =
+                    attached_proposal_higher_confirmation(&surface.state, consolidation, retract);
                 assert!(higher);
                 surface.paint(80, 24, false, false);
                 assert!(
@@ -6338,26 +5589,47 @@ mod tests {
                         .contains("Your agent proposes a message")
                 );
             }
-            surface.state.pending_permission =
-                Some(crate::adapters::tui::state::PendingPermission {
-                    id: crate::domain::models::RequestId::new(),
-                    source: crate::domain::models::ApprovalSource::ForegroundTurn {
-                        conversation_id: surface
-                            .state
-                            .team_proposal_conversation_id
-                            .clone()
-                            .unwrap(),
+            let id = crate::domain::models::RequestId::new();
+            surface.state.pending_leader = Some(crate::adapters::tui::keymap::Context::Input);
+            crate::adapters::tui::decision_queue::raise_permission(
+                &mut surface.state,
+                crate::adapters::tui::decision_queue::PermissionPayload::new(
+                    id.clone(),
+                    crate::domain::models::ApprovalSource::ForegroundTurn {
+                        conversation_id: "c".into(),
                     },
-                    tool_name: "Write".into(),
-                    input: std::sync::Arc::new(serde_json::json!({})),
-                    risk: crate::domain::models::ToolRisk::Safe,
-                });
+                    "Write".into(),
+                    crate::domain::models::ToolRisk::Safe,
+                    crate::adapters::tui::decision_queue::PermissionInput::Ready(
+                        std::sync::Arc::new(serde_json::json!({})),
+                    ),
+                ),
+                crate::adapters::tui::decision_queue::Responder::Attached,
+            );
+            surface.state.pending_leader = None;
             assert!(
-                attached_proposal_higher_confirmation(&surface.state, false, false, false),
+                attached_proposal_higher_confirmation(&surface.state, false, false),
                 "attached permission prompts must outrank proposals"
             );
             assert!(!surface.key(KeyCode::Char('y'), true, false));
-            surface.state.pending_permission = None;
+            crate::adapters::tui::decision_queue::withdraw_request(&mut surface.state, &id);
+            surface.state.pending_leader = Some(crate::adapters::tui::keymap::Context::Input);
+            crate::adapters::tui::decision_queue::raise_consent(
+                &mut surface.state,
+                crate::adapters::tui::decision_queue::ConsentPayload {
+                    request_id: id.clone(),
+                    tool: "a2a/sender-consent".into(),
+                    input_preview: "consent".into(),
+                },
+            );
+            surface.state.pending_leader = None;
+            assert!(attached_proposal_higher_confirmation(
+                &surface.state,
+                false,
+                false
+            ));
+            assert!(!surface.key(KeyCode::Char('y'), true, false));
+            crate::adapters::tui::decision_queue::withdraw_request(&mut surface.state, &id);
             surface.state.team_proposal_visible = None;
             assert!(
                 !surface.key(KeyCode::Char('y'), false, false),
@@ -6508,75 +5780,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn consent_card_queue_indicator_is_derived_from_the_daemon_fifo() {
-        let pending = PendingConsentApproval {
-            request_id: crate::domain::models::RequestId::new(),
-            tool: "a2a/sender-consent".to_owned(),
-            input_preview: "Consent required\n[y] Allow once  [a] Always allow  [n] Decline"
-                .to_owned(),
-        };
-        let text = consent_approval_card_lines(&pending, 2, 200)
-            .into_iter()
-            .flat_map(|line| line.spans)
-            .map(|span| span.content.into_owned())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("[2 more queued]"));
-        assert!(text.contains("[y] Allow once  [a] Always allow  [n] Decline"));
+    fn consent_frame(id: &str, summary: String) -> DaemonFrame {
+        DaemonFrame::ApprovalRequest {
+            request_id: crate::domain::models::RequestId(id.into()),
+            tool: "a2a/sender-consent".into(),
+            source: crate::domain::models::ApprovalSource::ForegroundTurn {
+                conversation_id: "c".into(),
+            },
+            risk: crate::domain::models::ToolRisk::Standard,
+            summary,
+            input_bytes: None,
+        }
     }
 
-    /// Story 19.18d `P22` dev smoke, kept as a regression: at the 60-column
-    /// layout floor the bound card's `[a]` line renders whole — wrapped inside
-    /// the decision card, never cut — and a line that fits keeps its bytes.
     #[test]
-    fn an_overlong_consent_line_wraps_inside_the_card_at_the_layout_floor() {
-        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card;
-        use crate::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE;
+    fn consent_queue_indicator_is_derived_from_the_session_queue() {
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.state.input_buffer = "draft".into();
+        for id in ["a", "b", "c"] {
+            rig.approval_frame(consent_frame(id, "Consent required".into()));
+        }
+        assert_eq!(attached_notice_badges(&rig.state).decisions, 3);
+        let text = attached_screen(&rig.paint());
+        assert!(text.contains("Needs you (3) ^X q"), "{text}");
+    }
 
+    #[test]
+    fn an_overlong_consent_line_wraps_inside_the_frame_at_the_layout_floor() {
+        use crate::domain::services::peer_admission::BOUND_KEY_CONSENT_LINE;
         let pin = crate::domain::models::PeerId::from_public_key(&[9; 32]).unwrap();
-        let pending = PendingConsentApproval {
-            request_id: crate::domain::models::RequestId::new(),
-            tool: "a2a/sender-consent".to_owned(),
-            input_preview: crate::infrastructure::runtime::transparency_bridge::consent_card_text(
-                &crate::domain::models::PolicyPrincipal::bound_a2a(pin),
-            ),
-        };
-        let pane = ratatui::layout::Rect::new(0, 0, 60, 30);
-        let lines = consent_approval_card_lines(&pending, 0, usize::from(pane.width - 2));
-        let mut buffer = ratatui::buffer::Buffer::empty(pane);
-        render_bottom_anchored_decision_card(
-            &mut buffer,
-            lines.clone(),
-            ratatui::style::Color::Reset,
-            pane,
+        let summary = crate::infrastructure::runtime::transparency_bridge::consent_card_text(
+            &crate::domain::models::PolicyPrincipal::bound_a2a(pin),
         );
-        let rendered: String = (0..pane.height)
-            .map(|y| {
-                (1..pane.width - 1)
-                    .map(|x| buffer[(x, y)].symbol().to_owned())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let words = |text: &str| {
-            text.split_whitespace()
+        let mut rig = attach_keys::tests::Rig::new(false);
+        rig.state.terminal_width = 60;
+        rig.state.terminal_height = 30;
+        rig.approval_frame(consent_frame("bound", summary));
+        let text = attached_screen(&rig.paint());
+        let words = |s: &str| {
+            s.replace('│', " ")
+                .split_whitespace()
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         };
-        let rendered_words = words(&rendered);
-        let clause = words(&format!("[a] {BOUND_KEY_CONSENT_LINE}"));
+        let rendered = words(&text);
+        let clause = words(BOUND_KEY_CONSENT_LINE);
         assert!(
-            rendered_words
+            rendered
                 .windows(clause.len())
                 .any(|window| window == clause.as_slice()),
-            "the whole bound clause is visible at 60 columns: {rendered}"
+            "{text}"
         );
-        let kept = "[y] Allow once  [a] Always allow  [n] Decline";
-        assert!(
-            lines.iter().any(|line| line.to_string() == kept),
-            "a line that fits keeps its bytes"
-        );
+        assert!(text.contains("[y] Allow once"), "{text}");
+        assert!(text.contains("[a] Always allow"), "{text}");
     }
 
     // ── Story 18.3c (AC3/AC5) — peer response decision-core coverage ────────
@@ -9184,7 +8440,7 @@ mod tests {
         }
     }
 
-    fn snapshot_with(transcript: Vec<ChatMessage>, blocked: usize) -> AttachSnapshot {
+    pub(super) fn snapshot_with(transcript: Vec<ChatMessage>, blocked: usize) -> AttachSnapshot {
         AttachSnapshot {
             conversation_id: "conv-test".into(),
             transcript,
@@ -11839,10 +11095,12 @@ mod display_width_tests {
     #[test]
     fn display_width_attached_consent_lines_wrap_by_cells_never_scalars() {
         let cells = crate::adapters::tui::text_geometry::cells;
-        let pending = |preview: String| PendingConsentApproval {
-            request_id: crate::domain::models::RequestId::new(),
-            tool: "a2a/sender-consent".to_owned(),
-            input_preview: preview,
+        let wrap = |preview: &str| {
+            crate::adapters::tui::widgets::modal::wrapped(
+                preview,
+                ratatui::style::Style::default(),
+                40,
+            )
         };
         let texts = |lines: Vec<ratatui::text::Line<'static>>| -> Vec<String> {
             lines
@@ -11857,19 +11115,19 @@ mod display_width_tests {
         };
         // 30 C = 60 cells but only 30 scalars: the old scalar fast path kept
         // it as one overlong row at content width 40.
-        let rows = texts(consent_approval_card_lines(&pending(C.repeat(30)), 0, 40));
+        let rows = texts(wrap(&C.repeat(30)));
         assert!(rows.len() >= 2, "{rows:?}");
         assert!(rows.iter().all(|row| cells(row) <= 40), "{rows:?}");
         assert_eq!(rows.concat().replace(' ', ""), C.repeat(30));
-        // A line that fits in cells is kept byte-for-byte, double spaces included.
+        // The shared word wrapper normalizes whitespace even when a line fits.
         let fits = format!("[y]  Allow {C}{C}  [n] Decline");
         assert_eq!(
-            texts(consent_approval_card_lines(&pending(fits.clone()), 0, 40)),
-            [fits]
+            texts(wrap(&fits)),
+            [format!("[y] Allow {C}{C} [n] Decline")]
         );
         // G and A at the cut stay whole.
         let mixed = format!("{}{G}{A}{}", "x".repeat(38), "y".repeat(20));
-        let rows = texts(consent_approval_card_lines(&pending(mixed), 0, 40));
+        let rows = texts(wrap(&mixed));
         assert!(rows.iter().all(|row| cells(row) <= 40), "{rows:?}");
         assert!(
             rows.concat().contains(G) && rows.concat().contains(A),

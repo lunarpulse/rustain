@@ -923,12 +923,15 @@ fn budget_with_waiting_carryover() -> TuiState {
 #[rustfmt::skip]
 const PANE: &[W] = &[
     w(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Budget, true)]"),
+    wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Permission, true)]", |s| *s = super::support::permission()),
     wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Recovery, true)]", |s| *s = pane(DecisionKind::Recovery)),
     wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[(DeleteConversations, true)]", |s| *s = pane(DecisionKind::DeleteConversations)),
     wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[]", |s| *s = stale_budget()),
     w(&[Key::Ctrl('q')], "Quit | focused=true items=[(Budget, false)]"),
+    wp(&[Key::Ctrl('q')], "Quit | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
     wp(&[Key::Enter], "Decision(RecoveryContinue) | focused=false items=[]", |s| *s = pane(DecisionKind::Recovery)),
     w(&[Key::Esc], "Consumed | focused=false items=[(Budget, true)]"),
+    wp(&[Key::Esc], "Consumed | focused=false items=[(Permission, true)]", |s| *s = super::support::permission()),
     wp(&[Key::Esc], "Consumed | focused=false items=[(Carryover, true)]", |s| *s = pane(DecisionKind::Carryover)),
     wp(&[Key::Esc], "Consumed | focused=false items=[(ContextWarning, true)]", |s| *s = pane(DecisionKind::ContextWarning)),
     wp(&[Key::Esc], "Consumed | focused=false items=[(LargeImage, true)]", |s| *s = pane(DecisionKind::LargeImage)),
@@ -947,8 +950,12 @@ const PANE: &[W] = &[
     wp(&[Key::Char('n')], "Consumed | focused=true items=[(Carryover, false)]", |s| *s = pane(DecisionKind::ContextWarning)),
     w(&[Key::PageUp], "Consumed | focused=true items=[(Budget, false)]"),
     w(&[Key::PageDown], "Consumed | focused=true items=[(Budget, false)]"),
+    wp(&[Key::PageUp], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
+    wp(&[Key::PageDown], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
     w(&[Key::Ctrl('x')], "Consumed | focused=true items=[(Budget, false)]"),
+    wp(&[Key::Ctrl('x')], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
     w(&[Key::Ctrl('p')], "Consumed | focused=true items=[(Budget, false)]"),
+    wp(&[Key::Ctrl('p')], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
 ];
 
 /// A key of another kind's decision does nothing: the pane stays, the decision stays (R7).
@@ -1011,7 +1018,17 @@ fn decision_rows_by_value_and_every_other_key_is_swallowed() {
             );
         }
         if key == Key::Ctrl('x') {
-            assert_eq!(state.pending_leader, Some(Context::Decision));
+            let context = if state
+                .decisions
+                .items()
+                .next()
+                .is_some_and(|item| item.kind == DecisionKind::Permission)
+            {
+                Context::Permission
+            } else {
+                Context::Decision
+            };
+            assert_eq!(state.pending_leader, Some(context));
             assert_eq!(
                 state.modal_stack.iter().cloned().collect::<Vec<_>>(),
                 frames
@@ -1051,6 +1068,147 @@ fn decision_rows_by_value_and_every_other_key_is_swallowed() {
         off: PANE_OFF,
         ..local(Context::Decision, setup, salient, PANE)
     });
+}
+
+#[test]
+fn needs_you_list_rows_select_open_back_and_preserve_items() {
+    use super::support::press;
+    use rustain::adapters::tui::keymap::resolve::rows_of;
+    let mut count = 0;
+    for row in rows_of(Context::DecisionQueue, Host::Local) {
+        let mut state = super::support::permission();
+        press(&mut state, Key::Esc);
+        decision_queue::raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "budget"),
+            Arrival::Automatic,
+        );
+        decision_queue::open_waiting(&mut state, &facts());
+        assert!(is_open(&state, Surface::DecisionQueue));
+        let key = row.keys[0];
+        if matches!(key, Key::Down | Key::Char('j')) {
+            press(&mut state, Key::Up);
+        }
+        let action = press(&mut state, key);
+        match key {
+            Key::Up | Key::Char('k') | Key::Down | Key::Char('j') => {
+                assert_eq!(action, InputAction::Consumed);
+                assert_eq!(state.decisions.len(), 2);
+                press(&mut state, Key::Enter);
+                let kind = state
+                    .modal_stack
+                    .top()
+                    .unwrap()
+                    .decision
+                    .as_ref()
+                    .unwrap()
+                    .kind;
+                let expected = if matches!(key, Key::Up | Key::Char('k')) {
+                    DecisionKind::Permission
+                } else {
+                    DecisionKind::Budget
+                };
+                assert_eq!(kind, expected);
+            }
+            Key::Enter => {
+                assert_eq!(action, InputAction::Consumed);
+                assert_eq!(
+                    state
+                        .modal_stack
+                        .top()
+                        .unwrap()
+                        .decision
+                        .as_ref()
+                        .unwrap()
+                        .kind,
+                    DecisionKind::Budget
+                );
+            }
+            Key::Esc | Key::Ctrl('c') => {
+                assert_eq!(action, InputAction::Consumed);
+                assert!(!is_open(&state, Surface::DecisionQueue));
+            }
+            Key::Ctrl('q') => assert_eq!(action, InputAction::Quit),
+            Key::Ctrl('x') => {
+                assert_eq!(action, InputAction::Consumed);
+                assert_eq!(state.pending_leader, Some(Context::DecisionQueue));
+            }
+            Key::Ctrl('p') => {
+                assert_eq!(action, InputAction::Consumed);
+                assert!(is_open(&state, Surface::CommandPalette));
+            }
+            other => panic!("unwitnessed list row {other:?}"),
+        }
+        assert_eq!(state.decisions.len(), 2, "list keys never decide");
+        count += 1;
+    }
+    assert_eq!(count, 10);
+    assert_eq!(
+        rows_of(Context::DecisionQueue, Host::Attached).count(),
+        count
+    );
+}
+
+#[test]
+fn needs_you_list_swallows_keys_without_rows() {
+    use super::support::press;
+    use rustain::adapters::tui::keymap::{Resolved, resolve};
+    let mut swept = 0;
+    for key in Key::universe() {
+        if !matches!(
+            resolve(Context::DecisionQueue, Host::Local, &[key]),
+            Resolved::Miss
+        ) {
+            continue;
+        }
+        let mut state = super::support::permission();
+        press(&mut state, Key::Esc);
+        decision_queue::raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "budget"),
+            Arrival::Automatic,
+        );
+        decision_queue::open_waiting(&mut state, &facts());
+        let before: Vec<_> = state.decisions.items().cloned().collect();
+        let composer = (state.input_buffer.clone(), state.cursor_position);
+        assert!(is_inert(&press(&mut state, key)));
+        assert!(is_open(&state, Surface::DecisionQueue));
+        assert_eq!(state.decisions.items().cloned().collect::<Vec<_>>(), before);
+        assert_eq!(
+            (state.input_buffer.clone(), state.cursor_position),
+            composer
+        );
+        press(&mut state, Key::Enter);
+        assert_eq!(
+            state
+                .modal_stack
+                .top()
+                .unwrap()
+                .decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            DecisionKind::Budget
+        );
+        swept += 1;
+    }
+    assert!(swept > 130);
+}
+
+#[test]
+fn permission_review_page_keys_scroll_exact_input_and_return_to_top() {
+    use super::support::{paint_decision, permission_with_input, press};
+    let lines: Vec<String> = (0..80).map(|n| format!("unique-line-{n:03}")).collect();
+    let mut state = permission_with_input(serde_json::json!({"lines": lines}));
+    assert_eq!(press(&mut state, Key::Char('r')), InputAction::Consumed);
+    let initial = paint_decision(&mut state);
+    assert!(initial.contains("unique-line-000"));
+    assert_eq!(press(&mut state, Key::PageDown), InputAction::Consumed);
+    let scrolled = paint_decision(&mut state);
+    assert_ne!(scrolled, initial);
+    assert!(!scrolled.contains("unique-line-000"));
+    assert_eq!(press(&mut state, Key::PageUp), InputAction::Consumed);
+    assert_eq!(paint_decision(&mut state), initial);
 }
 
 #[rustfmt::skip]

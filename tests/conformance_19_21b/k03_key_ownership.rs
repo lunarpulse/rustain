@@ -97,6 +97,7 @@ fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
         state,
         &DomainInputEvent::KeyPress(key),
         &LogFacts::default(),
+        rustain::adapters::tui::keymap::Host::Local,
     )? {
         PaneOutcome::Effect(effect) => Some(effect.into_action()),
         _ => Some(InputAction::Consumed),

@@ -70,7 +70,7 @@ fn facts(active: &str) -> LogFacts {
 }
 
 fn press(state: &mut TuiState, event: DomainInputEvent, f: &LogFacts) -> Option<PaneOutcome> {
-    let outcome = decision_queue::handle_domain_event(state, &event, f);
+    let outcome = decision_queue::handle_domain_event(state, &event, f, Host::Local);
     assert!(presentation::consistent(state));
     outcome
 }
@@ -230,7 +230,6 @@ fn k10_open_surfaces_are_never_taken_from() {
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::reducer;
     use rustain::domain::models::autocomplete::AutocompleteKind;
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
     let surfaces: [(&str, Setup); 12] = [
         ("S-QUIT", |s| {
             let mut f = QuitFacts::idle(QuitHost::Local);
@@ -290,8 +289,27 @@ fn k10_open_surfaces_are_never_taken_from() {
             assert_eq!(s.focus, FocusState::Input);
             assert!(s.modal_stack.is_empty());
         }),
-        ("permission confirmation overlay", |s| {
-            s.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
+        ("permission frame", |s| {
+            use rustain::adapters::tui::decision_queue::{
+                PermissionInput, PermissionPayload, Responder,
+            };
+            use rustain::domain::models::tool_call::RequestId;
+            use rustain::domain::models::{ApprovalSource, ToolRisk};
+            decision_queue::raise_permission(
+                s,
+                PermissionPayload::new(
+                    RequestId::new(),
+                    ApprovalSource::ForegroundTurn {
+                        conversation_id: "c1".into(),
+                    },
+                    "Bash".into(),
+                    ToolRisk::Elevated,
+                    PermissionInput::Ready(std::sync::Arc::new(
+                        serde_json::json!({"command": "true"}),
+                    )),
+                ),
+                Responder::Local,
+            );
         }),
     ];
     for (name, setup) in surfaces {
@@ -303,7 +321,11 @@ fn k10_open_surfaces_are_never_taken_from() {
             Raised::Waiting,
             "{name}"
         );
-        assert!(!is_open(&state, Surface::Decision), "{name}");
+        assert_eq!(
+            is_open(&state, Surface::Decision),
+            name == "permission frame",
+            "{name}"
+        );
         assert_eq!(
             state.modal_stack.iter().cloned().collect::<Vec<_>>(),
             frames,
@@ -561,7 +583,7 @@ fn k10_a_waiting_or_deferred_item_cannot_be_answered_by_a_stray_key() {
 // ── Ctrl+X q ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
+fn k10_ctrl_x_q_lists_waiting_items_and_says_so_when_none() {
     let (mut state, _c) = clocked(80, 24);
     state.focus = FocusState::Chat;
     handle_input(&mut state, &special(DomainKey::CtrlX));
@@ -575,7 +597,7 @@ fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
         "No decisions waiting"
     );
 
-    // Two waiting items: the oldest takes focus.
+    // Two waiting items: the oldest is selected in the list.
     let (mut state, _c) = clocked(80, 24);
     state.input_buffer = "typing".into();
     state.focus = FocusState::Input;
@@ -584,6 +606,16 @@ fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
     assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
     decision_queue::open_waiting(&mut state, &facts("c1"));
+    assert!(is_open(&state, Surface::DecisionQueue));
+    assert_eq!(
+        presentation::route(
+            &mut state,
+            &special(DomainKey::Enter),
+            Host::Local,
+            &facts("c1")
+        ),
+        Some(presentation::RouteEffect::Consumed)
+    );
     assert_eq!(
         decision_queue::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::Carryover)
@@ -847,7 +879,7 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
         "positive control after its own paint and 500 ms"
     );
 
-    // `Ctrl+X q` refocuses the oldest (deferred) item over a painted one.
+    // Select the deferred oldest item from the list over a painted one.
     let (mut state, clock) = clocked(80, 24);
     automatic(&mut state, DecisionKind::LargeImage);
     ready(&mut state, &clock);
@@ -864,6 +896,9 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
     );
     ready(&mut state, &clock);
     decision_queue::open_waiting(&mut state, &f);
+    assert!(is_open(&state, Surface::DecisionQueue));
+    presentation::route(&mut state, &special(DomainKey::Up), Host::Local, &f);
+    presentation::route(&mut state, &special(DomainKey::Enter), Host::Local, &f);
     assert_eq!(
         decision_queue::current(&state, &f).map(|i| i.kind),
         Some(DecisionKind::LargeImage)
@@ -1201,6 +1236,13 @@ fn k10_ctrl_c_backs_out_and_ctrl_q_inside_the_pane_requests_the_guard() {
     assert!(state.decisions.items().next().unwrap().deferred);
 
     decision_queue::open_waiting(&mut state, &LogFacts::default());
+    assert!(is_open(&state, Surface::DecisionQueue));
+    presentation::route(
+        &mut state,
+        &special(DomainKey::Enter),
+        Host::Local,
+        &LogFacts::default(),
+    );
     ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, special(DomainKey::CtrlQ), &LogFacts::default()),

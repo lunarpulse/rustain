@@ -82,6 +82,126 @@ pub fn fresh() -> TuiState {
     TuiState::new(80, 24)
 }
 
+/// Raise a real permission, paint its decision frame, and pass its inert window.
+pub fn permission() -> TuiState {
+    permission_with_input(serde_json::json!({"command": "ls"}))
+}
+
+pub fn permission_with_input(input: serde_json::Value) -> TuiState {
+    use rustain::adapters::tui::decision_queue::INERT_AFTER_PAINT;
+    use rustain::adapters::tui::notifications::NotificationStore;
+    use rustain::domain::clock::MockClock;
+    use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
+    use rustain::domain::models::{NotificationsConfig, ToolRisk};
+    use rustain::domain::services::approval_runtime::{ApprovalRuntimeEvent, PendingReview};
+    use rustain::infrastructure::runtime::approval_bridge;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = fresh();
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    let id = RequestId::new();
+    let source = ApprovalSource::ForegroundTurn {
+        conversation_id: "c1".into(),
+    };
+    let review = PendingReview {
+        id: id.clone(),
+        source: source.clone(),
+        tool: "Bash".into(),
+        risk: ToolRisk::Elevated,
+        input: Arc::new(input),
+    };
+    approval_bridge::apply(
+        &mut state,
+        ApprovalRuntimeEvent::Requested {
+            id,
+            source,
+            tool: "Bash".into(),
+            risk: ToolRisk::Elevated,
+            consent_card: None,
+        },
+        Some(review),
+    );
+    paint_decision(&mut state);
+    clock.advance(INERT_AFTER_PAINT);
+    state
+}
+
+pub fn paint_decision(state: &mut TuiState) -> String {
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        layout::{Position, Rect},
+    };
+    use rustain::adapters::tui::decision_queue;
+    use rustain::adapters::tui::keymap::Host;
+    use rustain::adapters::tui::layout::compute_layout;
+    use rustain::adapters::tui::notification_log::LogFacts;
+    use rustain::adapters::tui::presentation::{self, Shell};
+    use rustain::domain::models::visual::DensityMode;
+    let layout = compute_layout(
+        Rect::new(0, 0, 80, 24),
+        &state.theme,
+        &state.input_buffer,
+        1,
+        false,
+        DensityMode::Focus,
+    )
+    .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let mut painted = false;
+    terminal
+        .draw(|frame| {
+            let shell = Shell::new(frame.area(), &layout);
+            painted = presentation::compose(
+                frame,
+                state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
+        })
+        .unwrap();
+    assert!(painted, "permission frame painted");
+    decision_queue::note_painted(state);
+    let buffer = terminal.backend().buffer();
+    (0..24)
+        .map(|y| {
+            (0..80)
+                .map(|x| buffer.cell(Position::new(x, y)).unwrap().symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn permission_payload(
+    state: &TuiState,
+) -> &rustain::adapters::tui::decision_queue::PermissionPayload {
+    use rustain::adapters::tui::decision_queue::DecisionSubject;
+    match &state
+        .decisions
+        .items()
+        .next()
+        .expect("permission pending")
+        .subject
+    {
+        DecisionSubject::Permission(payload) => payload,
+        other => panic!("expected permission, got {other:?}"),
+    }
+}
+
+pub fn feedback(state: &TuiState) -> &rustain::adapters::tui::presentation::text_field::TextField {
+    permission_payload(state)
+        .feedback
+        .as_ref()
+        .expect("feedback open")
+}
+
 /// True when the action is one a "no command fires" sweep tolerates.
 pub fn is_inert(action: &InputAction) -> bool {
     matches!(action, InputAction::Consumed | InputAction::Ignored)

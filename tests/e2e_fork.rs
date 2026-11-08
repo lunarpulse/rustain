@@ -804,28 +804,72 @@ fn test_e2e_fork_widget_truncates_long_utf8_safely() {
 
 #[test]
 fn test_e2e_fork_blocked_during_permission_overlay() {
-    // DF-018: 'f' key in Permission overlay now triggers PermissionDenyFeedback (AC5),
-    // not ForkAtMessage. Updated from the old behavior where 'f' was consumed silently.
-    let mut state = TuiState::new(80, 24);
-    state.focus = rustain::domain::models::FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::Permission,
-    ));
-
+    use rustain::adapters::tui::decision_queue::{
+        self, DecisionSubject, PermissionInput, PermissionPayload, Responder,
+    };
+    use rustain::adapters::tui::keymap::Host;
+    use rustain::adapters::tui::notification_log::LogFacts;
+    use rustain::adapters::tui::notifications::NotificationStore;
+    use rustain::adapters::tui::presentation::{self, Shell};
+    use rustain::domain::clock::MockClock;
     use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('f');
-    let action = handle_input(&mut state, &event);
+    use rustain::domain::models::tool_call::RequestId;
+    use rustain::domain::models::{ApprovalSource, NotificationsConfig, ToolRisk};
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    // 'f' now triggers deny-with-feedback (AC5), NOT fork
-    assert_ne!(
-        action,
-        InputAction::ForkAtMessage,
-        "'f' in Permission overlay must NOT produce ForkAtMessage (DF-018)"
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = TuiState::new(80, 24);
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    decision_queue::raise_permission(
+        &mut state,
+        PermissionPayload::new(
+            RequestId::new(),
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            ToolRisk::Elevated,
+            PermissionInput::Ready(Arc::new(serde_json::json!({"command": "true"}))),
+        ),
+        Responder::Local,
     );
-    assert_eq!(
-        action,
-        InputAction::PermissionDenyFeedback,
-        "'f' in Permission overlay should produce PermissionDenyFeedback (AC5)"
-    );
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    let layout = rustain::adapters::tui::layout::compute_layout(
+        ratatui::layout::Rect::new(0, 0, 80, 24),
+        &state.theme,
+        "",
+        1,
+        false,
+        rustain::domain::models::visual::DensityMode::Focus,
+    )
+    .unwrap();
+    let mut painted = false;
+    terminal
+        .draw(|frame| {
+            let shell = Shell::new(frame.area(), &layout);
+            painted = presentation::compose(
+                frame,
+                &state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
+        })
+        .unwrap();
+    assert!(painted);
+    decision_queue::note_painted(&mut state);
+    clock.advance(decision_queue::INERT_AFTER_PAINT);
+    let action = handle_input(&mut state, &DomainInputEvent::KeyPress('f'));
+    assert_ne!(action, InputAction::ForkAtMessage);
+    assert_eq!(action, InputAction::Consumed);
+    assert!(matches!(
+        &decision_queue::current(&state, &LogFacts::default()).unwrap().subject,
+        DecisionSubject::Permission(payload) if payload.feedback.is_some()
+    ));
 }
 
 #[test]

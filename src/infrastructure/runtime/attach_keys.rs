@@ -317,18 +317,15 @@ impl KeyCtx<'_> {
     }
 
     fn decision_cards_pending(&self) -> bool {
-        !self.state.attached.consent.is_empty() || self.state.attached.consolidation_token.is_some()
+        self.state.attached.consolidation_token.is_some()
     }
 }
 
-/// The attached decision card that owns `Esc` / `Ctrl+C` now: sender consent, the
-/// consolidation card or the retract confirmation (A8; the permission approvals and the
-/// team retract card answer in `attach_loop`).
+/// The remaining attached card that owns `Esc` / `Ctrl+C`.
 fn attached_card_context(ctx: &KeyCtx<'_>) -> Option<Context> {
-    if !ctx.state.attached.consent.is_empty() {
-        Some(Context::Consent)
-    } else if ctx.state.attached.consolidation_token.is_some()
-        || ctx.state.attached.retract_confirm.is_some()
+    if !super::attached_decision_pending(ctx.state)
+        && (ctx.state.attached.consolidation_token.is_some()
+            || ctx.state.attached.retract_confirm.is_some())
     {
         Some(Context::Confirm)
     } else {
@@ -434,8 +431,43 @@ pub(super) fn handle_attached_paste(state: &mut TuiState, text: &str, card_pendi
     false
 }
 
+/// Check the raw event before conversion loses its kind and modifier details.
+fn invalid_decision_key(state: &TuiState, key: KeyEvent) -> bool {
+    use crate::adapters::tui::decision_queue::{DecisionKind, DecisionSubject};
+    use crossterm::event::KeyEventKind;
+
+    let Some(item) = state
+        .modal_stack
+        .top()
+        .filter(|frame| frame.surface == Surface::Decision)
+        .and_then(|frame| frame.decision.as_ref())
+        .and_then(|id| state.decisions.item(id))
+    else {
+        return false;
+    };
+    let composing = matches!(
+        &item.subject,
+        DecisionSubject::Permission(payload) if payload.feedback.is_some()
+    );
+    let answer = if composing {
+        key.code == KeyCode::Enter
+    } else {
+        matches!(item.kind, DecisionKind::Permission | DecisionKind::Consent)
+            && matches!(
+                key.code,
+                KeyCode::Char(
+                    'y' | 'Y' | 's' | 'S' | 'a' | 'A' | 'n' | 'N' | 'f' | 'F' | 'r' | 'R'
+                )
+            )
+    };
+    answer && (key.kind != KeyEventKind::Press || !key.modifiers.is_empty())
+}
+
 /// The attached key front door. Called by `run_attached` for every key event.
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
+    if invalid_decision_key(ctx.state, key) {
+        return KeyFlow::Continue;
+    }
     // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
     let overlay_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(ctx.state);
     let owner_before = (
@@ -461,6 +493,32 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         Some(RouteEffect::Leader) => leader_key(ctx, key).await,
         Some(RouteEffect::Frame(context)) => unreachable!("attached frame context: {context:?}"),
         Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
+        Some(RouteEffect::Decision(_)) => {
+            if let Some((key, effect, subject)) = ctx.state.decisions.take_sending() {
+                use crate::adapters::tui::decision_queue::{self, DecisionSubject};
+                let response = match subject {
+                    DecisionSubject::Permission(payload) => payload
+                        .outcome(effect)
+                        .map(|outcome| (payload.request_id, outcome)),
+                    DecisionSubject::Consent(payload) => payload
+                        .outcome(effect)
+                        .map(|outcome| (payload.request_id, outcome)),
+                    _ => None,
+                };
+                if let Some((request_id, outcome)) = response
+                    && ctx
+                        .frame_tx
+                        .send(ClientFrame::ApprovalResponse {
+                            request_id,
+                            outcome,
+                        })
+                        .is_ok()
+                {
+                    decision_queue::settle_sent(ctx.state, &log_facts(&ctx.conversation.id), &key);
+                }
+            }
+            KeyFlow::Continue
+        }
         // Guarded quit is universal, including cards that consume every key.
         None if command_in(Context::Global, overlay_key(&key))
             == Some(CommandId::Global(GlobalCmd::QuitRequest)) =>
@@ -512,38 +570,16 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     }
 
     // Story 19.21c: every retract-card key before the composer.
-    if attached_team_retract_key(ctx.state, ctx.team_requests, key, ctx.frame_tx) {
+    if !super::attached_decision_pending(ctx.state)
+        && attached_team_retract_key(ctx.state, ctx.team_requests, key, ctx.frame_tx)
+    {
         return KeyFlow::Continue;
     }
-    let approval_higher = attached_proposal_higher_confirmation(
+    let proposal_higher = attached_proposal_higher_confirmation(
         ctx.state,
-        !ctx.state.attached.consent.is_empty(),
         ctx.state.pending_consolidation_card.is_some(),
         ctx.state.attached.retract_confirm.is_some(),
     );
-    let approval_blocked = ctx.read_only
-        || approval_higher
-        || ctx.state.focus != FocusState::Chat
-        || !crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
-            .unwrap_or(&ctx.state.input_buffer)
-            .is_empty();
-    if ctx
-        .state
-        .attached
-        .approvals
-        .key(key, approval_blocked, ctx.frame_tx)
-    {
-        if std::mem::take(&mut ctx.state.attached.approvals.cue) {
-            ctx.info(crate::adapters::tui::keymap::render::card_cue(
-                Context::Permission,
-                Host::Attached,
-            ));
-        }
-        ctx.state.needs_redraw = true;
-        return KeyFlow::Continue;
-    }
-    let proposal_higher =
-        approval_higher || (!ctx.read_only && !ctx.state.attached.approvals.pending.is_empty());
     if attached_proposal_key(
         key,
         proposal_higher,
@@ -615,54 +651,11 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     }
 
     match (key.code, key.modifiers) {
-        // Story 18.3d AC1 — sender-consent Approval Pattern. The guard is the
-        // daemon-derived pending FIFO, so these single-letter keys are inert
-        // everywhere else.
-        (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !ctx.state.attached.consent.is_empty() =>
-        {
-            if let Some(pending) = ctx.state.attached.consent.pop_front() {
-                let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
-                    request_id: pending.request_id,
-                    outcome: crate::domain::models::ApprovalOutcome::Once,
-                });
-            }
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Char('a'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !ctx.state.attached.consent.is_empty() =>
-        {
-            if let Some(pending) = ctx.state.attached.consent.pop_front() {
-                let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
-                    request_id: pending.request_id,
-                    outcome: crate::domain::models::ApprovalOutcome::AlwaysAndSave {
-                        scope: crate::domain::models::ApprovalScope::Tool(pending.tool),
-                    },
-                });
-            }
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !ctx.state.attached.consent.is_empty() =>
-        {
-            if let Some(pending) = ctx.state.attached.consent.pop_front() {
-                let _ = ctx.frame_tx.send(ClientFrame::ApprovalResponse {
-                    request_id: pending.request_id,
-                    outcome: crate::domain::models::ApprovalOutcome::Reject { feedback: None },
-                });
-            }
-            ctx.state.needs_redraw = true;
-        }
         // Story 12.2d AC4/AC5 — consolidation card intercept.
         (KeyCode::Char('y'), m)
             if !m.contains(KeyModifiers::CONTROL)
                 && chat
+                && !super::attached_decision_pending(ctx.state)
                 && ctx.state.attached.consolidation_token.is_some() =>
         {
             if let Some(token) = ctx.state.attached.consolidation_token.take() {
@@ -677,6 +670,7 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         (KeyCode::Char('n'), m)
             if !m.contains(KeyModifiers::CONTROL)
                 && chat
+                && !super::attached_decision_pending(ctx.state)
                 && ctx.state.attached.consolidation_token.is_some() =>
         {
             // n while the card is shown → decline.
@@ -695,6 +689,7 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         (KeyCode::Char('y'), m)
             if !m.contains(KeyModifiers::CONTROL)
                 && chat
+                && !super::attached_decision_pending(ctx.state)
                 && ctx.state.attached.retract_confirm.is_some() =>
         {
             if ctx.read_only {
@@ -719,6 +714,7 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         (KeyCode::Char('n'), m)
             if !m.contains(KeyModifiers::CONTROL)
                 && chat
+                && !super::attached_decision_pending(ctx.state)
                 && ctx.state.attached.retract_confirm.is_some() =>
         {
             ctx.state.attached.retract_confirm = None;
@@ -985,6 +981,10 @@ fn ctrl_c(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 /// Ask to quit this client through the shared S-QUIT decision. Exits only on a
 /// clean idle host or an explicit `y`; the daemon and its work are untouched.
 fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
+    let large_images = ctx
+        .state
+        .decisions
+        .count_live(crate::adapters::tui::decision_queue::DecisionKind::LargeImage);
     let facts = QuitFacts {
         host: QuitHost::Attached,
         streams: usize::from(ctx.streaming.is_streaming),
@@ -996,19 +996,13 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         )
         .unwrap_or(&ctx.state.input_buffer)
         .is_empty(),
-        pending_images: 0,
+        pending_images: ctx.state.pending_images.len() + large_images,
         peer_compose: ctx.state.pinned_peer_compose.is_some()
             || crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
                 .is_some(),
-        pending_decisions: ctx.state.attached.consent.len()
-            + usize::from(ctx.state.attached.consolidation_token.is_some())
-            + ctx.state.decisions.len()
-            + usize::from(attached_proposal_pending(ctx.state).is_some())
-            + if ctx.read_only {
-                0
-            } else {
-                ctx.state.attached.approvals.pending.len()
-            },
+        pending_decisions: usize::from(ctx.state.attached.consolidation_token.is_some())
+            + (ctx.state.decisions.undecided() - large_images)
+            + usize::from(attached_proposal_pending(ctx.state).is_some()),
     };
     match presentation::reducer::request_quit(ctx.state, facts) {
         QuitRequest::ExitNow => KeyFlow::Quit,
@@ -1068,29 +1062,10 @@ async fn leader_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
             ctx.state.needs_redraw = true;
         }
         LeaderCmd::Decisions => {
-            if ctx.state.attached.approvals.pending.is_empty() {
-                ctx.info("No decisions waiting in this client");
-            } else {
-                ctx.info(format!(
-                    "Approval pending: clear the draft, {}then {} / {}",
-                    if ctx.state.focus == FocusState::Input {
-                        format!(
-                            "{} to Chat, ",
-                            crate::adapters::tui::keymap::render::key_text(InputCmd::ReturnToChat)
-                        )
-                    } else {
-                        String::new()
-                    },
-                    crate::adapters::tui::keymap::render::rail(
-                        Context::Permission,
-                        crate::adapters::tui::keymap::table_permission::PermissionCmd::AllowOnce
-                    ),
-                    crate::adapters::tui::keymap::render::rail(
-                        Context::Permission,
-                        crate::adapters::tui::keymap::table_permission::PermissionCmd::Deny
-                    ),
-                ));
-            }
+            crate::adapters::tui::decision_queue::open_waiting(
+                ctx.state,
+                &log_facts(&ctx.conversation.id),
+            );
         }
         LeaderCmd::Detach => return KeyFlow::Detach,
         // The shared boundary intercepts Ctrl+Q before dismissing a legacy menu.
@@ -1484,7 +1459,6 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::PendingConsentApproval;
     use super::super::{apply_attached_approval_frame, attached_card_arrived};
     use super::*;
     use crate::adapters::daemon::protocol::ProposalToken;
@@ -1506,6 +1480,11 @@ pub(super) mod tests {
         read_only: bool,
         pub(crate) state: TuiState,
         tx: mpsc::UnboundedSender<ClientFrame>,
+        clock: std::sync::Arc<crate::domain::clock::MockClock>,
+        assemblies: std::collections::HashMap<
+            crate::domain::models::RequestId,
+            crate::adapters::daemon::protocol::ExactInputAssembly,
+        >,
         rx: mpsc::UnboundedReceiver<ClientFrame>,
         team_requests: AttachedTeamRequests,
         tab: TabRenderState,
@@ -1531,11 +1510,21 @@ pub(super) mod tests {
                 workspace.path().to_path_buf(),
             );
             let mut state = TuiState::new(80, 24);
+            let clock = std::sync::Arc::new(crate::domain::clock::MockClock::new(
+                std::time::Instant::now(),
+            ));
+            state.notifications =
+                crate::adapters::tui::notifications::NotificationStore::from_config(
+                    &crate::domain::models::NotificationsConfig::default(),
+                    clock.clone(),
+                );
             state.focus = FocusState::Input;
             Self {
                 workspace,
                 read_only,
                 state,
+                clock,
+                assemblies: std::collections::HashMap::new(),
                 driver: SocketTurnDriver::new(tx.clone()),
                 tx,
                 rx,
@@ -1553,7 +1542,26 @@ pub(super) mod tests {
             }
         }
 
+        pub(crate) fn approval_frame(&mut self, frame: DaemonFrame) {
+            apply_attached_approval_frame(
+                &mut self.state,
+                &mut self.assemblies,
+                frame,
+                self.read_only,
+            );
+        }
+
+        pub(crate) fn ready(&mut self) {
+            self.paint();
+            self.clock
+                .advance(crate::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+        }
+
         async fn press(&mut self, code: KeyCode, modifiers: KeyModifiers) -> KeyFlow {
+            self.raw_key(KeyEvent::new(code, modifiers)).await
+        }
+
+        async fn raw_key(&mut self, key: KeyEvent) -> KeyFlow {
             let mut ctx = KeyCtx {
                 workspace: self.workspace.path(),
                 read_only: self.read_only,
@@ -1573,7 +1581,7 @@ pub(super) mod tests {
             };
             tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                handle_attached_key(&mut ctx, KeyEvent::new(code, modifiers)),
+                handle_attached_key(&mut ctx, key),
             )
             .await
             .expect("attached key deadline")
@@ -2005,14 +2013,7 @@ pub(super) mod tests {
     async fn story21_2_attached_quit_frame_owns_keys_and_exits_only_on_y() {
         let mut rig = Rig::new(false);
         rig.type_text("draft").await;
-        rig.state
-            .attached
-            .consent
-            .push_back(PendingConsentApproval {
-                request_id: crate::domain::models::RequestId::new(),
-                tool: "a2a/sender-consent".to_owned(),
-                input_preview: "consent".to_owned(),
-            });
+        rig.retained_arrives(false);
         rig.ctrl('q').await;
         let facts = rig.state.quit_confirm.as_ref().unwrap().facts.clone();
         assert!(facts.composer_draft);
@@ -2025,7 +2026,7 @@ pub(super) mod tests {
             assert!(rig.state.quit_confirm.is_some(), "{c} consumed");
         }
         assert_eq!(rig.state.input_buffer, "draft");
-        assert_eq!(rig.state.attached.consent.len(), 1);
+        assert_eq!(rig.state.decisions.undecided(), 1);
         assert!(rig.frames().is_empty());
         // n, Esc, Ctrl+C and Enter each cancel without exiting.
         for cancel in [
@@ -2039,7 +2040,7 @@ pub(super) mod tests {
             assert!(rig.state.quit_confirm.is_none(), "{cancel:?} cancels");
             assert_eq!(rig.state.input_buffer, "draft");
             assert_eq!(
-                rig.state.attached.consent.len(),
+                rig.state.decisions.undecided(),
                 1,
                 "the card was never answered"
             );
@@ -2049,7 +2050,7 @@ pub(super) mod tests {
         // Explicit `y` is the only exit, and it answers no card.
         assert_eq!(rig.ch('y').await, KeyFlow::Quit);
         assert!(rig.state.quit_confirm.is_none());
-        assert_eq!(rig.state.attached.consent.len(), 1);
+        assert_eq!(rig.state.decisions.undecided(), 1);
         assert!(rig.frames().is_empty());
     }
 
@@ -2888,69 +2889,10 @@ pub(super) mod tests {
 
     // ── the pre-existing owners keep their keys ──────────────────────────────
 
-    /// 21-3 3-C (AC16, AC17; was "keeps its keys and Ctrl+C declines it"): a card answers only
-    /// in Chat focus, and `Esc` / `Ctrl+C` post one cue instead of declining it.
+    /// The retract confirmation remains a legacy card in this slice.
     #[tokio::test]
-    async fn story21_3_attached_consent_and_retract_cards_answer_in_chat_and_never_on_esc() {
-        fn consent() -> PendingConsentApproval {
-            PendingConsentApproval {
-                request_id: crate::domain::models::RequestId::new(),
-                tool: "a2a/sender-consent".to_owned(),
-                input_preview: "consent".to_owned(),
-            }
-        }
+    async fn story21_3_attached_retract_card_never_decides_on_esc() {
         let mut rig = Rig::new(false);
-        rig.state.attached.consent.push_back(consent());
-        // Input focus: `y` is text and the card stays pending.
-        rig.ch('y').await;
-        assert!(rig.frames().is_empty() && rig.state.attached.consent.len() == 1);
-        assert_eq!(rig.state.input_buffer, "y");
-        rig.state.input_buffer.clear();
-        rig.state.cursor_position = 0;
-        rig.state.input_scroll_offset = 0;
-        attached_card_arrived(&mut rig.state, false);
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        let cue = crate::adapters::tui::keymap::render::card_cue(Context::Consent, Host::Attached);
-        for pressed_ctrl_c in [false, true] {
-            if pressed_ctrl_c {
-                rig.ctrl('c').await;
-            } else {
-                rig.esc().await;
-            }
-            assert!(
-                rig.frames().is_empty() && rig.state.attached.consent.len() == 1,
-                "no decision"
-            );
-            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
-        }
-        assert!(
-            rig.state.quit_confirm.is_none(),
-            "Ctrl+C is never a quit here"
-        );
-        // Positive control: the explicit keys decide, once each.
-        rig.ch('y').await;
-        assert!(matches!(
-            rig.frames().as_slice(),
-            [ClientFrame::ApprovalResponse {
-                outcome: crate::domain::models::ApprovalOutcome::Once,
-                ..
-            }]
-        ));
-        assert_eq!(
-            rig.state.focus,
-            FocusState::Input,
-            "consent returns borrowed focus"
-        );
-        rig.retained_arrives(false);
-        rig.ch('n').await;
-        assert!(matches!(
-            rig.frames().as_slice(),
-            [ClientFrame::ApprovalResponse {
-                outcome: crate::domain::models::ApprovalOutcome::Reject { .. },
-                ..
-            }]
-        ));
-        // The retract confirmation: same grammar, same cue.
         rig.state.attached.retract_confirm =
             Some(("peer-response-node-a".to_owned(), "first".to_owned()));
         assert_eq!(rig.state.focus, FocusState::Input);
@@ -2996,7 +2938,7 @@ pub(super) mod tests {
                     chunks: 1,
                 },
             ] {
-                apply_attached_approval_frame(&mut self.state, frame, self.read_only);
+                self.approval_frame(frame);
             }
             self.paint_approvals();
         }
@@ -3019,193 +2961,47 @@ pub(super) mod tests {
                     self.read_only,
                 );
             } else {
-                super::super::apply_attached_consent_frame(
-                    &mut self.state,
-                    DaemonFrame::ApprovalRequest {
-                        request_id: crate::domain::models::RequestId::new(),
-                        tool: "a2a/sender-consent".into(),
-                        source: crate::domain::models::tool_call::ApprovalSource::ForegroundTurn {
-                            conversation_id: "c".into(),
-                        },
-                        risk: crate::domain::models::ToolRisk::Standard,
-                        summary: "consent".into(),
-                        input_bytes: None,
+                self.approval_frame(DaemonFrame::ApprovalRequest {
+                    request_id: crate::domain::models::RequestId::new(),
+                    tool: "a2a/sender-consent".into(),
+                    source: crate::domain::models::tool_call::ApprovalSource::ForegroundTurn {
+                        conversation_id: "c".into(),
                     },
-                    self.read_only,
-                );
+                    risk: crate::domain::models::ToolRisk::Standard,
+                    summary: "consent".into(),
+                    input_bytes: None,
+                });
             }
         }
-    }
-
-    async fn retained_attached_arrival(consolidation: bool) {
-        for (focus, draft, help) in [
-            (FocusState::Input, "", false),
-            (FocusState::Input, "draft\n界", false),
-            (FocusState::Input, "", true),
-        ] {
-            let mut rig = Rig::new(false);
-            rig.state.focus = focus.clone();
-            rig.state.input_buffer = draft.into();
-            rig.state.cursor_position = rig.state.input_buffer.chars().count();
-            if help {
-                rig.ctrl('x').await;
-                rig.ch('?').await;
-            }
-            rig.retained_arrives(consolidation);
-            let takes = !help && focus == FocusState::Input && draft.is_empty();
-            assert_eq!(
-                rig.state.focus,
-                if takes {
-                    FocusState::Chat
-                } else {
-                    focus.clone()
-                }
-            );
-            assert_eq!(rig.state.input_buffer, draft);
-            assert!(rig.frames().is_empty());
-            if takes {
-                rig.ch('i').await;
-                assert_eq!(rig.state.focus, FocusState::Input);
-                rig.retained_arrives(consolidation);
-                assert_eq!(
-                    rig.state.focus,
-                    FocusState::Chat,
-                    "burst retakes empty Input"
-                );
-            } else if !help && focus == FocusState::Input {
-                rig.esc().await;
-                rig.ch('i').await;
-                assert_eq!(rig.state.focus, FocusState::Input);
-                assert_eq!(rig.state.input_buffer, draft);
-            }
-            assert_eq!(
-                rig.state.attached.consolidation_token.is_some(),
-                consolidation
-            );
-            assert_eq!(rig.state.attached.consent.is_empty(), consolidation);
-        }
-    }
-
-    #[tokio::test]
-    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_attached_consent() {
-        retained_attached_arrival(false).await;
     }
 
     #[tokio::test]
     async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_attached_consolidation() {
-        retained_attached_arrival(true).await;
-    }
-
-    #[tokio::test]
-    async fn story21_3_borrowed_consent_focus_restores_composition() {
-        let mut rig = Rig::new(false);
-        rig.retained_arrives(false);
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        rig.ch('y').await;
-        assert_eq!(rig.state.focus, FocusState::Input);
-        assert!(matches!(
-            rig.frames().as_slice(),
-            [ClientFrame::ApprovalResponse { .. }]
-        ));
-        let pending = super::super::attached_card_pending(&rig.state);
-        super::handle_attached_paste(&mut rig.state, "first line\nsecond line", pending);
-        rig.enter().await;
-        assert_eq!(
-            rig.frames().iter().find_map(user_text),
-            Some("first line\nsecond line")
-        );
-        // Tab saves this restored focus, not the card's Chat.
-        let mut row = system_message("pending response");
-        row.id = "peer".into();
-        rig.domain_tab.conversation.messages.push(row);
-        rig.domain_tab.conversation.peer_row_controls.insert(
-            "peer".into(),
-            crate::domain::models::PeerRowControl {
-                node_id: "node".into(),
-                item_address: None,
-                stories: None,
-                status: None,
-                selected_for: None,
-                retro: None,
-                message_type: crate::domain::models::SemanticMessageType::Unknown,
-                sender_label: "sender".into(),
-                stage: crate::domain::models::PeerRowStage::AwaitingOperator,
-                node_resolvable: true,
-            },
-        );
-        rig.press(KeyCode::Tab, KeyModifiers::NONE).await;
-        assert!(rig.state.recipient_surface.is_some());
-        rig.esc().await;
-        assert_eq!(rig.state.focus, FocusState::Input);
-    }
-
-    #[tokio::test]
-    async fn story21_3_borrowed_focus_respects_explicit_user_control() {
-        let mut rig = Rig::new(false);
-        rig.retained_arrives(false);
-        rig.ch('i').await;
-        assert_eq!(rig.state.focus, FocusState::Input);
-        rig.esc().await;
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        rig.ch('y').await;
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        assert!(matches!(
-            rig.frames().as_slice(),
-            [ClientFrame::ApprovalResponse { .. }]
-        ));
-    }
-
-    #[tokio::test]
-    async fn story21_3_borrowed_focus_waits_for_last_attached_card() {
-        let mut rig = Rig::new(false);
-        rig.approval_arrives("queued");
-        rig.retained_arrives(false);
-        rig.ch('y').await;
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        assert_eq!(rig.state.attached.approvals.pending.len(), 1);
-        rig.paint_approvals();
-        rig.ch('y').await;
-        assert_eq!(rig.state.focus, FocusState::Input);
-        assert_eq!(rig.frames().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn story21_3_borrowed_focus_settles_after_frame_without_key() {
-        let mut rig = Rig::new(false);
-        rig.approval_arrives("withdrawn");
-        apply_attached_approval_frame(
-            &mut rig.state,
-            DaemonFrame::ApprovalClosed {
-                request_id: crate::domain::models::RequestId("withdrawn".into()),
-            },
-            false,
-        );
-        super::super::settle_attached_card_focus(&mut rig.state, false);
-        assert!(rig.state.attached.approvals.pending.is_empty());
-        assert_eq!(rig.state.focus, FocusState::Input);
-        assert!(rig.frames().is_empty());
-    }
-
-    #[tokio::test]
-    async fn story21_3_borrowed_focus_does_not_restore_unborrowed_focus() {
-        for (read_only, draft) in [(true, ""), (false, "draft")] {
-            let mut rig = Rig::new(read_only);
-            rig.state.input_buffer = draft.into();
-            rig.state.cursor_position = rig.state.input_buffer.chars().count();
-            rig.retained_arrives(false);
-            assert_eq!(rig.state.focus, FocusState::Input);
-            rig.esc().await;
-            rig.ch('y').await;
-            assert_eq!(rig.state.focus, FocusState::Chat);
-            assert_eq!(rig.state.input_buffer, draft);
-        }
-    }
-
-    async fn arrival_behind_surface(surface: char) {
         for draft in ["", "saved draft"] {
             let mut rig = Rig::new(false);
             rig.state.input_buffer = draft.into();
-            rig.state.cursor_position = rig.state.input_buffer.chars().count();
+            rig.state.cursor_position = draft.chars().count();
+            rig.retained_arrives(true);
+            assert_eq!(rig.state.input_buffer, draft);
+            assert_eq!(
+                rig.state.focus,
+                if draft.is_empty() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                }
+            );
+            assert!(rig.state.attached.consolidation_token.is_some());
+            assert!(rig.frames().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_3_arrival_behind_log_and_quit_attached() {
+        for surface in ['n', 'q'] {
+            let mut rig = Rig::new(false);
+            rig.state.input_buffer = "saved draft".into();
+            rig.state.cursor_position = rig.state.input_buffer.len();
             rig.domain_tab.streaming.is_streaming = true;
             if surface == 'q' {
                 rig.ctrl('q').await;
@@ -3213,108 +3009,32 @@ pub(super) mod tests {
                 rig.ctrl('x').await;
                 rig.ch(surface).await;
             }
-            assert_eq!(rig.state.focus, FocusState::Input);
-            assert!(rig.state.notification_log.is_some() || rig.state.quit_confirm.is_some());
             rig.approval_arrives("behind-surface");
-            assert_eq!(rig.state.focus, FocusState::Input, "surface keeps focus");
+            assert_eq!(rig.state.decisions.undecided(), 1);
             rig.ch('d').await;
-            assert_eq!(rig.state.input_buffer, draft, "surface keeps its keys");
+            assert_eq!(rig.state.input_buffer, "saved draft");
             rig.esc().await;
-            assert_eq!(
-                rig.state.focus,
-                if draft.is_empty() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                }
-            );
-            assert_eq!(rig.state.attached.approvals.pending.len(), 1);
-            assert_eq!(rig.state.input_buffer, draft);
-            assert!(
-                rig.frames().is_empty(),
-                "dismissal never decides or interrupts"
-            );
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert!(rig.frames().is_empty());
         }
-    }
-
-    #[tokio::test]
-    async fn story21_3_arrival_behind_log_attached() {
-        arrival_behind_surface('n').await;
-    }
-    #[tokio::test]
-    async fn story21_3_arrival_behind_quit_attached() {
-        arrival_behind_surface('q').await;
     }
 
     #[tokio::test]
     async fn story21_3_attached_approval_arriving_behind_help_remains_discoverable() {
-        for draft in ["", "saved draft"] {
-            let mut rig = Rig::new(false);
-            rig.state.input_buffer = draft.into();
-            rig.state.cursor_position = rig.state.input_buffer.chars().count();
-            rig.ctrl('x').await;
-            rig.ch('?').await;
-            assert!(presentation::is_open(&rig.state, Surface::Help));
-            assert_eq!(rig.state.focus, FocusState::Input);
-            rig.approval_arrives("behind-help");
-            assert!(presentation::is_open(&rig.state, Surface::Help));
-            assert_eq!(rig.state.focus, FocusState::Input);
-            rig.esc().await;
-            assert_eq!(
-                rig.state.focus,
-                if draft.is_empty() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                }
-            );
-            rig.paint_approvals();
-            if !draft.is_empty() {
-                assert_eq!(
-                    super::super::attached_notice_badges(&rig.state).decisions,
-                    1
-                );
-                assert!(
-                    rig.state.attached.approvals.painted.is_none(),
-                    "draft hides card"
-                );
-            }
-            rig.ch('y').await;
-            if draft.is_empty() {
-                assert!(matches!(
-                    rig.frames().as_slice(),
-                    [ClientFrame::ApprovalResponse {
-                        outcome: crate::domain::models::ApprovalOutcome::Once,
-                        ..
-                    }]
-                ));
-                rig.ch('y').await;
-                assert!(rig.frames().is_empty());
-            } else {
-                assert_eq!(rig.state.input_buffer, "saved drafty");
-                assert!(rig.frames().is_empty());
-                assert_eq!(rig.state.attached.approvals.pending.len(), 1);
-                rig.ctrl('x').await;
-                rig.ch('q').await;
-                let route = rig.notice(NoticeSource::Attached).unwrap();
-                assert!(
-                    route.contains("clear the draft")
-                        && route.contains(&crate::adapters::tui::keymap::render::key_text(
-                            InputCmd::ReturnToChat
-                        ))
-                );
-                assert!(route.contains(&crate::adapters::tui::keymap::render::rail(
-                    Context::Permission,
-                    crate::adapters::tui::keymap::table_permission::PermissionCmd::Deny
-                )));
-                rig.esc().await;
-                rig.paint_approvals();
-                assert!(
-                    rig.state.attached.approvals.painted.is_none(),
-                    "Esc does not expose a drafted approval"
-                );
-            }
-        }
+        let mut rig = Rig::new(false);
+        rig.state.input_buffer = "saved draft".into();
+        rig.state.cursor_position = rig.state.input_buffer.len();
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        rig.approval_arrives("behind-help");
+        assert!(presentation::is_open(&rig.state, Surface::Help));
+        rig.esc().await;
+        assert_eq!(rig.state.input_buffer, "saved draft");
+        rig.ctrl('x').await;
+        rig.ch('q').await;
+        assert!(presentation::is_open(&rig.state, Surface::DecisionQueue));
+        assert_eq!(rig.state.decisions.undecided(), 1);
+        assert!(rig.frames().is_empty());
     }
 
     #[tokio::test]
@@ -3391,85 +3111,641 @@ pub(super) mod tests {
         assert!(rig.state.pending_team_proposals.contains_key("c"));
     }
 
-    /// 21-3 3-C patch round (R1, FR-21-3-c): an approval that arrives while the writer sits in
-    /// an empty Input hands the card Chat focus; `y` then decides once. Esc / Ctrl+C post the
-    /// registry cue through the host (R4c) and a card never answers outside Chat (R4b).
+    fn screen(rig: &mut Rig) -> String {
+        let terminal = rig.paint();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[tokio::test]
-    async fn story21_3_attached_approval_arrival_takes_chat_focus_for_an_empty_composer() {
-        let mut rig = Rig::new(false);
-        assert_eq!(rig.state.focus, FocusState::Input);
-        rig.approval_arrives("a");
-        assert_eq!(rig.state.focus, FocusState::Chat, "the arrival takes focus");
-        let cue =
-            crate::adapters::tui::keymap::render::card_cue(Context::Permission, Host::Attached);
-        for ctrl_c in [false, true] {
-            if ctrl_c {
-                rig.ctrl('c').await;
-            } else {
-                rig.esc().await;
-            }
-            assert!(rig.frames().is_empty(), "no decision");
-            assert_eq!(
-                rig.state.attached.approvals.pending.len(),
-                1,
-                "the card stays pending"
-            );
-            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
-        }
+    async fn story21_6_attached_mirror_never_paints_a_decision() {
+        use crate::adapters::daemon::protocol::ApprovalRefusal;
+        use crate::domain::models::RequestId;
+        let mut rig = Rig::new(true);
+        let mut snapshot = super::super::tests::snapshot_with(Vec::new(), 0);
+        snapshot.retained_approvals = 2;
+        snapshot.pending_consent_cards = 1;
+        super::super::seed_mirror_waiting(&mut rig.state, &snapshot, true);
+        rig.approval_arrives("private");
+        rig.retained_arrives(false);
+        let painted = screen(&mut rig);
+        let layout = crate::adapters::tui::layout::compute_layout(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &rig.state.theme,
+            "",
+            1,
+            false,
+            crate::domain::models::visual::DensityMode::Focus,
+        )
+        .unwrap();
         assert!(
-            rig.state.quit_confirm.is_none(),
-            "Ctrl+C is never a quit here"
+            painted
+                .lines()
+                .nth(usize::from(layout.status_bar.y))
+                .unwrap()
+                .contains("3 approval(s) waiting for the writer"),
+            "{painted}"
         );
-        // Outside Chat the painted card is blocked: `y` is composer text.
-        rig.state.focus = FocusState::Input;
-        rig.ch('y').await;
-        assert_eq!(rig.state.input_buffer, "y");
-        assert!(rig.frames().is_empty() && rig.state.attached.approvals.pending.len() == 1);
-        rig.state.input_buffer.clear();
-        rig.state.cursor_position = 0;
-        rig.state.input_scroll_offset = 0;
+        assert!(
+            !painted.contains("Decision:")
+                && !painted.contains("[r] Review")
+                && !painted.contains("[y] Allow")
+                && !painted.contains("Needs you"),
+            "{painted}"
+        );
+        assert_eq!(rig.state.focus, FocusState::Input);
+        assert!(rig.state.modal_stack.is_empty());
+        assert!(rig.state.decisions.is_empty());
+        rig.ctrl('x').await;
+        rig.ch('?').await;
+        let owner = rig.state.modal_stack.top().unwrap().clone();
+        rig.approval_arrives("ignored-behind-help");
+        rig.retained_arrives(false);
+        assert_eq!(rig.state.modal_stack.top(), Some(&owner));
+        rig.esc().await;
         rig.state.focus = FocusState::Chat;
-        rig.paint_approvals();
         rig.ch('y').await;
+        assert!(rig.state.input_buffer.is_empty());
+        assert!(rig.frames().is_empty());
+        for (id, reason, expected) in [
+            ("first", None, 2),
+            ("first", None, 2),
+            ("other", Some(ApprovalRefusal::WriterOnly), 2),
+            ("other", Some(ApprovalRefusal::NoLongerPending), 1),
+        ] {
+            let request_id = RequestId(id.into());
+            rig.approval_frame(match reason {
+                None => DaemonFrame::ApprovalClosed { request_id },
+                Some(reason) => DaemonFrame::ApprovalRefused { request_id, reason },
+            });
+            assert_eq!(rig.state.decisions.mirror_waiting(), expected);
+            let painted = screen(&mut rig);
+            assert!(
+                painted.contains(&format!("{expected} approval(s) waiting for the writer")),
+                "{painted}"
+            );
+            assert!(
+                !painted.contains("Decision:") && !painted.contains("[r] Review"),
+                "{painted}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_writer_decides_exactly_once_and_retires_after_send() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("writer");
+        let painted = screen(&mut rig);
+        assert!(painted.contains("Decision: Permission"), "{painted}");
+        assert!(
+            painted.contains("[y] Allow  [s] Session  [a] Always"),
+            "{painted}"
+        );
+        assert!(
+            painted.contains("[n] Deny  [f] Deny + feedback  [r] Review"),
+            "{painted}"
+        );
+        assert!(
+            painted.lines().any(|line| line.starts_with("││ ")),
+            "{painted}"
+        );
+        rig.ch('y').await;
+        assert!(
+            rig.frames().is_empty(),
+            "first paint starts the inert window"
+        );
+        assert_eq!(rig.state.decisions.undecided(), 1);
+        rig.clock
+            .advance(crate::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+        rig.ch('y').await;
+        assert!(
+            matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse {
+            request_id, outcome: crate::domain::models::ApprovalOutcome::Once,
+        }] if request_id.0 == "writer")
+        );
+        assert!(rig.state.decisions.is_empty());
+        assert!(!presentation::is_open(&rig.state, Surface::Decision));
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty());
+
+        let mut failed = Rig::new(false);
+        failed.approval_arrives("closed");
+        failed.ready();
+        failed.rx.close();
+        failed.ch('y').await;
+        assert_eq!(failed.state.decisions.undecided(), 1);
+        assert!(presentation::is_open(&failed.state, Surface::Decision));
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_only_plain_press_can_decide_either_queued_item() {
+        use crate::domain::models::{ApprovalSource, RequestId, ToolRisk};
+        use crossterm::event::KeyEventKind;
+
+        for consent in [false, true] {
+            let mut rig = Rig::new(false);
+            for id in ["first", "second"] {
+                if consent {
+                    rig.approval_frame(DaemonFrame::ApprovalRequest {
+                        request_id: RequestId(id.into()),
+                        tool: "a2a/sender-consent".into(),
+                        source: ApprovalSource::ForegroundTurn {
+                            conversation_id: "c".into(),
+                        },
+                        risk: ToolRisk::Standard,
+                        summary: "consent".into(),
+                        input_bytes: None,
+                    });
+                } else {
+                    rig.approval_arrives(id);
+                }
+            }
+            rig.ready();
+            let before: Vec<_> = rig.state.decisions.items().cloned().collect();
+            assert_eq!(before.len(), 2);
+            for code in ['y', 's', 'a', 'n', 'f', 'r', 'Y'] {
+                for modifiers in [
+                    KeyModifiers::SHIFT,
+                    KeyModifiers::CONTROL,
+                    KeyModifiers::ALT,
+                    KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                ] {
+                    rig.raw_key(KeyEvent::new(KeyCode::Char(code), modifiers))
+                        .await;
+                    assert_eq!(
+                        rig.state.decisions.items().cloned().collect::<Vec<_>>(),
+                        before
+                    );
+                    assert!(rig.frames().is_empty());
+                }
+                for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                    rig.raw_key(KeyEvent::new_with_kind(
+                        KeyCode::Char(code),
+                        KeyModifiers::NONE,
+                        kind,
+                    ))
+                    .await;
+                    assert_eq!(
+                        rig.state.decisions.items().cloned().collect::<Vec<_>>(),
+                        before
+                    );
+                    assert!(rig.frames().is_empty());
+                }
+            }
+            rig.ch('y').await;
+            assert!(matches!(rig.frames().as_slice(),
+                [ClientFrame::ApprovalResponse { request_id, .. }] if request_id.0 == "first"));
+            assert_eq!(rig.state.decisions.undecided(), 1);
+            rig.ready();
+            rig.raw_key(KeyEvent::new_with_kind(
+                KeyCode::Char('y'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))
+            .await;
+            assert!(rig.frames().is_empty());
+            assert_eq!(rig.state.decisions.items().next(), Some(&before[1]));
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_feedback_submit_requires_plain_press_but_editing_remains_live() {
+        use crossterm::event::KeyEventKind;
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("feedback-raw");
+        rig.ready();
+        rig.ch('f').await;
+        rig.type_text("abc").await;
+        rig.ctrl('a').await;
+        rig.press(KeyCode::Char('Z'), KeyModifiers::SHIFT).await;
+        rig.ctrl('e').await;
+        rig.ctrl('h').await;
+        rig.ctrl('w').await;
+        rig.type_text("temporary").await;
+        rig.ctrl('a').await;
+        rig.ctrl('k').await;
+        rig.type_text("temporary").await;
+        rig.ctrl('u').await;
+        rig.type_text("Zab").await;
+        let before: Vec<_> = rig.state.decisions.items().cloned().collect();
+        for key in [
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat),
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        ] {
+            rig.raw_key(key).await;
+            assert_eq!(
+                rig.state.decisions.items().cloned().collect::<Vec<_>>(),
+                before
+            );
+            assert!(rig.frames().is_empty());
+        }
+        rig.enter().await;
+        assert!(matches!(rig.frames().as_slice(),
+            [ClientFrame::ApprovalResponse { outcome: crate::domain::models::ApprovalOutcome::Reject { feedback: Some(text) }, .. }]
+                if text == "Zab"));
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_waiting_and_deferred_permissions_leave_legacy_cards_usable() {
+        for deferred in [false, true] {
+            for card in ["consolidation", "retract", "team"] {
+                let mut rig = Rig::new(false);
+                if !deferred {
+                    rig.state.pending_leader = Some(Context::Input);
+                }
+                rig.approval_arrives("waiting");
+                if deferred {
+                    rig.esc().await;
+                } else {
+                    rig.state.pending_leader = None;
+                }
+                assert!(!presentation::is_open(&rig.state, Surface::Decision));
+                match card {
+                    "consolidation" => rig.retained_arrives(true),
+                    "retract" => {
+                        rig.retractable("peer-response-test", "retract canary");
+                        rig.state.attached.retract_confirm =
+                            Some(("peer-response-test".into(), "retract canary".into()));
+                        attached_card_arrived(&mut rig.state, false);
+                    }
+                    "team" => {
+                        crate::adapters::tui::handlers::team_command::open_team_retract_card(
+                            &mut rig.state,
+                            "daemon-attachment",
+                            crate::domain::events::TeamRetractPreview::Card(
+                                crate::domain::events::TeamRetractCard {
+                                    peer: "peer-a".into(),
+                                    item_id: "item-a".into(),
+                                    task: None,
+                                    body: "team retract canary".into(),
+                                    armed: true,
+                                },
+                            ),
+                        );
+                        rig.team_requests.open_retract = Some("retract-a".into());
+                    }
+                    _ => unreachable!(),
+                }
+                let painted = screen(&mut rig);
+                let expected = match card {
+                    "consolidation" => "memory",
+                    "retract" => "retract canary",
+                    "team" => "team retract canary",
+                    _ => unreachable!(),
+                };
+                assert!(
+                    painted.contains(expected),
+                    "{card} deferred={deferred}: {painted}"
+                );
+                rig.ch('y').await;
+                let frames = rig.frames();
+                assert!(
+                    match card {
+                        "consolidation" => matches!(
+                            frames.as_slice(),
+                            [ClientFrame::ConsolidationResolve {
+                                token: ProposalToken(7),
+                                accept: true
+                            }]
+                        ),
+                        "retract" =>
+                            matches!(frames.as_slice(), [ClientFrame::RetractAutoResponse { message_id, .. }] if message_id == "peer-response-test"),
+                        "team" =>
+                            matches!(frames.as_slice(), [ClientFrame::TeamRetractDecision { request, confirm: true }] if request == "retract-a"),
+                        _ => false,
+                    },
+                    "{card} deferred={deferred}: {frames:?}"
+                );
+                assert_eq!(rig.state.decisions.undecided(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_esc_defers_and_never_decides() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("defer");
+        rig.esc().await;
+        assert!(rig.frames().is_empty());
+        assert_eq!(rig.state.decisions.undecided(), 1);
+        assert!(!presentation::is_open(&rig.state, Surface::Decision));
+        let painted = screen(&mut rig);
+        assert!(painted.contains("Needs you (1) ^X q"), "{painted}");
+        rig.ctrl('x').await;
+        rig.ch('q').await;
+        assert!(presentation::is_open(&rig.state, Surface::DecisionQueue));
+        rig.enter().await;
+        rig.ready();
+        rig.ch('n').await;
         assert!(matches!(
             rig.frames().as_slice(),
             [ClientFrame::ApprovalResponse {
-                outcome: crate::domain::models::ApprovalOutcome::Once,
+                outcome: crate::domain::models::ApprovalOutcome::Reject { feedback: None },
                 ..
             }]
         ));
-        assert!(
-            rig.state.attached.approvals.pending.is_empty(),
-            "decided once"
-        );
-        rig.ch('y').await;
-        assert!(rig.frames().is_empty(), "a second `y` decides nothing");
     }
 
-    /// A draft keeps focus: the user is mid-sentence, so `y` stays text and no frame goes out
-    /// (the card is hidden by the paint rule and still pending). A read-only client keeps focus.
+    #[tokio::test]
+    async fn story21_6_attached_stale_after_a_closed_frame_shows_the_source_copy() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("stale");
+        rig.approval_frame(DaemonFrame::ApprovalClosed {
+            request_id: crate::domain::models::RequestId("stale".into()),
+        });
+        let painted = screen(&mut rig);
+        assert!(
+            painted.contains("approval refused: that request is no longer pending"),
+            "{painted}"
+        );
+        assert!(painted.contains("[Esc] Close"), "{painted}");
+        assert!(!painted.contains("[y] Allow"), "{painted}");
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty());
+        rig.esc().await;
+        assert!(rig.state.decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_closed_review_and_feedback_cannot_send() {
+        for key in ['r', 'f'] {
+            let mut rig = Rig::new(false);
+            rig.approval_arrives("closed-subcontext");
+            rig.ready();
+            rig.ch(key).await;
+            rig.approval_frame(DaemonFrame::ApprovalClosed {
+                request_id: crate::domain::models::RequestId("closed-subcontext".into()),
+            });
+            rig.approval_frame(DaemonFrame::ApprovalInputChunk {
+                request_id: crate::domain::models::RequestId("closed-subcontext".into()),
+                sequence: 0,
+                data: "{}".into(),
+            });
+            rig.approval_frame(DaemonFrame::ApprovalInputComplete {
+                request_id: crate::domain::models::RequestId("closed-subcontext".into()),
+                chunks: 1,
+            });
+            rig.ch('y').await;
+            rig.enter().await;
+            assert!(rig.frames().is_empty());
+            assert_eq!(rig.state.decisions.undecided(), 0);
+            assert!(screen(&mut rig).contains("[Esc] Close"));
+            rig.esc().await;
+            assert!(rig.state.decisions.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_review_waits_for_exact_input() {
+        use crate::domain::models::{ApprovalSource, RequestId, ToolRisk};
+        let mut rig = Rig::new(false);
+        let data = r#"{"command":"EXACT-INPUT-CANARY"}"#;
+        rig.approval_frame(DaemonFrame::ApprovalRequest {
+            request_id: RequestId("receiving".into()),
+            tool: "Bash".into(),
+            source: ApprovalSource::ForegroundTurn {
+                conversation_id: "c".into(),
+            },
+            risk: ToolRisk::Standard,
+            summary: "summary".into(),
+            input_bytes: Some(data.len() as u64),
+        });
+        rig.ready();
+        rig.ch('r').await;
+        assert!(screen(&mut rig).contains("receiving exact input"));
+        rig.approval_frame(DaemonFrame::ApprovalInputChunk {
+            request_id: RequestId("receiving".into()),
+            sequence: 0,
+            data: data.into(),
+        });
+        rig.approval_frame(DaemonFrame::ApprovalInputComplete {
+            request_id: RequestId("receiving".into()),
+            chunks: 1,
+        });
+        rig.ch('r').await;
+        assert!(screen(&mut rig).contains("EXACT-INPUT-CANARY"));
+        assert!(rig.frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_review_keeps_request_identity_and_exact_tail() {
+        use crate::domain::models::{ApprovalSource, RequestId, ToolRisk};
+        for (width, height) in [(60, 16), (80, 24), (130, 30)] {
+            let mut rig = Rig::new(false);
+            rig.state.terminal_width = width;
+            rig.state.terminal_height = height;
+            let value = serde_json::json!({
+                "command": format!("HEAD {} \n[y] fake control \u{1b}[31m TAIL-CANARY", "long content ".repeat(120))
+            });
+            let data = serde_json::to_string(&value).unwrap();
+            rig.approval_frame(DaemonFrame::ApprovalRequest {
+                request_id: RequestId("review-a".into()),
+                tool: format!("mcp__{}__{}", "server".repeat(100), "operation".repeat(100)),
+                source: ApprovalSource::ForegroundSubagent {
+                    conversation_id: "c".into(),
+                    parent_tool_call_id: "parent".into(),
+                    subagent_type: "source".repeat(100),
+                },
+                risk: ToolRisk::Standard,
+                summary: "review input".into(),
+                input_bytes: Some(data.len() as u64),
+            });
+            rig.approval_frame(DaemonFrame::ApprovalInputChunk {
+                request_id: RequestId("review-a".into()),
+                sequence: 0,
+                data,
+            });
+            rig.approval_frame(DaemonFrame::ApprovalInputComplete {
+                request_id: RequestId("review-a".into()),
+                chunks: 1,
+            });
+            rig.ready();
+            rig.ch('r').await;
+            rig.approval_arrives("review-b");
+            let mut pages = String::new();
+            for _ in 0..80 {
+                let page = screen(&mut rig);
+                assert!(
+                    page.contains("[y] Allow") && page.contains("[n] Deny"),
+                    "{page}"
+                );
+                pages.push_str(&page);
+                rig.key(Key::PageDown).await;
+            }
+            assert!(
+                pages.contains("HEAD") && pages.contains("TAIL-CANARY"),
+                "{pages}"
+            );
+            assert!(!pages.contains('\u{1b}'), "{pages}");
+            assert!(!pages.contains(r#""command": "ok""#));
+            assert!(rig.frames().is_empty());
+            rig.ch('y').await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse { request_id, .. }]
+                if request_id.0 == "review-a")
+            );
+            assert_eq!(rig.state.decisions.undecided(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_consent_keys_and_labels() {
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope};
+        for (key, expected) in [
+            ('y', ApprovalOutcome::Once),
+            (
+                'a',
+                ApprovalOutcome::AlwaysAndSave {
+                    scope: ApprovalScope::Tool("a2a/sender-consent".into()),
+                },
+            ),
+            ('n', ApprovalOutcome::Reject { feedback: None }),
+        ] {
+            let mut rig = Rig::new(false);
+            rig.retained_arrives(false);
+            let painted = screen(&mut rig);
+            assert!(painted.contains("Decision: Peer consent"), "{painted}");
+            assert!(
+                painted.contains("[y] Allow once  [a] Always allow  [n] Decline"),
+                "{painted}"
+            );
+            rig.clock
+                .advance(crate::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+            rig.ch(key).await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse { outcome, .. }] if outcome == &expected)
+            );
+            assert!(rig.state.decisions.is_empty());
+        }
+        let mut reader = Rig::new(true);
+        reader.retained_arrives(false);
+        assert!(reader.state.decisions.is_empty());
+        assert!(!screen(&mut reader).contains("Decision: Peer consent"));
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_feedback_field_denies_with_text() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("feedback");
+        rig.ready();
+        rig.state.input_buffer = "untouched".into();
+        rig.state.cursor_position = 3;
+        rig.ch('f').await;
+        rig.type_text("not safe").await;
+        rig.enter().await;
+        assert!(
+            matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse {
+            outcome: crate::domain::models::ApprovalOutcome::Reject { feedback: Some(text) }, ..
+        }] if text == "not safe")
+        );
+        assert_eq!(rig.state.input_buffer, "untouched");
+        assert_eq!(rig.state.cursor_position, 3);
+        assert!(rig.frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_quit_counts_live_but_not_stale() {
+        let mut rig = Rig::new(false);
+        rig.approval_arrives("quit");
+        rig.ctrl('q').await;
+        assert_eq!(
+            rig.state
+                .quit_confirm
+                .as_ref()
+                .unwrap()
+                .facts
+                .pending_decisions,
+            1
+        );
+        rig.esc().await;
+        rig.approval_frame(DaemonFrame::ApprovalClosed {
+            request_id: crate::domain::models::RequestId("quit".into()),
+        });
+        assert_eq!(rig.state.decisions.undecided(), 0);
+        assert_eq!(rig.ctrl('q').await, KeyFlow::Quit);
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_paint_starts_inert_window() {
+        let mut rig = Rig::new(false);
+        rig.approval_frame(DaemonFrame::ApprovalRequest {
+            request_id: crate::domain::models::RequestId("paint".into()),
+            tool: "Bash".into(),
+            source: crate::domain::models::ApprovalSource::ForegroundTurn {
+                conversation_id: "c".into(),
+            },
+            risk: crate::domain::models::ToolRisk::Standard,
+            summary: "receiving".into(),
+            input_bytes: Some(2),
+        });
+        rig.clock
+            .advance(crate::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty(), "an unpainted frame is inert");
+        rig.paint();
+        rig.ch('y').await;
+        assert!(
+            rig.frames().is_empty(),
+            "the first paint restarts the inert interval"
+        );
+        rig.clock
+            .advance(crate::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+        rig.ch('y').await;
+        assert_eq!(rig.frames().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_permission_scope_and_deny_outcomes() {
+        use crate::domain::models::{ApprovalOutcome, ApprovalScope};
+        for (key, expected) in [
+            (
+                's',
+                ApprovalOutcome::AlwaysTool {
+                    tool_name: "Bash".into(),
+                },
+            ),
+            (
+                'a',
+                ApprovalOutcome::AlwaysAndSave {
+                    scope: ApprovalScope::Tool("Bash".into()),
+                },
+            ),
+            ('n', ApprovalOutcome::Reject { feedback: None }),
+        ] {
+            let mut rig = Rig::new(false);
+            rig.approval_arrives("scope");
+            rig.ready();
+            rig.ch(key).await;
+            assert!(
+                matches!(rig.frames().as_slice(), [ClientFrame::ApprovalResponse { request_id, outcome }]
+                if request_id.0 == "scope" && outcome == &expected)
+            );
+            assert!(rig.state.decisions.is_empty());
+        }
+    }
+
     #[tokio::test]
     async fn story21_3_attached_approval_arrival_never_takes_focus_from_a_draft_or_a_reader() {
-        let mut rig = Rig::new(false);
-        rig.state.input_buffer = "half a sentence ".to_owned();
-        rig.state.cursor_position = rig.state.input_buffer.chars().count();
-        rig.approval_arrives("a");
-        assert_eq!(rig.state.focus, FocusState::Input);
-        rig.ch('y').await;
-        assert_eq!(rig.state.input_buffer, "half a sentence y");
-        assert!(rig.frames().is_empty());
-        assert_eq!(
-            rig.state.attached.approvals.pending.len(),
-            1,
-            "the card waits"
-        );
-
-        let mut reader = Rig::new(true);
-        reader.approval_arrives("a");
-        assert_eq!(reader.state.focus, FocusState::Input);
-        reader.ch('y').await;
-        assert_eq!(reader.state.input_buffer, "y");
-        assert!(reader.frames().is_empty());
+        for read_only in [false, true] {
+            let mut rig = Rig::new(read_only);
+            rig.state.input_buffer = "draft ".into();
+            rig.state.cursor_position = rig.state.input_buffer.len();
+            rig.approval_arrives("draft");
+            rig.ch('y').await;
+            assert_eq!(rig.state.input_buffer, "draft y");
+            assert_eq!(rig.state.decisions.undecided(), usize::from(!read_only));
+            assert!(rig.frames().is_empty());
+        }
     }
 
     /// R4a: the consolidation card answers `y` / `n` in Chat (a token is sent once), they are
@@ -3726,16 +4002,14 @@ pub(super) mod tests {
         assert!(rig.frames().is_empty(), "never sent to the daemon");
     }
 
-    /// S2 AC10 — the attached client has no decision producers: `Ctrl+X q` is a
-    /// painted, routed chord that answers honestly (an Info notice) and sends
-    /// nothing to the daemon; the status row never claims a waiting decision.
+    /// With an empty attached queue the chord answers without sending a frame.
     #[tokio::test]
     async fn story21_1_attached_ctrl_x_q_answers_that_no_decision_waits_in_this_client() {
         let mut rig = Rig::new(false);
         assert_eq!(rig.ctrl('x').await, KeyFlow::Continue);
         assert_eq!(rig.ch('q').await, KeyFlow::Continue);
         let notice = rig.state.notifications.visible().next().expect("a toast");
-        assert_eq!(notice.message, "No decisions waiting in this client");
+        assert_eq!(notice.message, "No decisions waiting");
         assert_eq!(notice.severity, NoticeSeverity::Info);
         assert!(rig.state.decisions.is_empty());
         assert!(rig.frames().is_empty(), "never sent to the daemon");
@@ -4075,10 +4349,15 @@ pub(super) mod tests {
                 }
                 LeaderCmd::Decisions => {
                     let toast = rig.state.notifications.visible().next().expect("a toast");
-                    assert_eq!(toast.message, "No decisions waiting in this client");
+                    assert_eq!(toast.message, "No decisions waiting");
                     assert_eq!(toast.severity, NoticeSeverity::Info);
                     assert_eq!(posted, 1, "{label}");
                     assert!(rig.frames().is_empty(), "{label}: a local answer");
+                    rig.approval_arrives("leader-witness");
+                    rig.ctrl('x').await;
+                    rig.ch('q').await;
+                    assert!(presentation::is_open(&rig.state, Surface::DecisionQueue));
+                    assert_eq!(rig.state.decisions.undecided(), 1);
                 }
                 LeaderCmd::Send => {
                     let frames = rig.frames();
@@ -5302,6 +5581,7 @@ pub(super) mod tests {
                         }
                     }
                     Surface::Decision
+                    | Surface::DecisionQueue
                     | Surface::ModelSelector
                     | Surface::ProfileSwitcher
                     | Surface::UsagePanel
@@ -5390,8 +5670,9 @@ pub(super) mod tests {
         }
         super::handle_attached_paste(&mut rig.state, "hidden paste", false);
         assert!(rig.state.cursor_position <= rig.state.input_buffer.chars().count());
-        assert_eq!(rig.state.attached.approvals.pending.len(), 1);
+        assert_eq!(rig.state.decisions.undecided(), 1);
         rig.state.terminal_width = 80;
+        rig.ready();
         rig.ch('y').await;
         assert!(
             matches!(
@@ -5874,15 +6155,14 @@ pub(super) mod tests {
         rig.ctrl('x').await;
         let avail = attached_avail_ctx(&rig.state, false);
         assert!(avail.frame_origin);
-        let LeaderStep::Unavailable(_, remedy) =
-            leader_step(Host::Attached, Key::Char('q'), &avail, Context::Help.name())
-        else {
-            panic!("attached frame-origin pane absence must be registry-gated");
-        };
-        assert_eq!(remedy, "No decisions waiting in this client");
+        assert!(matches!(
+            leader_step(Host::Attached, Key::Char('q'), &avail, Context::Help.name()),
+            LeaderStep::Run(_)
+        ));
+        let remedy = "No decisions waiting";
         assert!(!presentation::is_open(&rig.state, Surface::Decision));
         rig.ch('q').await;
-        assert_eq!(rig.notice(NoticeSource::Chord), Some(remedy));
+        assert_eq!(rig.notice(NoticeSource::System), Some(remedy));
         assert_eq!(rig.state.notifications.records().len(), records + 1);
         assert_eq!(
             rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
@@ -6233,7 +6513,7 @@ pub(super) mod tests {
                 let records = rig.state.notifications.records().len();
                 rig.ch(key).await;
                 let expected = if key == 'q' {
-                    "No decisions waiting in this client".to_owned()
+                    "No decisions waiting".to_owned()
                 } else {
                     crate::adapters::tui::keymap::resolve::no_binding_text(
                         Key::Char(key),
@@ -6241,7 +6521,14 @@ pub(super) mod tests {
                     )
                 };
                 assert_eq!(rig.state.pending_leader, Some(Context::Help));
-                assert_eq!(rig.notice(NoticeSource::Chord), Some(expected.as_str()));
+                assert_eq!(
+                    rig.notice(if key == 'q' {
+                        NoticeSource::System
+                    } else {
+                        NoticeSource::Chord
+                    }),
+                    Some(expected.as_str())
+                );
                 assert_eq!(rig.state.notifications.records().len(), records + 1);
                 assert_eq!(
                     rig.state.modal_stack.iter().cloned().collect::<Vec<_>>(),
@@ -6267,14 +6554,14 @@ pub(super) mod tests {
                     let (y, row) = rows
                         .iter()
                         .enumerate()
-                        .find(|(_, row)| row.contains("[Q] Decisions (n/a)"))
+                        .find(|(_, row)| row.contains("[Q] Decisions"))
                         .unwrap();
                     let x = row[..row.find("[Q]").unwrap()].chars().count() as u16;
                     assert!(
                         buffer[(x, y as u16)].modifier.intersects(
                             ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED
                         ),
-                        "pressed unavailable row must stand out"
+                        "pressed Decisions row must stand out"
                     );
                 }
                 rig.ctrl('q').await;
@@ -6312,8 +6599,8 @@ pub(super) mod tests {
                 assert_eq!(base.state.notifications.records().len(), 1);
                 if key == 'q' {
                     assert_eq!(
-                        base.notice(NoticeSource::Attached),
-                        Some("No decisions waiting in this client")
+                        base.notice(NoticeSource::System),
+                        Some("No decisions waiting")
                     );
                 } else {
                     assert_eq!(

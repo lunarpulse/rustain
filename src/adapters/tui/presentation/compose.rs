@@ -178,6 +178,16 @@ pub fn compose(
                 pane_painted =
                     depth + 1 == state.modal_stack.len() && state.pending_leader.is_none();
             }
+            Surface::DecisionQueue => {
+                crate::adapters::tui::widgets::decision_list::render(
+                    frame,
+                    rect,
+                    state,
+                    facts,
+                    theme,
+                    modal.title(),
+                );
+            }
             Surface::Help => help_overlay::render(
                 frame,
                 rect,
@@ -238,6 +248,7 @@ pub fn compose(
                 | Surface::Help
                 | Surface::CommandPalette
                 | Surface::Decision
+                | Surface::DecisionQueue
                 | Surface::ModelSelector
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel

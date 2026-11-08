@@ -1,75 +1,30 @@
-//! Story 21.3 conformance leg (k4_permission): the KG-2 truth sweep of the
-//! Permission context (AC5, K4, local host): focus `Confirmation(Permission)`
-//! with a pending tool call, Review closed and Review open. Every key goes
-//! through the real front door (`support::press`). The attached twin of each row
-//! (`AttachedApprovals::key`, consent / consolidation / retract arms) lives next
-//! to `handle_attached_key` / `attach_loop`.
-//!
-//! `Esc` and `Ctrl+C` never deny the card (3-C, A8): with Review closed they post one cue,
-//! with Review open they go back.
+//! Permission rows and isolation through the painted decision-frame front door.
 
-use std::sync::Arc;
-
+use super::support::{is_inert, permission, permission_payload, press, press_all};
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::resolve::rows_of;
 use rustain::adapters::tui::keymap::table_permission::PermissionCmd;
-use rustain::adapters::tui::keymap::{
-    CommandId, Context, Host, Hosts, Key, Resolved, resolve, table,
-};
+use rustain::adapters::tui::keymap::{CommandId, Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::presentation::{Surface, is_open};
-use rustain::adapters::tui::state::{PendingPermission, TuiState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::ToolRisk;
-use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
-use super::support::{fresh, is_inert, press, press_all};
-
-fn card_focus() -> FocusState {
-    FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-}
-
-/// A fresh state with one pending tool-call decision owning the keyboard.
 fn card() -> TuiState {
-    let mut state = fresh();
-    state.pending_permission = Some(PendingPermission {
-        id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn {
-            conversation_id: "c1".into(),
-        },
-        tool_name: "Bash".to_string(),
-        input: Arc::new(serde_json::json!({"command": "ls"})),
-        risk: ToolRisk::Elevated,
-    });
-    state.focus = card_focus();
-    state
+    permission()
 }
 
-/// The same card with the Review reader open (`r` pressed through the front door).
 fn card_in_review() -> TuiState {
     let mut state = card();
     assert_eq!(press(&mut state, Key::Char('r')), InputAction::Consumed);
-    assert!(state.permission_reader.review.is_some(), "Review opened");
+    assert!(permission_payload(&state).reviewing);
     state
 }
 
-fn pending_id(state: &TuiState) -> RequestId {
-    state
-        .pending_permission
-        .as_ref()
-        .expect("the card is pending")
-        .id
-        .clone()
-}
-
-/// The state a "no command fires" sweep must see unchanged.
 #[derive(Debug, Clone, PartialEq)]
 struct Salient {
     focus: FocusState,
-    pending: Option<RequestId>,
-    review: Option<RequestId>,
-    reader_scroll: usize,
-    queued: usize,
+    items: Vec<rustain::adapters::tui::decision_queue::DecisionItem>,
+    frame: bool,
     buffer: String,
     cursor: usize,
     multiline: bool,
@@ -82,10 +37,8 @@ struct Salient {
 fn salient(state: &TuiState) -> Salient {
     Salient {
         focus: state.focus.clone(),
-        pending: state.pending_permission.as_ref().map(|p| p.id.clone()),
-        review: state.permission_reader.review.clone(),
-        reader_scroll: state.permission_reader.scroll,
-        queued: state.permission_queue.len(),
+        items: state.decisions.items().cloned().collect(),
+        frame: is_open(state, Surface::Decision),
         buffer: state.input_buffer.clone(),
         cursor: state.cursor_position,
         multiline: state.multiline_mode,
@@ -96,125 +49,24 @@ fn salient(state: &TuiState) -> Salient {
     }
 }
 
-/// The effect of `keys` in a card state that makes the command observable, by
-/// VALUE. Exhaustive on purpose: a new `PermissionCmd` does not compile until it
-/// has a witness.
+/// Exhaustive on purpose: every PermissionCmd has a behavioral witness.
 fn witness(cmd: PermissionCmd, keys: &[Key]) {
+    let mut state = card();
+    let expected = match cmd {
+        PermissionCmd::AllowOnce => InputAction::PermissionAllow,
+        PermissionCmd::AllowSession => InputAction::PermissionSessionAllow,
+        PermissionCmd::AllowAlways => InputAction::PermissionAlwaysAllow,
+        PermissionCmd::Deny => InputAction::PermissionDeny,
+        PermissionCmd::DenyWithFeedback | PermissionCmd::Review => InputAction::Consumed,
+    };
+    assert_eq!(press_all(&mut state, keys), vec![expected]);
     match cmd {
-        PermissionCmd::AllowOnce => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionAllow]
-            );
+        PermissionCmd::DenyWithFeedback => assert!(permission_payload(&state).feedback.is_some()),
+        PermissionCmd::Review => assert!(permission_payload(&state).reviewing),
+        _ => {
+            assert!(state.decisions.is_empty(), "the answered item is retired");
+            assert!(!is_open(&state, Surface::Decision));
         }
-        PermissionCmd::AllowSession => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionSessionAllow]
-            );
-        }
-        PermissionCmd::AllowAlways => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionAlwaysAllow]
-            );
-        }
-        PermissionCmd::Deny => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionDeny]
-            );
-        }
-        PermissionCmd::DenyWithFeedback => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::PermissionDenyFeedback]
-            );
-        }
-        PermissionCmd::Review => {
-            let mut state = card();
-            let id = pending_id(&state);
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(
-                state.permission_reader.review,
-                Some(id),
-                "Review pins the request"
-            );
-            assert_eq!(state.permission_reader.scroll, 0);
-            assert_eq!(state.focus, card_focus(), "Review stays inside the card");
-        }
-        PermissionCmd::BackOrCue => {
-            // 3-C (A8): with Review closed the key decides NOTHING: one inert answer, one cue,
-            // the card stays pending (K11 asserts the cue text and every other card).
-            let mut state = card();
-            let id = pending_id(&state);
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(pending_id(&state), id, "the key never decides the card");
-            assert_eq!(state.notifications.records().count(), 1, "one cue");
-            // With Review open the same key only goes back, the card stays pending.
-            let mut state = card_in_review();
-            let id = pending_id(&state);
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(state.permission_reader.review, None, "Review closed");
-            assert_eq!(pending_id(&state), id, "the card is still pending");
-            assert_eq!(state.focus, card_focus());
-        }
-        PermissionCmd::ReviewPageDown => {
-            let mut state = card_in_review();
-            state.permission_reader.scroll_max = 100;
-            state.permission_reader.viewport_rows = 11;
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(
-                state.permission_reader.scroll, 10,
-                "one page is viewport - 1"
-            );
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(state.permission_reader.scroll, 20);
-        }
-        PermissionCmd::ReviewPageUp => {
-            let mut state = card_in_review();
-            state.permission_reader.scroll_max = 100;
-            state.permission_reader.viewport_rows = 11;
-            state.permission_reader.scroll = 25;
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(
-                state.permission_reader.scroll, 15,
-                "one page is viewport - 1"
-            );
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::Consumed]);
-            assert_eq!(state.permission_reader.scroll, 5);
-        }
-        PermissionCmd::ScrollLineDown => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::ScrollLineDown]
-            );
-        }
-        PermissionCmd::ScrollLineUp => {
-            let mut state = card();
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::ScrollLineUp]);
-        }
-        PermissionCmd::ScrollToBottom => {
-            let mut state = card();
-            assert_eq!(
-                press_all(&mut state, keys),
-                vec![InputAction::ScrollToBottom]
-            );
-        }
-        PermissionCmd::ScrollToTop => {
-            let mut state = card();
-            assert_eq!(press_all(&mut state, keys), vec![InputAction::ScrollToTop]);
-        }
-        PermissionCmd::QuitRequest => panic!(
-            "{cmd:?} is an attached-only command: the local card swallows Ctrl+Q today; \
-             its witness lives next to `handle_attached_key` (story21_3_attached_*)"
-        ),
     }
 }
 
@@ -236,27 +88,33 @@ fn every_permission_row_resolves_to_its_command_by_value() {
         witness(cmd, row.keys);
         witnessed += 1;
     }
-    assert_eq!(
-        witnessed, 14,
-        "y s a n f r Esc Ctrl+C PgUp PgDn j k G g are the local card keys"
-    );
+    assert_eq!(witnessed, 6, "y s a n f r are the permission rows");
 }
 
-/// The rows of one host only are exactly the ones this leg knows about.
+/// Both hosts share the same six permission rows.
 #[test]
-fn the_only_attached_permission_row_is_ctrl_q() {
-    let attached_only: Vec<_> = table()
-        .iter()
-        .filter(|row| row.context == Context::Permission && row.hosts == Hosts::Attached)
-        .map(|row| (row.keys.to_vec(), row.command))
-        .collect();
-    assert_eq!(
-        attached_only,
-        vec![(
-            vec![Key::Ctrl('q')],
-            CommandId::Permission(PermissionCmd::QuitRequest)
-        )]
-    );
+fn attached_and_local_permission_rows_match() {
+    let rows = |host| {
+        rows_of(Context::Permission, host)
+            .map(|row| (row.keys.to_vec(), row.command))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(Host::Local), rows(Host::Attached));
+    assert_eq!(rows(Host::Attached).len(), 6);
+}
+
+#[test]
+fn review_backs_out_before_the_permission_is_deferred() {
+    for key in [Key::Esc, Key::Ctrl('c')] {
+        let mut state = card_in_review();
+        assert_eq!(press(&mut state, key), InputAction::Consumed);
+        assert!(!permission_payload(&state).reviewing);
+        assert!(is_open(&state, Surface::Decision));
+        assert!(!state.decisions.items().next().unwrap().deferred);
+        assert_eq!(press(&mut state, key), InputAction::Consumed);
+        assert!(!is_open(&state, Surface::Decision));
+        assert!(state.decisions.items().next().unwrap().deferred);
+    }
 }
 
 /// Negative sweep over one starting state: every key with NO local Permission

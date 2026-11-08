@@ -36,7 +36,7 @@ Reach: *portable* keys work in every terminal; *extended keyboard* keys need a k
 | `Ctrl+X, ?` | This help overlay | local, attached | portable |  |
 | `Ctrl+X, N` | Notification Log (also /notifications); Log !N counts unseen warnings and errors | local, attached | portable |  |
 | `Ctrl+X, X` | Clear toasts (hides every visible toast; the log keeps them) | local, attached | portable |  |
-| `Ctrl+X, Q` | Decisions: focus the oldest waiting decision (status cue: Needs you) | local, attached | portable |  |
+| `Ctrl+X, Q` | Decisions: open the Needs-you queue (status cue: Needs you) | local, attached | portable |  |
 | `Ctrl+X, Enter` | Send the composer from any terminal (multi-line safe send) | local, attached | portable |  |
 | `Ctrl+X, Esc` | Close the menu without doing anything | local, attached | portable |  |
 | `Ctrl+X, Ctrl+C` | Close the menu without doing anything | local, attached | portable |  |
@@ -214,6 +214,8 @@ Also inherits: Caret text field.
 
 ## Permission
 
+Also inherits: Decisions.
+
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `y` | Allow tool call (this time only) | local, attached | portable |  |
@@ -222,15 +224,6 @@ Also inherits: Caret text field.
 | `n` | Deny tool call | local, attached | portable |  |
 | `f` | Deny + feedback — provide text guidance to the LLM | local, attached | portable |  |
 | `r` | Open the exact tool input for review | local, attached | portable |  |
-| `Esc` | Close the review when it is open; otherwise remind which keys decide the tool call | local, attached | portable |  |
-| `PgUp` | Page the review reader up | local, attached | portable |  |
-| `PgDn` | Page the review reader down | local, attached | portable |  |
-| `j` | Scroll the chat down one line | local | portable |  |
-| `k` | Scroll the chat up one line | local | portable |  |
-| `G` | Scroll the chat to the bottom | local | portable |  |
-| `g` | Scroll the chat to the top | local | portable |  |
-| `Ctrl+Q` | Ask to quit | attached | portable |  |
-| `Ctrl+C` | Close the review when it is open; otherwise remind which keys decide the tool call | local, attached | portable |  |
 
 ## Append-only text field
 
@@ -651,19 +644,34 @@ Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Ctrl+X` | Open the menu above this frame | local | portable |  |
-| `Ctrl+P` | Open the command palette above this frame | local | portable |  |
-| `Ctrl+C` | Back one frame without deciding; leave the item waiting | local | portable |  |
-| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local | portable |  |
-| `Enter` | Continue (a recovery decision) | local | portable |  |
-| `Esc` | Decide the safe default, or defer a deferrable decision | local | portable |  |
-| `y` | Accept, continue or confirm (by the decision's kind) | local | portable |  |
-| `n` | Decline, cancel or start fresh (by the decision's kind) | local | portable |  |
-| `s` | Switch to a cheaper model (a budget decision) | local | portable |  |
-| `p` | Pause (a budget decision) | local | portable |  |
-| `k` | Compact the conversation (a context warning) | local | portable |  |
-| `PgUp` | Scroll the decision body up | local | portable |  |
-| `PgDn` | Scroll the decision body down | local | portable |  |
+| `Ctrl+X` | Open the menu above this frame | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this frame | local, attached | portable |  |
+| `Ctrl+C` | Back one frame without deciding; leave the item waiting | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
+| `Enter` | Continue (a recovery decision) | local, attached | portable |  |
+| `Esc` | Decide the safe default, or defer a deferrable decision | local, attached | portable |  |
+| `y` | Accept, continue or confirm (by the decision's kind) | local, attached | portable |  |
+| `n` | Decline, cancel or start fresh (by the decision's kind) | local, attached | portable |  |
+| `s` | Switch to a cheaper model (a budget decision) | local, attached | portable |  |
+| `p` | Pause (a budget decision) | local, attached | portable |  |
+| `k` | Compact the conversation (a context warning) | local, attached | portable |  |
+| `PgUp` | Scroll the decision body up | local, attached | portable |  |
+| `PgDn` | Scroll the decision body down | local, attached | portable |  |
+
+## Needs-you list
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Ctrl+X` | Open the menu above this list | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this list | local, attached | portable |  |
+| `Up` | Select the previous waiting decision | local, attached | portable |  |
+| `k` | Select the previous waiting decision | local, attached | portable |  |
+| `Down` | Select the next waiting decision | local, attached | portable |  |
+| `j` | Select the next waiting decision | local, attached | portable |  |
+| `Enter` | Open the selected decision; opening never answers it | local, attached | portable |  |
+| `Esc` | Close the list and restore what it covered | local, attached | portable |  |
+| `Ctrl+C` | Close the list (back one frame) | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit (guarded by the quit confirmation) | local, attached | portable |  |
 
 ## Recipient surface
 
@@ -709,15 +717,18 @@ A writer's action keys (reply, accept, acknowledge, defer, share, decline, edit,
 | `Esc` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
 | `Ctrl+C` | Never decides the card: posts one cue naming the keys that do | local, attached | portable |  |
 
-## Permission feedback
+## Decision field
 
-Also inherits: Append-only text field.
+Also inherits: Caret text field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Send the feedback and deny the tool call | local, attached | portable |  |
-| `Esc` | Cancel the feedback and return to the permission card | local, attached | portable |  |
-| `Backspace` | Delete the last character of the feedback | local, attached | portable |  |
+| `Ctrl+X` | Open the menu above this field | local, attached | portable |  |
+| `Ctrl+P` | Open the command palette above this field | local, attached | portable |  |
+| `Ctrl+Q` | Ask to quit without leaving the field | local, attached | portable |  |
+| `Enter` | Send the text and decide with it | local, attached | portable |  |
+| `Esc` | Leave the field and return to the undecided request | local, attached | portable |  |
+| `Ctrl+C` | Leave the field without deciding (back one frame) | local, attached | portable |  |
 
 ## Question
 
@@ -854,8 +865,10 @@ Also inherits: Decision cards (shared).
 
 ## Consent
 
+Also inherits: Decisions.
+
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `y` | Allow the sender's request once | attached | portable |  |
 | `a` | Always allow this sender's tool and remember it | attached | portable |  |
-| `n` | Reject the sender's request | attached | portable |  |
+| `n` | Decline the sender's request | attached | portable |  |

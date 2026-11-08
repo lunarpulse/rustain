@@ -395,10 +395,12 @@ fn depth_cap_continuation_keeps_exact_inspector_payload_until_restoration_or_dis
 }
 
 #[test]
-fn each_back_key_releases_a_real_queued_permission_before_the_next_paint() {
+fn each_back_key_keeps_a_real_permission_queued_without_surprise_opening() {
     for close in [Key::Esc, Key::Ctrl('c')] {
         let mut f = fixture(80, 24);
         f.open();
+        f.h.state.input_buffer = "protected composer draft".into();
+        f.h.state.last_printable_at = Some(f.h.state.notifications.now());
         let id = RequestId::new();
         let conversation_id = f.conversation().id.clone();
         approval_bridge::apply(
@@ -412,27 +414,55 @@ fn each_back_key_releases_a_real_queued_permission_before_the_next_paint() {
             },
             None,
         );
-        assert!(f.h.state.pending_permission.is_none());
-        assert_eq!(f.h.state.permission_queue.len(), 1);
+        assert!(rustain::adapters::tui::decision_queue::holds_request(
+            &f.h.state, &id
+        ));
+        assert_eq!(f.h.state.decisions.len(), 1);
         assert_eq!(f.press(close), InputAction::Consumed);
         assert!(f.h.state.tool_inspectors.is_empty());
-        assert_eq!(
-            f.h.state.pending_permission.as_ref().map(|p| &p.id),
-            Some(&id),
-            "{close:?}: key settlement, not a later paint, promotes"
-        );
-        assert!(f.h.state.permission_queue.is_empty());
+        assert!(rustain::adapters::tui::decision_queue::holds_request(
+            &f.h.state, &id
+        ));
+        assert_eq!(f.h.state.decisions.len(), 1);
+        assert!(!presentation::is_open(&f.h.state, Surface::Decision));
         f.paint();
+        assert!(f.h.screen_text().contains("Needs you (1)"));
         assert!(
-            f.h.screen_text()
+            !f.h.screen_text()
                 .contains("queued inspector permission control")
         );
-        assert_eq!(
-            f.press(Key::Char('y')),
-            InputAction::PermissionAllow,
-            "the promoted real request owns ingress"
-        );
     }
+}
+
+#[test]
+fn idle_inspector_is_interrupted_and_restored_by_permission_deferral() {
+    let mut f = fixture(80, 24);
+    f.open();
+    let inspector = f.h.state.modal_stack.top().unwrap().clone();
+    f.clock.advance(Duration::from_secs(2));
+    let id = RequestId::new();
+    let conversation_id = f.conversation().id.clone();
+    approval_bridge::apply(
+        &mut f.h.state,
+        ApprovalRuntimeEvent::Requested {
+            id: id.clone(),
+            source: ApprovalSource::ForegroundTurn { conversation_id },
+            tool: "Bash".into(),
+            risk: ToolRisk::Elevated,
+            consent_card: Some("interrupted inspector permission".into()),
+        },
+        None,
+    );
+    assert_eq!(
+        f.h.state.modal_stack.top().unwrap().surface,
+        Surface::Decision
+    );
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    f.paint();
+    assert!(f.h.screen_text().contains("Interrupted:"));
+    assert_eq!(f.press(Key::Esc), InputAction::Consumed);
+    assert_eq!(f.h.state.modal_stack.top(), Some(&inspector));
+    assert!(decision_queue::holds_request(&f.h.state, &id));
 }
 
 #[test]

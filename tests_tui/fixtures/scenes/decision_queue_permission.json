@@ -1,0 +1,27 @@
+{
+  "scene": "story-21-6-permission-queue",
+  "personas": {
+    "operator": {
+      "turns": [
+        {
+          "expect": "run permission scene",
+          "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "echo permission-first-output; touch ready; read x < gate"}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        },
+        {
+          "expect": "permission-first-output",
+          "content": [{"type": "tool_use", "name": "Bash", "input": {"command": "printf 'permission-second-output\\n'"}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        },
+        {
+          "expect": "use rg",
+          "content": [{"type": "text", "text": "Denial received."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        }
+      ]
+    }
+  }
+}

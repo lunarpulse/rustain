@@ -21,6 +21,7 @@ import pytest
 from harness import RustainTUI
 from keys import Permission, ENTER, ESC
 from pathlib import Path
+from test_story_5_0b_permissions import _permission_ready, _stable_sheet
 
 
 # ── Structural / non-API tests ─────────────────────────────────────────────
@@ -79,6 +80,7 @@ def test_five_action_prompt_shows_all_glyphs(tui_strict: RustainTUI):
     tui_strict.assert_screen_contains("[a]")
     tui_strict.assert_screen_contains("[n]")
     tui_strict.assert_screen_contains("[f]")
+    _permission_ready(tui_strict)
     tui_strict.approve_permission()
 
 
@@ -135,6 +137,7 @@ def test_deny_returns_error_to_model(tui_strict: RustainTUI):
     tui_strict.send_message("Use the Bash tool to run: rm -rf /tmp/test_deny")
     if not tui_strict.wait_for_screen("[y]", timeout=30.0):
         pytest.skip("LLM did not trigger a Bash tool call")
+    _permission_ready(tui_strict)
     tui_strict.send(Permission.DENY)
     tui_strict.wait_for_screen_not_contains("[y]", timeout=5.0)
     tui_strict.assert_screen_not_contains("[y] Allow", msg="Prompt should dismiss after deny")
@@ -177,6 +180,7 @@ def test_queue_indicator_appears_for_queued_permissions(tui_strict: RustainTUI):
     if "more queued" in screen:
         assert "[1 more queued]" in screen or "[2 more queued]" in screen, \
             f"Expected queue indicator, got: {screen}"
+    _permission_ready(tui_strict)
     tui_strict.approve_permission()
 
 
@@ -190,6 +194,7 @@ def test_permission_prompt_displays_tool_input(tui_strict: RustainTUI):
         pytest.skip("LLM did not trigger a Bash tool call")
     screen = tui_strict.get_screen_text()
     assert "Bash" in screen, f"Tool name should be visible in prompt; screen: {screen}"
+    _permission_ready(tui_strict)
     tui_strict.approve_permission()
 
 
@@ -197,14 +202,21 @@ def test_permission_prompt_displays_tool_input(tui_strict: RustainTUI):
 @pytest.mark.slow
 @pytest.mark.story_6_0c
 def test_esc_never_decides_permission_prompt(tui_strict: RustainTUI):
-    """21.3 AC16 (was AC11 "Esc sends Cancel"): Esc never decides a card. It posts the registry cue,
-    the prompt stays pending and only the explicit `n` denies it."""
+    """Esc defers without deciding; the queued permission can be reopened and denied."""
     tui_strict.send_message("Use the Bash tool to run: echo cancel_test")
     if not tui_strict.wait_for_screen("[y]", timeout=30.0):
         pytest.skip("LLM did not trigger a Bash tool call")
     tui_strict.send(ESC)
-    assert tui_strict.wait_for_screen("never decide this card", timeout=5.0), "Esc should post the cue"
-    tui_strict.assert_screen_contains("[y] Allow", msg="Esc must leave the permission prompt pending")
+    assert tui_strict.wait_for_screen_not_contains("Decision: Permission", timeout=5.0), tui_strict.get_screen_text()
+    assert tui_strict.wait_for_screen("Needs you (1) ^X q", timeout=5.0), "Esc should keep the permission queued"
+    tui_strict.assert_screen_not_contains("Decision: Permission", msg="Esc should defer the frame")
+    tui_strict.send("\x18q")
+    assert tui_strict.wait_for_screen("[Enter] Open", timeout=5.0), tui_strict.get_screen_text()
+    assert "Permission · Bash" in tui_strict.get_screen_text()
+    _stable_sheet(tui_strict, "Needs you", ("[Enter] Open", "[Esc] Back", "Select"))
+    tui_strict.send(ENTER)
+    assert tui_strict.wait_for_screen("[y] Allow", timeout=5.0), tui_strict.get_screen_text()
+    _permission_ready(tui_strict)
     tui_strict.send(Permission.DENY)
     assert tui_strict.wait_for_screen("Ready", timeout=30.0), "the explicit `n` denies the prompt and the turn ends"
 

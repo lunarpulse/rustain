@@ -332,12 +332,15 @@ mod tests {
         assert_eq!(rx.await.unwrap().as_deref(), Some("code42[0m"));
     }
 
-    /// A permission that arrives while the overlay owns focus is queued behind
-    /// it (as behind every overlay) and shown as soon as the overlay closes.
+    /// A permission that arrives while the overlay owns the keyboard waits in the
+    /// decision queue behind it (RU-6: no frame over Login, the chip counts it) and is
+    /// never opened by surprise when the overlay closes.
     #[test]
-    fn a_permission_queued_behind_the_overlay_surfaces_when_it_closes() {
+    fn a_permission_arriving_over_the_overlay_waits_in_the_queue_after_it_closes() {
+        use crate::adapters::tui::decision_queue::{
+            self, PermissionInput, PermissionPayload, Raised, Responder,
+        };
         use crate::domain::models::FocusState;
-        use crate::domain::models::visual::{ConfirmationType, OverlayType};
         let mut state = TuiState::new(80, 24);
         state
             .login
@@ -348,17 +351,21 @@ mod tests {
             )
             .expect("fresh Login fixture");
         crate::adapters::tui::app::advance_deferred_permission(&mut state);
-        state
-            .permission_queue
-            .push(crate::adapters::tui::state::PendingPermission {
-                id: crate::domain::models::RequestId::new(),
-                source: crate::domain::models::ApprovalSource::ForegroundTurn {
-                    conversation_id: "c1".into(),
-                },
-                tool_name: "Write".into(),
-                input: Arc::new(serde_json::json!({})),
-                risk: crate::domain::models::ToolRisk::Safe,
-            });
+        let payload = PermissionPayload::new(
+            crate::domain::models::RequestId::new(),
+            crate::domain::models::ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Write".into(),
+            crate::domain::models::ToolRisk::Safe,
+            PermissionInput::Ready(Arc::new(serde_json::json!({}))),
+        );
+        assert_eq!(
+            decision_queue::raise_permission(&mut state, payload, Responder::Local),
+            Raised::Waiting,
+            "no decision frame opens over the sign-in overlay"
+        );
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Login);
         assert_eq!(
             crate::adapters::tui::app::handle_input(
                 &mut state,
@@ -369,14 +376,15 @@ mod tests {
             })
         );
         assert!(
-            state.pending_permission.is_some(),
-            "the queued permission is shown"
+            !crate::adapters::tui::presentation::is_open(&state, Surface::Decision),
+            "closing the overlay never opens the waiting permission by surprise"
         );
-        assert!(state.permission_queue.is_empty());
         assert_eq!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+            decision_queue::waiting(&state),
+            1,
+            "the chip still counts it"
         );
+        assert_eq!(state.focus, FocusState::Input);
     }
 
     #[test]

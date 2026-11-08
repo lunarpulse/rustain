@@ -58,7 +58,7 @@ async fn k01_late_tool_fields_review_paint_and_exact_execution() {
                 f.key(KeyCode::Char('r')).await,
                 Some(InputAction::Consumed)
             ));
-            assert_eq!(f.state.permission_reader.review.as_ref(), Some(&id));
+            assert!(f.permission().reviewing);
             assert_eq!(
                 f.current_id(),
                 id,
@@ -104,7 +104,8 @@ async fn k01_late_tool_fields_review_paint_and_exact_execution() {
                     || row.contains("│ [y] Allow")
                 {
                     assert!(
-                        row.starts_with("│ "),
+                        row.strip_prefix('│')
+                            .is_some_and(|inner| inner.starts_with("│ ")),
                         "physical input row escapes host delimiter: {row:?}"
                     );
                 }
@@ -141,7 +142,7 @@ async fn k01_approve_without_review_executes_complete_value_once() {
     f.wait_requested().await;
     let id = f.current_id();
     f.paint(60, 16);
-    assert!(f.state.permission_reader.review.is_none());
+    assert!(!f.permission().reviewing);
     assert!(matches!(
         f.key(KeyCode::Char('y')).await,
         Some(InputAction::PermissionAllow)
@@ -149,7 +150,7 @@ async fn k01_approve_without_review_executes_complete_value_once() {
     f.wait_closed(&id).await;
     f.finish().await;
     assert_eq!(*f.tools.executed.lock(), vec![("Bash".into(), input)]);
-    assert!(f.state.pending_permission.is_none());
+    assert!(f.state.decisions.is_empty());
 }
 
 /// Unknown tools, object extras and all non-object JSON kinds go through the
@@ -213,15 +214,8 @@ async fn k01_review_deny_and_feedback_execute_nothing() {
         assert!(f.tools.executed.lock().is_empty());
         if feedback {
             f.key(KeyCode::Char('f')).await;
-            assert_eq!(
-                f.state
-                    .pending_feedback_input
-                    .as_ref()
-                    .expect("feedback owns request")
-                    .pending_permission
-                    .id,
-                id
-            );
+            assert_eq!(f.current_id(), id);
+            assert!(f.permission().feedback.is_some(), "feedback owns request");
             for c in "keep this exact feedback".chars() {
                 f.key(KeyCode::Char(c)).await;
             }

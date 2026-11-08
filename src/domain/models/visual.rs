@@ -149,9 +149,6 @@ pub enum DeleteConfirmTarget {
 /// Note: Not Copy because `ExportOverwrite` contains path data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfirmationType {
-    Permission,
-    /// Permission feedback mini-input (AC5).
-    PermissionFeedback,
     Question,
     /// Fork confirmation card (Story 4-3a, AC1).
     Fork,

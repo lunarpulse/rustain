@@ -44,6 +44,45 @@ fn shipped_table_passes_governance() {
 }
 
 #[test]
+fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
+    use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
+    assert_eq!(Context::ALL.len(), 59);
+    assert_eq!(Context::Permission.parents(), &[Context::Decision]);
+    assert_eq!(Context::Consent.parents(), &[Context::Decision]);
+    assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);
+    assert!(matches!(
+        resolve(Context::Consent, Host::Attached, &[Key::Char('n')]),
+        Resolved::Hit(row) if row.label == "Decline"
+    ));
+    for host in [Host::Local, Host::Attached] {
+        for context in [Context::Permission, Context::Consent] {
+            for key in [
+                Key::Esc,
+                Key::Ctrl('c'),
+                Key::Ctrl('q'),
+                Key::PageUp,
+                Key::PageDown,
+                Key::Ctrl('x'),
+                Key::Ctrl('p'),
+            ] {
+                assert!(
+                    matches!(resolve(context, host, &[key]), Resolved::Hit(row) if row.context == Context::Decision),
+                    "{context:?}/{host:?}: {key:?}"
+                );
+            }
+        }
+        for context in [Context::DecisionQueue, Context::DecisionCompose] {
+            for key in [Key::Ctrl('x'), Key::Ctrl('p'), Key::Ctrl('q')] {
+                assert!(
+                    matches!(resolve(context, host, &[key]), Resolved::Hit(row) if row.context == context),
+                    "{context:?}/{host:?}: {key:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn duplicate_key_in_one_context_is_rejected() {
     let graph = shipped();
     let rows = [

@@ -1,9 +1,5 @@
-//! K8 (local leg, AC11, RU-24, A4): composer and migrated queries edit at a
-//! grapheme-safe caret; permission feedback and question answers retain their
-//! legacy tail editors. Printables never become commands inside a field, except
-//! CrossSearch's reserved j/k navigation. Attached twins live in attach_keys.rs.
-
-use std::sync::Arc;
+//! K8: composer and decision feedback use grapheme-safe caret editing; question
+//! answers retain their legacy tail editor. Attached twins live in attach_keys.rs.
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::keymap::resolve::resolve_in;
@@ -11,14 +7,13 @@ use rustain::adapters::tui::keymap::table::GlobalCmd;
 use rustain::adapters::tui::keymap::{
     Binding, CommandId, Context, Host, Key, Resolved, bind, resolve,
 };
-use rustain::adapters::tui::state::{FeedbackInputState, PendingPermission, TuiState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
+use rustain::domain::models::FocusState;
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-use rustain::domain::models::{FocusState, ToolRisk};
 
 use super::k4_overlays::cross_search_state;
-use super::support::{fresh, is_inert, press};
+use super::support::{feedback, fresh, is_inert, permission, press};
 
 const FAMILY: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
 
@@ -209,6 +204,7 @@ fn lint_no_printable_resolves_to_a_row_in_any_text_entry() {
         Context::CrossSearch,
         Context::InspectorSearch,
         Context::FieldEdit,
+        Context::DecisionCompose,
     ];
     for context in fields {
         for c in (0x20u8..0x7f).map(char::from) {
@@ -258,11 +254,6 @@ fn every_printable_types_into_every_text_field() {
                     is_inert(&action) && text.is_empty(),
                     "{name}: {c:?} navigates"
                 );
-                continue;
-            }
-            // The permission feedback buffer is appended by the event loop: the key leaves as its char.
-            if name == "permission feedback" {
-                assert_eq!(action, InputAction::FeedbackInputChar(c), "{name}: {c:?}");
                 continue;
             }
             assert_eq!(text, c.to_string(), "{name}: {c:?} types itself");
@@ -346,23 +337,18 @@ const FIELDS: &[Field] = &[
     Field {
         name: "permission feedback",
         open: |s| {
-            s.pending_feedback_input = Some(FeedbackInputState {
-                buffer: String::new(),
-                cursor: 0,
-                pending_permission: PendingPermission {
-                    id: RequestId::new(),
-                    source: ApprovalSource::ForegroundTurn {
-                        conversation_id: "c1".into(),
-                    },
-                    tool_name: "Bash".to_string(),
-                    input: Arc::new(serde_json::json!({"command": "ls"})),
-                    risk: ToolRisk::Elevated,
-                },
-            });
-            confirmation(s, ConfirmationType::PermissionFeedback);
+            *s = permission();
+            assert_eq!(press(s, Key::Char('f')), InputAction::Consumed);
         },
-        text: |s| &s.pending_feedback_input.as_ref().expect("open").buffer,
-        set: |s, text| s.pending_feedback_input.as_mut().expect("open").buffer = text.into(),
+        text: |s| feedback(s).as_str(),
+        set: |s, text| {
+            press(s, Key::Ctrl('a'));
+            press(s, Key::Ctrl('k'));
+            rustain::adapters::tui::app::handle_input(
+                s,
+                &rustain::domain::events::DomainInputEvent::Paste(text.into()),
+            );
+        },
     },
     Field {
         name: "question answer",
@@ -386,6 +372,9 @@ const FIELDS: &[Field] = &[
 fn append_only_fields_edit_their_tail_by_grapheme() {
     for field in FIELDS {
         let name = field.name;
+        if name == "permission feedback" {
+            continue; // Caret-aware behavior is witnessed separately below.
+        }
         let mut state = fresh();
         (field.open)(&mut state);
         let set = |state: &mut TuiState, text: &str| (field.set)(state, text);
@@ -416,4 +405,72 @@ fn append_only_fields_edit_their_tail_by_grapheme() {
             assert_eq!((field.text)(&mut state), "keep", "{name}: Ctrl+{key}");
         }
     }
+}
+
+#[test]
+fn permission_feedback_edits_at_a_grapheme_safe_caret() {
+    use rustain::adapters::tui::app::handle_input;
+    use rustain::domain::events::DomainInputEvent;
+
+    let mut state = permission();
+    state.input_buffer = "retained\ncomposer draft".into();
+    state.cursor_position = 5;
+    assert_eq!(press(&mut state, Key::Char('f')), InputAction::Consumed);
+    let draft = (
+        state.input_buffer.clone(),
+        state.cursor_position,
+        state.multiline_mode,
+    );
+    let height = |s: &TuiState| {
+        rustain::adapters::tui::layout::compute_layout(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &s.theme,
+            &s.input_buffer,
+            1,
+            false,
+            rustain::domain::models::visual::DensityMode::Focus,
+        )
+        .unwrap()
+        .input_area
+        .height
+    };
+    let before_height = height(&state);
+    let paste = |s: &mut TuiState, text: &str| {
+        handle_input(s, &DomainInputEvent::Paste(text.into()));
+    };
+    paste(&mut state, "alpha beta");
+    press(&mut state, Key::Ctrl('a'));
+    assert_eq!(feedback(&state).cursor(), 0);
+    press(&mut state, Key::Right);
+    press(&mut state, Key::Char('X'));
+    assert_eq!(feedback(&state).as_str(), "aXlpha beta");
+    press(&mut state, Key::Left);
+    press(&mut state, Key::Backspace);
+    assert_eq!(feedback(&state).as_str(), "Xlpha beta");
+    press(&mut state, Key::End);
+    press(&mut state, Key::Ctrl('w'));
+    assert_eq!(feedback(&state).as_str(), "Xlpha ");
+    paste(&mut state, FAMILY);
+    press(&mut state, Key::Ctrl('h'));
+    assert_eq!(feedback(&state).as_str(), "Xlpha ");
+    paste(&mut state, "e\u{301}tail");
+    press(&mut state, Key::Home);
+    press(&mut state, Key::Ctrl('k'));
+    assert_eq!(feedback(&state).as_str(), "");
+    paste(&mut state, "one two");
+    press(&mut state, Key::Ctrl('a'));
+    press(&mut state, Key::Right);
+    press(&mut state, Key::Ctrl('u'));
+    assert_eq!(feedback(&state).as_str(), "ne two");
+    press(&mut state, Key::Ctrl('e'));
+    assert_eq!(feedback(&state).cursor(), 6);
+    assert_eq!(height(&state), before_height);
+    assert_eq!(
+        (
+            state.input_buffer,
+            state.cursor_position,
+            state.multiline_mode
+        ),
+        draft
+    );
 }

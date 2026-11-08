@@ -133,6 +133,22 @@ fn every_leader_follow_up_runs_its_command_by_value() {
 }
 
 #[test]
+fn decisions_leader_opens_the_waiting_list_not_the_item() {
+    use rustain::adapters::tui::decision_queue;
+    use rustain::adapters::tui::notification_log::LogFacts;
+    let mut state = super::support::permission();
+    assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
+    assert_eq!(
+        leader(&mut state, Key::Char('q')),
+        InputAction::FocusDecisions
+    );
+    decision_queue::open_waiting(&mut state, &LogFacts::default());
+    assert!(is_open(&state, Surface::DecisionQueue));
+    assert!(!is_open(&state, Surface::Decision));
+    assert_eq!(state.decisions.len(), 1);
+}
+
+#[test]
 fn enter_sends_only_from_an_input_origin() {
     let mut state = wide();
     state.input_buffer = "hello".into();

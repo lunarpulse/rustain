@@ -777,8 +777,8 @@ fn queued_permission_and_automatic_arrival_cannot_steal_an_idle_search_field() {
         },
         None,
     );
-    assert!(f.h.state.pending_permission.is_none());
-    assert_eq!(f.h.state.permission_queue.len(), 1);
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    assert_eq!(f.h.state.decisions.len(), 1);
     assert_eq!(
         decision_queue::raise(
             &mut f.h.state,
@@ -791,8 +791,8 @@ fn queued_permission_and_automatic_arrival_cannot_steal_an_idle_search_field() {
     f.paint();
     assert_eq!(f.h.state.modal_stack.top(), Some(&frame));
     assert_eq!(context(&f), Context::InspectorSearch);
-    assert!(f.h.state.pending_permission.is_none());
-    assert_eq!(f.h.state.permission_queue.len(), 1);
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    assert_eq!(f.h.state.decisions.len(), 2);
     assert!(
         !f.h.screen_text()
             .contains("search field permission control")
@@ -805,14 +805,12 @@ fn queued_permission_and_automatic_arrival_cannot_steal_an_idle_search_field() {
     );
     assert_eq!(marked_cells(&f), 5);
     f.press(Key::Esc);
-    assert_eq!(
-        f.h.state.pending_permission.as_ref().map(|p| &p.id),
-        Some(&id),
-        "production close promotes the exact real permission; it was not dropped"
-    );
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    assert!(!presentation::is_open(&f.h.state, Surface::Decision));
     f.paint();
+    assert!(f.h.screen_text().contains("Needs you (2)"));
     assert!(
-        f.h.screen_text()
+        !f.h.screen_text()
             .contains("search field permission control")
     );
 }
@@ -895,7 +893,7 @@ fn ctrl_q_precedes_the_field_and_cancel_restores_its_real_query() {
 }
 
 #[test]
-fn missing_target_exits_editor_ownership_and_back_releases_the_real_queued_permission() {
+fn missing_target_exits_editor_and_back_keeps_the_real_permission_queued() {
     let mut f = output("alpha target");
     let draft = (f.h.state.input_buffer.clone(), f.h.state.cursor_position);
     type_query(&mut f, "query-only");
@@ -915,8 +913,8 @@ fn missing_target_exits_editor_ownership_and_back_releases_the_real_queued_permi
         },
         None,
     );
-    assert!(f.h.state.pending_permission.is_none());
-    assert_eq!(f.h.state.permission_queue.len(), 1);
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    assert_eq!(f.h.state.decisions.len(), 1);
     f.tabs.active_tab_mut().conversation.turns.clear();
     f.tabs
         .active_tab_mut()
@@ -943,13 +941,12 @@ fn missing_target_exits_editor_ownership_and_back_releases_the_real_queued_permi
         f.h.state.tool_inspectors.is_empty(),
         "one Back releases the missing owner"
     );
-    assert_eq!(
-        f.h.state.pending_permission.as_ref().map(|p| &p.id),
-        Some(&id)
-    );
+    assert!(decision_queue::holds_request(&f.h.state, &id));
+    assert!(!presentation::is_open(&f.h.state, Surface::Decision));
     f.paint();
+    assert!(f.h.screen_text().contains("Needs you (1)"));
     assert!(
-        f.h.screen_text()
+        !f.h.screen_text()
             .contains("missing editor permission control")
     );
     assert!(presentation::consistent(&f.h.state));

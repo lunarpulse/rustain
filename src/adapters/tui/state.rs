@@ -13,12 +13,9 @@ use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggesti
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
 use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
 use crate::domain::models::tab::TabId;
-use crate::domain::models::tool_call::{ApprovalSource, RequestId};
 use crate::domain::models::turn::TurnId;
 use crate::domain::models::view_state::SummaryTier;
-use crate::domain::models::{
-    FeedbackBlock, FocusState, RetryState, StatusState, ToolRisk, UsageInfo,
-};
+use crate::domain::models::{FeedbackBlock, FocusState, RetryState, StatusState, UsageInfo};
 use crate::domain::services::cross_search::CrossSearchResult;
 use crate::domain::services::search::SearchMatch;
 
@@ -82,22 +79,6 @@ pub struct LogAwarenessView {
     pub reset_revision: u64,
     /// Visits actually presented by a completed draw, awaiting persistence.
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
-}
-
-/// Pending permission request awaiting user response.
-pub struct PendingPermission {
-    pub id: RequestId,
-    pub source: ApprovalSource,
-    pub tool_name: String,
-    pub input: std::sync::Arc<serde_json::Value>,
-    pub risk: ToolRisk,
-}
-
-/// State for the permission feedback mini-input (AC5).
-pub struct FeedbackInputState {
-    pub buffer: String,
-    pub cursor: usize,
-    pub pending_permission: PendingPermission,
 }
 
 /// Pending plan approval awaiting user y/a/n/e response.
@@ -410,34 +391,6 @@ pub struct PendingSkillActivation {
     pub skill_file: std::path::PathBuf,
     pub arguments: String,
     pub conversation_id: crate::domain::models::tab::ConversationId,
-}
-
-/// Queue for permission requests that arrive while another is being displayed.
-#[derive(Default)]
-pub struct PermissionQueue {
-    pub(crate) queue: VecDeque<PendingPermission>,
-}
-
-impl PermissionQueue {
-    pub fn push(&mut self, p: PendingPermission) {
-        self.queue.push_back(p);
-    }
-
-    pub fn pop(&mut self) -> Option<PendingPermission> {
-        self.queue.pop_front()
-    }
-
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    // NOTE: drain_matching removed in 6-0c — the ApprovalRuntime fast-path
-    // handles batch sweep automatically after session-always resolve.
 }
 
 /// Direction for boundary navigation.
@@ -2624,14 +2577,6 @@ pub struct TuiState {
     /// `resolve_copy_content` reads THIS field; `focused_item_id` stays the
     /// render-derived signal that drives `Enter`.
     pub selected_item_id: Option<String>,
-    /// Pending permission request awaiting user y/n/a/s/f response.
-    pub pending_permission: Option<PendingPermission>,
-    /// Queue for additional permission requests that arrive while one is displayed.
-    pub permission_queue: PermissionQueue,
-    /// Active feedback input state (AC5 — deny with feedback mini-input).
-    pub pending_feedback_input: Option<FeedbackInputState>,
-    /// Story 19.20c: request-pinned exact input reader and width-bound layout.
-    pub permission_reader: crate::adapters::tui::widgets::permission_prompt::PermissionReaderState,
     /// Active retry state for provider error recovery.
     pub retry_state: Option<RetryState>,
     /// Feedback blocks displayed in conversation, keyed by block ID.
@@ -3219,10 +3164,6 @@ impl TuiState {
             pending_anchor: None,
             focused_item_id: None,
             selected_item_id: None,
-            pending_permission: None,
-            permission_queue: PermissionQueue::default(),
-            pending_feedback_input: None,
-            permission_reader: Default::default(),
             retry_state: None,
             feedback_blocks: BTreeMap::new(),
             team_send_blocks: BTreeMap::new(),
@@ -4553,7 +4494,7 @@ mod tests {
 
 #[cfg(test)]
 mod wave_frame_tests {
-    use super::{PendingPermission, TuiState, WaveViewState};
+    use super::{TuiState, WaveViewState};
     use crate::adapters::tui::{
         app::{self, InputAction},
         handlers::wave_overlay::{apply, back_action, command, context},
@@ -4731,48 +4672,42 @@ mod wave_frame_tests {
         );
     }
 
+    /// A permission that arrives while the user is typing waits in the decision
+    /// queue (RU-6): the closing wave frames neither lose nor open it.
     fn queue_approval(state: &mut TuiState) -> RequestId {
+        use crate::adapters::tui::decision_queue::{
+            self, PermissionInput, PermissionPayload, Responder,
+        };
         let id = RequestId::new();
-        state.permission_queue.push(PendingPermission {
-            id: id.clone(),
-            source: ApprovalSource::ForegroundTurn {
-                conversation_id: "stage-a".into(),
-            },
-            tool_name: "Bash".into(),
-            input: Arc::new(serde_json::json!({"command": "payload-safe-approval"})),
-            risk: ToolRisk::Elevated,
-        });
+        state.last_printable_at = Some(state.notifications.now());
+        decision_queue::raise_permission(
+            state,
+            PermissionPayload::new(
+                id.clone(),
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "stage-a".into(),
+                },
+                "Bash".into(),
+                ToolRisk::Elevated,
+                PermissionInput::Ready(Arc::new(
+                    serde_json::json!({"command": "payload-safe-approval"}),
+                )),
+            ),
+            Responder::Local,
+        );
         id
     }
 
-    fn assert_approval_painted(state: &mut TuiState, id: &RequestId) {
-        use crate::adapters::tui::widgets::permission_prompt::render_permission_surface;
-        use ratatui::{Terminal, backend::TestBackend};
-        assert_eq!(&state.pending_permission.as_ref().unwrap().id, id);
-        assert!(state.permission_queue.queue.is_empty());
+    fn assert_approval_waits(state: &TuiState, id: &RequestId) {
+        use crate::adapters::tui::decision_queue::DecisionSubject;
+        assert!(state.decisions.items().any(
+            |item| matches!(&item.subject, DecisionSubject::Permission(p) if &p.request_id == id)
+        ));
+        assert!(
+            !presentation::is_open(state, Surface::Decision),
+            "a waiting approval is never opened by a wave frame closing"
+        );
         assert_eq!(state.input_buffer, "composer payload");
-        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
-        terminal
-            .draw(|frame| {
-                let _ = render_permission_surface(
-                    frame,
-                    frame.area(),
-                    state.pending_permission.as_ref(),
-                    None,
-                    0,
-                    &mut state.permission_reader,
-                    &state.theme,
-                );
-            })
-            .unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("payload-safe-approval"), "{text}");
     }
 
     #[test]
@@ -4787,7 +4722,7 @@ mod wave_frame_tests {
             dispatch(&mut state, PanelCmd::WaveOpenOverlay);
             let id = queue_approval(&mut state);
             dispatch(&mut state, PanelCmd::WaveDiverge);
-            assert!(state.pending_permission.is_none(), "frame still owns keys");
+            assert!(!presentation::is_open(&state, Surface::Decision));
             if matches!(effect, InputAction::WaveDrillSpoke(_)) {
                 // Wrong owning Stage closes safely without drilling its data.
                 apply(&mut state, "stage-b", &effect);
@@ -4797,7 +4732,7 @@ mod wave_frame_tests {
                 apply(&mut state, "stage-a", &effect);
             }
             assert!(state.modal_stack.is_empty());
-            assert_approval_painted(&mut state, &id);
+            assert_approval_waits(&state, &id);
         }
         // Divergence -> retained drill is NOT a close and cannot promote early.
         let (mut state, _) = retained();
@@ -4806,10 +4741,10 @@ mod wave_frame_tests {
         apply(&mut state, "stage-a", &InputAction::WaveDrillSpoke(1));
         dispatch(&mut state, PanelCmd::WaveDiverge);
         apply(&mut state, "stage-a", &InputAction::CloseDivergeView);
-        assert!(state.pending_permission.is_none());
+        assert!(!presentation::is_open(&state, Surface::Decision));
         let action = back_action(&state, false);
         apply(&mut state, "stage-a", &action);
-        assert_approval_painted(&mut state, &id);
+        assert_approval_waits(&state, &id);
     }
 
     #[test]
@@ -4836,12 +4771,12 @@ mod wave_frame_tests {
         apply(&mut state, "stage-b", &InputAction::OpenDivergeView);
         assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Help);
         assert!(!presentation::is_open(&state, Surface::WaveOverlay));
-        assert!(state.pending_permission.is_none());
+        assert!(!presentation::is_open(&state, Surface::Decision));
         assert!(state.wave_run.is_some());
         // Removing a stale covered Stage did not consume or promote the queue.
         app::with_card_focus_reconcile(&mut state, |state| {
             reducer::close(state, Surface::Help);
         });
-        assert_approval_painted(&mut state, &id);
+        assert_approval_waits(&state, &id);
     }
 }

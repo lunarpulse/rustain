@@ -58,24 +58,17 @@ pub enum InputAction {
     NotificationLog(crate::adapters::tui::notification_log::LogOutcome),
     /// Ctrl+C: cancel streaming if active, otherwise quit.
     CancelOrQuit,
-    /// Permission prompt: user pressed y.
+    /// Permission frame: user pressed y.
     PermissionAllow,
-    /// Permission prompt: user pressed n.
+    /// Permission frame: user pressed n.
     PermissionDeny,
-    /// Permission prompt: user pressed a.
+    /// Permission frame: user pressed a.
     PermissionAlwaysAllow,
-    /// Permission prompt: user pressed s (AC4 — session allow).
+    /// Permission frame: user pressed s (session allow).
     PermissionSessionAllow,
-    /// Permission prompt: user pressed f (AC5 — deny + feedback).
-    PermissionDenyFeedback,
-    /// Feedback input: user typed a character (AC5).
-    FeedbackInputChar(char),
-    /// Feedback input: user pressed backspace (AC5).
-    FeedbackInputBackspace,
-    /// Feedback input: user pressed enter (AC5).
+    /// Permission frame: Enter in the Deny + feedback field (the text rides in the
+    /// resolved payload).
     FeedbackInputSubmit,
-    /// Feedback input: user pressed Esc (AC5 — cancel feedback, restore prompt).
-    FeedbackInputCancel,
     /// Story 8.5 AC-6 — apply a session-scoped adapter override.
     ApplyAdapterOverride {
         port: crate::domain::models::PortDimension,
@@ -476,12 +469,6 @@ impl InputAction {
             self,
             InputAction::SubmitMessage(_)
                 | InputAction::SubmitWithContext { .. }
-                | InputAction::PermissionAllow
-                | InputAction::PermissionDeny
-                | InputAction::PermissionAlwaysAllow
-                | InputAction::PermissionSessionAllow
-                | InputAction::PermissionDenyFeedback
-                | InputAction::FeedbackInputSubmit
                 | InputAction::PlanApproveNormal
                 | InputAction::PlanApproveAutoEdit
                 | InputAction::PlanReject
@@ -499,8 +486,9 @@ pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
         || state.task_panel_state.pending_deviation.is_some()
         || state.task_panel_state.cancel_plan_confirm.is_some()
         || state.task_panel_state.skip_cascade_pending.is_some()
-        || state.pending_permission.is_some()
-        || state.pending_feedback_input.is_some()
+        || state
+            .decisions
+            .holds(crate::adapters::tui::decision_queue::DecisionKind::Permission)
         || state.pending_skill_trust.is_some()
         || state.pending_plan_approval.is_some()
         || state.pending_spawn_gate.is_some()
@@ -549,15 +537,30 @@ pub(crate) fn recipient_surface_ignores_raw_key(
     event: &crossterm::event::Event,
 ) -> bool {
     use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-    // Story 19.20c: conversion discards kind/modifiers. Guard the deciding
-    // surface first, preserving its existing Ctrl+C/Ctrl+Q modal behavior.
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
+    // Conversion loses kind and modifiers. Only the permission's deciding keys
+    // (and the feedback field's Send) require a plain press.
+    if state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::Decision)
         && let Event::Key(key) = event
     {
-        return key.kind != KeyEventKind::Press
-            || (!key.modifiers.is_empty()
-                && !(key.modifiers == KeyModifiers::CONTROL
-                    && matches!(key.code, KeyCode::Char('c' | 'q'))));
+        let context = crate::adapters::tui::decision_queue::frame_context(state);
+        let deciding = match context {
+            crate::adapters::tui::keymap::Context::Permission => {
+                matches!(
+                    key.code,
+                    KeyCode::Char(
+                        'y' | 's' | 'a' | 'n' | 'f' | 'r' | 'Y' | 'S' | 'A' | 'N' | 'F' | 'R'
+                    )
+                )
+            }
+            crate::adapters::tui::keymap::Context::DecisionCompose => key.code == KeyCode::Enter,
+            _ => false,
+        };
+        if deciding {
+            return key.kind != KeyEventKind::Press || !key.modifiers.is_empty();
+        }
     }
     #[cfg(feature = "a2a")]
     if state.input_buffer.is_empty()
@@ -595,11 +598,13 @@ pub fn handle_operator_input(
     }
 }
 
-/// Trusted auth-handler collaborator: settle Login intent, then legacy ownership.
-/// Keep this reviewed synchronous boundary; handlers never acquire stack authority.
+/// Trusted auth-handler collaborator: settle Login intent, then the remaining legacy
+/// owners and the decision queue. Keep this reviewed synchronous boundary; handlers
+/// never acquire stack authority.
 pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
     if reducer::settle_login(state) {
         reducer::settle_legacy(state);
+        crate::adapters::tui::decision_queue::settle(state);
     }
 }
 
@@ -615,13 +620,12 @@ pub fn with_card_focus_reconcile<T>(
     dispatch: impl FnOnce(&mut TuiState) -> T,
 ) -> T {
     let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
-    let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
     );
     let action = dispatch(state);
-    finish_input_boundary(state, surface_was_open, permission_owned, owner_before);
+    finish_input_boundary(state, surface_was_open, owner_before);
     action
 }
 
@@ -632,27 +636,22 @@ pub fn try_with_card_focus_reconcile<T>(
     dispatch: impl FnOnce(&mut TuiState) -> Option<T>,
 ) -> Option<T> {
     let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
-    let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
     );
     let action = dispatch(state)?;
-    finish_input_boundary(state, surface_was_open, permission_owned, owner_before);
+    finish_input_boundary(state, surface_was_open, owner_before);
     Some(action)
 }
 
 fn finish_input_boundary(
     state: &mut TuiState,
     surface_was_open: bool,
-    permission_owned: bool,
     owner_before: (Option<u64>, Option<Context>),
 ) {
-    if permission_owned {
-        advance_deferred_permission(state);
-    } else {
-        reducer::settle_legacy(state);
-    }
+    reducer::settle_legacy(state);
+    crate::adapters::tui::decision_queue::settle(state);
     if surface_was_open
         && !crate::adapters::tui::decision_queue::card_focus_blocked(state)
         && matches!(inline_card(state), Some(card) if !matches!(card, InlineCard::Plan | InlineCard::SkipCascade))
@@ -1370,8 +1369,6 @@ fn card_context(state: &TuiState) -> Option<Context> {
     use ConfirmationType as C;
     if let FocusState::Overlay(OverlayType::Confirmation(card)) = &state.focus {
         return Some(match card {
-            C::Permission => Context::Permission,
-            C::PermissionFeedback => Context::Feedback,
             C::SkillTrust => Context::SkillTrust,
             C::SkillTrustInspect => Context::SkillTrustInspect,
             C::Question => Context::Question,
@@ -1449,34 +1446,13 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
     }
     let field_edit = matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h'));
     Some(match (context, key) {
-        (Context::Permission, DomainKey::PageUp | DomainKey::PageDown) => {
-            state.permission_reader.page(key == DomainKey::PageDown);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        (Context::Permission, _) if esc && state.permission_reader.review.is_some() => {
-            state.permission_reader.back();
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        (Context::Feedback, DomainKey::Enter) => InputAction::FeedbackInputSubmit,
-        (Context::Feedback, DomainKey::Backspace) => InputAction::FeedbackInputBackspace,
-        (Context::Feedback, _) if field_edit => {
-            if let Some(fi) = state.pending_feedback_input.as_mut() {
-                edit_field(&mut fi.buffer, key);
-                fi.cursor = fi.buffer.chars().count();
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-        (Context::Feedback, DomainKey::Esc) => InputAction::FeedbackInputCancel,
         (Context::SkillTrustInspect, DomainKey::Esc) => {
             state.skill_trust_inspect_mode = false;
             reducer::raise_confirmation(state, ConfirmationType::SkillTrust);
             state.needs_redraw = true;
             InputAction::Consumed
         }
-        (Context::Feedback | Context::SkillTrustInspect, DomainKey::CtrlC) => InputAction::Consumed,
+        (Context::SkillTrustInspect, DomainKey::CtrlC) => InputAction::Consumed,
         (Context::Question, DomainKey::Enter) => match state.ask_user_question.as_mut() {
             Some(aq) if !aq.input_buffer.is_empty() => {
                 let answer = std::mem::take(&mut aq.input_buffer);
@@ -1986,6 +1962,12 @@ fn edit_query(
 /// The borrowed paste seam edits only fields actually offered by this host.
 pub(crate) fn paste_query(state: &mut TuiState, text: &str, host: Host) -> Option<InputAction> {
     let context = focus_context(state)?;
+    if context == Context::DecisionCompose {
+        // The frame's own field (never the composer): control characters become spaces.
+        crate::adapters::tui::decision_queue::paste(state, text);
+        state.needs_redraw = true;
+        return Some(InputAction::Consumed);
+    }
     if host == Host::Attached
         && !matches!(context, Context::CommandPalette | Context::InspectorSearch)
     {
@@ -2711,57 +2693,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'n' => InputAction::TeamRetractDecline,
             _ => InputAction::Consumed,
         };
-    }
-
-    // Permission prompt focus: y/n/a/s/f are handled, chat-scroll keys pass through
-    // to the chat pane (AC6), all others ignored.
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission)) {
-        match c {
-            'y' => return InputAction::PermissionAllow,
-            'n' => return InputAction::PermissionDeny,
-            'a' => return InputAction::PermissionAlwaysAllow,
-            's' => return InputAction::PermissionSessionAllow,
-            'f' => return InputAction::PermissionDenyFeedback,
-            'r' => {
-                if let Some(pending) = &state.pending_permission {
-                    state.permission_reader.open(pending.id.clone());
-                    state.needs_redraw = true;
-                }
-                return InputAction::Consumed;
-            }
-            // AC6: chat-scroll preserved while the prompt is up.
-            // Story 16.8, AC7: migrated from direct mutation to InputAction emission.
-            'j' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollLineDown;
-            }
-            'k' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollLineUp;
-            }
-            'G' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollToBottom;
-            }
-            'g' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollToTop;
-            }
-            _ => return InputAction::Consumed,
-        }
-    }
-
-    // Permission feedback input focus (AC5): printable chars + backspace handled.
-    // Reject control characters, tab, and newline (spec: single-line, multi-line disallowed).
-    if state.focus
-        == FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::PermissionFeedback,
-        ))
-    {
-        if c.is_control() || c == '\t' || c == '\n' || c == '\r' {
-            return InputAction::Consumed;
-        }
-        return InputAction::FeedbackInputChar(c);
     }
 
     // Skill trust prompt focus: y/n/i (Story 5-2 AC4)
@@ -3940,6 +3871,181 @@ mod tests {
         TuiState::new(80, 24)
     }
 
+    fn story21_6_raw_permission() -> TuiState {
+        use crate::adapters::tui::decision_queue::{
+            self, PermissionInput, PermissionPayload, Responder,
+        };
+        use crate::adapters::tui::notifications::NotificationStore;
+        use crate::domain::clock::MockClock;
+        use crate::domain::models::tool_call::{ApprovalSource, RequestId};
+        use std::sync::Arc;
+        let mut state = make_state();
+        let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+        state.notifications = NotificationStore::from_config(
+            &crate::domain::models::NotificationsConfig::default(),
+            clock.clone(),
+        );
+        decision_queue::raise_permission(
+            &mut state,
+            PermissionPayload::new(
+                RequestId::new(),
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                "Bash".into(),
+                crate::domain::models::ToolRisk::Elevated,
+                PermissionInput::Ready(Arc::new(serde_json::json!({"command": "ok"}))),
+            ),
+            Responder::Local,
+        );
+        decision_queue::note_painted(&mut state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
+        state
+    }
+
+    fn story21_6_raw_route(
+        state: &mut TuiState,
+        event: crossterm::event::Event,
+    ) -> Option<presentation::RouteEffect> {
+        if recipient_surface_ignores_raw_key(state, &event) {
+            return None;
+        }
+        let input =
+            convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default())?;
+        presentation::route(
+            state,
+            &input,
+            crate::adapters::tui::keymap::Host::Local,
+            &Default::default(),
+        )
+    }
+
+    fn story21_6_raw_key(
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        kind: KeyEventKind,
+    ) -> crossterm::event::Event {
+        crossterm::event::Event::Key(KeyEvent {
+            code,
+            modifiers,
+            kind,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    #[test]
+    fn story21_6_raw_permission_only_plain_press_decides() {
+        for c in ['y', 's', 'a', 'n', 'f', 'r'] {
+            for (modifiers, kind) in [
+                (KeyModifiers::NONE, KeyEventKind::Repeat),
+                (KeyModifiers::NONE, KeyEventKind::Release),
+                (KeyModifiers::ALT, KeyEventKind::Press),
+                (KeyModifiers::SHIFT, KeyEventKind::Press),
+                (KeyModifiers::CONTROL, KeyEventKind::Press),
+            ] {
+                let mut state = story21_6_raw_permission();
+                assert!(
+                    story21_6_raw_route(
+                        &mut state,
+                        story21_6_raw_key(KeyCode::Char(c), modifiers, kind)
+                    )
+                    .is_none()
+                );
+                assert_eq!(state.decisions.len(), 1);
+            }
+        }
+        let mut state = story21_6_raw_permission();
+        assert!(matches!(
+            story21_6_raw_route(
+                &mut state,
+                story21_6_raw_key(KeyCode::Char('y'), KeyModifiers::NONE, KeyEventKind::Press)
+            ),
+            Some(presentation::RouteEffect::Action(
+                InputAction::PermissionAllow
+            ))
+        ));
+        assert!(state.decisions.is_empty());
+    }
+
+    #[test]
+    fn story21_6_raw_feedback_editing_and_global_keys_reach_router() {
+        use crate::adapters::tui::decision_queue::DecisionSubject;
+        let mut state = story21_6_raw_permission();
+        story21_6_raw_route(
+            &mut state,
+            story21_6_raw_key(KeyCode::Char('f'), KeyModifiers::NONE, KeyEventKind::Press),
+        );
+        for c in "abc def".chars() {
+            story21_6_raw_route(
+                &mut state,
+                story21_6_raw_key(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press),
+            );
+        }
+        for c in ['a', 'e', 'k', 'w', 'u', 'h'] {
+            let event = ctrl_key(c);
+            assert!(
+                !recipient_surface_ignores_raw_key(&state, &event),
+                "Ctrl+{c}"
+            );
+            story21_6_raw_route(&mut state, event);
+        }
+        story21_6_raw_route(
+            &mut state,
+            story21_6_raw_key(KeyCode::Char('Z'), KeyModifiers::SHIFT, KeyEventKind::Press),
+        );
+        let DecisionSubject::Permission(payload) = &state.decisions.items().next().unwrap().subject
+        else {
+            panic!("permission")
+        };
+        assert_eq!(payload.feedback.as_ref().unwrap().as_str(), "Z");
+        for (modifiers, kind) in [
+            (KeyModifiers::NONE, KeyEventKind::Repeat),
+            (KeyModifiers::NONE, KeyEventKind::Release),
+            (KeyModifiers::SHIFT, KeyEventKind::Press),
+        ] {
+            assert!(
+                story21_6_raw_route(
+                    &mut state,
+                    story21_6_raw_key(KeyCode::Enter, modifiers, kind)
+                )
+                .is_none()
+            );
+            assert_eq!(state.decisions.len(), 1);
+        }
+        for c in ['x', 'p', 'c', 'q'] {
+            assert!(
+                !recipient_surface_ignores_raw_key(&state, &ctrl_key(c)),
+                "Ctrl+{c}"
+            );
+        }
+        for c in ['x', 'p'] {
+            let mut plain = story21_6_raw_permission();
+            assert!(
+                story21_6_raw_route(&mut plain, ctrl_key(c)).is_some(),
+                "Ctrl+{c} reaches permission routing"
+            );
+            let mut global = story21_6_raw_permission();
+            story21_6_raw_route(
+                &mut global,
+                story21_6_raw_key(KeyCode::Char('f'), KeyModifiers::NONE, KeyEventKind::Press),
+            );
+            assert!(
+                story21_6_raw_route(&mut global, ctrl_key(c)).is_some(),
+                "Ctrl+{c} reaches routing"
+            );
+            assert_eq!(global.decisions.len(), 1);
+        }
+        assert!(matches!(
+            story21_6_raw_route(
+                &mut state,
+                story21_6_raw_key(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press)
+            ),
+            Some(presentation::RouteEffect::Action(
+                InputAction::FeedbackInputSubmit
+            ))
+        ));
+    }
+
     #[cfg(feature = "anthropic")]
     #[test]
     fn k07_model_selector_enter_keeps_locked_provider_open() {
@@ -4644,20 +4750,6 @@ mod tests {
                     presentation::reducer::open(s, Surface::UsagePanel);
                 }),
                 expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
-                label: "Overlay(Confirmation(Permission))",
-                setup: confirmation(ConfirmationType::Permission),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(Permission): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
-            },
-            Row {
-                label: "Overlay(Confirmation(PermissionFeedback))",
-                setup: confirmation(ConfirmationType::PermissionFeedback),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(PermissionFeedback): the field swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
             },
             Row {
                 label: "Overlay(Confirmation(Question))",
@@ -6494,24 +6586,6 @@ mod story21_2_shortcut_tests {
             },
         });
         state
-    }
-
-    /// B-4 (AC10 "higher focused overlays keep ownership"): a pending plan under a
-    /// focused Permission confirmation lets `y`/`n` answer the permission.
-    #[test]
-    fn story21_2_permission_focus_keeps_y_and_n_over_a_pending_plan() {
-        let permission =
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
-        let mut state = state_with_plan(permission.clone());
-        assert_eq!(
-            handle_input(&mut state, &key('y')),
-            InputAction::PermissionAllow
-        );
-        let mut state = state_with_plan(permission);
-        assert_eq!(
-            handle_input(&mut state, &key('n')),
-            InputAction::PermissionDeny
-        );
     }
 
     #[test]

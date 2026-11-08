@@ -303,6 +303,12 @@ const RULES: &[(&str, &str)] = &[
         "decision-21-6-a",
         r"\b(?:decision_pane|DecisionPane|StageBottom|pending_delete|pending_large_image)\b",
     ),
+    // Story 21.6 slice 6-B (A20): retired permission and consent ownership.
+    // The reused permission_prompt widget and advance_deferred_permission stay legal.
+    (
+        "decision-21-6-b",
+        r"\b(?:pending_permission|permission_queue|PermissionQueue|pending_feedback_input|permission_reader|PermissionReaderState|FeedbackInputState|PendingPermission|AttachedApprovals|PendingConsentApproval|permission_modal_owns_focus)\b|\bConfirmationType\s*::\s*(?:Permission|PermissionFeedback)\b|\bapproval_bridge\s*::\s*advance\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -544,6 +550,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "field-string",
                     "field-tail",
                     "decision-21-6-a",
+                    "decision-21-6-b",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -1632,7 +1639,7 @@ fn k6_bb2_fields_are_typed_and_tail_helpers_cannot_return() {
         );
     }
     // Independent negative control: genuinely unmigrated editors remain allowed.
-    let legacy = "struct FeedbackInputState { query: String }
+    let legacy = "struct OtherEditor { query: String }
         fn edit_field() { state.model_selector.search_query.push(x); }";
     assert!(scan(&[("src/field.rs".into(), legacy.into())], &[]).is_empty());
 }
@@ -2051,4 +2058,66 @@ fn k11a_the_interim_pane_symbols_are_unpinnable_and_the_queue_api_passes() {
                  let q: DecisionQueue = Default::default(); \
                  let k = Surface::Decision; let n = s.pending_images.len(); }";
     assert!(scan(&[("src/x.rs".into(), queue.into())], &[]).is_empty());
+}
+
+/// 6-B (A20): retired permission and consent owners cannot be pinned, while
+/// the reused widget and queue APIs remain legal.
+#[test]
+fn k11b_permission_and_consent_symbols_are_unpinnable_and_reused_apis_pass() {
+    for text in [
+        "s.pending_permission.take();",
+        "s.permission_queue.pop_front();",
+        "let _: PermissionQueue = queue;",
+        "s.pending_feedback_input.take();",
+        "s.permission_reader.take();",
+        "let _: PermissionReaderState = reader;",
+        "let _: FeedbackInputState = feedback;",
+        "let _: PendingPermission = permission;",
+        "let _: AttachedApprovals = approvals;",
+        "let _: PendingConsentApproval = consent;",
+        "permission_modal_owns_focus(s);",
+        "let kind = ConfirmationType::Permission;",
+        "let kind = ConfirmationType::PermissionFeedback;",
+        "approval_bridge::advance(s);",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("decision-21-6-b|real|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|error| error.split_once(": ").unwrap().1)
+            .collect();
+        let pins = [("src/x.rs", "21-6", sites.as_slice())];
+        let errors = scan(&files, &pins);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("decision-21-6-b|")),
+            "{text}: a pin never exempts a 21-6 symbol: {errors:?}"
+        );
+    }
+    let legal = "fn real() { permission_prompt::card_rows(); \
+                 let _: PermissionPayload = payload; \
+                 decision_queue::raise_permission(s, request); \
+                 advance_deferred_permission(s); }";
+    assert!(scan(&[("src/x.rs".into(), legal.into())], &[]).is_empty());
+    let widget = include_str!("../../src/adapters/tui/widgets/permission_prompt.rs");
+    let errors = scan(
+        &[(
+            "src/adapters/tui/widgets/permission_prompt.rs".into(),
+            widget.into(),
+        )],
+        &[],
+    );
+    assert!(
+        !errors.iter().any(|s| s.contains("decision-21-6-b|")),
+        "{errors:?}"
+    );
 }

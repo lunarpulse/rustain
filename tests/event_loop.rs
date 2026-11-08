@@ -33,45 +33,91 @@ fn test_resize_event_updates_state() {
     assert!(state.needs_redraw);
 }
 
-// ── Task 19.9: PermissionQueue push/pop (new pub/sub architecture) ──
-//
-// In the new ApprovalRuntime pub/sub architecture, PermissionQueue is a simple
-// VecDeque of PendingPermission structs (no oneshot channels). Session-allow
-// sweep is handled automatically by the ApprovalRuntime fast path.
-
+// Task 19.9: permissions remain FIFO in the shared session decision queue.
 #[test]
 fn test_permission_queue_push_pop() {
-    use rustain::adapters::tui::state::{PendingPermission, PermissionQueue};
-    use rustain::domain::models::ToolRisk;
-    use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
+    use rustain::adapters::tui::decision_queue::{
+        self, DecisionKind, DecisionSubject, PaneKey, PaneOutcome, PermissionInput,
+        PermissionPayload, Responder,
+    };
+    use rustain::adapters::tui::notification_log::LogFacts;
+    use rustain::adapters::tui::notifications::NotificationStore;
+    use rustain::domain::clock::MockClock;
+    use rustain::domain::models::tool_call::RequestId;
+    use rustain::domain::models::{ApprovalSource, NotificationsConfig, ToolRisk};
+    use std::sync::Arc;
+    use std::time::Instant;
 
-    let mut queue = PermissionQueue::default();
-
-    queue.push(PendingPermission {
-        id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn {
-            conversation_id: "c1".into(),
-        },
-        tool_name: "Bash".to_string(),
-        input: std::sync::Arc::new(serde_json::json!({"command": "ls"})),
-        risk: ToolRisk::Elevated,
-    });
-    queue.push(PendingPermission {
-        id: RequestId::new(),
-        source: ApprovalSource::ForegroundTurn {
-            conversation_id: "c1".into(),
-        },
-        tool_name: "Write".to_string(),
-        input: std::sync::Arc::new(serde_json::json!({"file_path": "a.rs"})),
-        risk: ToolRisk::Standard,
-    });
-    assert_eq!(queue.len(), 2);
-
-    let first = queue.pop().unwrap();
-    assert_eq!(first.tool_name, "Bash");
-    assert_eq!(queue.len(), 1);
-
-    let second = queue.pop().unwrap();
-    assert_eq!(second.tool_name, "Write");
-    assert!(queue.pop().is_none());
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    let mut state = TuiState::new(80, 24);
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    for (tool, input, risk) in [
+        (
+            "Bash",
+            serde_json::json!({"command": "ls"}),
+            ToolRisk::Elevated,
+        ),
+        (
+            "Write",
+            serde_json::json!({"file_path": "a.rs"}),
+            ToolRisk::Standard,
+        ),
+    ] {
+        decision_queue::raise_permission(
+            &mut state,
+            PermissionPayload::new(
+                RequestId::new(),
+                ApprovalSource::ForegroundTurn {
+                    conversation_id: "c1".into(),
+                },
+                tool.into(),
+                risk,
+                PermissionInput::Ready(Arc::new(input)),
+            ),
+            Responder::Local,
+        );
+    }
+    assert_eq!(state.decisions.count(DecisionKind::Permission), 2);
+    for (tool, remaining) in [("Bash", 1), ("Write", 0)] {
+        let item = decision_queue::current(&state, &LogFacts::default()).unwrap();
+        assert!(matches!(&item.subject, DecisionSubject::Permission(p) if p.tool_name == tool));
+        let layout = rustain::adapters::tui::layout::compute_layout(
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            &state.theme,
+            "",
+            1,
+            false,
+            rustain::domain::models::visual::DensityMode::Focus,
+        )
+        .unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut painted = false;
+        terminal
+            .draw(|frame| {
+                let shell = rustain::adapters::tui::presentation::Shell::new(frame.area(), &layout);
+                painted = rustain::adapters::tui::presentation::compose(
+                    frame,
+                    &state,
+                    &shell,
+                    rustain::adapters::tui::keymap::Host::Local,
+                    &LogFacts::default(),
+                    &mut rustain::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                        shell.chat_pane,
+                    ),
+                    |_| {},
+                );
+            })
+            .unwrap();
+        assert!(painted);
+        decision_queue::note_painted(&mut state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
+        assert!(matches!(
+            decision_queue::handle_key(&mut state, PaneKey::Char('n'), &LogFacts::default()),
+            PaneOutcome::Effect(_)
+        ));
+        assert_eq!(state.decisions.count(DecisionKind::Permission), remaining);
+    }
+    assert!(state.decisions.is_empty());
 }

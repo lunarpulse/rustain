@@ -58,8 +58,6 @@ fn higher_owner(state: &TuiState) -> bool {
 
 fn confirmation_pending(state: &TuiState, kind: &ConfirmationType) -> bool {
     match kind {
-        ConfirmationType::Permission => state.pending_permission.is_some(),
-        ConfirmationType::PermissionFeedback => state.pending_feedback_input.is_some(),
         ConfirmationType::Question => state.ask_user_question.is_some(),
         ConfirmationType::Fork => state.pending_fork_index.is_some(),
         ConfirmationType::Rewind => state.pending_rewind_index.is_some(),
@@ -89,11 +87,6 @@ pub fn raise_confirmation(state: &mut TuiState, confirmation: ConfirmationType) 
     if !confirmation_pending(state, &confirmation) {
         return;
     }
-    if matches!(&confirmation, ConfirmationType::Permission)
-        && another_confirmation_owns_focus(state)
-    {
-        return;
-    }
     if higher_owner(state) {
         state.modal_stack.pending_confirmation = Some(confirmation);
     } else {
@@ -104,42 +97,8 @@ pub fn raise_confirmation(state: &mut TuiState, confirmation: ConfirmationType) 
     }
 }
 
-fn another_confirmation_owns_focus(state: &TuiState) -> bool {
-    matches!(state.focus, FocusState::Overlay(_))
-        && !matches!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(
-                ConfirmationType::Permission | ConfirmationType::PermissionFeedback
-            ))
-        )
-}
-
-/// A generic permission must wait for all existing higher legacy owners too.
-pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
-    higher_owner(state)
-        || state.pending_plan_card.is_some()
-        || state.pending_delegation_card.is_some()
-        || state.pending_consolidation_card.is_some()
-        || state.pending_forget_card.is_some()
-        || state.task_panel_state.pending_deviation.is_some()
-        || state.task_panel_state.cancel_plan_confirm.is_some()
-        || state.task_panel_state.skip_cascade_pending.is_some()
-        || state.pending_skill_trust.is_some()
-        || state.pending_activation.is_some()
-        || state.pending_plan_approval.is_some()
-        || state.pending_spawn_gate.is_some()
-        || state.decisions.holds_undeferred(DecisionKind::LargeImage)
-        || state.pending_artifact_card.is_some()
-        || state.pending_feedback_input.is_some()
-        || another_confirmation_owns_focus(state)
-}
-
 fn pending_confirmation(state: &TuiState) -> Option<ConfirmationType> {
-    if state.pending_feedback_input.is_some() {
-        Some(ConfirmationType::PermissionFeedback)
-    } else if state.pending_permission.is_some() {
-        Some(ConfirmationType::Permission)
-    } else if state.pending_skill_trust.is_some() || state.pending_activation.is_some() {
+    if state.pending_skill_trust.is_some() || state.pending_activation.is_some() {
         Some(if state.skill_trust_inspect_mode {
             ConfirmationType::SkillTrustInspect
         } else {
@@ -181,17 +140,6 @@ fn settle_legacy_inner(state: &mut TuiState) -> bool {
     if higher_owner(state) || current_confirmation_pending(state) {
         return false;
     }
-    // Release the former request's exact-input cache before promoting any owner,
-    // even when there is no next queued permission or Resolved has not arrived.
-    let permission_closed = matches!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::Permission | ConfirmationType::PermissionFeedback
-        ))
-    );
-    if permission_closed {
-        state.permission_reader = Default::default();
-    }
     let next = state
         .modal_stack
         .pending_confirmation
@@ -210,16 +158,6 @@ fn settle_legacy_inner(state: &mut TuiState) -> bool {
         };
         changed = true;
     }
-    if !permission_modal_owns_focus(state)
-        && let Some(next) = state.permission_queue.pop()
-    {
-        if !permission_closed {
-            state.permission_reader = Default::default();
-        }
-        state.pending_permission = Some(next);
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission));
-        changed = true;
-    }
     changed
 }
 
@@ -231,13 +169,7 @@ pub fn settle_legacy(state: &mut TuiState) {
 }
 
 pub fn restore_focus_after_modal(state: &mut TuiState) {
-    let focus = if state.pending_feedback_input.is_some() {
-        FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::PermissionFeedback,
-        ))
-    } else if state.pending_permission.is_some() {
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-    } else if state.recipient_surface.is_some() {
+    let focus = if state.recipient_surface.is_some() {
         FocusState::Chat
     } else {
         FocusState::Input
@@ -748,6 +680,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
             "Quit must open through request_quit"
         ),
         Surface::Decision
+        | Surface::DecisionQueue
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
@@ -809,9 +742,7 @@ pub fn reconcile_stage(state: &mut TuiState) {
 
 /// A replacement effect's base target yields to retained frames or a promoted approval.
 pub fn settle_stage_base(state: &mut TuiState, focus: crate::domain::models::FocusState) {
-    if state.pending_permission.is_none() {
-        set_base(state, focus);
-    }
+    set_base(state, focus);
 }
 
 /// Remove one surface and its payload. Closing a covered surface does not
@@ -886,6 +817,10 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
         }
         Surface::Decision => {
             state.decisions.clear_paint();
+            None
+        }
+        Surface::DecisionQueue => {
+            state.decisions.list_selected = None;
             None
         }
         Surface::ModelSelector => {

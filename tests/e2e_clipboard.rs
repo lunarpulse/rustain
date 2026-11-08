@@ -224,6 +224,7 @@ fn test_e2e_large_image_cancel() {
         &mut h.state,
         &rustain::domain::events::DomainInputEvent::KeyPress('n'),
         &rustain::adapters::tui::notification_log::LogFacts::default(),
+        rustain::adapters::tui::keymap::Host::Local,
     );
     assert_eq!(
         outcome,

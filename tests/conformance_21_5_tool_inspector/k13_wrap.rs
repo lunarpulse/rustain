@@ -784,6 +784,8 @@ fn story21_5_missing_tool_rejects_slash_with_queued_permission() {
     assert!(f.tool().search.editor.editing, "valid target control");
     f.press(Key::Esc);
     f.clock.advance(Duration::from_secs(2));
+    f.h.state.input_buffer = "protected composer draft".into();
+    f.h.state.last_printable_at = Some(f.h.state.notifications.now());
     let id = RequestId::new();
     let conversation_id = f.conversation().id.clone();
     approval_bridge::apply(
@@ -797,7 +799,10 @@ fn story21_5_missing_tool_rejects_slash_with_queued_permission() {
         },
         None,
     );
-    assert_eq!(f.h.state.permission_queue.len(), 1);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &f.h.state, &id
+    ));
+    assert_eq!(f.h.state.decisions.len(), 1);
     f.tabs.active_tab_mut().conversation.turns.clear();
     f.tabs
         .active_tab_mut()
@@ -810,8 +815,11 @@ fn story21_5_missing_tool_rejects_slash_with_queued_permission() {
     assert!(!f.tool().search.editor.editing);
     assert_eq!(f.h.state.input_buffer, draft);
     f.press(Key::Esc);
-    assert_eq!(
-        f.h.state.pending_permission.as_ref().map(|p| &p.id),
-        Some(&id)
-    );
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &f.h.state, &id
+    ));
+    assert!(!rustain::adapters::tui::presentation::is_open(
+        &f.h.state,
+        rustain::adapters::tui::presentation::Surface::Decision,
+    ));
 }

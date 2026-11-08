@@ -22,6 +22,11 @@ fn log() -> TuiState {
 }
 
 pub(super) fn request_permission(state: &mut TuiState) -> RequestId {
+    // These boundary fixtures exercise a waiting arrival, not RU-6's
+    // permitted interruption of an idle non-text frame.
+    if !state.modal_stack.is_empty() {
+        state.last_printable_at = Some(state.notifications.now());
+    }
     let id = RequestId::new();
     approval_bridge::apply(
         state,
@@ -243,9 +248,10 @@ fn quit_cancel_returns_to_the_same_log_and_help() {
 }
 
 #[test]
-fn permission_requested_under_log_or_quit_waits_until_the_stack_empties() {
+fn permission_requested_under_log_or_quit_remains_queued_after_stack_empties() {
     for surface in ["log", "quit", "log-quit"] {
         let mut state = TuiState::new(80, 24);
+        state.input_buffer = "protected draft".into();
         if surface != "quit" {
             press(&mut state, Key::Ctrl('x'));
             press(&mut state, Key::Char('n'));
@@ -261,35 +267,48 @@ fn permission_requested_under_log_or_quit_waits_until_the_stack_empties() {
         }
         let base = state.focus.clone();
         let id = request_permission(&mut state);
-        assert!(
-            state.pending_permission.is_none(),
-            "{surface}: permission must defer"
-        );
-        assert_eq!(state.permission_queue.len(), 1);
+        assert_permission_deferred(&state, &id);
         assert_eq!(state.focus, base);
         assert_eq!(press(&mut state, Key::Char('a')), InputAction::Consumed);
         press(&mut state, Key::Esc);
         if surface == "log-quit" {
-            assert!(state.pending_permission.is_none(), "Log still owns the top");
+            assert_permission_deferred(&state, &id);
             press(&mut state, Key::Esc);
         }
-        assert_eq!(state.pending_permission.as_ref().map(|p| &p.id), Some(&id));
-        assert!(state.permission_queue.is_empty());
-        assert_eq!(
-            press(&mut state, Key::Char('y')),
-            InputAction::PermissionAllow
-        );
+        assert_permission_deferred(&state, &id);
+        assert!(state.modal_stack.is_empty());
+        assert_eq!(state.focus, base);
     }
 }
 
 #[test]
-fn tiny_permission_is_not_answered_and_the_visible_control_still_answers() {
+fn tiny_permission_is_not_answered_and_resize_restores_its_frame() {
     let mut state = TuiState::new(80, 24);
+    let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
     let id = request_permission(&mut state);
     handle_input(&mut state, &DomainInputEvent::Resize(59, 16));
     assert_eq!(press(&mut state, Key::Char('y')), InputAction::Consumed);
-    assert_eq!(state.pending_permission.as_ref().map(|p| &p.id), Some(&id));
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &id
+    ));
     handle_input(&mut state, &DomainInputEvent::Resize(80, 24));
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &id
+    ));
+    super::k3_compose::draw(
+        &state,
+        &super::k3_compose::layout(&state),
+        Some("Decision: Permission"),
+    );
+    rustain::adapters::tui::decision_queue::note_painted(&mut state);
+    clock.advance(rustain::adapters::tui::decision_queue::INERT_AFTER_PAINT);
     assert_eq!(
         press(&mut state, Key::Char('y')),
         InputAction::PermissionAllow
@@ -650,11 +669,11 @@ fn search_top(navigating: bool) -> (crate::e2e_harness::TestHarness, TabManager)
 }
 
 pub(super) fn assert_permission_deferred(state: &TuiState, id: &RequestId) {
-    assert!(
-        state.pending_permission.is_none(),
-        "{id:?} must stay queued"
-    );
-    assert_eq!(state.permission_queue.len(), 1);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        state, id
+    ));
+    assert_eq!(state.decisions.len(), 1);
+    assert!(!presentation::is_open(state, Surface::Decision));
 }
 
 pub(super) fn assert_permission_painted(
@@ -662,47 +681,13 @@ pub(super) fn assert_permission_painted(
     tabs: &TabManager,
     id: &RequestId,
 ) {
-    // Assert promotion BEFORE painting: neither a render nor another key may repair it.
-    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
-    assert!(h.state.permission_queue.is_empty());
+    // Closing an unrelated surface cannot promote the request by surprise.
+    assert_permission_deferred(&h.state, id);
     h.render_active_tab(tabs);
-    let state = &mut h.state;
-    h.terminal
-        .draw(|frame| {
-            let layout = rustain::adapters::tui::layout::compute_layout(
-                frame.area(),
-                &state.theme,
-                &state.input_buffer,
-                1,
-                false,
-                rustain::domain::models::visual::DensityMode::Focus,
-            )
-            .unwrap();
-            // The active-tab fixture omits legacy cards; use the runtime's real
-            // permission painter with the SAME state, reader and chat viewport.
-            let _ = rustain::adapters::tui::widgets::permission_prompt::render_permission_surface(
-                frame,
-                layout.chat_pane,
-                state.pending_permission.as_ref(),
-                state.pending_feedback_input.as_ref(),
-                state.permission_queue.len(),
-                &mut state.permission_reader,
-                &state.theme,
-            );
-        })
-        .unwrap();
-    h.assert_screen_contains(
-        "real permission admission",
-        "the queued request paints on release",
-    );
-    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
-    assert_eq!(
-        press(&mut h.state, Key::Char('y')),
-        InputAction::PermissionAllow
-    );
+    assert_permission_deferred(&h.state, id);
 }
 
-fn search_release_promotes_permission(key: Key, navigating: bool) {
+fn search_release_keeps_permission_waiting(key: Key, navigating: bool) {
     let (mut h, mut tabs) = search_top(navigating);
     let saved_view = format!(
         "{:?}",
@@ -755,22 +740,22 @@ fn search_release_promotes_permission(key: Key, navigating: bool) {
 }
 
 #[test]
-fn search_escape_release_promotes_and_paints_the_queued_request() {
+fn search_escape_release_keeps_the_request_waiting() {
     for navigating in [false, true] {
-        search_release_promotes_permission(Key::Esc, navigating);
+        search_release_keeps_permission_waiting(Key::Esc, navigating);
     }
 }
 
 #[test]
-fn search_ctrl_c_release_promotes_and_paints_the_queued_request() {
+fn search_ctrl_c_release_keeps_the_request_waiting() {
     for navigating in [false, true] {
-        search_release_promotes_permission(Key::Ctrl('c'), navigating);
+        search_release_keeps_permission_waiting(Key::Ctrl('c'), navigating);
     }
 }
 
 #[test]
-fn search_navigating_enter_release_promotes_and_paints_the_queued_request() {
-    search_release_promotes_permission(Key::Enter, true);
+fn search_navigating_enter_release_keeps_the_request_waiting() {
+    search_release_keeps_permission_waiting(Key::Enter, true);
 }
 
 #[test]
@@ -880,18 +865,13 @@ fn search_top_routes_every_key_without_falling_through_to_the_composer_or_cards(
 fn search_context_switch_and_permission_controls_use_actual_dispatch() {
     let (mut h, mut tabs) = search_top(false);
     let id = request_permission(&mut h.state);
-    assert!(h.state.pending_permission.is_none());
-    assert_eq!(h.state.permission_queue.len(), 1);
+    assert_permission_deferred(&h.state, &id);
     assert_eq!(
         search_press(&mut h.state, &mut tabs, Key::Char('y')),
         InputAction::SearchQueryChanged
     );
     assert_eq!(h.state.search_state.query.as_str(), "needley");
-    assert!(
-        h.state.pending_permission.is_none(),
-        "{id:?} must stay queued"
-    );
-    assert_eq!(h.state.permission_queue.len(), 1);
+    assert_permission_deferred(&h.state, &id);
     assert_eq!(h.state.input_buffer, "untouched Search draft");
 
     // Close this exact fixture, not a fresh Search without the queued request.
@@ -977,7 +957,7 @@ fn quit_cancel_restores_the_identical_search_frame_and_query_in_both_contexts() 
 }
 
 #[test]
-fn reverse_search_accept_and_cancel_promote_and_paint_the_exact_queued_request() {
+fn reverse_search_accept_and_cancel_keep_the_exact_request_waiting() {
     for key in [Key::Enter, Key::Esc, Key::Ctrl('c')] {
         let mut h = crate::e2e_harness::TestHarness::new();
         let tabs = TabManager::new(tokio_util::sync::CancellationToken::new());
@@ -1015,7 +995,7 @@ fn reverse_search_accept_and_cancel_promote_and_paint_the_exact_queued_request()
 }
 
 #[tokio::test]
-async fn every_bookmark_close_effect_promotes_and_paints_the_queued_request() {
+async fn every_bookmark_close_effect_keeps_the_request_waiting() {
     use rustain::adapters::{filesystem::FileSystemStorage, tui::handlers::bookmark};
     for path in [
         "esc",
@@ -1107,15 +1087,12 @@ async fn every_bookmark_close_effect_promotes_and_paints_the_queued_request() {
         assert_permission_painted(&mut h, &tabs, &id);
         // Runtime's repeated close must not overwrite the newly promoted card.
         bookmark::close(&mut h.state);
-        assert_eq!(
-            h.state.pending_permission.as_ref().map(|p| &p.id),
-            Some(&id)
-        );
+        assert_permission_deferred(&h.state, &id);
     }
 }
 
 #[test]
-fn covered_bookmark_effects_do_not_promote_until_the_last_owner_releases() {
+fn covered_bookmark_effects_keep_the_request_waiting_after_release() {
     use rustain::adapters::tui::handlers::bookmark;
     for close in [false, true] {
         let (mut h, mut tabs) = super::stage_support::stage(80, 24);
@@ -1150,7 +1127,7 @@ fn covered_bookmark_effects_do_not_promote_until_the_last_owner_releases() {
 }
 
 #[test]
-fn every_wave_close_effect_promotes_and_paints_without_cancelling_the_run() {
+fn every_wave_close_effect_keeps_the_request_waiting_without_cancelling_the_run() {
     use rustain::adapters::tui::handlers::wave_overlay;
     use std::sync::Arc;
     for path in [
@@ -1232,7 +1209,7 @@ fn every_wave_close_effect_promotes_and_paints_without_cancelling_the_run() {
 }
 
 #[test]
-fn stage_reconcile_releases_the_last_owner_without_clobbering_its_promoted_card() {
+fn stage_reconcile_releases_the_last_owner_without_opening_the_request() {
     use rustain::adapters::tui::handlers::{bookmark, wave_overlay};
     use rustain::infrastructure::runtime::event_loop::replace_stage_conversation;
     for wave in [false, true] {
@@ -1283,18 +1260,11 @@ pub(super) fn assert_runtime_permission_painted(
     core: &rustain::infrastructure::runtime::agent_core::AgentCore,
     id: &RequestId,
 ) {
-    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
-    assert!(
-        h.state.permission_queue.is_empty(),
-        "promotion precedes paint or another key"
-    );
+    assert_permission_deferred(&h.state, id);
     let screen = crate::conformance_tui_orchestration::render_runtime(h, tabs, core);
-    assert!(screen.contains("real permission admission"), "{screen}");
-    assert_eq!(h.state.pending_permission.as_ref().map(|p| &p.id), Some(id));
-    assert_eq!(
-        press(&mut h.state, Key::Char('y')),
-        InputAction::PermissionAllow
-    );
+    assert!(screen.contains("Needs you (1)"), "{screen}");
+    assert!(!screen.contains("real permission admission"), "{screen}");
+    assert_permission_deferred(&h.state, id);
 }
 
 #[test]

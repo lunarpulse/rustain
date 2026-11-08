@@ -447,7 +447,12 @@ fn ready(state: &mut TuiState, clock: &MockClock) {
 }
 
 fn press(state: &mut TuiState, event: DomainInputEvent) -> Option<PaneOutcome> {
-    decision_queue::handle_domain_event(state, &event, &LogFacts::default())
+    decision_queue::handle_domain_event(
+        state,
+        &event,
+        &LogFacts::default(),
+        rustain::adapters::tui::keymap::Host::Local,
+    )
 }
 
 fn single() -> DeleteConfirmTarget {

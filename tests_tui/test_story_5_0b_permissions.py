@@ -10,10 +10,67 @@ Non-API tests (mode switching, widget rendering) run without API.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from harness import RustainTUI
 from keys import Permission, ENTER, ESC
+
+def _complete_sheet(screen, title, controls):
+    """Identify a fully painted, bordered sheet with all its controls."""
+    rows = screen.splitlines()
+    for start, row in enumerate(rows):
+        left = row.find("┌ " + title)
+        if left < 0:
+            continue
+        right = row.rfind("┐")
+        if right <= left:
+            continue
+        for end in range(start + 1, len(rows)):
+            line = rows[end]
+            if len(line) <= right:
+                break
+            if line[left] == "└" and line[right] == "┘":
+                interior = rows[start + 1:end]
+                return (
+                    all(len(part) > right and part[left] == "│" and part[right] == "│"
+                        for part in interior)
+                    and all(control in " ".join(interior) for control in controls)
+                )
+    return False
+
+
+def _stable_sheet(tui, title, controls):
+    """Wait for a complete sheet to remain unchanged beyond its inert window."""
+    deadline = time.monotonic() + 60
+    previous, since = None, None
+    while True:
+        screen = tui.get_screen_text()
+        now = time.monotonic()
+        assert now < deadline, f"{title} did not stabilize:\n{screen}"
+        if not _complete_sheet(screen, title, controls):
+            previous, since = None, None
+        elif screen != previous:
+            previous, since = screen, now
+        elif now - since >= 0.6:
+            return screen
+
+
+def _permission_ready(tui):
+    return _stable_sheet(tui, "Decision: Permission",
+                         ("[y] Allow", "[s] Session", "[a] Always",
+                          "[n] Deny", "[f] Deny + feedback", "[r] Review"))
+
+
+def test_complete_sheet_rejects_torn_permission_frame():
+    top = "┌ " + "Decision: Permission ".ljust(78, "─") + "┐"
+    body = "│" + " [y] Allow [s] Session [a] Always [n] Deny [f] Deny + feedback [r] Review".ljust(79) + "│"
+    whole = "\n".join((top, body, "└" + "─" * 79 + "┘"))
+    controls = ("[y] Allow", "[r] Review")
+    assert _complete_sheet(whole, "Decision: Permission", controls)
+    assert not _complete_sheet(whole.replace("[r] Review", "          "), "Decision: Permission", controls)
+    assert not _complete_sheet(whole.replace("└", " "), "Decision: Permission", controls)
 
 
 # ── Non-API tests (subprocess / mode-switch only) ─────────────────────────
@@ -61,6 +118,7 @@ def test_bash_tool_prompts_with_five_options(tui_strict: RustainTUI):
     tui_strict.assert_screen_contains("[a]")
     tui_strict.assert_screen_contains("[n]")
     tui_strict.assert_screen_contains("[f]")
+    _permission_ready(tui_strict)
     tui_strict.approve_permission()
 
 
@@ -145,6 +203,7 @@ def test_queue_indicator_shows_count(tui: RustainTUI):
     # Simplified: send a request that triggers 3 Bash calls, check for indicator.
     tui.send_message("Run these 3 commands separately: echo a, echo b, echo c")
     tui.wait_for_screen("[y]", timeout=15.0)
+    _permission_ready(tui)
     # If queue built up, we should see the indicator
     # (may or may not appear depending on LLM response timing)
     tui.approve_permission()

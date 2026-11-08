@@ -7,7 +7,7 @@ use crate::adapters::tui::keymap::{
 };
 use crate::adapters::tui::{
     app::{self, InputAction},
-    decision_queue::{self, PaneOutcome},
+    decision_queue::{self, ListOutcome, PaneOutcome},
     keymap::{self, CommandId, Context, Host, Key, Resolved},
     notification_log::{self, LogFacts, LogOutcome},
     quit_confirm::{self, QuitKeyOutcome},
@@ -28,6 +28,9 @@ pub enum RouteEffect {
     Action(InputAction),
     /// Attached host effects retain their async chrome/transport executors.
     Frame(Context),
+    /// A decision rail key of the attached host: the item stays queued while the host
+    /// sends its `ClientFrame` (`decision_queue::settle_sent` retires it after the send).
+    Decision(decision_queue::DecisionEffect),
     Leader,
     OpenPalette,
 }
@@ -40,7 +43,7 @@ impl RouteEffect {
             Self::QuitConfirmed => InputAction::QuitConfirmed,
             Self::Log(outcome) => InputAction::NotificationLog(outcome),
             Self::Action(action) => action,
-            Self::Frame(_) | Self::Leader | Self::OpenPalette => {
+            Self::Frame(_) | Self::Decision(_) | Self::Leader | Self::OpenPalette => {
                 unreachable!("attached-only presentation effect in local dispatch")
             }
         }
@@ -220,10 +223,17 @@ pub fn route(
         Surface::BlockViewer(_) => {
             RouteEffect::Action(crate::adapters::tui::block_viewer::on_key(state, key, host))
         }
-        Surface::Decision => match decision_queue::handle_domain_event(state, event, facts) {
+        Surface::Decision => match decision_queue::handle_domain_event(state, event, facts, host) {
+            Some(PaneOutcome::Effect(effect)) if host == Host::Attached => {
+                RouteEffect::Decision(effect)
+            }
             Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),
             Some(PaneOutcome::Quit) => RouteEffect::QuitRequest,
             Some(PaneOutcome::Consumed) | None => RouteEffect::Consumed,
+        },
+        Surface::DecisionQueue => match decision_queue::handle_list_key(state, host, key, facts) {
+            ListOutcome::Quit => RouteEffect::QuitRequest,
+            ListOutcome::Consumed => RouteEffect::Consumed,
         },
         Surface::NotificationLog => match notification_log::handle_key(state, host, key, facts) {
             LogOutcome::Consumed | LogOutcome::Closed => RouteEffect::Consumed,

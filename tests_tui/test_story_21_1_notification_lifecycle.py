@@ -605,8 +605,8 @@ def test_s1_toasts_expire_and_notification_log_local_and_attached_80x24(monkeypa
 # * budget - a tiny `[budget] daily_limit_usd` crosses its limit when a turn
 #   completes while a draft sits in the composer: the decision is NOT painted
 #   over the draft (the draft is intact and keeps taking keys), the status row
-#   shows `Needs you (1) ^X q`, `Ctrl+X q` focuses the pane, `Esc` defers it
-#   (the cue stays), `Ctrl+X q` reopens it and `y` resolves it.
+#   shows `Needs you (1) ^X q`, `Ctrl+X q` opens the list, Enter opens the
+#   selected pane, `Esc` defers it (the cue stays), and `y` resolves it.
 # * the retired prompt texts (`[y/n]`, `Ctrl+K`) are never painted.
 # Every wait is a bounded structural predicate; no sleeps.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -648,6 +648,33 @@ def _pane_open(screen, title, *rail):
     """The frame is fully painted with every rail pair (positional: inside the frame)."""
     text = _pane(screen, title)
     return bool(text) and all(item in text for item in rail)
+
+
+def _open_budget_from_list(tui, rail):
+    """Open the selected budget from a fully painted Needs-you list."""
+    def listed(screen):
+        rows = screen.splitlines()
+        top = next((i for i, row in enumerate(rows) if row.startswith("┌ Needs you ")), None)
+        if top is None:
+            return False
+        bottom = next((i for i in range(top + 1, len(rows))
+                       if rows[i].startswith("└") and rows[i].endswith("┘")), None)
+        if bottom is None or any(not (row.startswith("│") and row.endswith("│"))
+                                 for row in rows[top + 1:bottom]):
+            return False
+        body = rows[top + 1:bottom]
+        return (any("▸ Daily budget ·" in row for row in body)
+                and any("[Enter] Open" in row and "[Esc] Back" in row
+                        and "[Up/Down] Select" in row for row in body))
+
+    _wait(tui, listed, "the Needs-you list with the selected budget and its rail")
+    deadline = time.monotonic() + 0.6
+    while time.monotonic() < deadline:
+        screen = tui.get_screen_text()
+        assert listed(screen), f"the Needs-you list changed before Enter:\n{screen}"
+    tui.send(ENTER)
+    return _wait(tui, lambda s: _pane_open(s, "Daily budget", *rail),
+                 "Enter opens the budget decision with its rail")
 
 
 def _cue(screen):
@@ -961,8 +988,7 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu lists Decisions")
         tui.send("q")
         budget_rail = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
-        screen = _wait(tui, lambda s: _pane_open(s, "Daily budget", *budget_rail),
-                       "Ctrl+X q focuses the budget decision with its rail")
+        screen = _open_budget_from_list(tui, budget_rail)
         assert "reached" in _pane(screen, "Daily budget"), _pane(screen, "Daily budget")
         _capture(tui, evidence, "32-budget-pane", screen)
         screen = _answer(tui, ESC, "Daily budget")  # Esc = Later: defers, never resolves
@@ -977,7 +1003,7 @@ def _exercise_s2(binary, evidence, root, monkeypatch):
         tui.send(CTRL_X)
         _wait(tui, lambda s: "[Q] Decisions" in _menu(s), "the leader menu before the second q")
         tui.send("q")
-        _wait(tui, lambda s: _pane_open(s, "Daily budget", *budget_rail), "Ctrl+X q reopens the deferred decision")
+        _open_budget_from_list(tui, budget_rail)
         screen = _answer(tui, "y", "Daily budget")  # Continue: the effect runs once
         screen = _wait(tui, lambda s: _cue(s) is None, "an answered decision clears the cue")
         _capture(tui, evidence, "34-budget-answered", screen)

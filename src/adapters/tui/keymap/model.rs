@@ -398,12 +398,14 @@ pub enum Context {
     NotificationLog,
     QuitConfirm,
     Decision,
+    /// The Needs-you list (S-QUEUE): select, open, back.
+    DecisionQueue,
     RecipientSurface,
     Login,
     /// Shared parent of every decision card: the `Esc` / `Ctrl+C` cue rows (A8).
     Card,
-    /// The permission feedback field (sub-frame of the permission card).
-    Feedback,
+    /// A decision frame's own text field (Deny + feedback): readline editing, never the composer.
+    DecisionCompose,
     Question,
     SkillTrust,
     SkillTrustInspect,
@@ -425,7 +427,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 58] = [
+    pub const ALL: [Context; 59] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -466,10 +468,11 @@ impl Context {
         Context::NotificationLog,
         Context::QuitConfirm,
         Context::Decision,
+        Context::DecisionQueue,
         Context::RecipientSurface,
         Context::Login,
         Context::Card,
-        Context::Feedback,
+        Context::DecisionCompose,
         Context::Question,
         Context::SkillTrust,
         Context::SkillTrustInspect,
@@ -529,10 +532,11 @@ impl Context {
             Context::NotificationLog => "Notification log",
             Context::QuitConfirm => "Quit confirmation",
             Context::Decision => "Decisions",
+            Context::DecisionQueue => "Needs-you list",
             Context::RecipientSurface => "Recipient surface",
             Context::Login => "Login",
             Context::Card => "Decision cards (shared)",
-            Context::Feedback => "Permission feedback",
+            Context::DecisionCompose => "Decision field",
             Context::Question => "Question",
             Context::SkillTrust => "Skill trust",
             Context::SkillTrustInspect => "Skill trust (inspect)",
@@ -557,7 +561,7 @@ impl Context {
             // their menu/quit rows explicitly; fields keep their edit inheritance.
             Context::Global
             | Context::Leader
-            | Context::Permission
+            | Context::DecisionQueue
             | Context::BookmarkList
             | Context::FieldEdit
             | Context::WaveOverlay
@@ -572,8 +576,10 @@ impl Context {
             | Context::RecipientSurface
             | Context::Login
             | Context::Card
-            | Context::SkillTrustInspect
-            | Context::Consent => &[],
+            | Context::SkillTrustInspect => &[],
+            // The permission and consent frames are decision frames: the parent owns
+            // Esc (defer), Ctrl+C (back), Ctrl+Q (quit) and PgUp/PgDn (scroll).
+            Context::Permission | Context::Consent => &[Context::Decision],
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector => &[Context::MarkdownBody],
@@ -589,7 +595,7 @@ impl Context {
             | Context::Rewind
             | Context::ExportOverwrite
             | Context::TeamProposal => &[Context::Card],
-            Context::Feedback => &[Context::FieldEdit],
+            Context::DecisionCompose => &[Context::CaretField],
             Context::Question => &[Context::Card, Context::FieldEdit],
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],

@@ -64,7 +64,7 @@ HELP_LOG = HELP+" › System · Notifications"
 HELP_QUIT = HELP+" › System · Quit"
 BUDGET = HELP+" › Decision: Daily budget"
 BUDGET_RAIL = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
-NO_DECISIONS = "No decisions waiting in this client"
+NO_DECISIONS = "No decisions waiting"
 TURN = "A2b-held-budget"
 REPLY = "A2b budget completion"
 # Markdown hard breaks keep sixty real rows at every width; the inherited A2b
@@ -837,8 +837,18 @@ def _a2b_leg(tui, held, release):
                           "defer restores exact Help frame body scroll and keeps cue")
         tui.capture("16-help-budget-deferred", screen)
         tui.send("frame-origin Ctrl+X q reopens decision", b"\x18q")
+        screen = tui.wait(lambda s: (box := _box(s, HELP+" › Needs you", "[Up/Down] Select"))
+                          and any("▸ Daily budget ·" in row for row in box)
+                          and any("[Enter] Open" in row and "[Esc] Back" in row for row in box)
+                          and _status(s) and _cue(s) == 1 and tui.screen.cursor.hidden,
+                          "frame-origin q opens the selected budget in the Needs-you list")
+        tui.settle(lambda s: (box := _box(s, HELP+" › Needs you", "[Up/Down] Select"))
+                   and any("▸ Daily budget ·" in row for row in box)
+                   and _status(s) and _cue(s) == 1 and tui.screen.cursor.hidden,
+                   0.6, "Needs-you list beyond its inert guard")
+        tui.send("open selected budget", b"\r")
         screen = tui.wait(lambda s: _budget_box(s) and _status(s) and _cue(s) == 1
-                          and tui.screen.cursor.hidden, "frame-origin q reopens deferred budget")
+                          and tui.screen.cursor.hidden, "Enter opens the deferred budget")
         tui.capture("17-budget-reopened", screen)
         tui.settle(lambda s: _budget_box(s) and _status(s) and _cue(s) == 1
                    and tui.screen.cursor.hidden, 0.5, "reopened budget beyond its own 500ms guard")
@@ -854,7 +864,7 @@ def _a2b_leg(tui, held, release):
         tui.send("attached q is truthful local refusal", b"q")
         screen = tui.wait(lambda s: _no_decisions_menu(s) and _status(s) and _cue(s) is None
                           and BUDGET not in s and tui.screen.cursor.hidden,
-                          "truthful No decisions waiting in this client in frame-origin menu; no pane")
+                          "truthful No decisions waiting in frame-origin menu; no pane")
         tui.capture("15-attached-no-decisions", screen)
         tui.send("cancel attached leader only", b"\x1b")
         screen = tui.wait(lambda s: _help_box(s) == before and _status(s)

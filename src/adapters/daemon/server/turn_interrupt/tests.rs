@@ -30,6 +30,8 @@ enum Step {
     Text(&'static str),
     /// Ask for the held `Glob` tool.
     Tool,
+    /// Ask for a `Bash` tool that requires operator approval.
+    ApprovalTool,
     /// Stream `partial`, then hang until released.
     HeldStream,
 }
@@ -109,11 +111,20 @@ impl StreamingProvider for HeldProvider {
                 },
             ])
             .boxed(),
-            Step::Tool => futures::stream::iter(vec![
+            Step::Tool | Step::ApprovalTool => futures::stream::iter(vec![
                 StreamChunk::ToolUse {
                     id: format!("held-{call}"),
-                    name: "Glob".to_owned(),
-                    input: serde_json::json!({"pattern": "*"}),
+                    name: if matches!(step, Step::Tool) {
+                        "Glob"
+                    } else {
+                        "Bash"
+                    }
+                    .to_owned(),
+                    input: if matches!(step, Step::Tool) {
+                        serde_json::json!({"pattern": "*"})
+                    } else {
+                        serde_json::json!({"command": "echo held"})
+                    },
                 },
                 StreamChunk::TurnComplete {
                     stop_reason: StopReason::ToolUse,
@@ -182,12 +193,15 @@ struct HeldTool {
 #[async_trait::async_trait]
 impl ToolSetPort for HeldTool {
     fn available_tools(&self) -> Vec<ToolDefinition> {
-        vec![ToolDefinition {
-            name: "Glob".to_owned(),
-            description: "held".to_owned(),
-            input_schema: serde_json::json!({"type": "object"}),
-            parallel_safe: true,
-        }]
+        ["Glob", "Bash"]
+            .into_iter()
+            .map(|name| ToolDefinition {
+                name: name.to_owned(),
+                description: "held".to_owned(),
+                input_schema: serde_json::json!({"type": "object"}),
+                parallel_safe: true,
+            })
+            .collect()
     }
 
     async fn execute(
@@ -450,6 +464,134 @@ fn has_assistant(conversation: &Conversation) -> bool {
 }
 
 // ── K8: the attached actual interrupt ───────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn story21_6_interrupt_while_an_approval_waits_leaves_the_approval_resolvable_or_closed_and_the_turn_not_stuck()
+ {
+    use crate::adapters::daemon::protocol::{ApprovalRefusal, ExactInputAssembly};
+    use crate::domain::models::ApprovalOutcome;
+
+    let rig = Rig::start(vec![Step::ApprovalTool, Step::Text("done")]).await;
+    let mut writer = rig.writer(1).await;
+    send(
+        &mut writer,
+        ClientFrame::UserMessage {
+            text: "stop while approval waits".into(),
+            images: vec![],
+        },
+    )
+    .await;
+    let generation = live_generation(&mut writer).await;
+    let (request_id, bytes) = loop {
+        if let DaemonFrame::ApprovalRequest {
+            request_id,
+            tool,
+            input_bytes,
+            ..
+        } = next(&mut writer).await
+        {
+            assert_eq!(tool, "Bash");
+            break (request_id, input_bytes.expect("tool input length"));
+        }
+    };
+    let mut input = ExactInputAssembly::new(bytes);
+    loop {
+        match next(&mut writer).await {
+            DaemonFrame::ApprovalInputChunk {
+                request_id: id,
+                sequence,
+                data,
+            } => {
+                assert_eq!(id, request_id);
+                input.push(sequence, &data).unwrap();
+            }
+            DaemonFrame::ApprovalInputComplete {
+                request_id: id,
+                chunks,
+            } => {
+                assert_eq!(id, request_id);
+                assert_eq!(
+                    input.finish(chunks).unwrap(),
+                    serde_json::json!({"command": "echo held"})
+                );
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        rig.probes.entered.available_permits(),
+        0,
+        "the tool has not executed"
+    );
+
+    send(&mut writer, ClientFrame::InterruptTurn { generation }).await;
+    let mut seen = Seen::default();
+    let mut closed = false;
+    while seen.results.is_empty() || !turn_over(&seen) {
+        let frame = next(&mut writer).await;
+        if let DaemonFrame::ApprovalClosed { request_id: id } = &frame {
+            assert_eq!(id, &request_id);
+            closed = true;
+        }
+        seen.take(frame);
+    }
+    assert_eq!(seen.results, [(generation, InterruptOutcome::Interrupted)]);
+    assert_eq!(seen.terminals, [StopReason::Cancelled]);
+
+    // The scheduler can cancel the request first, or the turn driver's abort
+    // can drop the waiting future first. A late response therefore either
+    // resolves the still-pending request or is refused as no longer pending.
+    send(
+        &mut writer,
+        ClientFrame::ApprovalResponse {
+            request_id: request_id.clone(),
+            outcome: ApprovalOutcome::Once,
+        },
+    )
+    .await;
+    send(
+        &mut writer,
+        ClientFrame::UserMessage {
+            text: "again".into(),
+            images: vec![],
+        },
+    )
+    .await;
+    let mut followup = Seen::default();
+    let mut next_generation = None;
+    while !closed || !turn_over(&followup) {
+        let frame = next(&mut writer).await;
+        match &frame {
+            DaemonFrame::ApprovalClosed { request_id: id } => {
+                assert_eq!(id, &request_id);
+                closed = true;
+            }
+            DaemonFrame::ApprovalRefused {
+                request_id: id,
+                reason,
+            } => {
+                assert_eq!(id, &request_id);
+                assert_eq!(*reason, ApprovalRefusal::NoLongerPending);
+                closed = true;
+            }
+            DaemonFrame::ActiveTurn {
+                generation: Some(next),
+            } => next_generation = Some(*next),
+            _ => {}
+        }
+        followup.take(frame);
+    }
+    assert!(next_generation.expect("follow-up generation").0 > generation.0);
+    assert_eq!(followup.terminals, [StopReason::EndTurn]);
+    assert_eq!(followup.text, "done");
+    assert_eq!(
+        rig.probes.entered.available_permits(),
+        0,
+        "interrupted tool never executed"
+    );
+    rig.finish().await;
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn story21_2_writer_interrupt_cancels_a_held_tool_and_the_socket_stays_usable() {

@@ -67,6 +67,9 @@ fn raise_kind(state: &mut TuiState, kind: DecisionKind) {
                 title: "Old chat".into(),
             },
         ),
+        DecisionKind::Permission | DecisionKind::Consent => {
+            unreachable!("the permission family is raised by its own producers (k4)")
+        }
     }
     assert!(presentation::consistent(state));
 }
@@ -404,13 +407,16 @@ fn k3_a_deferred_item_is_never_reopened_automatically() {
     paint(&mut state, &f, 80, 24);
     assert!(!is_open(&state, Surface::Decision));
     assert_eq!(waiting(&state), 2);
-    // Only the user's own `Ctrl+X q` opens one, the oldest (the deferred c1).
+    // The list selects the non-deferred c2; choose the deferred c1 explicitly.
     handle_input(&mut state, &special(DomainKey::CtrlX));
     assert_eq!(
         handle_input(&mut state, &key('q')),
         InputAction::FocusDecisions
     );
     decision_queue::open_waiting(&mut state, &f);
+    assert!(is_open(&state, Surface::DecisionQueue));
+    route(&mut state, &special(DomainKey::Up), &f);
+    route(&mut state, &special(DomainKey::Enter), &f);
     assert!(is_open(&state, Surface::Decision));
     let shown = decision_queue::current(&state, &f).expect("the focused item");
     assert_eq!(shown.conversation_id.as_deref(), Some("c1"));

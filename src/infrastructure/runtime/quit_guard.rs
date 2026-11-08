@@ -59,10 +59,7 @@ pub(crate) fn local_facts(
     facts.pending_images = state.pending_images.len() + large_images;
     facts.peer_compose = state.pinned_peer_compose.is_some()
         || crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
-    facts.pending_decisions = usize::from(state.pending_permission.is_some())
-        + state.permission_queue.len()
-        + usize::from(state.pending_feedback_input.is_some())
-        + usize::from(state.pending_skill_trust.is_some())
+    facts.pending_decisions = usize::from(state.pending_skill_trust.is_some())
         + state.skill_trust_queue.len()
         + usize::from(state.pending_activation.is_some())
         + usize::from(plan_decision_is_open(state, conversation, tabs))

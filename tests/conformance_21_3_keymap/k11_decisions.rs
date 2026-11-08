@@ -29,13 +29,7 @@ use rustain::domain::models::plan::{
 use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use rustain::domain::services::delegation_decider::{DelegationReason, DelegationSuggestion};
 
-use std::sync::Arc;
-
-use rustain::adapters::tui::state::{FeedbackInputState, PendingPermission};
-use rustain::domain::models::ToolRisk;
-use rustain::domain::models::tool_call::{ApprovalSource, RequestId};
-
-use super::support::{fresh, is_inert, press};
+use super::support::{feedback, fresh, is_inert, permission, permission_payload, press};
 use crate::conformance_21_11_display_width::k5b_cards::{
     apply_pending, peer_pending, retract_pending,
 };
@@ -705,8 +699,7 @@ fn the_shared_peer_add_card_copy_names_the_confirm_rows() {
     assert!(card.contains(&line), "{card}");
 }
 
-/// R7: a toast clips at 80 columns, so the cue names the card's negative key within the
-/// first 74 cells of its body (the prefix is 45 cells): `[n] Deny` on the permission card.
+/// Legacy card cues still name their negative key inside the toast budget.
 #[test]
 fn every_cue_names_its_negative_key_inside_the_toast_budget() {
     use rustain::adapters::tui::keymap::render::{CUE_BUDGET_CELLS, is_negative};
@@ -714,7 +707,7 @@ fn every_cue_names_its_negative_key_inside_the_toast_budget() {
     use rustain::adapters::tui::keymap::table_card;
     use rustain::adapters::tui::text_geometry::cells;
     assert_eq!(CUE_BUDGET_CELLS, 74, "80 columns minus the notice prefix");
-    let mut contexts: Vec<Context> = vec![Context::Permission];
+    let mut contexts: Vec<Context> = Vec::new();
     for row in table_card::ROWS {
         contexts.push(row.context);
     }
@@ -723,7 +716,10 @@ fn every_cue_names_its_negative_key_inside_the_toast_budget() {
     let cued = |context: &&Context| {
         !matches!(
             **context,
-            Context::Card | Context::Feedback | Context::SkillTrustInspect
+            Context::Card
+                | Context::DecisionCompose
+                | Context::SkillTrustInspect
+                | Context::Consent
         )
     };
     let mut checked = 0;
@@ -749,48 +745,32 @@ fn every_cue_names_its_negative_key_inside_the_toast_budget() {
             );
         }
     }
-    assert!(checked >= 14, "{checked} negative keys checked");
-    let permission = card_cue(Context::Permission, Host::Local);
-    assert!(
-        permission.contains("[y] Allow  [n] Deny"),
-        "the deny key follows the allow key: {permission}"
-    );
+    assert!(checked >= 12, "{checked} legacy negative keys checked");
 }
 
-/// The feedback field sends, erases and backs out: a back is no decision and no cue.
+/// Feedback edits in the frame; Back never decides or posts a cue, Send resolves once.
 #[test]
 fn the_feedback_field_types_erases_sends_and_backs_out() {
-    let mut state = overlay(ConfirmationType::PermissionFeedback);
-    state.pending_feedback_input = Some(FeedbackInputState {
-        buffer: String::new(),
-        cursor: 0,
-        pending_permission: PendingPermission {
-            id: RequestId::new(),
-            source: ApprovalSource::ForegroundTurn {
-                conversation_id: "c1".into(),
-            },
-            tool_name: "Bash".to_string(),
-            input: Arc::new(serde_json::json!({"command": "ls"})),
-            risk: ToolRisk::Elevated,
-        },
-    });
-    assert_eq!(
-        press(&mut state, ch('h')),
-        InputAction::FeedbackInputChar('h')
-    );
-    assert_eq!(
-        press(&mut state, Key::Backspace),
-        InputAction::FeedbackInputBackspace
-    );
+    for back in [Key::Esc, Key::Ctrl('c')] {
+        let mut state = permission();
+        assert_eq!(press(&mut state, ch('f')), InputAction::Consumed);
+        assert_eq!(press(&mut state, ch('h')), InputAction::Consumed);
+        assert_eq!(feedback(&state).as_str(), "h");
+        assert_eq!(press(&mut state, Key::Backspace), InputAction::Consumed);
+        assert_eq!(feedback(&state).as_str(), "");
+        assert_eq!(press(&mut state, back), InputAction::Consumed);
+        assert!(permission_payload(&state).feedback.is_none());
+        assert_eq!(state.decisions.len(), 1);
+        assert!(cue_records(&state).is_empty(), "a back posts no cue");
+    }
+    let mut state = permission();
+    press(&mut state, ch('f'));
+    press(&mut state, ch('h'));
     assert_eq!(
         press(&mut state, Key::Enter),
         InputAction::FeedbackInputSubmit
     );
-    assert_eq!(
-        press(&mut state, Key::Esc),
-        InputAction::FeedbackInputCancel
-    );
-    assert!(cue_records(&state).is_empty(), "a back posts no cue");
+    assert!(state.decisions.is_empty());
 }
 
 /// The question answer erases its last character.
@@ -848,9 +828,9 @@ fn every_table_card_row_has_a_witness() {
         (Context::Card, Key::Esc),
         (Context::Card, Key::Ctrl('c')),
         // `the_feedback_field_types_erases_sends_and_backs_out`.
-        (Context::Feedback, Key::Enter),
-        (Context::Feedback, Key::Esc),
-        (Context::Feedback, Key::Backspace),
+        (Context::DecisionCompose, Key::Enter),
+        (Context::DecisionCompose, Key::Esc),
+        (Context::DecisionCompose, Key::Ctrl('c')),
         // `ctrl_d_skips_the_question_and_esc_never_does`, `the_question_answer_erases_...`.
         (Context::Question, Key::Enter),
         (Context::Question, Key::Ctrl('d')),

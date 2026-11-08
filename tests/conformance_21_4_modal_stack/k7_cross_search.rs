@@ -319,9 +319,8 @@ async fn successful_existing_and_new_result_navigation_releases_the_global_owner
             let query_storage = h.state.cross_search.query.as_str().as_ptr() as usize;
             let permission =
                 with_permission.then(|| super::k2_boundary::request_permission(&mut h.state));
-            if with_permission {
-                assert!(h.state.pending_permission.is_none());
-                assert_eq!(h.state.permission_queue.len(), 1);
+            if let Some(id) = &permission {
+                super::k2_boundary::assert_permission_deferred(&h.state, id);
             }
             assert_eq!(
                 press(&mut h.state, Key::Enter),
@@ -875,8 +874,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         assert!(presentation::is_open(&h.state, Surface::CrossSearch));
         assert_eq!(h.state.cross_search.query, before_query);
         assert_eq!(h.state.cross_search.results.len(), 1);
-        assert!(h.state.pending_permission.is_none());
-        assert_eq!(h.state.permission_queue.len(), 1);
+        super::k2_boundary::assert_permission_deferred(&h.state, &id);
         if path == "covered" {
             assert_eq!(
                 h.state.modal_stack.top().unwrap().surface,
@@ -916,8 +914,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
             assert_eq!(super::stage_support::view(&tabs), before_view);
             assert_eq!(tabs.active_tab_id(), active);
             assert_eq!(h.conversation.id, conversation);
-            assert!(h.state.pending_permission.is_none());
-            assert_eq!(h.state.permission_queue.len(), 1);
+            super::k2_boundary::assert_permission_deferred(&h.state, &id);
         }
         assert_eq!(
             press(&mut h.state, Key::Char('y')),
@@ -937,10 +934,7 @@ async fn failed_loads_keep_the_owner_feedback_and_queued_permission_until_explic
         );
         let screen = crate::conformance_tui_orchestration::render_runtime(&mut h, &mut tabs, &core);
         assert!(!screen.contains("Failed to open conversation"));
-        assert!(
-            h.state.pending_permission.is_none(),
-            "typing must not answer the queued request"
-        );
+        super::k2_boundary::assert_permission_deferred(&h.state, &id);
         assert_eq!(press(&mut h.state, Key::Esc), InputAction::CloseCrossSearch);
         export::close_cross_search(&mut h.state);
         assert!(!h.state.cross_search.load_failed);

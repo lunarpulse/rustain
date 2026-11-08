@@ -14,7 +14,7 @@ use rustain::adapters::tui::layout;
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-use rustain::adapters::tui::widgets::{chat_pane, input_box, permission_prompt, status_bar};
+use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::models::tool_call::ApprovalSource;
 use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{
@@ -236,6 +236,22 @@ fn test_permission_prompt_in_full_layout() {
     let theme = Theme::dark();
     let conversation = make_conversation(vec![]);
     let streaming = StreamingState::default();
+    let mut state = rustain::adapters::tui::state::TuiState::new(80, 24);
+    rustain::adapters::tui::decision_queue::raise_permission(
+        &mut state,
+        rustain::adapters::tui::decision_queue::PermissionPayload::new(
+            rustain::domain::models::tool_call::RequestId::new(),
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            rustain::domain::models::ToolRisk::Elevated,
+            rustain::adapters::tui::decision_queue::PermissionInput::Ready(std::sync::Arc::new(
+                serde_json::json!({"command": "rm -rf /tmp/test"}),
+            )),
+        ),
+        rustain::adapters::tui::decision_queue::Responder::Local,
+    );
 
     terminal
         .draw(|frame| {
@@ -253,32 +269,6 @@ fn test_permission_prompt_in_full_layout() {
                 &mut TabRenderState::default(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
-
-            let input = serde_json::json!({"command": "rm -rf /tmp/test"});
-            let source = ApprovalSource::ForegroundTurn {
-                conversation_id: "c1".into(),
-            };
-            let prompt_lines = permission_prompt::render_permission_card_lines(
-                &permission_prompt::PermissionCard {
-                    source: &source,
-                    tool_name: "Bash",
-                    risk: rustain::domain::models::ToolRisk::Elevated,
-                    input: permission_prompt::ExactInput::Ready(&input),
-                    queue_len: 0,
-                },
-                app_layout.chat_pane.width,
-                &theme,
-            );
-            let prompt_height = prompt_lines.len() as u16;
-            let prompt_area = Rect {
-                x: app_layout.chat_pane.x,
-                y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                    - prompt_height.min(app_layout.chat_pane.height),
-                width: app_layout.chat_pane.width,
-                height: prompt_height.min(app_layout.chat_pane.height),
-            };
-            frame.render_widget(Clear, prompt_area);
-            frame.render_widget(Paragraph::new(prompt_lines), prompt_area);
 
             status_bar::render(
                 frame,
@@ -323,6 +313,18 @@ fn test_permission_prompt_in_full_layout() {
                 false,
                 0,
                 None,
+            );
+            let shell = rustain::adapters::tui::presentation::Shell::new(area, &app_layout);
+            rustain::adapters::tui::presentation::compose(
+                frame,
+                &state,
+                &shell,
+                rustain::adapters::tui::keymap::Host::Local,
+                &Default::default(),
+                &mut rustain::adapters::tui::presentation::occlusion::OpaqueRects::new(
+                    shell.chat_pane,
+                ),
+                |_| {},
             );
         })
         .unwrap();

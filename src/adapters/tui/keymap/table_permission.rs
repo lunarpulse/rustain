@@ -1,46 +1,28 @@
-//! Permission card rows (Story 21.3 AC5, KG-2, both hosts): focus
-//! `Confirmation(Permission)` including the Review-open state, and the attached
-//! decision cards that share its `y/s/a/n/f/r` grammar (`AttachedApprovals::key`,
-//! consent / consolidation / retract arms of `attach_keys::handle_attached_key`).
+//! Permission rows (Story 21.3 AC5, KG-2; moved onto the decision frame by 21.6 6-B):
+//! the keys of the `Decision: Permission` frame in both hosts.
 //!
-//! Slice 3-C (A8): `Esc` and `Ctrl+C` never decide the card. With the Review reader open they
-//! close it; otherwise they post one cue naming the explicit keys. The attached consent /
-//! consolidation / retract cards have their own contexts (`table_card`). Every other key
-//! is swallowed by the card and has no row.
+//! The context is a child of `Decision`: `Esc` (defer; with Review open, go back),
+//! `Ctrl+C` (back one frame, never a decision), `Ctrl+Q` (quit request) and `PgUp` /
+//! `PgDn` (scroll the body, which is the Review reader while it is open) are the
+//! parent's rows. Every other key is swallowed by the frame and has no row.
 
 use super::model::{Binding, CommandId, Context, HelpCat, Key, bind};
 
 /// Commands of the Permission context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PermissionCmd {
-    /// `y`: allow this one tool call (attached consent / consolidation / retract: confirm).
+    /// `y`: allow this one tool call.
     AllowOnce,
     /// `s`: auto-approve this tool for the rest of the session.
     AllowSession,
     /// `a`: always allow this tool and persist the approval.
     AllowAlways,
-    /// `n`: deny the tool call (decline / keep on the attached cards).
+    /// `n`: deny the tool call.
     Deny,
     /// `f`: deny and open the feedback field.
     DenyWithFeedback,
     /// `r`: open the exact-input Review reader.
     Review,
-    /// `Esc` / `Ctrl+C`: close Review when it is open, otherwise one cue (never a decision).
-    BackOrCue,
-    /// `PageUp`: page the Review reader / card up.
-    ReviewPageUp,
-    /// `PageDown`: page the Review reader / card down.
-    ReviewPageDown,
-    /// `j`: scroll the chat one line down while the card is up. Local only.
-    ScrollLineDown,
-    /// `k`: scroll the chat one line up while the card is up. Local only.
-    ScrollLineUp,
-    /// `G`: scroll the chat to the bottom while the card is up. Local only.
-    ScrollToBottom,
-    /// `g`: scroll the chat to the top while the card is up. Local only.
-    ScrollToTop,
-    /// `Ctrl+Q`: ask to quit over the card. Attached only (the local card swallows it).
-    QuitRequest,
 }
 
 const fn p(keys: &'static [Key], cmd: PermissionCmd, label: &'static str) -> Binding {
@@ -57,15 +39,6 @@ const PERMISSION: &[Binding] = &[
     p(&[Key::Char('n')], PermissionCmd::Deny, "Deny").help(P, "n", "Deny tool call"),
     p(&[Key::Char('f')], PermissionCmd::DenyWithFeedback, "Deny + feedback").help(P, "f", "Deny + feedback — provide text guidance to the LLM"),
     p(&[Key::Char('r')], PermissionCmd::Review, "Review").help(P, "r", "Review").does("Open the exact tool input for review"),
-    p(&[Key::Esc], PermissionCmd::BackOrCue, "").does("Close the review when it is open; otherwise remind which keys decide the tool call"),
-    p(&[Key::PageUp], PermissionCmd::ReviewPageUp, "").does("Page the review reader up"),
-    p(&[Key::PageDown], PermissionCmd::ReviewPageDown, "").does("Page the review reader down"),
-    p(&[Key::Char('j')], PermissionCmd::ScrollLineDown, "").local().does("Scroll the chat down one line"),
-    p(&[Key::Char('k')], PermissionCmd::ScrollLineUp, "").local().does("Scroll the chat up one line"),
-    p(&[Key::Char('G')], PermissionCmd::ScrollToBottom, "").local().does("Scroll the chat to the bottom"),
-    p(&[Key::Char('g')], PermissionCmd::ScrollToTop, "").local().does("Scroll the chat to the top"),
-    p(&[Key::Ctrl('q')], PermissionCmd::QuitRequest, "").attached().does("Ask to quit"),
-    p(&[Key::Ctrl('c')], PermissionCmd::BackOrCue, "").does("Close the review when it is open; otherwise remind which keys decide the tool call"),
 ];
 
 pub const ROWS: &[Binding] = PERMISSION;

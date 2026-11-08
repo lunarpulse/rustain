@@ -767,18 +767,36 @@ fn test_e2e_rewind_blocked_when_permission_pending() {
     // Given: state with a pending permission (simulating an in-flight tool turn)
     let mut state = make_state_in_chat_focus(80, 24);
     state.message_boundaries = vec![0, 5, 10];
-    // Simulate pending_permission being set (we check it via the status guard in event_loop)
-    // The actual guard is: if state.pending_permission.is_some() { return early with flash }
-    // We test the TuiState field directly:
+    // The event-loop guard reads the decision queue, rather than a permission slot.
     assert!(
-        state.pending_permission.is_none(),
+        !state
+            .decisions
+            .holds(rustain::adapters::tui::decision_queue::DecisionKind::Permission),
         "Fresh state has no pending permission"
     );
 
-    // When: R is pressed while pending_permission would be set (simulate)
-    // handle_input itself returns RewindAtMessage; the guard is in event_loop
-    // We verify that pending_permission field is accessible from TuiState (guard check would fail)
-    // and that the guard message matches the spec.
+    use rustain::adapters::tui::decision_queue::{
+        self, DecisionKind, PermissionInput, PermissionPayload, Responder,
+    };
+    use rustain::domain::models::{ApprovalSource, ToolRisk};
+    decision_queue::raise_permission(
+        &mut state,
+        PermissionPayload::new(
+            rustain::domain::models::tool_call::RequestId::new(),
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            ToolRisk::Elevated,
+            PermissionInput::Ready(std::sync::Arc::new(serde_json::json!({"command": "true"}))),
+        ),
+        Responder::Local,
+    );
+    assert!(
+        state.decisions.holds(DecisionKind::Permission),
+        "the actual guard sees the queued permission"
+    );
+    // The event loop owns the guard toast.
     let guard_msg = "Cannot rewind: a permission/question is pending — answer it first";
     notifications::notify(
         &mut state,
@@ -807,9 +825,9 @@ fn test_e2e_rewind_blocked_when_permission_pending() {
 }
 
 #[test]
-fn test_e2e_rewind_drops_permission_request_when_overlay_active() {
+fn test_e2e_rewind_queues_permission_request_when_overlay_active() {
     // Given: rewind overlay is active
-    let state = make_state_in_rewind_overlay();
+    let mut state = make_state_in_rewind_overlay();
 
     // Then: focus is Overlay(Confirmation(Rewind))
     assert_eq!(
@@ -817,25 +835,43 @@ fn test_e2e_rewind_drops_permission_request_when_overlay_active() {
         FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)),
         "State should be in Rewind overlay"
     );
-    // And: pending_permission is None (guard would drop incoming permission requests)
+    // No permission item is held in this fresh rewind fixture.
     assert!(
-        state.pending_permission.is_none(),
-        "Rewind overlay state should have no pending permission (guard drops incoming)"
+        !state
+            .decisions
+            .holds(rustain::adapters::tui::decision_queue::DecisionKind::Permission),
+        "Rewind overlay state should have no pending permission"
     );
 
-    // When: a PermissionRequest arrives for the active tab while rewind overlay is open,
-    // the event_loop guard (DF-018 inverse) checks:
-    //   if matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)))
-    //   -> drop silently
-    // We verify the guard condition is evaluable from state.focus:
-    let is_rewind_overlay = matches!(
+    // A permission arriving behind the higher rewind confirmation stays queued.
+    use rustain::adapters::tui::decision_queue::{
+        self, DecisionKind, PermissionInput, PermissionPayload, Responder,
+    };
+    use rustain::domain::models::{ApprovalSource, ToolRisk};
+    let id = rustain::domain::models::tool_call::RequestId::new();
+    decision_queue::raise_permission(
+        &mut state,
+        PermissionPayload::new(
+            id.clone(),
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "c1".into(),
+            },
+            "Bash".into(),
+            ToolRisk::Elevated,
+            PermissionInput::Ready(std::sync::Arc::new(serde_json::json!({"command": "true"}))),
+        ),
+        Responder::Local,
+    );
+    assert!(decision_queue::holds_request(&state, &id));
+    assert_eq!(state.decisions.count(DecisionKind::Permission), 1);
+    assert_eq!(
         state.focus,
         FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
     );
-    assert!(
-        is_rewind_overlay,
-        "Guard condition should be true when rewind overlay is active"
-    );
+    assert!(!rustain::adapters::tui::presentation::is_open(
+        &state,
+        rustain::adapters::tui::presentation::Surface::Decision
+    ));
 }
 
 #[test]

@@ -158,8 +158,7 @@ def test_text_turn_completes_through_the_env_front_door(stub, scratch_home):
 
 def test_tool_turn_prompts_then_writes_the_scripted_file(stub, scratch_home):
     """AC1(c): a scripted tool_use reaches the real permission gate and the real tool."""
-    # The harness default allow-list pre-approves Write, which would skip the prompt
-    # entirely; `approve_permission()` is a blind `y`, so the prompt must be waited for.
+    # The harness default allow-list pre-approves Write, which would skip the prompt.
     with RustainTUI(
         fresh=True,
         build=False,
@@ -168,8 +167,56 @@ def test_tool_turn_prompts_then_writes_the_scripted_file(stub, scratch_home):
     ) as tui:
         tui.send_message("write the scene file")
 
-        assert tui.wait_for_screen("[y] Allow", timeout=30), tui.get_screen_text()
-        tui.approve_permission()
+        def frame(screen, title, required):
+            rows = screen.splitlines()
+            for top, row in enumerate(rows):
+                left = row.find("┌ " + title + " ")
+                right = row.rfind("┐")
+                if left < 0 or right <= left:
+                    continue
+                for bottom in range(top + 1, len(rows)):
+                    if len(rows[bottom]) > right and rows[bottom][left] == "└":
+                        if rows[bottom][right] != "┘":
+                            return False
+                        inside = rows[top + 1:bottom]
+                        if any(len(line) <= right or line[left] != "│" or line[right] != "│"
+                               for line in inside):
+                            return False
+                        text = " ".join(line[left + 1:right] for line in inside)
+                        return all(part in text for part in required)
+            return False
+
+        def permission(screen):
+            return frame(screen, "Decision: Permission",
+                         ("Write", "[y] Allow", "[s] Session", "[a] Always",
+                          "[n] Deny", "[f] Deny + feedback", "[r] Review"))
+
+        def wait_screen(predicate, label, timeout=30):
+            deadline = time.monotonic() + timeout
+            while True:
+                screen = tui.get_screen_text()
+                if predicate(screen):
+                    return screen
+                assert time.monotonic() < deadline, f"{label}:\n{screen}"
+
+        def settle(predicate, label):
+            wait_screen(predicate, label)
+            deadline = time.monotonic() + 0.6
+            while time.monotonic() < deadline:
+                screen = tui.get_screen_text()
+                assert predicate(screen), f"{label} changed:\n{screen}"
+
+        screen = wait_screen(lambda s: permission(s) or "Needs you (1) ^X q" in s,
+                             "permission frame or queued permission chip")
+        if not permission(screen):
+            tui.send("\x18q")
+            listed = lambda s: frame(s, "Needs you",
+                                     ("▸ Permission · Write", "[Enter] Open",
+                                      "[Esc] Back", "[Up/Down] Select"))
+            settle(listed, "complete Needs-you list with selected Write permission")
+            tui.send("\r")
+        settle(permission, "complete Write permission frame beyond its inert window")
+        tui.send("y")
 
         written = tui.wp / "scene.txt"
         assert _wait_for(lambda: written.exists()), tui.get_screen_text()

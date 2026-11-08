@@ -1075,9 +1075,12 @@ pub async fn run(
                             {
                                 palette_gate.sync(&mut state, &mut command_registry, &mut palette_registry, &workspace_path).await;
                             }
+                        } else if presentation::is_open(&state, presentation::Surface::Decision) && crate::adapters::tui::app::recipient_surface_ignores_raw_key(&state, &event) {
+                            // A repeat/release/modified key never decides a permission frame (19.20c).
                         } else if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
                             let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog)
-                                || presentation::is_open(&state, presentation::Surface::Decision) {
+                                || presentation::is_open(&state, presentation::Surface::Decision)
+                                || presentation::is_open(&state, presentation::Surface::DecisionQueue) {
                                 notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
                             } else { notification_log::LogFacts::default() };
                             let mut pane_action: Option<InputAction> = None;
@@ -1093,7 +1096,7 @@ pub async fn run(
                                     }
                                     RouteEffect::Log(outcome) => notice_actions::execute_log_outcome(outcome, &mut state, &mut conversation, &streaming, &provider, config, &domain_tx, &app_state, &router),
                                     RouteEffect::Action(action) => pane_action = Some(action),
-                                    RouteEffect::Frame(_) | RouteEffect::Leader | RouteEffect::OpenPalette =>
+                                    RouteEffect::Frame(_) | RouteEffect::Decision(_) | RouteEffect::Leader | RouteEffect::OpenPalette =>
                                         unreachable!("attached-only route effect in the local host"),
                                 }
                                 if pane_action.is_none() { continue; }
@@ -1316,20 +1319,9 @@ pub async fn run(
                                         }
                                         continue;
                                     }
-                                    // Cancel active feedback input flow first (AC5)
-                                    if let Some(fi) = state.pending_feedback_input.take() {
-                                        let pending = fi.pending_permission;
-                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
-                                        reducer::set_base(&mut state, FocusState::Input);
-                                    }
-                                    // Cancel any pending permission before aborting
-                                    if let Some(pending) = state.pending_permission.take() {
-                                        let _ = approval_runtime.resolve(&pending.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
-                                        reducer::set_base(&mut state, FocusState::Input);
-                                    }
-                                    // Cancel all queued permission requests
-                                    while let Some(queued) = state.permission_queue.pop() {
-                                        let _ = approval_runtime.resolve(&queued.id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
+                                    // Cancel every waiting permission (queued, deferred or stale) before aborting
+                                    for id in crate::adapters::tui::decision_queue::drain_permissions(&mut state) {
+                                        let _ = approval_runtime.resolve(&id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
                                     }
                                     // Decline any pending skill trust prompt
                                     if let Some(pending) = state.pending_skill_trust.take() {
@@ -1386,7 +1378,7 @@ pub async fn run(
                                 | InputAction::PermissionDeny
                                 | InputAction::PermissionAlwaysAllow
                                 | InputAction::PermissionSessionAllow
-                                | InputAction::PermissionDenyFeedback) => {
+                                | InputAction::FeedbackInputSubmit) => {
                                     crate::infrastructure::runtime::approval_bridge::handle_action(
                                         &mut state, &action, &approval_runtime,
                                     ).await;
@@ -1617,14 +1609,6 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
-                                action @ (InputAction::FeedbackInputChar(_)
-                                | InputAction::FeedbackInputBackspace
-                                | InputAction::FeedbackInputSubmit
-                                | InputAction::FeedbackInputCancel) => {
-                                    crate::infrastructure::runtime::approval_bridge::handle_action(
-                                        &mut state, &action, &approval_runtime,
-                                    ).await;
-                                }
                                 InputAction::SkillTrustAccept => {
                                     let handled = if let Some(pending) = state.pending_activation.take() {
                                         state.pending_activation_inspect_content = None;
@@ -1790,6 +1774,14 @@ pub async fn run(
                                         DecisionEffect::AttachLargeImage
                                         | DecisionEffect::CancelLargeImage
                                         | DecisionEffect::ConfirmDelete
+                                        | DecisionEffect::PermissionAllowOnce
+                                        | DecisionEffect::PermissionAllowSession
+                                        | DecisionEffect::PermissionAllowAlways
+                                        | DecisionEffect::PermissionDeny
+                                        | DecisionEffect::PermissionDenyFeedback
+                                        | DecisionEffect::ConsentOnce
+                                        | DecisionEffect::ConsentAlways
+                                        | DecisionEffect::ConsentDecline
                                         | DecisionEffect::CancelDelete => {
                                             unreachable!("DecisionEffect::into_action maps these to their own arms");
                                         }
@@ -3517,7 +3509,7 @@ pub async fn run(
                                 // ── Rewind Conversation (Story 4-3b) ─────────────────
                                 InputAction::RewindAtMessage => {
                                     // DF-018 guard: block if permission/question overlay is active
-                                    if state.pending_permission.is_some() || state.ask_user_question.is_some() {
+                                    if state.decisions.holds(crate::adapters::tui::decision_queue::DecisionKind::Permission) || state.ask_user_question.is_some() {
                                         notifications::info(&mut state, NoticeSource::Session, "Cannot rewind: a permission/question is pending \u{2014} answer it first");
                                         state.needs_redraw = true;
                                     } else if streaming.is_streaming {
@@ -3644,7 +3636,7 @@ pub async fn run(
 
                                                 // 5. Cancel in-flight permission/question + drain queue (AC3 step 5)
                                                 // Dropping response_tx closes the channel → turn gets Err
-                                                drop(state.pending_permission.take());
+                                                drop(crate::adapters::tui::decision_queue::drain_permissions(&mut state));
                                                 drop(state.ask_user_question.take());
                                                 drop(state.question_response_tx.take());
                                                 while turn_queue.dequeue().is_some() {}
@@ -7713,10 +7705,6 @@ pub fn render(
     let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
     let TuiState {
         ref feedback_blocks,
-        ref pending_permission,
-        ref permission_queue,
-        ref pending_feedback_input,
-        ref mut permission_reader,
         ref pending_skill_trust,
         ref skill_trust_queue,
         skill_trust_inspect_mode,
@@ -8357,20 +8345,6 @@ pub fn render(
                     )));
                 }
 
-                opaque.host(crate::adapters::tui::widgets::permission_prompt::render_permission_surface(
-                    frame,
-                    app_layout.chat_pane,
-                    pending_permission.as_ref().filter(|_| {
-                        *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Permission))
-                    }),
-                    pending_feedback_input.as_ref().filter(|_| {
-                        *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PermissionFeedback))
-                    }),
-                    permission_queue.len(),
-                    permission_reader,
-                    theme,
-                ));
-
                 // Render skill trust prompt at bottom of chat pane (Story 5-2 AC4)
                 let trust_selected = matches!(focus, FocusState::Overlay(OverlayType::Confirmation(
                     ConfirmationType::SkillTrust | ConfirmationType::SkillTrustInspect
@@ -8629,6 +8603,7 @@ pub fn render(
                         unseen: state.notifications.unseen(),
                         decisions: state.decisions.len(),
                         tail: leader_tail,
+                        ..Default::default()
                     },
 );
                 };
@@ -9433,6 +9408,8 @@ mod tests {
                         InputAction::FocusDecisions
                     );
                     decision_queue::open_waiting(&mut state, &LogFacts::default());
+                    assert!(presentation::is_open(&state, Surface::DecisionQueue));
+                    handle_input(&mut state, &E::SpecialKey(K::Enter));
                     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
                     terminal
                         .draw(|frame| {

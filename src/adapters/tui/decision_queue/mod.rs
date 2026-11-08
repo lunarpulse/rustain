@@ -4,7 +4,7 @@
 //! Every question the session asks the user is an item of ONE FIFO keyed by
 //! `(kind, source, conversation)`, counted by the `Needs you (N)` status cue and
 //! the quit guard. A decision is an L3 `Surface::Decision` frame on the 21-4
-//! stack: it opens only through [`raise`]/[`open`]/[`focus_oldest`] (producers
+//! stack: it opens only through [`raise`]/[`open`]/[`open_list`] (producers
 //! never write focus), pops back to exactly what it interrupted, and `Esc` sets
 //! it aside without ever deciding it.
 //!
@@ -12,22 +12,32 @@
 //! Rail keys are inert for 500 ms from the frame's first paint; `Ctrl+C` backs
 //! without deciding. This module is pure: no I/O and no clock of its own.
 
+mod compose;
 mod keys;
 mod kinds;
+mod list;
+mod permission;
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-pub(crate) use keys::clear_feedback;
-pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key};
+pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key, settle_sent};
+pub(crate) use keys::{clear_feedback, paste};
 pub use kinds::{
-    DecisionEffect, DecisionKind, DecisionSubject, EscPolicy, NO_LONGER_PENDING, Responder,
-    StaleCopy, Validity,
+    APPROVAL_NO_LONGER_PENDING, DecisionEffect, DecisionKind, DecisionSubject, EscPolicy,
+    NO_LONGER_PENDING, Responder, StaleCopy, Validity,
+};
+pub(crate) use list::selected_index as list_selected_index;
+pub use list::{ListOutcome, handle_list_key, open_list};
+pub use permission::{
+    ConsentPayload, PermissionInput, PermissionPayload, complete_input, drain_permissions,
+    holds_request, raise_consent, raise_permission, withdraw_request,
 };
 
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::keymap::render::leader_follow_up_compact;
 use crate::adapters::tui::keymap::table::LeaderCmd;
-use crate::adapters::tui::keymap::{self, CommandId};
+use crate::adapters::tui::keymap::{self, CommandId, Context};
 use crate::adapters::tui::notification_log::LogFacts;
 use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::presentation::{self, Surface};
@@ -116,9 +126,9 @@ pub(crate) fn apply_resolved_action(
 /// for the interim kinds, whose source is the session itself) and the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionKey {
-    pub(crate) kind: DecisionKind,
-    pub(crate) source: String,
-    pub(crate) conversation_id: Option<String>,
+    pub kind: DecisionKind,
+    pub source: String,
+    pub conversation_id: Option<String>,
 }
 
 impl DecisionKey {
@@ -136,6 +146,9 @@ pub struct DecisionItem {
     pub source: String,
     /// `None` = decidable from any tab; `Some(id)` only while `id` is active.
     pub conversation_id: Option<String>,
+    /// What the source is, in a few words (breadcrumb and list row); the source
+    /// identity itself when empty.
+    pub summary: String,
     pub detail: String,
     /// The payload the kind's effect consumes (moved here from its old slot).
     pub subject: DecisionSubject,
@@ -179,8 +192,10 @@ pub struct DecisionDraft {
     pub kind: DecisionKind,
     pub source: String,
     pub conversation_id: Option<String>,
+    pub summary: String,
     pub detail: String,
     pub subject: DecisionSubject,
+    pub responder: Responder,
 }
 
 impl DecisionDraft {
@@ -190,8 +205,10 @@ impl DecisionDraft {
             kind,
             source: String::new(),
             conversation_id: None,
+            summary: String::new(),
             detail: detail.into(),
             subject: DecisionSubject::Text,
+            responder: Responder::Local,
         }
     }
 
@@ -205,6 +222,20 @@ impl DecisionDraft {
     #[must_use]
     pub fn source(mut self, source: impl Into<String>) -> Self {
         self.source = source.into();
+        self
+    }
+
+    /// What the source is, in a few words (the tool name of a permission).
+    #[must_use]
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = summary.into();
+        self
+    }
+
+    /// The route that answers it (never re-targeted once queued).
+    #[must_use]
+    pub fn responder(mut self, responder: Responder) -> Self {
+        self.responder = responder;
         self
     }
 
@@ -245,12 +276,24 @@ pub struct DecisionQueue {
     feedback: Option<&'static str>,
     /// First visible body row of the focused frame (`PgUp`/`PgDn`).
     scroll: usize,
+    pub(crate) permission_layout: std::cell::RefCell<
+        Option<std::sync::Arc<crate::adapters::tui::widgets::decision_frame::PreparedPermission>>,
+    >,
     /// The payload of the item the last rail key resolved, until its effect arm
     /// consumes it (the same tick); the queue is its only owner.
     resolved: Option<DecisionSubject>,
+    /// An attached item whose effect the host is sending: the item stays queued
+    /// until the send succeeds (the `AttachedApprovals::decide` rule, A8).
+    sending: Option<(DecisionKey, DecisionEffect)>,
     /// The active tab's conversation, as the last draw saw it: an item for
     /// another conversation is never focused (it waits, counted).
     active_conversation: Option<String>,
+    /// The S-QUEUE list's selected item (the oldest non-deferred when `None`).
+    pub(crate) list_selected: Option<DecisionKey>,
+    /// A read-only mirror's count of approvals the writer still owes (A14).
+    mirror_waiting: usize,
+    /// Request ids a mirror already saw retire (a repeated close counts once).
+    mirror_retired: HashSet<String>,
 }
 
 impl DecisionQueue {
@@ -318,6 +361,11 @@ impl DecisionQueue {
     pub(crate) fn prepare(&mut self, key: &DecisionKey) {
         if let Some(item) = self.item_mut(key) {
             item.deferred = false;
+            // A frame opens on the request itself, never inside a sub-context.
+            if let DecisionSubject::Permission(payload) = &mut item.subject {
+                payload.reviewing = false;
+                payload.feedback = None;
+            }
         }
         self.clear_paint();
         self.feedback = None;
@@ -346,6 +394,36 @@ impl DecisionQueue {
         self.resolved.take()
     }
 
+    /// The attached item the host must send now, with its payload: it stays queued
+    /// until [`settle_sent`] retires it after a successful send.
+    pub(crate) fn take_sending(
+        &mut self,
+    ) -> Option<(DecisionKey, DecisionEffect, DecisionSubject)> {
+        let (key, effect) = self.sending.take()?;
+        let subject = self.item(&key)?.subject.clone();
+        Some((key, effect, subject))
+    }
+
+    /// A read-only mirror's handshake count: approvals the writer still owes.
+    pub fn set_mirror_waiting(&mut self, waiting: usize) {
+        self.mirror_waiting = waiting;
+        self.mirror_retired.clear();
+    }
+
+    /// A mirror saw `request_id` retire (`ApprovalClosed`, or `ApprovalRefused` with
+    /// `NoLongerPending`); a repeat of the same id counts once (A14).
+    pub fn retire_mirror(&mut self, request_id: &str) {
+        if self.mirror_retired.insert(request_id.to_owned()) {
+            self.mirror_waiting = self.mirror_waiting.saturating_sub(1);
+        }
+    }
+
+    /// Approvals a read-only mirror knows the writer still has to answer.
+    #[must_use]
+    pub fn mirror_waiting(&self) -> usize {
+        self.mirror_waiting
+    }
+
     /// True until 500 ms after the focused frame's first paint (RU-6).
     pub(crate) fn inert(&self, state: &TuiState) -> bool {
         let now = state.notifications.now();
@@ -372,6 +450,7 @@ impl DecisionQueue {
 
     fn remove(&mut self, key: &DecisionKey) -> Option<DecisionItem> {
         let at = self.items.iter().position(|item| item.matches_key(key))?;
+        *self.permission_layout.get_mut() = None;
         Some(self.items.remove(at))
     }
 
@@ -447,12 +526,13 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
                 kind: draft.kind,
                 source: draft.source,
                 conversation_id: draft.conversation_id,
+                summary: draft.summary,
                 detail,
                 subject: draft.subject,
                 deferred: false,
                 validity: Validity::Live,
                 arrived: now,
-                responder: Responder::Local,
+                responder: draft.responder,
             });
             true
         }
@@ -480,13 +560,22 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
 /// belongs to: only for global conditions (the daily budget). Nothing is promoted
 /// here; an item whose frame is open turns stale instead (A7).
 pub fn withdraw(state: &mut TuiState, kind: DecisionKind) {
-    withdraw_where(state, |item| item.kind == kind);
+    withdraw_where(state, NO_LONGER_PENDING, |item| item.kind == kind);
+}
+
+/// The one item `key` names settled elsewhere: it leaves the queue, or, when its
+/// frame is open, turns stale with `copy` (the source's own words) and waits for
+/// Close. False when it was not queued.
+pub(crate) fn withdraw_key(state: &mut TuiState, key: &DecisionKey, copy: StaleCopy) -> bool {
+    let found = state.decisions.contains_key(key);
+    withdraw_where(state, copy, |item| item.matches_key(key));
+    found
 }
 
 /// Drop the `kind` item keyed to `conversation_id` only: clearing one tab's
 /// condition never silently drops another tab's pending decision.
 pub fn withdraw_for(state: &mut TuiState, kind: DecisionKind, conversation_id: &str) {
-    withdraw_where(state, |item| {
+    withdraw_where(state, NO_LONGER_PENDING, |item| {
         item.kind == kind && item.conversation_id.as_deref() == Some(conversation_id)
     });
 }
@@ -501,7 +590,7 @@ pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
     if facts.titles.is_empty() {
         return;
     }
-    withdraw_where(state, |item| {
+    withdraw_where(state, NO_LONGER_PENDING, |item| {
         item.conversation_id.as_deref().is_some_and(|id| {
             Some(id) != facts.active_conversation_id.as_deref()
                 && !facts.titles.iter().any(|(known, _)| known == id)
@@ -512,7 +601,7 @@ pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
 /// A withdrawn item leaves the queue, unless its frame is open: then the user is
 /// reading it, so it turns stale (its source copy, `[Esc] Close` only) and Close
 /// removes it.
-fn withdraw_where(state: &mut TuiState, matches: impl Fn(&DecisionItem) -> bool) {
+fn withdraw_where(state: &mut TuiState, copy: StaleCopy, matches: impl Fn(&DecisionItem) -> bool) {
     let shown = state
         .modal_stack
         .all_frames()
@@ -526,12 +615,13 @@ fn withdraw_where(state: &mut TuiState, matches: impl Fn(&DecisionItem) -> bool)
         }
         if shown.as_ref().is_some_and(|key| item.matches_key(key)) {
             staled |= !item.is_stale();
-            item.validity = Validity::Stale(NO_LONGER_PENDING);
+            item.validity = Validity::Stale(copy);
             return true;
         }
         false
     });
     if staled || state.decisions.items.len() != before {
+        *state.decisions.permission_layout.get_mut() = None;
         state.needs_redraw = true;
     }
 }
@@ -563,14 +653,17 @@ pub fn raise_large_image(
     )
 }
 
-/// `Ctrl+X q` (interim, 6-A): focus the oldest decidable item (a deferred one
-/// included). False when nothing decidable waits here.
-pub fn focus_oldest(state: &mut TuiState, facts: &LogFacts) -> bool {
-    let Some(key) = state.decisions.oldest(facts, false) else {
-        return false;
-    };
-    presentation::reducer::focus_decision(state, key);
-    true
+/// The registry context of the focused decision frame (its item's own context, the
+/// field's while one is open): the context hints, `Ctrl+X` and paste resolve in.
+#[must_use]
+pub(crate) fn frame_context(state: &TuiState) -> Context {
+    state
+        .modal_stack
+        .all_frames()
+        .find(|frame| frame.surface == Surface::Decision)
+        .and_then(|frame| frame.decision.as_ref())
+        .and_then(|key| state.decisions.item(key))
+        .map_or(Context::Decision, keys::context_of)
 }
 
 /// Open the queued item `key` as a frame over whatever is open: an explicit,
@@ -590,13 +683,32 @@ pub fn open(state: &mut TuiState, key: &DecisionKey) -> bool {
     true
 }
 
-/// `Ctrl+X q` as the local host runs it: focus the oldest decidable item, or
-/// say honestly why nothing could be focused.
+/// Hygiene both hosts run after an owner closes: a decision frame whose item left
+/// the queue closes (nothing below it is ever opened by surprise, AD-2106).
+pub fn settle(state: &mut TuiState) {
+    let orphan = state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| frame.surface == Surface::Decision)
+        && !state
+            .modal_stack
+            .all_frames()
+            .find(|frame| frame.surface == Surface::Decision)
+            .and_then(|frame| frame.decision.as_ref())
+            .is_some_and(|key| state.decisions.contains_key(key));
+    if orphan {
+        presentation::reducer::close(state, Surface::Decision);
+        state.needs_redraw = true;
+    }
+}
+
+/// `Ctrl+X q` as both hosts run it: open the Needs-you list, or say honestly that
+/// nothing waits.
 pub fn open_waiting(state: &mut TuiState, facts: &LogFacts) {
-    if focus_oldest(state, facts) {
+    if open_list(state, facts) {
         return;
     }
-    let message = keymap::table::decision_waiting_remedy(!state.decisions.is_empty());
+    let message = keymap::table::decision_waiting_remedy();
     if let Some(origin) = state
         .modal_stack
         .top()
@@ -682,9 +794,24 @@ pub fn status_cue(waiting: usize) -> Option<String> {
     })
 }
 
+/// A read-only mirror's cue: it can see that approvals wait, never answer them (A14).
+#[must_use]
+pub fn mirror_cue(waiting: usize) -> Option<String> {
+    (waiting > 0).then(|| format!("{waiting} approval(s) waiting for the writer"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The oldest decidable item as a frame (what `Ctrl+X q` + `Enter` do).
+    fn focus_oldest(state: &mut TuiState, facts: &LogFacts) -> bool {
+        let Some(key) = state.decisions.oldest(facts, false) else {
+            return false;
+        };
+        presentation::reducer::focus_decision(state, key);
+        true
+    }
     use crate::adapters::tui::notifications::NotificationStore;
     use crate::adapters::tui::theme::Theme;
     use crate::adapters::tui::widgets::decision_frame;
@@ -1193,18 +1320,17 @@ mod tests {
 
     #[test]
     fn story21_1_an_item_of_another_conversation_is_passive_and_a_stray_key_never_answers_it() {
-        let (mut state, clock) = clocked();
+        let (mut state, _clock) = clocked();
+        prune_closed(&mut state, &facts("active"));
         raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Carryover, "x").conversation("other"),
             Arrival::Requested,
         );
-        // Focus was taken at raise time, but the item is not decidable here: the
-        // very first key heals the focus and flows on to the surface below.
-        ready(&mut state, &clock);
+        assert!(!presentation::is_open(&state, Surface::Decision));
         let event = DomainInputEvent::KeyPress('y');
         assert_eq!(
-            handle_domain_event(&mut state, &event, &facts("active")),
+            handle_domain_event(&mut state, &event, &facts("active"), keymap::Host::Local),
             None
         );
         assert!(!presentation::is_open(&state, Surface::Decision));
@@ -1212,13 +1338,25 @@ mod tests {
             state.decisions.holds(DecisionKind::Carryover),
             "the item still waits"
         );
-        // Ctrl+X q says where it waits instead of focusing it.
+        // The list includes the passive item, but Enter cannot open it here.
         open_waiting(&mut state, &facts("active"));
-        let last = state.notifications.records().next_back().unwrap();
-        assert!(last.message.contains("another tab"), "{}", last.message);
+        assert!(presentation::is_open(&state, Surface::DecisionQueue));
+        list::handle_list_key(
+            &mut state,
+            keymap::Host::Local,
+            keymap::Key::Enter,
+            &facts("active"),
+        );
+        assert!(presentation::is_open(&state, Surface::DecisionQueue));
         assert!(!presentation::is_open(&state, Surface::Decision));
-        // Back on its own tab the same chord focuses it.
-        open_waiting(&mut state, &facts("other"));
+        assert!(state.decisions.holds(DecisionKind::Carryover));
+        // On its own tab Enter opens that same queued item.
+        list::handle_list_key(
+            &mut state,
+            keymap::Host::Local,
+            keymap::Key::Enter,
+            &facts("other"),
+        );
         assert!(presentation::is_open(&state, Surface::Decision));
     }
 

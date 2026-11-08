@@ -1190,12 +1190,22 @@ fn answer_large_image(key: char) -> (Option<InputAction>, Option<InputAction>) {
     let facts = LogFacts::default();
     let event = DomainInputEvent::KeyPress(key);
     // Inside the 500 ms window the key is dropped and never replayed.
-    let early = match handle_domain_event(&mut state, &event, &facts) {
+    let early = match handle_domain_event(
+        &mut state,
+        &event,
+        &facts,
+        rustain::adapters::tui::keymap::Host::Local,
+    ) {
         Some(PaneOutcome::Effect(effect)) => Some(effect.into_action()),
         _ => None,
     };
     clock.advance(std::time::Duration::from_millis(501));
-    let late = match handle_domain_event(&mut state, &event, &facts) {
+    let late = match handle_domain_event(
+        &mut state,
+        &event,
+        &facts,
+        rustain::adapters::tui::keymap::Host::Local,
+    ) {
         Some(PaneOutcome::Effect(effect)) => Some(effect.into_action()),
         _ => None,
     };

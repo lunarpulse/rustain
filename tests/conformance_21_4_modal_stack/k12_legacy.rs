@@ -9,8 +9,8 @@ use rustain::adapters::tui::{
     state::{SkillTrustState, TuiState},
 };
 use rustain::domain::models::{
-    ApprovalOutcome, ApprovalScope, FocusState, OverlayType, PermissionResolution, RequestId,
-    SkillTrustResponse, ToolRisk,
+    ApprovalOutcome, FocusState, OverlayType, PermissionResolution, RequestId, SkillTrustResponse,
+    ToolRisk,
     palette::{PaletteAction, PaletteEntry, PaletteScope},
     tool_call::ApprovalSource,
     visual::ConfirmationType,
@@ -39,6 +39,11 @@ impl Approvals {
         &mut self,
         state: &mut TuiState,
     ) -> (RequestId, oneshot::Receiver<ResolvedApproval>) {
+        // The covered-card controls exercise RU-6's recent-typing guard;
+        // an idle non-text frame may otherwise be interrupted.
+        if !state.modal_stack.is_empty() {
+            state.last_printable_at = Some(state.notifications.now());
+        }
         let (id, response) = self
             .runtime
             .request(
@@ -84,8 +89,8 @@ fn frames(state: &TuiState) -> Vec<Frame> {
 }
 
 fn assert_queued(state: &TuiState) {
-    assert!(state.pending_permission.is_none());
-    assert_eq!(state.permission_queue.len(), 1);
+    assert_eq!(state.decisions.len(), 1);
+    assert!(!presentation::is_open(state, Surface::Decision));
 }
 
 /// M11: an actual queued request must not interpret a palette query's `a`.
@@ -127,70 +132,76 @@ async fn card_under_frames_never_takes_the_keys() {
     );
     assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
     assert!(state.modal_stack.is_empty());
-    assert!(state.permission_queue.is_empty());
-    let pending = state.pending_permission.as_ref().unwrap();
-    assert_eq!(pending.id, id);
-    assert!(Arc::ptr_eq(&pending.input, &input));
-    assert_eq!(state.focus, confirmation(ConfirmationType::Permission));
-    let action = press(&mut state, Key::Char('a'));
-    assert_eq!(action, InputAction::PermissionAlwaysAllow);
-    approval_bridge::handle_action(&mut state, &action, &approvals.runtime).await;
-    let resolved = response
-        .try_recv()
-        .expect("real runtime responder receives allow");
-    assert_eq!(
-        resolved.outcome,
-        ApprovalOutcome::AlwaysAndSave {
-            scope: ApprovalScope::Tool("Read".into()),
-        }
-    );
-    assert_eq!(resolved.resolution, PermissionResolution::Operator);
-    approvals.apply_resolution(&mut state, &id);
-    assert!(
-        approvals
-            .runtime
-            .pending_review(&id, ReviewScope::AllTools)
-            .await
-            .is_none()
-    );
-    assert!(state.pending_permission.is_none());
+    assert_queued(&state);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &id
+    ));
+    let item = state.decisions.items().next().unwrap();
+    let rustain::adapters::tui::decision_queue::DecisionSubject::Permission(payload) =
+        &item.subject
+    else {
+        panic!("expected permission payload");
+    };
+    let rustain::adapters::tui::decision_queue::PermissionInput::Ready(held) = &payload.input
+    else {
+        panic!("expected exact input");
+    };
+    assert!(Arc::ptr_eq(held, &input));
+    assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
     assert_eq!(state.focus, FocusState::Input);
     assert_eq!(state.input_buffer, "retained composer");
     assert_eq!(state.cursor_position, 4);
     assert!(presentation::consistent(&state));
 }
 
-/// Independent arrival control: suppressing all confirmation focus is not a fix.
+/// Empty-base arrivals use a decision frame, without borrowing base focus.
 #[tokio::test]
-async fn empty_stack_permission_arrival_takes_keys_and_really_denies() {
+async fn empty_stack_permission_arrival_opens_a_frame_without_borrowing_focus() {
     let mut state = TuiState::new(80, 24);
+    let clock = Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
     let mut approvals = Approvals::new();
     let (id, mut response) = approvals.request(&mut state).await;
-    assert!(state.modal_stack.is_empty());
-    assert_eq!(state.focus, confirmation(ConfirmationType::Permission));
-    assert_eq!(state.pending_permission.as_ref().unwrap().id, id);
-    assert!(state.permission_queue.is_empty());
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+    assert_eq!(state.focus, FocusState::Input);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &id
+    ));
+    super::k3_compose::draw(
+        &state,
+        &super::k3_compose::layout(&state),
+        Some("Decision: Permission"),
+    );
+    rustain::adapters::tui::decision_queue::note_painted(&mut state);
+    clock.advance(rustain::adapters::tui::decision_queue::INERT_AFTER_PAINT);
     assert_eq!(press(&mut state, Key::Char('r')), InputAction::Consumed);
-    assert_eq!(state.permission_reader.review.as_ref(), Some(&id));
+    let item = state.decisions.items().next().unwrap();
+    let rustain::adapters::tui::decision_queue::DecisionSubject::Permission(payload) =
+        &item.subject
+    else {
+        panic!("expected permission payload");
+    };
+    assert!(payload.reviewing);
     let action = press(&mut state, Key::Char('n'));
     assert_eq!(action, InputAction::PermissionDeny);
     approval_bridge::handle_action(&mut state, &action, &approvals.runtime).await;
-    let resolved = response
-        .try_recv()
-        .expect("real runtime responder receives denial");
-    assert_eq!(resolved.outcome, ApprovalOutcome::Reject { feedback: None });
-    assert_eq!(approvals.runtime.rejected_count(), 1);
-    assert!(
-        state.permission_reader.review.is_none(),
-        "closing the owner clears Review before the later Resolved event"
+    assert_eq!(
+        response.try_recv().unwrap().outcome,
+        ApprovalOutcome::Reject { feedback: None }
     );
+    assert_eq!(approvals.runtime.rejected_count(), 1);
+    assert!(state.decisions.is_empty());
     approvals.apply_resolution(&mut state, &id);
-    assert!(state.pending_permission.is_none());
     assert_eq!(state.focus, FocusState::Input);
 }
 
 #[tokio::test]
-async fn palette_action_close_promotes_the_real_queued_request() {
+async fn palette_action_close_leaves_the_real_request_queued() {
     for (action, notices_added, draft) in [
         (PaletteAction::ShowVersion, 1, ""),
         (
@@ -217,18 +228,15 @@ async fn palette_action_close_promotes_the_real_queued_request() {
         assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
         assert_eq!(
             state.notifications.records().count(),
-            notices + notices_added
+            notices + notices_added + 1
         );
         assert_eq!(state.input_buffer, draft);
         assert!(state.modal_stack.is_empty());
-        assert_eq!(state.focus, confirmation(ConfirmationType::Permission));
-        assert_eq!(state.pending_permission.as_ref().unwrap().id, id);
-        assert!(state.permission_queue.is_empty());
-        let action = press(&mut state, Key::Char('y'));
-        assert_eq!(action, InputAction::PermissionAllow);
-        approval_bridge::handle_action(&mut state, &action, &approvals.runtime).await;
-        assert_eq!(response.try_recv().unwrap().outcome, ApprovalOutcome::Once);
-        approvals.apply_resolution(&mut state, &id);
+        assert_queued(&state);
+        assert!(rustain::adapters::tui::decision_queue::holds_request(
+            &state, &id
+        ));
+        assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
         assert_eq!(state.focus, FocusState::Input);
         assert_eq!(state.input_buffer, draft);
     }
@@ -267,14 +275,12 @@ async fn surface_handoff_does_not_promote_a_card_in_the_transient_empty_stack() 
         while !state.modal_stack.is_empty() {
             assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
         }
-        assert_eq!(state.focus, confirmation(ConfirmationType::Permission));
-        assert_eq!(state.pending_permission.as_ref().unwrap().id, id);
-        let action = press(&mut state, Key::Char('y'));
-        assert_eq!(action, InputAction::PermissionAllow);
-        approval_bridge::handle_action(&mut state, &action, &approvals.runtime).await;
-        assert_eq!(response.try_recv().unwrap().outcome, ApprovalOutcome::Once);
-        approvals.apply_resolution(&mut state, &id);
-        assert_eq!(state.focus, FocusState::Input);
+        assert_eq!(state.focus, FocusState::Chat);
+        assert_queued(&state);
+        assert!(rustain::adapters::tui::decision_queue::holds_request(
+            &state, &id
+        ));
+        assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
         assert_eq!(state.input_buffer, "kept through handoff");
         assert_eq!(state.cursor_position, 2);
     }
@@ -414,15 +420,20 @@ fn empty_stack_skill_trust_producer_is_an_independent_focus_control() {
 async fn queued_request_preserves_an_active_legacy_trust_owner() {
     let mut state = TuiState::new(80, 24);
     let mut approvals = Approvals::new();
-    let (first, mut first_response) = approvals.request(&mut state).await;
     let (pending, mut trust_response) = trust("active-owner");
     state.pending_skill_trust = Some(pending);
     reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
+    let (first, mut first_response) = approvals.request(&mut state).await;
     assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
     let (second, mut second_response) = approvals.request(&mut state).await;
     assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
-    assert_eq!(state.pending_permission.as_ref().unwrap().id, first);
-    assert_eq!(state.permission_queue.len(), 1);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &first
+    ));
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &second
+    ));
+    assert_eq!(state.decisions.len(), 2);
     assert!(
         approvals
             .runtime
@@ -452,25 +463,16 @@ async fn queued_request_preserves_an_active_legacy_trust_owner() {
 async fn queued_request_retains_a_deferred_export_until_its_owner_releases() {
     let mut state = TuiState::new(80, 24);
     let mut approvals = Approvals::new();
-    let (first, mut first_response) = approvals.request(&mut state).await;
-    reducer::open(&mut state, Surface::Help);
-    let owner = state.modal_stack.top().unwrap().clone();
     let path = std::path::PathBuf::from("deferred-export.md");
     state.pending_export = Some((path.clone(), "retained export content".into()));
     reducer::raise_confirmation(&mut state, ConfirmationType::ExportOverwrite(path.clone()));
-    assert_eq!(state.modal_stack.top(), Some(&owner));
-    reducer::back(&mut state);
-    assert_eq!(state.focus, confirmation(ConfirmationType::Permission));
+    let (first, mut first_response) = approvals.request(&mut state).await;
     let (second, mut second_response) = approvals.request(&mut state).await;
-    assert_eq!(state.permission_queue.len(), 1);
-    let deny = press(&mut state, Key::Char('n'));
-    assert_eq!(deny, InputAction::PermissionDeny);
-    approval_bridge::handle_action(&mut state, &deny, &approvals.runtime).await;
-    assert_eq!(
-        first_response.try_recv().unwrap().outcome,
-        ApprovalOutcome::Reject { feedback: None }
-    );
-    approvals.apply_resolution(&mut state, &first);
+    assert_eq!(state.decisions.len(), 2);
+    assert!(matches!(
+        first_response.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
     assert_eq!(
         state.focus,
         confirmation(ConfirmationType::ExportOverwrite(path.clone()))
@@ -491,16 +493,18 @@ async fn queued_request_retains_a_deferred_export_until_its_owner_releases() {
     rustain::adapters::tui::handlers::export::apply_cancel_export_overwrite(&mut state);
     reducer::settle_legacy(&mut state);
     assert!(state.pending_export.is_none());
-    assert_eq!(state.pending_permission.as_ref().unwrap().id, second);
-    let deny = press(&mut state, Key::Char('n'));
-    assert_eq!(deny, InputAction::PermissionDeny);
-    approval_bridge::handle_action(&mut state, &deny, &approvals.runtime).await;
-    assert_eq!(
-        second_response.try_recv().unwrap().outcome,
-        ApprovalOutcome::Reject { feedback: None }
-    );
-    approvals.apply_resolution(&mut state, &second);
-    assert_eq!(state.focus, FocusState::Input);
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &first
+    ));
+    assert!(rustain::adapters::tui::decision_queue::holds_request(
+        &state, &second
+    ));
+    assert_eq!(state.decisions.len(), 2);
+    assert!(!presentation::is_open(&state, Surface::Decision));
+    assert!(matches!(
+        second_response.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
 }
 
 /// A late resolution of either an active card or a queued card may clean its
@@ -517,7 +521,13 @@ async fn asynchronous_permission_resolution_preserves_covered_and_continued_base
             } else {
                 None
             };
-            let surfaces: &[Surface] = if continued {
+            let surfaces: &[Surface] = if continued && active {
+                &[
+                    Surface::CommandPalette,
+                    Surface::ModelSelector,
+                    Surface::Help,
+                ]
+            } else if continued {
                 &[
                     Surface::CommandPalette,
                     Surface::ModelSelector,
@@ -535,7 +545,9 @@ async fn asynchronous_permission_resolution_preserves_covered_and_continued_base
                 None => approvals.request(&mut state).await,
             };
             if active {
-                assert_eq!(state.pending_permission.as_ref().unwrap().id, id);
+                assert!(rustain::adapters::tui::decision_queue::holds_request(
+                    &state, &id
+                ));
             } else {
                 assert_queued(&state);
             }
@@ -543,7 +555,16 @@ async fn asynchronous_permission_resolution_preserves_covered_and_continued_base
             let retained = frames(&state);
             open_quit(&mut state);
             let covered = frames(&state);
-            assert_eq!(state.modal_stack.len(), if continued { 4 } else { 2 });
+            assert_eq!(
+                state.modal_stack.len(),
+                if continued {
+                    4
+                } else if active {
+                    3
+                } else {
+                    2
+                }
+            );
             assert_eq!(
                 state.modal_stack.iter().any(|f| f.surface == Surface::Help),
                 !continued
@@ -555,8 +576,12 @@ async fn asynchronous_permission_resolution_preserves_covered_and_continued_base
                 .await;
             assert_eq!(response.try_recv().unwrap().outcome, ApprovalOutcome::Once);
             approvals.apply_resolution(&mut state, &id);
-            assert!(state.pending_permission.is_none());
-            assert!(state.permission_queue.is_empty());
+            if active {
+                assert_eq!(state.decisions.len(), 1);
+                assert!(state.decisions.items().next().unwrap().is_stale());
+            } else {
+                assert!(state.decisions.is_empty());
+            }
             assert_eq!(frames(&state), covered);
             assert_eq!(state.focus, caller);
             assert_eq!(press(&mut state, Key::Char('n')), InputAction::Consumed);
@@ -570,14 +595,7 @@ async fn asynchronous_permission_resolution_preserves_covered_and_continued_base
                     assert_eq!(state.focus, caller);
                 }
             }
-            assert_eq!(
-                state.focus,
-                if active {
-                    FocusState::Input
-                } else {
-                    FocusState::Chat
-                }
-            );
+            assert_eq!(state.focus, FocusState::Chat);
             assert!(
                 approvals
                     .runtime
@@ -607,7 +625,6 @@ mod local_occlusion {
     use rustain::adapters::noop::*;
     use rustain::adapters::tui::{
         decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
-        notification_log::LogFacts,
         notifications::{self, NoticeSeverity, NoticeSource},
         views::{self, ViewKind},
         widgets::feedback_block,
@@ -1345,17 +1362,7 @@ mod local_occlusion {
             assert!(!open_mixed_door(&mut f.h.state, Surface::Help), "{kind:?}");
             assert_eq!(f.h.state.focus, focus);
         }
-        let mut f = Visit::new(80, 24).await;
-        let mut approvals = Approvals::new();
-        let (_, mut response) = approvals.request(&mut f.h.state).await;
-        for surface in [
-            Surface::QuitConfirm,
-            Surface::NotificationLog,
-            Surface::Help,
-        ] {
-            assert!(!open_mixed_door(&mut f.h.state, surface), "Permission");
-        }
-        assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
+        // Permission is now a stack frame, not a legacy non-openable card.
     }
 
     #[tokio::test]
@@ -1373,35 +1380,33 @@ mod local_occlusion {
                 let mut trust_response = seed_mixed(&mut f, kind);
                 assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
                 f.draw();
-                let selected = f.h.state.focus.clone();
-                if selected == confirmation(ConfirmationType::Permission) {
-                    assert!(
-                        !f.h.screen_text().contains("mixed-"),
-                        "deferred card must not paint"
-                    );
-                    let action = press(&mut f.h.state, Key::Char('n'));
-                    assert_eq!(action, InputAction::PermissionDeny);
-                    approval_bridge::handle_action(&mut f.h.state, &action, &approvals.runtime)
-                        .await;
-                    assert_eq!(
-                        response.try_recv().unwrap().outcome,
-                        ApprovalOutcome::Reject { feedback: None }
-                    );
-                    approvals.apply_resolution(&mut f.h.state, &id);
-                } else {
-                    assert!(f.h.state.pending_permission.is_none());
-                    assert_eq!(f.h.state.permission_queue.len(), 1);
-                    let mut solo = Visit::new(130, 40).await;
-                    let kind = selected_mixed(&f.h.state);
-                    let _response = seed_mixed(&mut solo, kind);
-                    solo.draw();
-                    assert_eq!(
-                        offered_rails(&f),
-                        offered_rails(&solo),
-                        "{surface:?}: permission + {kind:?}"
-                    );
-                    assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
+                assert_queued(&f.h.state);
+                assert!(decision_queue::holds_request(&f.h.state, &id));
+                let mut solo = Visit::new(130, 40).await;
+                let kind = selected_mixed(&f.h.state);
+                let _response = seed_mixed(&mut solo, kind);
+                solo.draw();
+                let actual = offered_rails(&f);
+                let expected = offered_rails(&solo);
+                assert_eq!(
+                    actual.len(),
+                    expected.len(),
+                    "{surface:?}: permission + {kind:?}"
+                );
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    // A waiting-decision toast can share this terminal row, outside
+                    // the card. Compare the complete card rail, not the toast.
+                    let expected = expected.trim_end_matches(['│', '║', '╝', '┘', '═', '─', ' ']);
+                    let suffix = actual.strip_prefix(expected).unwrap_or_else(|| {
+                        panic!("{surface:?}: permission + {kind:?}: {actual:?} != {expected:?}")
+                    });
+                    for key in [
+                        "[y]", "[n]", "[d]", "[c]", "[Enter]", "[e]", "[a]", "[s]", "[f]", "[r]",
+                    ] {
+                        assert!(!suffix.contains(key), "unexpected second rail: {actual}");
+                    }
                 }
+                assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
                 if let Some(response) = &mut trust_response {
                     assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
                 }
@@ -1560,7 +1565,7 @@ mod local_occlusion {
         reducer::raise_confirmation(&mut f.h.state, ConfirmationType::SkillTrust);
         let mut approvals = Approvals::new();
         let (_, mut permission_response) = approvals.request(&mut f.h.state).await;
-        assert_eq!(f.h.state.permission_queue.len(), 1);
+        assert_eq!(f.h.state.decisions.len(), 1);
         assert_eq!(press(&mut f.h.state, Key::Char('n')), InputAction::Consumed);
         let screen = f.draw();
         assert!(screen.contains("[y] Apply"), "{screen}");
@@ -1697,9 +1702,8 @@ mod local_occlusion {
                     decision_queue::raise(
                         &mut f.h.state,
                         DecisionDraft::new(DecisionKind::Budget, "K12 actual decision"),
-                        Arrival::Automatic,
+                        Arrival::Requested,
                     );
-                    decision_queue::open_waiting(&mut f.h.state, &LogFacts::default());
                     assert_eq!(
                         f.h.state.modal_stack.top().unwrap().surface,
                         Surface::Decision
@@ -1733,27 +1737,42 @@ mod local_occlusion {
     }
 
     #[tokio::test]
-    async fn real_legacy_permission_card_covers_the_actual_clipped_row() {
+    async fn permission_frame_covers_the_actual_clipped_row() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             let mut f = Visit::new(width, height).await;
-            let y = f.pane().bottom() - 1;
-            assert_eq!(f.place(y).await, vec![y]);
+            let clock = Arc::new(rustain::domain::clock::MockClock::new(
+                std::time::Instant::now(),
+            ));
+            f.h.state.notifications = notifications::NotificationStore::from_config(
+                &rustain::domain::models::NotificationsConfig::default(),
+                clock.clone(),
+            );
+            let layout = super::super::k3_compose::layout(&f.h.state);
+            let region = rustain::adapters::tui::presentation::geometry::modal_region(
+                &layout,
+                Rect::new(0, 0, width, height),
+            );
+            let y = rustain::adapters::tui::presentation::geometry::frame_rect(region).bottom() - 3;
+            assert_eq!(f.place(y).await[0], y);
             let visit = f.read().await;
             let presented = f.h.state.log_awareness.presented.len();
             let mut approvals = Approvals::new();
             let (id, mut response) = approvals.request(&mut f.h.state).await;
             let screen = f.draw();
-            assert_eq!(f.h.state.pending_permission.as_ref().unwrap().id, id);
-            assert!(
-                f.row(y).starts_with("┃ "),
-                "actual card rail intersects feedback: {screen}"
-            );
+            assert!(decision_queue::holds_request(&f.h.state, &id));
+            let rect = f.painted_box("Decision: Permission");
+            assert!(rect.y <= y && y < rect.bottom(), "{screen}");
             assert!(
                 screen.contains("Allow") && screen.contains("Deny"),
                 "{screen}"
             );
             assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-            f.retained(visit, presented);
+            if width >= 100 {
+                f.acknowledged(visit);
+            } else {
+                f.retained(visit, presented);
+            }
+            clock.advance(decision_queue::INERT_AFTER_PAINT);
             let action = press(&mut f.h.state, Key::Char('n'));
             approval_bridge::handle_action(&mut f.h.state, &action, &approvals.runtime).await;
             assert_eq!(

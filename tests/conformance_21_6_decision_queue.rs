@@ -19,3 +19,9 @@ mod k2_arrival;
 
 #[path = "conformance_21_6_decision_queue/k3_frame.rs"]
 mod k3_frame;
+
+#[path = "conformance_21_6_decision_queue/k4_permission.rs"]
+mod k4_permission;
+
+#[path = "conformance_21_6_decision_queue/k6_list.rs"]
+mod k6_list;
