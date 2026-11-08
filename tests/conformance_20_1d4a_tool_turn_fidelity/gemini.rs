@@ -184,7 +184,7 @@ async fn k1_tui_reload_reproduces_the_in_turn_history() {
         assert!(row.tool_calls.iter().all(|call| call.id.starts_with("tc_")));
     }
     assert_eq!(
-        assistant[0].content, "VTdone",
+        assistant[0].content, "TVdone",
         "the display fold is unchanged"
     );
     let screen = render(&conversation);
@@ -613,7 +613,7 @@ async fn plain_pre_story_tui_session_rebuilds_as_before() {
             roles,
             [MessageRole::User, MessageRole::Assistant, MessageRole::User]
         );
-        assert_eq!(api[1].content, "VTdone");
+        assert_eq!(api[1].content, "TVdone");
         assert_eq!(api[1].tool_uses.len(), 3);
         assert!(api[1].tool_uses.iter().all(|u| u.id.starts_with("tc_")));
         assert_eq!(
