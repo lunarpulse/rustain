@@ -108,3 +108,60 @@ fn k1_the_sidebar_delete_creates_exactly_one_item_that_owns_its_target() {
     assert!(matches!(effect, Some(RouteEffect::Action(_))), "{effect:?}");
     assert!(state.decisions.is_empty());
 }
+
+/// Quit facts by value for every 6-C kind through the public store. `quit_guard::local_facts`
+/// is crate-private, so the host fact builder itself is witnessed in-file by
+/// `quit_guard::tests::story21_6_every_6c_kind_is_counted_per_live_item_by_the_host_facts`
+/// and `..._a_stale_6c_item_adds_nothing_to_the_host_facts` (`cargo test --lib story21_6_`).
+/// This test drives the shared S-QUIT transition with `decisions.undecided()`, the number
+/// that builder adds for the queue (it is not a substitute for the host aggregation).
+#[test]
+fn quit_warns_for_every_queued_decision_kind() {
+    use super::raisers::{ALL_6C, PLAIN, raise, raise_second};
+    use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
+    let quit_with = |state: &mut rustain::adapters::tui::state::TuiState| {
+        let mut facts = QuitFacts::idle(QuitHost::Local);
+        facts.pending_decisions = state.decisions.undecided();
+        quit_confirm::request(state, facts)
+    };
+    // Positive control: an empty queue counts nothing and quit exits at once.
+    let (mut empty, _clock) = clocked(80, 24);
+    assert_eq!(empty.decisions.undecided(), 0);
+    assert_eq!(quit_with(&mut empty), QuitRequest::ExitNow);
+    for kind in ALL_6C {
+        let (mut state, _clock) = clocked(80, 24);
+        let (_raised, _first) = raise(&mut state, kind, PLAIN);
+        assert_eq!(
+            state.decisions.undecided(),
+            1,
+            "{kind:?}: one queued counts once"
+        );
+        let _second = raise_second(&mut state, kind);
+        assert_eq!(
+            state.decisions.undecided(),
+            2,
+            "{kind:?}: two queued of a kind count twice"
+        );
+        assert_eq!(state.decisions.count(kind), 2, "{kind:?}");
+        assert_eq!(quit_with(&mut state), QuitRequest::Confirming, "{kind:?}");
+    }
+}
+
+#[test]
+fn a_stale_6c_item_is_not_counted_by_the_quit_guard() {
+    use super::raisers::{Hold, PLAIN, raise};
+    // A question whose turn went away can no longer be answered.
+    let (mut state, _clock) = clocked(80, 24);
+    let (_raised, hold) = raise(&mut state, DecisionKind::Question, PLAIN);
+    assert_eq!(state.decisions.undecided(), 1);
+    drop(hold);
+    decision_queue::prune_closed(&mut state, &facts("c1"));
+    assert_eq!(state.decisions.len(), 1, "the stale item is still listed");
+    assert_eq!(state.decisions.undecided(), 0, "but it no longer counts");
+    // Control: a live receiver keeps counting through the same prune.
+    let (mut live, _clock) = clocked(80, 24);
+    let (_raised, hold) = raise(&mut live, DecisionKind::Question, PLAIN);
+    decision_queue::prune_closed(&mut live, &facts("c1"));
+    assert_eq!(live.decisions.undecided(), 1);
+    assert!(matches!(hold, Hold::Question(_)));
+}

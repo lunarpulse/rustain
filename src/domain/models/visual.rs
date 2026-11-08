@@ -149,7 +149,6 @@ pub enum DeleteConfirmTarget {
 /// Note: Not Copy because `ExportOverwrite` contains path data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfirmationType {
-    Question,
     /// Fork confirmation card (Story 4-3a, AC1).
     Fork,
     /// Rewind confirmation card (Story 4-3b, AC1).
@@ -157,12 +156,6 @@ pub enum ConfirmationType {
     /// Export overwrite confirmation (Story 4-4 AC12) —
     /// shown only in explicit-path mode when the target file already exists.
     ExportOverwrite(PathBuf),
-    /// Skill trust prompt (Story 5-2 AC4) — y/n/i for workspace-tier skill activation.
-    SkillTrust,
-    /// Skill trust inspection mode (Story 5-2 AC4) — view file contents, Esc returns to prompt.
-    SkillTrustInspect,
-    /// Plan approval card (Story 6-0d AC4) — y/a/n/e for plan mode exit approval.
-    PlanApproval,
     /// Confirm `/artifact apply`: an irreversible workspace write.
     ArtifactApply,
     /// Confirm `/peer add`: pin a key into the transport allowlist

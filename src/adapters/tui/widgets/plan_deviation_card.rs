@@ -1,68 +1,52 @@
-//! Plan deviation card — Story 6.4: reapproval card inline in chat pane.
-//! Key bindings: [y] Approve / [e] Edit / [n] Reject.
+//! Plan deviation body — Story 6.4: the reapproval rows of the `Decision: Plan
+//! deviation` frame (Story 21.6 6-C). Keys: the frame's rail (`[y] Approve  [e] Edit
+//! [n] Reject`).
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-
-pub fn render(
-    area: Rect,
-    buf: &mut Buffer,
+/// The deviation rows: what changed and the runtime's summary. `current_step_count` is the
+/// task count after the deviation.
+pub fn lines(
     original_step_count: u32,
     current_step_count: u32,
     changed_steps: &[u32],
     summary: &str,
-) {
-    if area.width < 30 || area.height < 4 {
-        return;
-    }
-    let style = Style::default();
-    buf.set_string(
-        area.x,
-        area.y,
-        "╔══ Plan deviation — reapproval required",
-        style,
-    );
-    if area.height > 1 {
-        let skipped: Vec<String> = changed_steps.iter().map(|n| n.to_string()).collect();
-        buf.set_string(
-            area.x,
-            area.y + 1,
-            format!(
-                "║ {} tasks → {} tasks. Skipped: {}",
-                original_step_count,
-                current_step_count,
-                skipped.join(", ")
-            ),
-            style,
-        );
-    }
-    if area.height > 2 {
-        buf.set_string(area.x, area.y + 2, format!("║ {}", summary), style);
-    }
-    if area.height > 3 {
-        buf.set_string(
-            area.x,
-            area.y + 3,
-            format!(
-                "║ {} Approve revised  {} Edit  {} Reject",
-                rail(Context::PlanDecision, CardCmd::Yes),
-                rail(Context::PlanDecision, CardCmd::Edit),
-                rail(Context::PlanDecision, CardCmd::No)
-            ),
-            style,
-        );
-    }
-    if area.height > 4 {
-        buf.set_string(area.x, area.y + 4, "╚════════════════════════", style);
-    }
+) -> Vec<Line<'static>> {
+    let skipped: Vec<String> = changed_steps.iter().map(|n| n.to_string()).collect();
+    vec![
+        Line::from("Plan deviation — reapproval required"),
+        Line::from(format!(
+            "{} tasks → {} tasks. Skipped: {}",
+            original_step_count,
+            current_step_count,
+            skipped.join(", ")
+        )),
+        Line::from(summary.to_owned()),
+    ]
 }
 
-pub fn desired_height(kind: &crate::domain::models::plan::PlanDeviationKind, summary: &str) -> u16 {
-    let _ = (kind, summary);
-    6
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn story21_6_the_rows_name_the_counts_the_skipped_tasks_and_the_summary() {
+        let rows: Vec<String> = lines(
+            5,
+            5,
+            &[3, 4],
+            "2 task(s) auto-skipped due to upstream failure.",
+        )
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect();
+        assert_eq!(
+            rows,
+            [
+                "Plan deviation — reapproval required",
+                "5 tasks → 5 tasks. Skipped: 3, 4",
+                "2 task(s) auto-skipped due to upstream failure."
+            ]
+        );
+    }
 }

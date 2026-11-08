@@ -58,17 +58,12 @@ fn higher_owner(state: &TuiState) -> bool {
 
 fn confirmation_pending(state: &TuiState, kind: &ConfirmationType) -> bool {
     match kind {
-        ConfirmationType::Question => state.ask_user_question.is_some(),
         ConfirmationType::Fork => state.pending_fork_index.is_some(),
         ConfirmationType::Rewind => state.pending_rewind_index.is_some(),
         ConfirmationType::ExportOverwrite(path) => state
             .pending_export
             .as_ref()
             .is_some_and(|(pending, _)| pending == path),
-        ConfirmationType::SkillTrust | ConfirmationType::SkillTrustInspect => {
-            state.pending_skill_trust.is_some() || state.pending_activation.is_some()
-        }
-        ConfirmationType::PlanApproval => state.pending_plan_approval.is_some(),
         ConfirmationType::ArtifactApply => state.pending_artifact_card.is_some(),
         ConfirmationType::PeerAdd => state.pending_peer_add.is_some(),
         ConfirmationType::TeamRetract => state.pending_team_retract.is_some(),
@@ -98,22 +93,12 @@ pub fn raise_confirmation(state: &mut TuiState, confirmation: ConfirmationType) 
 }
 
 fn pending_confirmation(state: &TuiState) -> Option<ConfirmationType> {
-    if state.pending_skill_trust.is_some() || state.pending_activation.is_some() {
-        Some(if state.skill_trust_inspect_mode {
-            ConfirmationType::SkillTrustInspect
-        } else {
-            ConfirmationType::SkillTrust
-        })
-    } else if state.pending_artifact_card.is_some() {
+    if state.pending_artifact_card.is_some() {
         Some(ConfirmationType::ArtifactApply)
-    } else if state.pending_plan_approval.is_some() {
-        Some(ConfirmationType::PlanApproval)
     } else if state.pending_peer_add.is_some() {
         Some(ConfirmationType::PeerAdd)
     } else if state.pending_team_retract.is_some() {
         Some(ConfirmationType::TeamRetract)
-    } else if state.ask_user_question.is_some() {
-        Some(ConfirmationType::Question)
     } else if state.pending_fork_index.is_some() {
         Some(ConfirmationType::Fork)
     } else if state.pending_rewind_index.is_some() {
@@ -176,19 +161,6 @@ pub fn restore_focus_after_modal(state: &mut TuiState) {
     };
     set_base(state, focus);
     settle_legacy(state);
-}
-
-pub fn advance_skill_trust_queue(state: &mut TuiState) {
-    if let Some(next) = state.skill_trust_queue.pop_front() {
-        state.pending_skill_trust = Some(next);
-        state.skill_trust_inspect_mode = false;
-        raise_confirmation(state, ConfirmationType::SkillTrust);
-    } else {
-        state.pending_skill_trust = None;
-        state.skill_trust_inspect_mode = false;
-        restore_focus_after_modal(state);
-    }
-    state.needs_redraw = true;
 }
 
 /// The shared composer fact is authoritative in both hosts.

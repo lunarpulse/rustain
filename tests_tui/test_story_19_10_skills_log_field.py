@@ -116,6 +116,24 @@ def _drop_copied_credential(workspace: Path) -> None:
     (workspace / ".env").unlink(missing_ok=True)
 
 
+def _settle(tui: RustainTUI, timeout: float = 30.0, duration: float = 0.7) -> str:
+    """Decision keys are inert for 500 ms after the frame's first paint (21.6 A12):
+    wait structurally until the whole screen has stayed unchanged for `duration`."""
+    import re as _re
+    previous, since = None, None
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = tui.get_screen_text()
+        # A running tool row animates (spinner glyph, elapsed seconds): not decision churn.
+        steady = _re.sub(r"[\u2800-\u28ff]|\d+(?:\.\d+)?s\b", "", screen)
+        now = time.monotonic()
+        assert now < deadline, screen
+        if steady != previous:
+            previous, since = steady, now
+        elif now - since >= duration:
+            return screen
+
+
 def _activate(tui: RustainTUI) -> None:
     """Drive the model-driven activation through the trust gate with `y`.
 
@@ -123,11 +141,30 @@ def _activate(tui: RustainTUI) -> None:
     (`event_loop.rs:7733`), a different production path. The scene emits a real
     `activate_skill` tool_use, which is the door `execute_activate_skill`
     (`toolset_adapter.rs:1604`) opens and the one the trust gate guards.
+
+    21.6: the gate is the `Decision: Skill trust` frame (rail `[y] Trust`), whose keys
+    are inert right after it paints, so `y` is sent only on a settled frame.
     """
     tui.send_message("use the deploy skill")
+    # RU-6: a prompt that arrives within a second of the typed message waits as the
+    # `Needs you (1)` chip instead of taking focus; open it from the Needs-you list.
+    deadline = time.monotonic() + 45
+    while True:
+        screen = tui.get_screen_text()
+        if "Decision: Skill trust" in screen or "Needs you (1)" in screen:
+            break
+        assert time.monotonic() < deadline, screen
+    if "Decision: Skill trust" not in screen:
+        _settle(tui)
+        tui.send("\x18q")
+        assert tui.wait_for_screen("[Enter] Open", timeout=30), tui.get_screen_text()
+        _settle(tui)
+        tui.send("\r")
     assert tui.wait_for_screen(
         "Trust and enable this skill for this conversation?", timeout=45
     ), tui.get_screen_text()
+    screen = _settle(tui)
+    assert "Decision: Skill trust" in screen and "[y] Trust" in screen, screen
     tui.send("y")
     assert tui.wait_for_screen("protocol loaded", timeout=60), tui.get_screen_text()
 

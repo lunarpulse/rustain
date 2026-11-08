@@ -15,7 +15,6 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::adapters::daemon::protocol::ToolInputWithheld;
-use crate::adapters::tui::state::PendingPlanCard;
 use crate::adapters::tui::state::{CachedTurnLayout, TabRenderState};
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::feedback_block;
@@ -1969,7 +1968,7 @@ pub fn render_with_search(
     focused_search_match: Option<&SearchMatch>,
     search_matches: &[SearchMatch],
     bookmarks: &[usize],
-    pending_plan_card: Option<&PendingPlanCard>,
+    pending_plan_id: Option<&str>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
     focus: ToolFocus<'_>,
@@ -1991,7 +1990,7 @@ pub fn render_with_search(
         focused_search_match,
         search_matches,
         bookmarks,
-        pending_plan_card,
+        pending_plan_id,
         liveness,
         open_prose,
         focus,
@@ -2018,7 +2017,7 @@ fn render_with_search_impl(
     focused_search_match: Option<&SearchMatch>,
     search_matches: &[SearchMatch],
     bookmarks: &[usize],
-    pending_plan_card: Option<&PendingPlanCard>,
+    pending_plan_id: Option<&str>,
     liveness: Option<&crate::domain::models::LivenessSnapshot>,
     open_prose: Option<&str>,
     focus: ToolFocus<'_>,
@@ -2308,9 +2307,7 @@ fn render_with_search_impl(
                 block_boundaries.push(cumulative_offset + h);
             } else {
                 for plan in &plans_for_msg {
-                    let is_pending = pending_plan_card
-                        .map(|ppc| ppc.plan_id == plan.id)
-                        .unwrap_or(false);
+                    let is_pending = pending_plan_id == Some(plan.id.as_str());
                     h += plan_card::plan_card_height(plan, width as u16, is_pending);
                     block_boundaries.push(cumulative_offset + h);
                 }
@@ -2744,9 +2741,7 @@ fn render_with_search_impl(
                     }
                 } else {
                     for plan in plans_for_msg {
-                        let is_pending = pending_plan_card
-                            .map(|ppc| ppc.plan_id == plan.id)
-                            .unwrap_or(false);
+                        let is_pending = pending_plan_id == Some(plan.id.as_str());
                         let pc_lines =
                             plan_card::render_plan_card_lines(plan, theme, area.width, is_pending);
                         let pc_height = pc_lines.len();

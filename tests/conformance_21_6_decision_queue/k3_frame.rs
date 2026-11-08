@@ -70,6 +70,18 @@ fn raise_kind(state: &mut TuiState, kind: DecisionKind) {
         DecisionKind::Permission | DecisionKind::Consent => {
             unreachable!("the permission family is raised by its own producers (k4)")
         }
+        DecisionKind::Question
+        | DecisionKind::SkillTrust
+        | DecisionKind::PlanApproval
+        | DecisionKind::PlanCard
+        | DecisionKind::PlanDeviation
+        | DecisionKind::SkipCascade
+        | DecisionKind::CancelPlan
+        | DecisionKind::Delegation
+        | DecisionKind::SpawnGate
+        | DecisionKind::AgentKill => {
+            unreachable!("the 6-C kinds are raised by their own producers (raisers.rs, k7, k8)")
+        }
     }
     assert!(presentation::consistent(state));
 }

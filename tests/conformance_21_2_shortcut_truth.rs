@@ -270,27 +270,18 @@ fn k7_quit_decision_is_guarded_and_cancel_restores_the_caller() {
     );
 }
 
-/// K9 — Input y/e/n are text; Chat y/e/n resolve the plan; Shift+Tab maps to CycleMode.
+/// K9 — Input y/e/n are text while the plan decision is set aside; with its frame open the
+/// same letters resolve the plan (21-6 6-C: the plan card decision is a queue item);
+/// Shift+Tab maps to CycleMode.
 #[test]
 fn k9_plan_letters_are_text_in_input_and_decisions_in_chat() {
-    use rustain::adapters::tui::state::PendingPlanCard;
-    use rustain::domain::models::plan::{Plan, PlanStatus};
-    let card = || PendingPlanCard {
-        conversation_id: "c".into(),
-        plan_id: "p".into(),
-        plan_snapshot: Plan {
-            id: "p".into(),
-            title: "t".into(),
-            tasks: vec![],
-            estimated_effort: None,
-            status: PlanStatus::Pending,
-            created_at: 0,
-            resolved_at: None,
-            host_message_id: None,
-        },
-    };
-    let mut input = TuiState::new(80, 24);
-    input.pending_plan_card = Some(card());
+    use crate::conformance_21_6_decision_queue::raisers::{open_ready, press};
+    use rustain::adapters::tui::decision_queue::{self, DecisionKind};
+    use rustain::adapters::tui::keymap::Key;
+    let (mut input, _clock, _hold) = open_ready(DecisionKind::PlanCard, "t");
+    // The user sets the decision aside: Input is a plain composer again.
+    assert_eq!(press(&mut input, Key::Esc), InputAction::Consumed);
+    input.focus = FocusState::Input;
     for c in ['y', 'e', 'n'] {
         let action = handle_input(&mut input, &key(c));
         assert!(
@@ -304,22 +295,19 @@ fn k9_plan_letters_are_text_in_input_and_decisions_in_chat() {
         );
     }
     assert_eq!(input.input_buffer, "yen");
-    assert!(input.pending_plan_card.is_some());
-    let mut chat = TuiState::new(80, 24);
-    chat.focus = FocusState::Chat;
-    chat.pending_plan_card = Some(card());
-    assert_eq!(
-        handle_input(&mut chat, &key('y')),
-        InputAction::PlanCardApprove
-    );
-    assert_eq!(
-        handle_input(&mut chat, &key('e')),
-        InputAction::PlanCardEdit
-    );
-    assert_eq!(
-        handle_input(&mut chat, &key('n')),
-        InputAction::PlanCardReject
-    );
+    assert!(input.decisions.holds(DecisionKind::PlanCard));
+    assert!(decision_queue::plan_card_pending(&input, "p1"));
+    // With the frame open (Chat focus) y / e / n resolve it, one letter per decision.
+    for (c, want) in [
+        ('y', InputAction::PlanCardApprove),
+        ('e', InputAction::PlanCardEdit),
+        ('n', InputAction::PlanCardReject),
+    ] {
+        let (mut chat, _clock, _hold) = open_ready(DecisionKind::PlanCard, "t");
+        chat.focus = FocusState::Chat;
+        assert_eq!(press(&mut chat, Key::Char(c)), want, "{c}");
+        assert!(!chat.decisions.holds(DecisionKind::PlanCard));
+    }
     let mut state = TuiState::new(80, 24);
     assert_eq!(
         handle_input(&mut state, &special(DomainKey::ShiftTab)),

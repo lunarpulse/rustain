@@ -59,31 +59,36 @@ pub(crate) fn local_facts(
     facts.pending_images = state.pending_images.len() + large_images;
     facts.peer_compose = state.pinned_peer_compose.is_some()
         || crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
-    facts.pending_decisions = usize::from(state.pending_skill_trust.is_some())
-        + state.skill_trust_queue.len()
-        + usize::from(state.pending_activation.is_some())
-        + usize::from(plan_decision_is_open(state, conversation, tabs))
-        + usize::from(state.pending_delegation_card.is_some())
-        + usize::from(state.pending_consolidation_card.is_some())
-        + usize::from(state.ask_user_question.is_some())
-        + (state.decisions.undecided() - large_images);
+    facts.pending_decisions = usize::from(state.pending_consolidation_card.is_some())
+        + (state.decisions.undecided() - large_images)
+        - settled_plan_cards(state, conversation, tabs);
     facts
 }
 
-/// `pending_plan_card` is a pointer that outlives its decision (the card is not
-/// cleared when a plan is resolved), so it only counts as an open decision while
-/// the plan it names is still awaiting one. A card whose plan cannot be found is
-/// counted: the guard errs toward asking.
-fn plan_decision_is_open(state: &TuiState, conversation: &Conversation, tabs: &TabManager) -> bool {
-    let Some(card) = state.pending_plan_card.as_ref() else {
-        return false;
-    };
-    let plan = conversation.plans.get(&card.plan_id).or_else(|| {
-        tabs.tabs()
-            .iter()
-            .find_map(|tab| tab.conversation.plans.get(&card.plan_id))
-    });
-    plan.is_none_or(|plan| matches!(plan.status, PlanStatus::Pending | PlanStatus::Editing))
+/// A plan-card item whose plan already left Pending/Editing is not an open decision
+/// (the guard once asked "1 pending decision" for a rejected plan). A card whose plan
+/// cannot be found is counted: the guard errs toward asking.
+fn settled_plan_cards(state: &TuiState, conversation: &Conversation, tabs: &TabManager) -> usize {
+    state
+        .decisions
+        .items()
+        .filter(|item| item.kind == DecisionKind::PlanCard && !item.is_stale())
+        .filter(|item| {
+            let crate::adapters::tui::decision_queue::DecisionSubject::PlanCard(card) =
+                &item.subject
+            else {
+                return false;
+            };
+            let plan = conversation.plans.get(&card.plan_id).or_else(|| {
+                tabs.tabs()
+                    .iter()
+                    .find_map(|tab| tab.conversation.plans.get(&card.plan_id))
+            });
+            plan.is_some_and(|plan| {
+                !matches!(plan.status, PlanStatus::Pending | PlanStatus::Editing)
+            })
+        })
+        .count()
 }
 
 /// Request quit on the local host. `ExitNow` means nothing is running or
@@ -162,7 +167,7 @@ mod tests {
         id: &str,
         status: PlanStatus,
     ) -> (
-        crate::adapters::tui::state::PendingPlanCard,
+        crate::adapters::tui::decision_queue::PlanCardPayload,
         crate::domain::models::Plan,
     ) {
         let plan = crate::domain::models::Plan {
@@ -175,7 +180,7 @@ mod tests {
             resolved_at: None,
             host_message_id: None,
         };
-        let card = crate::adapters::tui::state::PendingPlanCard {
+        let card = crate::adapters::tui::decision_queue::PlanCardPayload {
             conversation_id: "c".into(),
             plan_id: id.into(),
             plan_snapshot: plan.clone(),
@@ -190,7 +195,7 @@ mod tests {
     fn story21_2_resolved_plan_card_is_not_a_pending_decision_but_an_open_one_is() {
         let mut h = host();
         let (card, plan) = plan_card("p", PlanStatus::Rejected);
-        h.state.pending_plan_card = Some(card);
+        decision_queue::raise_plan_card(&mut h.state, card);
         h.conversation.plans.insert("p".into(), plan);
         assert_eq!(
             ask(&mut h),
@@ -200,7 +205,7 @@ mod tests {
 
         let mut open = host();
         let (card, plan) = plan_card("p", PlanStatus::Pending);
-        open.state.pending_plan_card = Some(card);
+        decision_queue::raise_plan_card(&mut open.state, card);
         open.conversation.plans.insert("p".into(), plan);
         assert_eq!(
             ask(&mut open),
@@ -209,7 +214,10 @@ mod tests {
         );
 
         let mut missing = host();
-        missing.state.pending_plan_card = Some(plan_card("gone", PlanStatus::Pending).0);
+        decision_queue::raise_plan_card(
+            &mut missing.state,
+            plan_card("gone", PlanStatus::Pending).0,
+        );
         assert_eq!(
             ask(&mut missing),
             QuitRequest::Confirming,
@@ -226,7 +234,7 @@ mod tests {
         ] {
             let mut each = host();
             let (card, plan) = plan_card("s", status);
-            each.state.pending_plan_card = Some(card);
+            decision_queue::raise_plan_card(&mut each.state, card);
             each.conversation.plans.insert("s".into(), plan);
             let expected = if open {
                 QuitRequest::Confirming
@@ -553,5 +561,202 @@ mod tests {
         assert!(!presentation::is_open(&h.state, Surface::Decision));
         assert!(h.state.decisions.holds(DecisionKind::Budget));
         assert!(!h.state.should_quit);
+    }
+
+    fn pending(h: &Host) -> usize {
+        local_facts(
+            &h.state,
+            &h.conversation,
+            &h.tabs,
+            &h.streaming,
+            &h.lifecycle,
+            &h.queue,
+        )
+        .pending_decisions
+    }
+
+    /// One live item of a 6-C `kind`, number `n` (own conversation, plan, tool id, path),
+    /// raised through its producer; reply receivers are kept alive in `keep`.
+    fn raise_6c(
+        state: &mut TuiState,
+        kind: DecisionKind,
+        n: usize,
+        keep: &mut Vec<Box<dyn std::any::Any>>,
+    ) {
+        use crate::adapters::tui::decision_queue as dq;
+        use crate::adapters::tui::fanout_spec::FanOutSpec;
+        use crate::domain::models::AgentId;
+        use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
+        use crate::domain::services::delegation_decider::{DelegationReason, DelegationSuggestion};
+        let (conv, plan) = (format!("c{n}"), format!("p{n}"));
+        let _ = match kind {
+            DecisionKind::Question => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                keep.push(Box::new(rx));
+                dq::raise_question(state, &conv, format!("tu-{n}"), "q?".into(), tx)
+            }
+            DecisionKind::SkillTrust => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                keep.push(Box::new(rx));
+                dq::raise_model_skill_trust(
+                    state,
+                    format!("s{n}"),
+                    format!("/w/s{n}.md").into(),
+                    tx,
+                )
+            }
+            DecisionKind::PlanApproval => dq::raise_plan_approval(
+                state,
+                dq::PlanApprovalPayload {
+                    conversation_id: conv,
+                    plan_path: format!("/w/{plan}.md").into(),
+                    contents: "a".into(),
+                    summary: "s".into(),
+                },
+            ),
+            DecisionKind::PlanCard => {
+                dq::raise_plan_card(state, plan_card(&plan, PlanStatus::Pending).0)
+            }
+            DecisionKind::PlanDeviation => dq::raise_plan_deviation(
+                state,
+                &conv,
+                dq::PlanDeviationPayload {
+                    plan_id: plan,
+                    kind: PlanDeviationKind::AutoSkipBlockedTasks { source_task: 1 },
+                    original: 3,
+                    changed: vec![2],
+                    summary: "s".into(),
+                },
+            ),
+            DecisionKind::SkipCascade => dq::raise_skip_cascade(
+                state,
+                &conv,
+                dq::SkipCascadePending {
+                    plan_id: plan,
+                    source_task: 1,
+                    source_prior_status: PlanTaskStatus::Pending,
+                    source_prior_error: None,
+                    downstream: vec![2],
+                },
+            ),
+            DecisionKind::CancelPlan => dq::raise_cancel_plan(
+                state,
+                &conv,
+                dq::CancelPlanPayload {
+                    plan_id: plan,
+                    title: "t".into(),
+                    pending: 1,
+                    completed: 0,
+                },
+            ),
+            DecisionKind::Delegation => dq::raise_delegation(
+                state,
+                dq::PendingDelegationCard {
+                    conversation_id: conv,
+                    plan_id: plan,
+                    task_number: 1,
+                    suggestion: DelegationSuggestion {
+                        task_number: 1,
+                        agent_name: "a".into(),
+                        reason: DelegationReason::Heuristic,
+                        auto_proceed: false,
+                    },
+                },
+            ),
+            DecisionKind::SpawnGate => dq::raise_spawn_gate(
+                state,
+                &conv,
+                dq::PendingSpawnGate {
+                    spec: FanOutSpec::Identical {
+                        count: 5,
+                        prompt: "go".into(),
+                    },
+                    requested: 5,
+                    threshold: 2,
+                    adjusted: None,
+                },
+            ),
+            DecisionKind::AgentKill => {
+                dq::raise_agent_kill(state, &conv, AgentId::new(), "a".into())
+            }
+            other => panic!("{other:?} is not a 6-C kind"),
+        };
+    }
+
+    const KINDS_6C: [DecisionKind; 10] = [
+        DecisionKind::Question,
+        DecisionKind::SkillTrust,
+        DecisionKind::PlanApproval,
+        DecisionKind::PlanCard,
+        DecisionKind::PlanDeviation,
+        DecisionKind::SkipCascade,
+        DecisionKind::CancelPlan,
+        DecisionKind::Delegation,
+        DecisionKind::SpawnGate,
+        DecisionKind::AgentKill,
+    ];
+
+    /// The host's real fact builder, per 6-C kind: an empty queue counts nothing (the
+    /// control), one live item counts once, two count twice, and quit then asks.
+    #[test]
+    fn story21_6_every_6c_kind_is_counted_per_live_item_by_the_host_facts() {
+        assert_eq!(pending(&host()), 0, "control: an empty queue");
+        assert_eq!(ask(&mut host()), QuitRequest::ExitNow);
+        for kind in KINDS_6C {
+            let mut h = host();
+            let mut keep = Vec::new();
+            raise_6c(&mut h.state, kind, 1, &mut keep);
+            assert_eq!(pending(&h), 1, "{kind:?}: one");
+            raise_6c(&mut h.state, kind, 2, &mut keep);
+            assert_eq!(pending(&h), 2, "{kind:?}: two");
+            assert_eq!(h.state.decisions.count(kind), 2, "{kind:?}: two queued");
+            assert_eq!(ask(&mut h), QuitRequest::Confirming, "{kind:?}");
+        }
+    }
+
+    /// A stale item can no longer be answered: it never makes quit ask (the live
+    /// neighbour of the same kind still counts, so the exclusion is not an empty queue).
+    #[test]
+    fn story21_6_a_stale_6c_item_adds_nothing_to_the_host_facts() {
+        use crate::adapters::tui::decision_queue as dq;
+        let mut h = host();
+        let mut keep = Vec::new();
+        raise_6c(&mut h.state, DecisionKind::Question, 1, &mut keep);
+        raise_6c(&mut h.state, DecisionKind::Question, 2, &mut keep);
+        assert_eq!(pending(&h), 2);
+        drop(keep.remove(0));
+        assert!(dq::tick(&mut h.state), "the dead turn is swept");
+        assert_eq!(pending(&h), 1, "the answered-by-nobody question");
+        for kind in [
+            DecisionKind::PlanCard,
+            DecisionKind::PlanDeviation,
+            DecisionKind::SkipCascade,
+            DecisionKind::CancelPlan,
+            DecisionKind::Delegation,
+        ] {
+            let mut h = host();
+            let mut keep = Vec::new();
+            raise_6c(&mut h.state, kind, 1, &mut keep);
+            raise_6c(&mut h.state, kind, 2, &mut keep);
+            dq::withdraw_plan(&mut h.state, "p1");
+            // A Requested item that took the frame hides the withdrawn plan's item (removed,
+            // not stale); whichever stays, the withdrawn plan's item adds nothing to the facts.
+            assert!(
+                !h.state.decisions.is_empty(),
+                "{kind:?}: the other plan's item stays"
+            );
+            assert_eq!(pending(&h), 1, "{kind:?}: the withdrawn plan's item");
+        }
+        let mut h = host();
+        let gone = crate::domain::models::AgentId::new();
+        dq::raise_agent_kill(&mut h.state, "c1", gone.clone(), "a".into());
+        dq::raise_agent_kill(
+            &mut h.state,
+            "c1",
+            crate::domain::models::AgentId::new(),
+            "b".into(),
+        );
+        dq::withdraw_agent_kill(&mut h.state, &gone);
+        assert_eq!(pending(&h), 1, "the gone agent's kill confirmation");
     }
 }

@@ -7,11 +7,9 @@ use crate::adapters::skill_registry::SkillRegistry;
 use crate::adapters::tui::presentation::inspector_search::InspectorSearch;
 use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::refresh_tracker::RefreshTracker;
-use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use crate::domain::models::ImageAttachment;
 use crate::domain::models::autocomplete::{AutocompleteKind, AutocompleteSuggestion};
 use crate::domain::models::palette::{PaletteAction, PaletteEntry, PaletteScope};
-use crate::domain::models::plan::{PlanDeviationKind, PlanTaskStatus};
 use crate::domain::models::tab::TabId;
 use crate::domain::models::turn::TurnId;
 use crate::domain::models::view_state::SummaryTier;
@@ -79,62 +77,6 @@ pub struct LogAwarenessView {
     pub reset_revision: u64,
     /// Visits actually presented by a completed draw, awaiting persistence.
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
-}
-
-/// Pending plan approval awaiting user y/a/n/e response.
-pub struct PendingPlanApproval {
-    pub conversation_id: String,
-    pub plan_path: std::path::PathBuf,
-    pub contents: String,
-    pub summary: String,
-}
-
-/// Pending inline PlanCard awaiting user [y]/[e]/[n] response (Story 6-1a).
-/// Distinct from PendingPlanApproval (6-0d overlay). At most one per conversation.
-#[derive(Debug, Clone)]
-pub struct PendingPlanCard {
-    pub conversation_id: String,
-    pub plan_id: String,
-    pub plan_snapshot: crate::domain::models::Plan,
-}
-
-/// Story 10.5: pending delegation suggestion card awaiting user d/l response.
-pub struct PendingDelegationCard {
-    pub conversation_id: crate::domain::models::tab::ConversationId,
-    pub plan_id: String,
-    pub task_number: u32,
-    pub suggestion: crate::domain::services::delegation_decider::DelegationSuggestion,
-}
-
-/// Pending `/fanout` spawn gate awaiting inline confirmation.
-#[derive(Debug, Clone)]
-pub struct PendingSpawnGate {
-    pub spec: crate::adapters::tui::fanout_spec::FanOutSpec,
-    pub requested: usize,
-    pub threshold: usize,
-    pub adjusted: Option<usize>,
-}
-
-impl PendingSpawnGate {
-    pub fn effective_n(&self) -> usize {
-        self.adjusted.unwrap_or(self.requested)
-    }
-
-    pub fn adjust_left(&mut self) {
-        self.adjusted = Some(self.effective_n().saturating_sub(1).max(1));
-    }
-
-    pub fn adjust_right(&mut self) {
-        self.adjusted = Some(
-            self.effective_n()
-                .saturating_add(1)
-                .min(crate::domain::models::orchestration::FORK_JOIN_SPAWN_CAP),
-        );
-    }
-
-    pub fn cap_at_threshold(&mut self) {
-        self.adjusted = Some(self.threshold.max(1).min(self.requested));
-    }
 }
 
 /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
@@ -363,34 +305,6 @@ impl PinnedPeerCompose {
             label,
         }
     }
-}
-
-/// Pending skill trust prompt awaiting user y/n/i response (Story 5-2 AC4).
-pub struct SkillTrustState {
-    pub skill_name: String,
-    pub skill_file: std::path::PathBuf,
-    pub response_tx: tokio::sync::oneshot::Sender<crate::domain::models::SkillTrustResponse>,
-    /// Cached file content for inspect mode. Populated asynchronously via
-    /// `spawn_blocking` on the first `i` press so the render path never blocks
-    /// on disk I/O (Story 5-2 H5).
-    pub inspect_content: Option<String>,
-}
-
-/// Pending user-driven skill activation awaiting a trust response.
-///
-/// Carries enough context to complete activation + start_turn after the
-/// user presses y/n. Replaces the oneshot-channel rendezvous from Story
-/// 5-2 initial (which deadlocked inside `tokio::select!`).
-///
-/// INVARIANT: Populated only by the user-driven slash-command path
-/// (`AppEvent::AskActivateSkill`). The model-driven path
-/// (`AppEvent::SkillTrustPrompt`) uses `SkillTrustState` above.
-#[derive(Debug, Clone)]
-pub struct PendingSkillActivation {
-    pub skill_name: String,
-    pub skill_file: std::path::PathBuf,
-    pub arguments: String,
-    pub conversation_id: crate::domain::models::tab::ConversationId,
 }
 
 /// Direction for boundary navigation.
@@ -1078,12 +992,6 @@ pub struct TaskPanelState {
     pub reorder_mode_for: Option<u32>,
     /// Story 6.4: original task order, restored on Esc.
     pub reorder_original_order: Option<Vec<u32>>,
-    /// Story 6.4: (plan_id, deviation_kind) while deviation card is shown.
-    pub pending_deviation: Option<(String, PlanDeviationKind)>,
-    /// Story 6.4: pending skip cascade confirmation state.
-    pub skip_cascade_pending: Option<SkipCascadePending>,
-    /// Story 6.4: Some(plan_id) while cancel-plan confirm card is shown.
-    pub cancel_plan_confirm: Option<String>,
 }
 
 impl Default for TaskPanelState {
@@ -1100,9 +1008,6 @@ impl Default for TaskPanelState {
             auto_open_hint_shown_for: std::collections::HashSet::new(),
             reorder_mode_for: None,
             reorder_original_order: None,
-            pending_deviation: None,
-            skip_cascade_pending: None,
-            cancel_plan_confirm: None,
         }
     }
 }
@@ -1113,18 +1018,7 @@ pub struct AgentPanelState {
     pub cached_entries: Vec<crate::domain::models::subagent_view::AgentRowView>,
     pub drill_down_agent: Option<crate::domain::models::AgentId>,
     pub inspector_scroll_offset: u16,
-    pub pending_kill_confirm: Option<crate::domain::models::AgentId>,
     pub spool_tail_cache: std::collections::HashMap<crate::domain::models::AgentId, String>,
-}
-
-/// Story 6.4: pending skip cascade confirmation state (AC2).
-#[derive(Debug, Clone)]
-pub struct SkipCascadePending {
-    pub plan_id: String,
-    pub source_task: u32,
-    pub source_prior_status: PlanTaskStatus,
-    pub source_prior_error: Option<String>,
-    pub downstream: Vec<u32>,
 }
 
 /// Story 6.4: user's choice on the skip cascade card.
@@ -2609,24 +2503,6 @@ pub struct TuiState {
     /// instant.  A second scroll-intent within 2000ms drops the anchor via
     /// `ViewEvent::DropAnchorAndScroll`.  Reset on `]]`/`[[` or mode change.
     pub pending_anchor_drop: Option<std::time::Instant>,
-    /// Active AskUserQuestion card state.
-    pub ask_user_question: Option<AskUserQuestionState>,
-    /// Oneshot sender for AskUserQuestion responses.
-    pub question_response_tx: Option<tokio::sync::oneshot::Sender<String>>,
-    /// Pending skill trust prompt state (Story 5-2 AC4).
-    pub pending_skill_trust: Option<SkillTrustState>,
-    /// Queue for additional skill trust prompts that arrive while one is displayed.
-    pub skill_trust_queue: VecDeque<SkillTrustState>,
-    /// Whether the skill trust prompt is in inspection mode.
-    pub skill_trust_inspect_mode: bool,
-    /// User-driven slash-command activation awaiting trust confirmation.
-    /// Parallel to `pending_skill_trust` (model-driven). Populated by
-    /// `AskActivateSkill` handler, consumed by `SkillTrustAccept`/`Decline`.
-    pub pending_activation: Option<PendingSkillActivation>,
-    /// Cached inspect-mode content for the user-driven pending activation.
-    /// Populated asynchronously via `spawn_blocking` on the first `i` press.
-    /// Cleared when `pending_activation` is consumed.
-    pub pending_activation_inspect_content: Option<String>,
     /// Whether project context files were loaded (for status bar indicator).
     pub has_project_context: bool,
     /// Session-scoped input history for Up/Down and Ctrl+R.
@@ -2844,12 +2720,6 @@ pub struct TuiState {
     /// Set by `submit_message` when registry is not yet discovered;
     /// consumed by `AgentsDiscovered` handler in the event loop.
     pub pending_agent_activation: Option<(String, Option<String>)>,
-    /// Pending plan approval card state (Story 6-0d AC4).
-    pub pending_plan_approval: Option<PendingPlanApproval>,
-    /// Pending inline PlanCard awaiting user resolution (Story 6-1a).
-    pub pending_plan_card: Option<PendingPlanCard>,
-    /// Story 10.5: pending delegation suggestion card awaiting user d/l response.
-    pub pending_delegation_card: Option<PendingDelegationCard>,
     /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
     pub pending_consolidation_card: Option<PendingConsolidationCard>,
     /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
@@ -2908,6 +2778,13 @@ pub struct TuiState {
     /// adapters→infra crossing from F5 is gone). NOT a field of WaveViewState
     /// (which is Clone/Default for the push-counter regime).
     pub wave_run: Option<std::sync::Arc<dyn crate::domain::ports::wave_handle::WaveHandle>>,
+    /// Test seam: when set, the decision-frame `c` copy goes through this copier
+    /// instead of the real clipboard (`None` in production).
+    pub clipboard_copier: Option<
+        std::sync::Arc<
+            dyn Fn(&str) -> crate::adapters::tui::clipboard::ClipboardResult + Send + Sync,
+        >,
+    >,
     /// Story 14.3a — wave-overlay scroll state. The selected row in the
     /// virtual-scrolled WaveOverlay (j/k to scroll, 0-indexed).
     pub wave_overlay_selected: usize,
@@ -2925,9 +2802,6 @@ pub struct TuiState {
     /// Frame subview uses the legacy ChatWave return keys after divergence.
     /// Presence belongs only to the WaveOverlay frame, never to this mode flag.
     pub wave_chat_keys: bool,
-    /// Story 14.3c — pending above-threshold fan-out gate rendered in the chat
-    /// pane and controlled by ←/→/c/Enter/Esc before any wave is spawned.
-    pub pending_spawn_gate: Option<PendingSpawnGate>,
     /// P8 (review): the last-drilled spoke body, rendered inline in the chat
     /// pane instead of being dumped as a SystemNotice. `None` when no drill is
     /// open. Cleared on `CloseDivergeView` / `CloseWaveOverlay`.
@@ -3174,13 +3048,6 @@ impl TuiState {
             pending_bracket: None,
             pending_g: false,
             pending_anchor_drop: None,
-            ask_user_question: None,
-            question_response_tx: None,
-            pending_skill_trust: None,
-            skill_trust_queue: VecDeque::new(),
-            skill_trust_inspect_mode: false,
-            pending_activation: None,
-            pending_activation_inspect_content: None,
             has_project_context: false,
             input_history: InputHistory::new(),
             multiline_mode: false,
@@ -3260,9 +3127,6 @@ impl TuiState {
             agent_suggestions: Vec::new(),
             active_agent_name: None,
             pending_agent_activation: None,
-            pending_plan_approval: None,
-            pending_plan_card: None,
-            pending_delegation_card: None,
             pending_consolidation_card: None,
             pending_forget_card: None,
             pending_artifact_card: None,
@@ -3288,12 +3152,12 @@ impl TuiState {
             last_subagent_envelope: None,
             wave_state: None,
             wave_run: None,
+            clipboard_copier: None,
             wave_overlay_selected: 0,
             rerunning_slot: None,
             wave_cancel: None,
             wave_diverge_open: false,
             wave_chat_keys: false,
-            pending_spawn_gate: None,
             wave_drill_body: None,
             active_wave_id: None,
             wave_id_counter: 0,
@@ -3469,137 +3333,56 @@ impl TuiState {
 mod tests {
     use super::*;
 
-    fn make_pending(name: &str) -> PendingSkillActivation {
-        PendingSkillActivation {
-            skill_name: name.to_string(),
-            skill_file: std::path::PathBuf::from("/test/skills")
-                .join(name)
-                .join("SKILL.md"),
-            arguments: String::new(),
-            conversation_id: crate::domain::models::tab::ConversationId::new(),
-        }
-    }
-
     #[test]
-    fn test_tui_state_pending_activation_initializes_none() {
-        let state = TuiState::new(80, 24);
-        assert!(state.pending_activation.is_none());
-    }
-
-    #[test]
-    fn test_pending_activation_stores_and_takes() {
+    fn story21_6_second_user_skill_trust_is_dropped_while_one_is_queued() {
+        use crate::adapters::tui::decision_queue::raise_user_skill_trust;
         let mut state = TuiState::new(80, 24);
-        let pending = make_pending("reviewer");
-        let cid = pending.conversation_id.clone();
-
-        state.pending_activation = Some(pending);
-        assert!(state.pending_activation.is_some());
-        assert_eq!(
-            state.pending_activation.as_ref().unwrap().skill_name,
-            "reviewer"
-        );
-        assert_eq!(
-            state.pending_activation.as_ref().unwrap().conversation_id,
-            cid
-        );
-
-        let taken = state.pending_activation.take();
-        assert!(taken.is_some());
-        assert!(state.pending_activation.is_none());
-    }
-
-    #[test]
-    fn test_pending_activation_does_not_affect_skill_trust_state() {
-        let mut state = TuiState::new(80, 24);
-        let pending = make_pending("reviewer");
-        state.pending_activation = Some(pending);
-        assert!(state.pending_skill_trust.is_none());
-        assert!(state.skill_trust_queue.is_empty());
-    }
-
-    #[test]
-    fn test_accept_takes_user_driven_first() {
-        let mut state = TuiState::new(80, 24);
-        let pending_user = make_pending("user-skill");
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let pending_model = SkillTrustState {
-            skill_name: "model-skill".to_string(),
-            skill_file: std::path::PathBuf::from("/test/model/SKILL.md"),
-            response_tx: tx,
-            inspect_content: None,
+        let path = |n: &str| {
+            std::path::PathBuf::from("/test/skills")
+                .join(n)
+                .join("SKILL.md")
         };
-        state.pending_activation = Some(pending_user);
-        state.pending_skill_trust = Some(pending_model);
-
-        let taken_user = state.pending_activation.take();
-        assert!(taken_user.is_some());
-        assert_eq!(taken_user.unwrap().skill_name, "user-skill");
-        assert!(state.pending_skill_trust.is_some());
-        assert_eq!(
-            state.pending_skill_trust.as_ref().unwrap().skill_name,
-            "model-skill"
+        assert!(
+            raise_user_skill_trust(
+                &mut state,
+                "c1",
+                "first".into(),
+                path("first"),
+                String::new()
+            )
+            .is_some()
         );
+        assert!(
+            raise_user_skill_trust(
+                &mut state,
+                "c1",
+                "second".into(),
+                path("second"),
+                String::new()
+            )
+            .is_none()
+        );
+        assert_eq!(state.decisions.len(), 1);
     }
 
     #[test]
-    fn test_decline_clears_focus_when_no_model_pending() {
+    fn story21_6_model_skill_trust_prompts_queue_fifo_beside_a_user_prompt() {
+        use crate::adapters::tui::decision_queue::{
+            raise_model_skill_trust, raise_user_skill_trust,
+        };
         let mut state = TuiState::new(80, 24);
-        state.pending_activation = Some(make_pending("decline-me"));
-        state.focus = crate::domain::models::FocusState::Overlay(
-            crate::domain::models::visual::OverlayType::Confirmation(
-                crate::domain::models::visual::ConfirmationType::SkillTrust,
-            ),
-        );
-
-        let _taken = state.pending_activation.take();
-        if state.pending_skill_trust.is_none() {
-            state.focus = crate::domain::models::FocusState::Input;
-            state.skill_trust_inspect_mode = false;
+        let path = |n: &str| {
+            std::path::PathBuf::from("/test/skills")
+                .join(n)
+                .join("SKILL.md")
+        };
+        let _ =
+            raise_user_skill_trust(&mut state, "c1", "user".into(), path("user"), String::new());
+        for name in ["m1", "m2"] {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = raise_model_skill_trust(&mut state, name.into(), path(name), tx);
         }
-        assert!(state.pending_activation.is_none());
-        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
-        assert!(!state.skill_trust_inspect_mode);
-    }
-
-    #[test]
-    fn test_cancel_drains_pending_activation() {
-        let mut state = TuiState::new(80, 24);
-        state.pending_activation = Some(make_pending("cancel-me"));
-        state.focus = crate::domain::models::FocusState::Overlay(
-            crate::domain::models::visual::OverlayType::Confirmation(
-                crate::domain::models::visual::ConfirmationType::SkillTrust,
-            ),
-        );
-
-        if let Some(_pending) = state.pending_activation.take() {
-            if state.pending_skill_trust.is_none() {
-                state.focus = crate::domain::models::FocusState::Input;
-                state.skill_trust_inspect_mode = false;
-            }
-            state.needs_redraw = true;
-        }
-
-        assert!(state.pending_activation.is_none());
-        assert_eq!(state.focus, crate::domain::models::FocusState::Input);
-        assert!(state.needs_redraw);
-    }
-
-    #[test]
-    fn test_double_pending_activation_dropped() {
-        let mut state = TuiState::new(80, 24);
-        state.pending_activation = Some(make_pending("first"));
-        assert!(state.pending_activation.is_some());
-
-        let second = make_pending("second");
-        if state.pending_activation.is_some() {
-            // Simulates the error path: second activation is dropped
-        } else {
-            state.pending_activation = Some(second);
-        }
-        assert_eq!(
-            state.pending_activation.as_ref().unwrap().skill_name,
-            "first"
-        );
+        assert_eq!(state.decisions.len(), 3);
     }
 
     // ── HeightCache tests (Story 16-5) ──
@@ -4255,7 +4038,6 @@ mod tests {
         assert!(state.cached_entries.is_empty());
         assert_eq!(state.selected_index, 0);
         assert!(state.drill_down_agent.is_none());
-        assert!(state.pending_kill_confirm.is_none());
         assert!(state.spool_tail_cache.is_empty());
         assert_eq!(state.inspector_scroll_offset, 0);
     }

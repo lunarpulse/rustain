@@ -5,7 +5,15 @@
 //! context (a child of `Context::Decision`), so a key the rail paints is a key
 //! the handler honours (Story 21.3).
 
+use super::delegation::{AgentKillPayload, PendingDelegationCard, PendingSpawnGate};
 use super::permission::{ConsentPayload, PermissionPayload};
+use super::plan::{
+    CancelPlanPayload, PlanApprovalPayload, PlanCardPayload, PlanDeviationPayload,
+    SkipCascadePayload,
+};
+use super::question::QuestionPayload;
+use super::skill_trust::SkillTrustPayload;
+use super::{DecisionItem, keys};
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
@@ -14,7 +22,8 @@ use crate::adapters::tui::keymap::{self, Context};
 use crate::domain::models::ImageAttachment;
 use crate::domain::models::visual::DeleteConfirmTarget;
 
-/// The decision kinds migrated so far (21-1's interim kinds, 6-B's permission family).
+/// The decision kinds migrated so far (21-1's interim kinds, 6-B's permission family,
+/// 6-C's cards).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DecisionKind {
     Recovery,
@@ -27,6 +36,26 @@ pub enum DecisionKind {
     Permission,
     /// An a2a sender's request waits for the operator's consent (attached writer).
     Consent,
+    /// The agent asked the user a question (AskUserQuestion).
+    Question,
+    /// A workspace skill waits for the user's trust (model- or slash-driven).
+    SkillTrust,
+    /// A plan waits for approval (the plan-mode overlay's successor).
+    PlanApproval,
+    /// The inline plan card waits for approve / edit / reject.
+    PlanCard,
+    /// A running plan deviated and needs reapproval.
+    PlanDeviation,
+    /// Skipping a task has dependants: skip them too, continue anyway or cancel.
+    SkipCascade,
+    /// Cancelling a running plan waits for confirmation.
+    CancelPlan,
+    /// A task has a delegation suggestion.
+    Delegation,
+    /// A `/fanout` above the learned threshold waits for confirmation.
+    SpawnGate,
+    /// Killing an agent and its subtree waits for confirmation.
+    AgentKill,
 }
 
 /// What `Esc` does on a kind (RU-5, LR-3, A7).
@@ -40,12 +69,21 @@ pub enum EscPolicy {
 
 impl DecisionKind {
     /// The registry context whose rows (and `Decision` parent rows) resolve this
-    /// kind's keys.
+    /// kind's keys (its default sub-state: a question's field closed, a skill's trust
+    /// prompt rather than its reader).
     #[must_use]
     pub fn context(self) -> Context {
         match self {
             Self::Permission => Context::Permission,
             Self::Consent => Context::Consent,
+            Self::Question => Context::QuestionIdle,
+            Self::SkillTrust => Context::SkillTrust,
+            Self::PlanApproval => Context::PlanApproval,
+            Self::PlanCard | Self::PlanDeviation => Context::PlanDecision,
+            Self::SkipCascade => Context::SkipCascade,
+            Self::CancelPlan | Self::AgentKill => Context::DecisionConfirm,
+            Self::Delegation => Context::Delegation,
+            Self::SpawnGate => Context::SpawnGate,
             _ => Context::Decision,
         }
     }
@@ -62,6 +100,16 @@ impl DecisionKind {
             Self::DeleteConversations => "Delete conversations",
             Self::Permission => "Permission",
             Self::Consent => "Peer consent",
+            Self::Question => "Question",
+            Self::SkillTrust => "Skill trust",
+            Self::PlanApproval => "Plan approval",
+            Self::PlanCard => "Plan card",
+            Self::PlanDeviation => "Plan deviation",
+            Self::SkipCascade => "Skip cascade",
+            Self::CancelPlan => "Cancel plan",
+            Self::Delegation => "Delegate task",
+            Self::SpawnGate => "Spawn gate",
+            Self::AgentKill => "Kill agent",
         }
     }
 
@@ -77,6 +125,16 @@ impl DecisionKind {
             Self::DeleteConversations => "Decision: Delete conversations",
             Self::Permission => "Decision: Permission",
             Self::Consent => "Decision: Peer consent",
+            Self::Question => "Decision: Question",
+            Self::SkillTrust => "Decision: Skill trust",
+            Self::PlanApproval => "Decision: Plan approval",
+            Self::PlanCard => "Decision: Plan card",
+            Self::PlanDeviation => "Decision: Plan deviation",
+            Self::SkipCascade => "Decision: Skip cascade",
+            Self::CancelPlan => "Decision: Cancel plan",
+            Self::Delegation => "Decision: Delegate task",
+            Self::SpawnGate => "Decision: Spawn gate",
+            Self::AgentKill => "Decision: Kill agent",
         }
     }
 
@@ -98,7 +156,8 @@ impl DecisionKind {
     }
 
     /// The painted rail: `(key, label)` pairs, exactly the keys the handler honours. The
-    /// key text is generated from the rows of the kind's context (Story 21.3 AC15).
+    /// key text is generated from the rows of the kind's context (Story 21.3 AC15). A
+    /// kind with sub-states paints its default one here; [`rail_of`] paints an item's own.
     #[must_use]
     pub fn rail(self) -> Vec<(String, &'static str)> {
         let key = |command: OverlayCmd| keymap::render::rail(Context::Decision, command);
@@ -167,12 +226,146 @@ impl DecisionKind {
                     (consent(CardCmd::No), "Decline"),
                 ]
             }
+            Self::Question => {
+                let idle = |command: CardCmd| keymap::render::rail(Context::QuestionIdle, command);
+                vec![
+                    (idle(CardCmd::Answer), "Answer"),
+                    (idle(CardCmd::Skip), "Skip question"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::SkillTrust => {
+                let trust = |command: CardCmd| keymap::render::rail(Context::SkillTrust, command);
+                vec![
+                    (trust(CardCmd::Yes), "Trust"),
+                    (trust(CardCmd::No), "Decline"),
+                    (trust(CardCmd::Inspect), "Inspect"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::PlanApproval => {
+                let plan = |command: CardCmd| keymap::render::rail(Context::PlanApproval, command);
+                vec![
+                    (plan(CardCmd::Yes), "Approve"),
+                    (plan(CardCmd::Always), "Approve + auto-edit"),
+                    (plan(CardCmd::No), "Reject"),
+                    (plan(CardCmd::Edit), "Edit"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::PlanCard | Self::PlanDeviation => {
+                let plan = |command: CardCmd| keymap::render::rail(Context::PlanDecision, command);
+                // The deviation card kept its captured wording.
+                let approve = if matches!(self, Self::PlanDeviation) {
+                    "Approve revised"
+                } else {
+                    "Approve"
+                };
+                vec![
+                    (plan(CardCmd::Yes), approve),
+                    (plan(CardCmd::Edit), "Edit"),
+                    (plan(CardCmd::No), "Reject"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::SkipCascade => {
+                let skip = |command: CardCmd| keymap::render::rail(Context::SkipCascade, command);
+                vec![
+                    (skip(CardCmd::CascadeSkip), "Skip cascade"),
+                    (skip(CardCmd::Continue), "Continue anyway"),
+                    (skip(CardCmd::No), "Cancel skip"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::CancelPlan | Self::AgentKill => {
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                // The cancel-plan card kept its captured wording.
+                let (yes, no) = if matches!(self, Self::CancelPlan) {
+                    ("Cancel all", "Keep running")
+                } else {
+                    ("Confirm", "Decline")
+                };
+                vec![
+                    (confirm(CardCmd::Yes), yes),
+                    (confirm(CardCmd::No), no),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::Delegation => {
+                let delegation =
+                    |command: CardCmd| keymap::render::rail(Context::Delegation, command);
+                vec![
+                    (delegation(CardCmd::Delegate), "Delegate"),
+                    (delegation(CardCmd::RunLocal), "Run locally"),
+                    (delegation(CardCmd::CancelPlan), "Cancel plan"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::SpawnGate => {
+                let gate = |command: CardCmd| keymap::render::rail(Context::SpawnGate, command);
+                vec![
+                    (gate(CardCmd::Confirm), "Confirm"),
+                    (gate(CardCmd::Cap), "Cap"),
+                    (gate(CardCmd::No), "Cancel"),
+                    (
+                        keymap::render::rail_arrows(
+                            Context::SpawnGate,
+                            CardCmd::Left,
+                            CardCmd::Right,
+                        ),
+                        "adjust",
+                    ),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
         }
     }
 }
 
+/// The rail an item paints now: its kind's rail, or its open sub-context's (a question's
+/// answer field, a skill's file reader, a permission's Review is painted by the frame).
+#[must_use]
+pub fn rail_of(item: &DecisionItem) -> Vec<(String, &'static str)> {
+    // `Question` is the field-open context; the field-closed one is the kind's default.
+    match keys::context_of(item) {
+        Context::Question => vec![
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Send),
+                "Send",
+            ),
+            (
+                keymap::render::rail(Context::Question, CardCmd::Skip),
+                "Skip question",
+            ),
+            (
+                keymap::render::rail(Context::DecisionCompose, CardCmd::Back),
+                "Back",
+            ),
+        ],
+        Context::SkillTrustInspect => vec![
+            (
+                keymap::render::rail(Context::SkillTrustInspect, CardCmd::Back),
+                "Back",
+            ),
+            (
+                format!(
+                    "[{}]",
+                    keymap::render::rail_pair(
+                        Context::Decision,
+                        OverlayCmd::PaneScrollUp,
+                        OverlayCmd::PaneScrollDown
+                    )
+                ),
+                "scroll",
+            ),
+        ],
+        _ => item.kind.rail(),
+    }
+}
+
 /// The existing effect a rail key executes — exactly once (the item is resolved
-/// before the effect is returned).
+/// before the effect is returned), unless the effect is marked non-resolving.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionEffect {
     RecoveryContinue,
@@ -205,11 +398,50 @@ pub enum DecisionEffect {
     ConsentAlways,
     /// Decline the sender's request (attached).
     ConsentDecline,
+    /// Send the question's answer (the field's text rides in the payload).
+    QuestionSend,
+    /// Skip the question: the waiting turn gets no answer.
+    QuestionSkip,
+    /// Trust the skill and activate it.
+    SkillTrustAccept,
+    /// Decline the skill.
+    SkillTrustDecline,
+    /// Read the skill file (non-resolving: the item stays queued).
+    SkillTrustInspect,
+    PlanApproveNormal,
+    PlanApproveAutoEdit,
+    PlanReject,
+    /// Open the plan in the editor (non-resolving: the item stays queued).
+    PlanRevise,
+    PlanCardApprove,
+    PlanCardReject,
+    PlanCardEdit,
+    PlanDeviationApprove,
+    PlanDeviationEdit,
+    PlanDeviationReject,
+    /// Skip the task and everything that depends on it.
+    SkipCascadeSkip,
+    /// Skip the task only.
+    SkipCascadeContinue,
+    /// Keep the task.
+    SkipCascadeCancel,
+    CancelPlanConfirm,
+    CancelPlanDecline,
+    DelegateTask,
+    RunTaskLocally,
+    DelegationCardCancel,
+    SpawnGateConfirm,
+    /// Cancel the spawn: nothing is spawned.
+    SpawnGateCancel,
+    AgentKillConfirm,
+    AgentKillDecline,
 }
 
 impl DecisionEffect {
-    /// The host action that runs the effect (the four delete/image effects and the
-    /// permission family keep their existing arms; consent is an attached frame).
+    /// The host action that runs the effect (the delete/image effects, the permission
+    /// family and the cards keep their existing arms; consent is an attached frame; the
+    /// rest reach the host as `InputAction::Decision` and take their payload with
+    /// `take_resolved`).
     #[must_use]
     pub fn into_action(self) -> InputAction {
         match self {
@@ -224,14 +456,35 @@ impl DecisionEffect {
             Self::PermissionDenyFeedback => InputAction::FeedbackInputSubmit,
             // Consent items exist only on an attached writer, which sends the frame itself.
             Self::ConsentOnce | Self::ConsentAlways | Self::ConsentDecline => InputAction::Consumed,
+            Self::SkillTrustAccept => InputAction::SkillTrustAccept,
+            Self::SkillTrustDecline => InputAction::SkillTrustDecline,
+            Self::SkillTrustInspect => InputAction::SkillTrustInspect,
+            Self::PlanApproveNormal => InputAction::PlanApproveNormal,
+            Self::PlanApproveAutoEdit => InputAction::PlanApproveAutoEdit,
+            Self::PlanReject => InputAction::PlanReject,
+            Self::PlanRevise => InputAction::PlanRevise,
+            Self::PlanCardApprove => InputAction::PlanCardApprove,
+            Self::PlanCardReject => InputAction::PlanCardReject,
+            Self::PlanCardEdit => InputAction::PlanCardEdit,
+            Self::DelegateTask => InputAction::DelegateTask,
+            Self::RunTaskLocally => InputAction::RunTaskLocally,
+            Self::DelegationCardCancel => InputAction::DelegationCardCancel,
+            Self::SpawnGateConfirm => InputAction::SpawnGateConfirm,
             other => InputAction::Decision(other),
         }
+    }
+
+    /// True when the effect leaves its item queued (a sub-context opens, nothing is decided).
+    #[must_use]
+    pub fn keeps_item(self) -> bool {
+        matches!(self, Self::SkillTrustInspect | Self::PlanRevise)
     }
 }
 
 /// The payload a decision carries: what used to live in a singleton slot
 /// (`pending_large_image`, `pending_delete`, `pending_permission`, the attached
-/// approvals and consent queue), moved here, never copied (AD-2110).
+/// approvals and consent queue, and 6-C's question / skill / plan / delegation slots),
+/// moved here, never copied (AD-2110).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecisionSubject {
     /// The question text is the whole decision.
@@ -240,6 +493,16 @@ pub enum DecisionSubject {
     Delete(DeleteConfirmTarget),
     Permission(Box<PermissionPayload>),
     Consent(Box<ConsentPayload>),
+    Question(Box<QuestionPayload>),
+    SkillTrust(Box<SkillTrustPayload>),
+    PlanApproval(Box<PlanApprovalPayload>),
+    PlanCard(Box<PlanCardPayload>),
+    PlanDeviation(Box<PlanDeviationPayload>),
+    SkipCascade(Box<SkipCascadePayload>),
+    CancelPlan(Box<CancelPlanPayload>),
+    Delegation(Box<PendingDelegationCard>),
+    SpawnGate(Box<PendingSpawnGate>),
+    AgentKill(Box<AgentKillPayload>),
 }
 
 /// The copy a decision paints once its source settled elsewhere (A7).

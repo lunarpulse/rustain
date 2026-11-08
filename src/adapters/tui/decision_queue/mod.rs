@@ -13,16 +13,30 @@
 //! without deciding. This module is pure: no I/O and no clock of its own.
 
 mod compose;
+mod delegation;
+mod handle;
 mod keys;
 mod kinds;
 mod list;
 mod permission;
+mod plan;
+mod question;
+mod skill_trust;
+
+#[cfg(test)]
+mod cards_tests;
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+pub use delegation::{
+    AgentKillPayload, PendingDelegationCard, PendingSpawnGate, raise_agent_kill, raise_delegation,
+    raise_spawn_gate, withdraw_agent_kill, withdraw_gone_agent_kills,
+};
+pub use handle::ReplyHandle;
 pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key, settle_sent};
 pub(crate) use keys::{clear_feedback, paste};
+pub(crate) use kinds::rail_of;
 pub use kinds::{
     APPROVAL_NO_LONGER_PENDING, DecisionEffect, DecisionKind, DecisionSubject, EscPolicy,
     NO_LONGER_PENDING, Responder, StaleCopy, Validity,
@@ -32,6 +46,18 @@ pub use list::{ListOutcome, handle_list_key, open_list};
 pub use permission::{
     ConsentPayload, PermissionInput, PermissionPayload, complete_input, drain_permissions,
     holds_request, raise_consent, raise_permission, withdraw_request,
+};
+pub use plan::{
+    CancelPlanPayload, PlanApprovalPayload, PlanCardPayload, PlanDeviationPayload,
+    SkipCascadePayload, SkipCascadePending, plan_approval_applies, plan_approval_target,
+    plan_card_pending, plan_card_snapshot, raise_cancel_plan, raise_plan_approval, raise_plan_card,
+    raise_plan_deviation, raise_skip_cascade, set_plan_contents, settle_plan_approval,
+    withdraw_plan, withdraw_plan_card,
+};
+pub use question::{ANSWER_MAX_BYTES, QuestionPayload, drain_questions, raise_question};
+pub use skill_trust::{
+    SkillOrigin, SkillTrustPayload, drain_skill_trust, inspect_target, open_inspect,
+    raise_model_skill_trust, raise_user_skill_trust,
 };
 
 use crate::adapters::tui::app::InputAction;
@@ -64,12 +90,13 @@ pub fn waiting_toast() -> String {
 }
 
 /// State-only effects consumed by the live pane action arms, after the pane has
-/// resolved its item and restored or promoted its caller.
-/// Surviving caller frames keep their interrupted base focus. Only an empty
-/// stack uses the pre-stack restoration (including permission/recipient handoff
-/// for images and sidebar selection for delete cancellation). The host supplies
-/// its existing image-focus policy without coupling the pane to its runtime.
-pub(crate) fn apply_resolved_action(
+/// resolved its item and restored or promoted its caller (`RecoveryContinue`, the
+/// image and delete effects, the question's send / skip, and the spawn / cancel-plan /
+/// agent-kill declines). Surviving caller frames keep their interrupted base focus. Only
+/// an empty stack uses the pre-stack restoration (including permission/recipient handoff
+/// for images and sidebar selection for delete cancellation). The host supplies its
+/// existing image-focus policy without coupling the pane to its runtime.
+pub fn apply_resolved_action(
     state: &mut TuiState,
     action: InputAction,
     restore_base_focus: fn(&mut TuiState),
@@ -115,6 +142,29 @@ pub(crate) fn apply_resolved_action(
                     FocusState::Input
                 };
                 presentation::reducer::set_base(state, focus);
+            }
+        }
+        // The question's answer goes to its own turn (any tab); a skip drops the sender so
+        // the turn gets a `RecvError`. The reply handle rides in the resolved payload.
+        InputAction::Decision(
+            effect @ (DecisionEffect::QuestionSend | DecisionEffect::QuestionSkip),
+        ) => {
+            if let Some(subject) = state.decisions.take_resolved() {
+                question::deliver(subject, effect == DecisionEffect::QuestionSend);
+            }
+            if state.modal_stack.is_empty() {
+                presentation::reducer::set_base(state, FocusState::Input);
+            }
+        }
+        // Declines and cancels decide nothing further: the payload is dropped.
+        InputAction::Decision(
+            DecisionEffect::SpawnGateCancel
+            | DecisionEffect::CancelPlanDecline
+            | DecisionEffect::AgentKillDecline,
+        ) => {
+            drop(state.decisions.take_resolved());
+            if state.modal_stack.is_empty() {
+                restore_base_focus(state);
             }
         }
         _ => unreachable!("only state-only resolved pane actions enter this seam"),
@@ -279,6 +329,11 @@ pub struct DecisionQueue {
     pub(crate) permission_layout: std::cell::RefCell<
         Option<std::sync::Arc<crate::adapters::tui::widgets::decision_frame::PreparedPermission>>,
     >,
+    /// The wrapped body of the focused frame's heavy text (a question, a skill file, a
+    /// plan's contents), prepared once per item, width and colours.
+    pub(crate) body_layout: std::cell::RefCell<
+        Option<std::sync::Arc<crate::adapters::tui::widgets::decision_frame::PreparedBody>>,
+    >,
     /// The payload of the item the last rail key resolved, until its effect arm
     /// consumes it (the same tick); the queue is its only owner.
     resolved: Option<DecisionSubject>,
@@ -358,18 +413,26 @@ impl DecisionQueue {
         self.items.iter_mut().find(|item| item.matches_key(key))
     }
 
+    /// A frame opens on the request itself, never inside a sub-context: a permission
+    /// reads (no Review, no feedback), a question's answer field is open with its text
+    /// kept, a skill's prompt shows rather than its file.
     pub(crate) fn prepare(&mut self, key: &DecisionKey) {
         if let Some(item) = self.item_mut(key) {
             item.deferred = false;
-            // A frame opens on the request itself, never inside a sub-context.
-            if let DecisionSubject::Permission(payload) = &mut item.subject {
-                payload.reviewing = false;
-                payload.feedback = None;
+            match &mut item.subject {
+                DecisionSubject::Permission(payload) => {
+                    payload.reviewing = false;
+                    payload.feedback = None;
+                }
+                DecisionSubject::Question(payload) => payload.editing = true,
+                DecisionSubject::SkillTrust(payload) => payload.inspecting = false,
+                _ => {}
             }
         }
         self.clear_paint();
         self.feedback = None;
         self.scroll = 0;
+        *self.body_layout.get_mut() = None;
     }
 
     pub(crate) fn clear_paint(&mut self) {
@@ -451,6 +514,7 @@ impl DecisionQueue {
     fn remove(&mut self, key: &DecisionKey) -> Option<DecisionItem> {
         let at = self.items.iter().position(|item| item.matches_key(key))?;
         *self.permission_layout.get_mut() = None;
+        *self.body_layout.get_mut() = None;
         Some(self.items.remove(at))
     }
 
@@ -481,6 +545,15 @@ pub fn current<'a>(state: &'a TuiState, facts: &LogFacts) -> Option<&'a Decision
         .items
         .iter()
         .find(|item| item.matches_key(key) && (item.is_stale() || item.actionable(facts)))
+}
+
+/// The key of the decision frame on the stack (open or suspended), whatever tab shows it.
+pub(crate) fn focused_key(state: &TuiState) -> Option<DecisionKey> {
+    state
+        .modal_stack
+        .all_frames()
+        .find(|frame| frame.surface == Surface::Decision)
+        .and_then(|frame| frame.decision.clone())
 }
 
 fn clean(detail: &str) -> String {
@@ -537,6 +610,10 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
             true
         }
     };
+    if !is_new {
+        // The payload was replaced in place: its heavy body must be wrapped afresh.
+        *state.decisions.body_layout.get_mut() = None;
+    }
     state.needs_redraw = true;
     let take_focus = here
         && match arrival {
@@ -587,15 +664,35 @@ pub fn withdraw_for(state: &mut TuiState, kind: DecisionKind, conversation_id: &
 /// to compare against.
 pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
     state.decisions.active_conversation = facts.active_conversation_id.clone();
+    sweep_orphans(state);
     if facts.titles.is_empty() {
         return;
     }
     withdraw_where(state, NO_LONGER_PENDING, |item| {
-        item.conversation_id.as_deref().is_some_and(|id| {
+        // A user-driven skill prompt is keyed to no tab but is bound to its origin one.
+        let origin = item
+            .conversation_id
+            .as_deref()
+            .or_else(|| skill_trust::user_origin(&item.subject));
+        origin.is_some_and(|id| {
             Some(id) != facts.active_conversation_id.as_deref()
                 && !facts.titles.iter().any(|(known, _)| known == id)
         })
     });
+}
+
+/// A question or model skill prompt whose turn or tab is gone (its reply route closed)
+/// can never be answered: it leaves the queue, or turns stale when its frame is open.
+fn sweep_orphans(state: &mut TuiState) -> bool {
+    let orphaned = |item: &DecisionItem| {
+        !item.is_stale()
+            && (question::is_orphan(&item.subject) || skill_trust::is_orphan(&item.subject))
+    };
+    let any = state.decisions.items.iter().any(orphaned);
+    if any {
+        withdraw_where(state, NO_LONGER_PENDING, orphaned);
+    }
+    any
 }
 
 /// A withdrawn item leaves the queue, unless its frame is open: then the user is
@@ -622,6 +719,7 @@ fn withdraw_where(state: &mut TuiState, copy: StaleCopy, matches: impl Fn(&Decis
     });
     if staled || state.decisions.items.len() != before {
         *state.decisions.permission_layout.get_mut() = None;
+        *state.decisions.body_layout.get_mut() = None;
         state.needs_redraw = true;
     }
 }
@@ -748,10 +846,11 @@ pub fn note_painted(state: &mut TuiState) {
     }
 }
 
-/// Both hosts' tick: the frame was painted with muted keys while inert, so the
-/// moment the window ends asks for the one redraw that activates them. True when
-/// it asked.
+/// Both hosts' tick: a question whose turn or tab is gone turns stale, and the frame
+/// painted with muted keys while inert asks, the moment the window ends, for the one
+/// redraw that activates them. True when it asked for a redraw.
 pub fn tick(state: &mut TuiState) -> bool {
+    let swept = sweep_orphans(state);
     let queue = &state.decisions;
     if queue.inert_released
         || queue.painted_at.is_none()
@@ -761,7 +860,7 @@ pub fn tick(state: &mut TuiState) -> bool {
             .top()
             .is_none_or(|frame| frame.surface != Surface::Decision)
     {
-        return false;
+        return swept;
     }
     state.decisions.inert_released = true;
     state.needs_redraw = true;
@@ -927,7 +1026,6 @@ mod tests {
                 PaneKey::Char('z'),
                 PaneKey::Char('q'),
                 PaneKey::Char('x'),
-                PaneKey::Char('c'),
                 PaneKey::Char('Y'),
                 PaneKey::Enter,
             ];
@@ -1464,13 +1562,16 @@ mod tests {
             current(&state, &f).map(|i| i.kind),
             Some(DecisionKind::Carryover)
         );
-        // RU-21: `c` is never Compact.
+        // RU-21: `c` is never Compact; on a decision frame it copies (21-6 A19).
         ready(&mut state, &clock);
-        assert_eq!(
+        assert!(matches!(
             handle_key(&mut state, PaneKey::Char('c'), &f),
-            PaneOutcome::Consumed
+            PaneOutcome::Copy(text) if text.contains("Carry over a summary")
+        ));
+        assert!(
+            state.decisions.holds(DecisionKind::Carryover),
+            "a copy decides nothing"
         );
-        assert!(state.decisions.holds(DecisionKind::Carryover));
     }
 
     #[test]

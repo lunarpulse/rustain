@@ -1,0 +1,21 @@
+{
+  "scene": "story-21-6-question-compose",
+  "personas": {
+    "operator": {
+      "turns": [
+        {
+          "expect": "ask the colour question",
+          "content": [{"type": "tool_use", "name": "AskUserQuestion", "input": {"question": "Which colour do you prefer?"}}],
+          "stop_reason": "tool_use",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        },
+        {
+          "expect": "blue",
+          "content": [{"type": "text", "text": "Colour acknowledged: blue"}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        }
+      ]
+    }
+  }
+}

@@ -402,22 +402,29 @@ pub enum Context {
     DecisionQueue,
     RecipientSurface,
     Login,
-    /// Shared parent of every decision card: the `Esc` / `Ctrl+C` cue rows (A8).
+    /// Shared parent of the decision cards that still own their own keys (the 6-D
+    /// cards): the `Esc` / `Ctrl+C` cue rows (A8).
     Card,
-    /// A decision frame's own text field (Deny + feedback): readline editing, never the composer.
+    /// A decision frame's own text field (Deny + feedback, the question answer):
+    /// readline editing, never the composer.
     DecisionCompose,
+    /// The AskUserQuestion answer field is open (a child of `DecisionCompose`).
     Question,
+    /// The AskUserQuestion frame while its field is closed (Esc left it).
+    QuestionIdle,
     SkillTrust,
     SkillTrustInspect,
     PlanApproval,
-    /// The inline plan card and the plan deviation card (same `y/e/n` grammar).
+    /// The plan card and the plan deviation card (same `y/e/n` grammar).
     PlanDecision,
     SkipCascade,
     Delegation,
     SpawnGate,
-    /// The `y` / `n` confirmations: fork, artifact apply, `/peer add`, `/team retract`,
-    /// consolidation, cancel-plan, the attached retract confirmation.
+    /// The `y` / `n` confirmations of the cards that still own their keys: fork, artifact
+    /// apply, `/peer add`, `/team retract`, consolidation, the attached retract confirmation.
     Confirm,
+    /// The `y` / `n` confirmations that are decision frames: cancel plan, agent kill.
+    DecisionConfirm,
     Forget,
     Rewind,
     ExportOverwrite,
@@ -427,7 +434,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 59] = [
+    pub const ALL: [Context; 61] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -474,6 +481,7 @@ impl Context {
         Context::Card,
         Context::DecisionCompose,
         Context::Question,
+        Context::QuestionIdle,
         Context::SkillTrust,
         Context::SkillTrustInspect,
         Context::PlanApproval,
@@ -482,6 +490,7 @@ impl Context {
         Context::Delegation,
         Context::SpawnGate,
         Context::Confirm,
+        Context::DecisionConfirm,
         Context::Forget,
         Context::Rewind,
         Context::ExportOverwrite,
@@ -538,6 +547,7 @@ impl Context {
             Context::Card => "Decision cards (shared)",
             Context::DecisionCompose => "Decision field",
             Context::Question => "Question",
+            Context::QuestionIdle => "Question (field closed)",
             Context::SkillTrust => "Skill trust",
             Context::SkillTrustInspect => "Skill trust (inspect)",
             Context::PlanApproval => "Plan approval",
@@ -546,6 +556,7 @@ impl Context {
             Context::Delegation => "Delegation",
             Context::SpawnGate => "Spawn gate",
             Context::Confirm => "Confirmation card",
+            Context::DecisionConfirm => "Confirmation",
             Context::Forget => "Forget",
             Context::Rewind => "Rewind",
             Context::ExportOverwrite => "Export overwrite",
@@ -575,28 +586,32 @@ impl Context {
             | Context::Decision
             | Context::RecipientSurface
             | Context::Login
-            | Context::Card
-            | Context::SkillTrustInspect => &[],
-            // The permission and consent frames are decision frames: the parent owns
-            // Esc (defer), Ctrl+C (back), Ctrl+Q (quit) and PgUp/PgDn (scroll).
-            Context::Permission | Context::Consent => &[Context::Decision],
-            Context::MarkdownBody => &[Context::InspectorBody],
-            Context::BlockViewer => &[Context::MarkdownBody],
-            Context::ToolInspector => &[Context::MarkdownBody],
-            // The decision cards own every key: the shared cue rows only (A8).
-            Context::SkillTrust
+            | Context::Card => &[],
+            // The decision frames: the parent owns Esc (defer), Ctrl+C (back), Ctrl+Q
+            // (quit), `c` (copy) and PgUp/PgDn (scroll).
+            Context::Permission
+            | Context::Consent
+            | Context::QuestionIdle
+            | Context::SkillTrust
+            | Context::SkillTrustInspect
             | Context::PlanApproval
             | Context::PlanDecision
             | Context::SkipCascade
             | Context::Delegation
             | Context::SpawnGate
-            | Context::Confirm
+            | Context::DecisionConfirm => &[Context::Decision],
+            Context::MarkdownBody => &[Context::InspectorBody],
+            Context::BlockViewer => &[Context::MarkdownBody],
+            Context::ToolInspector => &[Context::MarkdownBody],
+            // The decision cards that still own every key: the shared cue rows only (A8).
+            Context::Confirm
             | Context::Forget
             | Context::Rewind
             | Context::ExportOverwrite
             | Context::TeamProposal => &[Context::Card],
             Context::DecisionCompose => &[Context::CaretField],
-            Context::Question => &[Context::Card, Context::FieldEdit],
+            // The answer field is a decision field plus its own `Ctrl+D` skip.
+            Context::Question => &[Context::DecisionCompose],
             Context::TextEntry | Context::Chat | Context::Sidebar => &[Context::Global],
             Context::Input => &[Context::TextEntry],
             Context::CaretField => &[Context::TextEntry],

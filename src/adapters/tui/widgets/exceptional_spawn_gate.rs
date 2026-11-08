@@ -18,11 +18,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail_key;
-use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::domain::models::visual::symbols;
 
 /// Pure decision returned by the adaptive spawn gate.
@@ -74,19 +70,15 @@ impl SpawnGateSnapshot {
     }
 }
 
-/// Render the `ExceptionalSpawnGate` as a single-line PermissionCard variant.
+/// The `ExceptionalSpawnGate` body: one row of the `Decision: Spawn gate` frame.
 ///
-/// Format:
-/// `spawn {N}? · n cancel ⚠ {N} rows · ←→ adjust N · ↵ confirm · c cap at {threshold}`
-/// where `N` is the effective breadth (adjusted when the user has nudged it,
-/// else the raw request). Padded to `width` so the `┃ … ┃` border closes flush
-/// (mirrors [`permission_prompt`](super::permission_prompt)'s card grammar).
-pub fn render_spawn_gate(snap: &SpawnGateSnapshot, width: u16) -> Vec<Line<'static>> {
+/// Format: `spawn {N}? · ⚠ {N} rows · cap at {threshold}` where `N` is the effective
+/// breadth (adjusted when the user has nudged it, else the raw request). The keys
+/// (`[Enter] Confirm  [t] Cap  [n] Cancel  [←/→] adjust  [Esc] Later`) are the frame's
+/// rail, generated from the registry, so no key text lives here.
+pub fn gate_lines(snap: &SpawnGateSnapshot) -> Vec<Line<'static>> {
     let n = snap.effective_n();
 
-    let border = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(Modifier::BOLD);
     let warn = Style::default().fg(Color::Yellow);
     let muted = Style::default().fg(Color::DarkGray);
     let accent = Style::default()
@@ -95,47 +87,14 @@ pub fn render_spawn_gate(snap: &SpawnGateSnapshot, width: u16) -> Vec<Line<'stat
     let body = Style::default().fg(Color::Gray);
     let sep = " \u{00B7} "; // · affordance separator
 
-    // Content spans (no borders) — multi-span so the review-burden `⚠ N rows`
-    // reads in warning yellow and affordances read muted/gray.
-    let mut content: Vec<Span> = vec![
+    // Multi-span so the review-burden `⚠ N rows` reads in warning yellow.
+    vec![Line::from(vec![
         Span::styled(format!("spawn {n}?"), accent),
         Span::styled(sep, muted),
-        Span::styled(
-            format!("{} cancel", rail_key(Context::SpawnGate, CardCmd::No)),
-            body,
-        ),
-        Span::raw(" "),
         Span::styled(format!("{} {n} rows", symbols::WARNING), warn),
         Span::styled(sep, muted),
-        Span::styled("\u{2190}\u{2192} adjust N", body), // ←→ adjust N
-        Span::styled(sep, muted),
-        Span::styled("\u{21B5} confirm", body), // ↵ confirm
-        Span::styled(sep, muted),
-        Span::styled(
-            format!(
-                "{} cap at {}",
-                rail_key(Context::SpawnGate, CardCmd::Cap),
-                snap.threshold
-            ),
-            body,
-        ),
-    ];
-
-    // Pad to `width` (minus the 4 chars of `┃ ` + ` ┃` border overhead) so the
-    // closing border sits flush. The gate content is short by design; we pad
-    // rather than truncate the keybinding hints.
-    let content_str: String = content.iter().map(|s| s.content.as_ref()).collect();
-    let content_w = content_str.width();
-    let target_content = (width as usize).saturating_sub(4);
-    if content_w < target_content {
-        content.push(Span::raw(" ".repeat(target_content - content_w)));
-    }
-
-    let mut spans = vec![Span::styled("\u{2503} ", border)]; // ┃
-    spans.append(&mut content);
-    spans.push(Span::styled(" \u{2503}", border)); // ┃
-
-    vec![Line::from(spans)]
+        Span::styled(format!("cap at {}", snap.threshold), body),
+    ])]
 }
 
 #[cfg(test)]
@@ -145,34 +104,6 @@ mod tests {
     /// Join a line's spans back into a flat string for assertion.
     fn rendered(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn story21_3_spawn_gate_cancel_is_visible_in_the_painted_viewport() {
-        for width in [60, 80] {
-            let mut terminal =
-                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 4)).unwrap();
-            terminal
-                .draw(|frame| {
-                    frame.render_widget(
-                        ratatui::widgets::Paragraph::new(render_spawn_gate(
-                            &SpawnGateSnapshot {
-                                requested: 20,
-                                threshold: 8,
-                                adjusted: None,
-                            },
-                            width,
-                        )),
-                        frame.area(),
-                    )
-                })
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let row: String = (0..width)
-                .map(|x| buffer.cell((x, 0)).unwrap().symbol())
-                .collect();
-            assert!(row.contains("n cancel"), "{width}: {row}");
-        }
     }
 
     #[test]
@@ -210,20 +141,18 @@ mod tests {
     }
 
     #[test]
-    fn render_gate_shows_review_burden_format() {
+    fn gate_lines_show_the_review_burden_and_the_cap() {
         let snap = SpawnGateSnapshot {
             requested: 20,
             threshold: 8,
             adjusted: None,
         };
-        let lines = render_spawn_gate(&snap, 80);
-        assert_eq!(lines.len(), 1, "gate renders as a single line");
+        let lines = gate_lines(&snap);
+        assert_eq!(lines.len(), 1, "the gate body is a single row");
         let out = rendered(&lines[0]);
         assert!(out.contains("spawn 20?"), "lede shows requested N: {out}");
         assert!(out.contains("20 rows"), "review-burden count: {out}");
-        assert!(out.contains("←→ adjust N"), "adjust affordance: {out}");
-        assert!(out.contains("↵ confirm"), "confirm affordance: {out}");
-        assert!(out.contains("c cap at 8"), "cap-at-threshold: {out}");
+        assert!(out.contains("cap at 8"), "cap-at-threshold: {out}");
         assert!(
             out.contains(symbols::WARNING.to_string().as_str()),
             "warning glyph reused (no new constant): {out}"
@@ -231,14 +160,14 @@ mod tests {
     }
 
     #[test]
-    fn render_gate_shows_adjusted_n_when_present() {
+    fn gate_lines_show_the_adjusted_n_when_present() {
         // ←→ nudges N: the gate renders the adjusted breadth, not the raw request.
         let snap = SpawnGateSnapshot {
             requested: 20,
             threshold: 8,
             adjusted: Some(12),
         };
-        let out = rendered(&render_spawn_gate(&snap, 80)[0]);
+        let out = rendered(&gate_lines(&snap)[0]);
         assert!(out.contains("spawn 12?"), "adjusted N shown: {out}");
         assert!(out.contains("12 rows"), "adjusted count: {out}");
         assert!(

@@ -37,6 +37,9 @@ use crate::adapters::toolset_adapter::remember_fact_through_live_slot;
 use crate::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
 use crate::adapters::tui::app::{self, InputAction, convert_crossterm_event, handle_input};
 use crate::adapters::tui::color_detect::detect_color_capability;
+use crate::adapters::tui::decision_queue::{
+    self as dq, DecisionEffect as DE, DecisionKind as DK, DecisionSubject as DS,
+};
 use crate::adapters::tui::handlers::{self, AuthWork, HandlerOutcome, SpawnRequest};
 use crate::adapters::tui::layout;
 use crate::adapters::tui::notification_log;
@@ -57,8 +60,8 @@ use crate::infrastructure::runtime::panel_bridge::{self, PanelOpenOutcome};
 #[cfg(feature = "a2a")]
 use crate::infrastructure::runtime::team_proposal_bridge::synchronize_surface;
 use crate::infrastructure::runtime::{
-    artifact_bridge, notice_actions, quit_guard, recovery_prompt, room_bridge, system_notice,
-    transparency_bridge,
+    artifact_bridge, decision_effects, notice_actions, quit_guard, recovery_prompt, room_bridge,
+    system_notice, transparency_bridge,
 };
 use ratatui::layout::Rect;
 
@@ -213,23 +216,12 @@ fn render_lines_bottom(
 pub fn paint_wave_base(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    gate: Option<&crate::adapters::tui::state::PendingSpawnGate>,
     handle: Option<&dyn crate::domain::ports::wave_handle::WaveHandle>,
     wave: Option<&crate::adapters::tui::state::WaveViewState>,
     rerunning_slot: Option<usize>,
     frame_open: bool,
 ) -> Option<Rect> {
-    if let Some(gate) = gate {
-        let lines = crate::adapters::tui::widgets::exceptional_spawn_gate::render_spawn_gate(
-            &crate::adapters::tui::widgets::exceptional_spawn_gate::SpawnGateSnapshot {
-                requested: gate.requested,
-                threshold: gate.threshold,
-                adjusted: gate.adjusted,
-            },
-            area.width,
-        );
-        render_lines_bottom(frame, area, lines)
-    } else if let Some(handle) = handle {
+    if let Some(handle) = handle {
         if !frame_open {
             let snap = handle.snapshot();
             let rows = wave_result_rows(&snap, rerunning_slot);
@@ -384,6 +376,7 @@ async fn refresh_subagent_panel_cache(
 ) {
     let Some(provider) = get_subagent_provider(agent_core) else {
         state.agent_panel_state.cached_entries.clear();
+        crate::adapters::tui::decision_queue::withdraw_gone_agent_kills(state);
         return;
     };
     let registry = provider.registry();
@@ -392,6 +385,7 @@ async fn refresh_subagent_panel_cache(
         .into_iter()
         .map(|e: crate::infrastructure::subagent::RegistryEntry| e.to_view())
         .collect();
+    crate::adapters::tui::decision_queue::withdraw_gone_agent_kills(state);
 }
 
 async fn refresh_spool_tail(
@@ -1103,7 +1097,7 @@ pub async fn run(
                             }
 
                             if pane_action.is_none() {
-                                match agent_inspector_keys::on_key(&mut state, &domain_event, tab_manager.active_tab().read_only) {
+                                match agent_inspector_keys::on_key(&mut state, &domain_event, tab_manager.active_tab().read_only, &conversation.id) {
                                     InspectorOutcome::PassThrough => {}
                                     InspectorOutcome::Consumed => continue,
                                     InspectorOutcome::SendOp { agent_id, op } => {
@@ -1111,37 +1105,6 @@ pub async fn run(
                                         if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
                                             let _ = provider.registry().send_op(&agent_id, op).await;
                                         }
-                                        state.needs_redraw = true;
-                                        continue;
-                                    }
-                                    InspectorOutcome::ConfirmKill(agent_id) => {
-                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                            let registry = provider.registry();
-                                            match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
-                                                Ok(_) => agent_inspector_keys::close(&mut state),
-                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: NoticeLevel::Warning,
-                                                        message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
-                                                    });
-                                                    agent_inspector_keys::close(&mut state);
-                                                }
-                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                        conversation_id: Some(conversation.id.clone()),
-                                                        level: NoticeLevel::Error,
-                                                        message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
-                                                    });
-                                                    state.agent_panel_state.pending_kill_confirm = None;
-                                                }
-                                                Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => agent_inspector_keys::close(&mut state),
-                                            }
-                                        } else {
-                                            state.agent_panel_state.pending_kill_confirm = None;
-                                            notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
-                                        }
-                                        refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
                                         state.needs_redraw = true;
                                         continue;
                                     }
@@ -1323,31 +1286,24 @@ pub async fn run(
                                     for id in crate::adapters::tui::decision_queue::drain_permissions(&mut state) {
                                         let _ = approval_runtime.resolve(&id, ApprovalOutcome::Cancel, crate::domain::models::PermissionResolution::Operator).await;
                                     }
-                                    // Decline any pending skill trust prompt
-                                    if let Some(pending) = state.pending_skill_trust.take() {
-                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
-                                        reducer::set_base(&mut state, FocusState::Input);
-                                    }
-                                    while let Some(queued) = state.skill_trust_queue.pop_front() {
-                                        let _ = queued.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
-                                    }
-                                    // Drain user-driven pending activation (Story 5-2 deadlock fix).
-                                    if let Some(pending) = state.pending_activation.take() {
-                                        state.pending_activation_inspect_content = None;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                            conversation_id: Some(pending.conversation_id),
-                                            level: NoticeLevel::Info,
-                                            message: format!(
-                                                "Skill '{}' activation cancelled",
-                                                pending.skill_name
-                                            ),
-                                        });
-                                        if state.pending_skill_trust.is_none() {
-                                            reducer::set_base(&mut state, FocusState::Input);
-                                            state.skill_trust_inspect_mode = false;
+                                    // Decline every pending skill trust prompt; cancel user-driven activations
+                                    for trust in dq::drain_skill_trust(&mut state) {
+                                        match trust.origin {
+                                            dq::SkillOrigin::Model { reply } => {
+                                                let _ = reply.send(crate::domain::models::SkillTrustResponse::Declined);
+                                            }
+                                            dq::SkillOrigin::User { conversation_id, .. } => {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conversation_id),
+                                                    level: NoticeLevel::Info,
+                                                    message: format!("Skill '{}' activation cancelled", trust.skill_name),
+                                                });
+                                            }
                                         }
-                                        state.needs_redraw = true;
                                     }
+                                    // The active turn is cancelled: nothing can answer ITS waiting questions any more.
+                                    dq::drain_questions(&mut state, &conversation.id);
+                                    state.needs_redraw = true;
                                     // Story 14.3a (AC8): cancel an in-flight wave
                                     // (primary cancel trigger = Ctrl-C). Fires the
                                     // wave-cancel root token, propagating to every
@@ -1383,112 +1339,64 @@ pub async fn run(
                                         &mut state, &action, &approval_runtime,
                                     ).await;
                                 }
-                                // Plan approval card key handlers (Story 6-0d AC4)
-                                InputAction::PlanApproveNormal => {
-                                    if let Some(pending) = state.pending_plan_approval.take() {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
-                                            conversation_id: pending.conversation_id,
-                                            outcome: crate::domain::models::PlanApprovalOutcome::ApproveNormal,
-                                        });
-                                    }
-                                }
-                                InputAction::PlanApproveAutoEdit => {
-                                    if let Some(pending) = state.pending_plan_approval.take() {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
-                                            conversation_id: pending.conversation_id,
-                                            outcome: crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit,
-                                        });
-                                    }
-                                }
-                                InputAction::PlanReject => {
-                                    if let Some(pending) = state.pending_plan_approval.take() {
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
-                                            conversation_id: pending.conversation_id,
-                                            outcome: crate::domain::models::PlanApprovalOutcome::Reject,
-                                        });
+                                // Plan approval card answers (Story 6-0d AC4): the answered item is already gone
+                                action @ (InputAction::PlanApproveNormal | InputAction::PlanApproveAutoEdit | InputAction::PlanReject) => {
+                                    if let Some(DS::PlanApproval(pending)) = state.decisions.take_resolved() {
+                                        // Applied only in its own writable tab; anywhere else it goes back to the queue.
+                                        if let Some(pending) = dq::settle_plan_approval(&mut state, pending, &conversation.id, tab_manager.active_tab().read_only) {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanApprovalResolved {
+                                                conversation_id: pending.conversation_id,
+                                                outcome: match action {
+                                                    InputAction::PlanApproveNormal => crate::domain::models::PlanApprovalOutcome::ApproveNormal,
+                                                    InputAction::PlanApproveAutoEdit => crate::domain::models::PlanApprovalOutcome::ApproveAutoEdit,
+                                                    _ => crate::domain::models::PlanApprovalOutcome::Reject,
+                                                },
+                                            });
+                                        }
                                     }
                                 }
                                 InputAction::PlanRevise => {
-                                    if let Some(ref pending) = state.pending_plan_approval {
-                                        let plan_path = pending.plan_path.clone();
+                                    // The item stays queued while the editor runs.
+                                    if let Some((key, plan_path)) = dq::plan_approval_target(&state) {
                                         let _ = crate::adapters::tui::editor_suspend::suspend_terminal(|| {
                                             let editor = crate::infrastructure::utils::env_var_trimmed("EDITOR").unwrap_or_else(|| "vi".to_string());
                                             std::process::Command::new(editor).arg(&plan_path).status()
                                         });
                                         let contents = tokio::fs::read_to_string(&plan_path).await.unwrap_or_default();
-                                        if let Some(ref mut pending) = state.pending_plan_approval {
-                                            pending.contents = contents;
-                                        }
+                                        dq::set_plan_contents(&mut state, &key, contents);
                                         state.needs_redraw = true;
                                     }
                                 }
                                 #[cfg(feature = "a2a")] InputAction::TeamProposal { conversation_id, proposal_id, decision } => crate::infrastructure::runtime::team_proposal_bridge::proposal_action(&mut state, &app_state, &conversation.id, &conversation_id, &proposal_id, decision).await,
-                                // PlanCard key handlers (Story 6-1a AC7)
-                                InputAction::PlanCardApprove => {
-                                    if let Some(ref pending) = state.pending_plan_card {
-                                        let conversation_id = conversation.id.clone();
-                                        let plan_id = pending.plan_id.clone();
+                                // PlanCard key handlers (Story 6-1a AC7): the answered item is already gone
+                                action @ (InputAction::PlanCardApprove | InputAction::PlanCardReject | InputAction::PlanCardEdit) => {
+                                    if let Some(DS::PlanCard(card)) = state.decisions.take_resolved() {
+                                        let decision = match action {
+                                            InputAction::PlanCardApprove => crate::domain::models::plan::PlanDecision::Approve,
+                                            InputAction::PlanCardReject => crate::domain::models::plan::PlanDecision::Reject,
+                                            _ => crate::domain::models::plan::PlanDecision::Edit,
+                                        };
                                         let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
-                                            conversation_id,
-                                            plan_id,
-                                            decision: crate::domain::models::plan::PlanDecision::Approve,
-                                        });
-                                    }
-                                }
-                                InputAction::PlanCardReject => {
-                                    if let Some(ref pending) = state.pending_plan_card {
-                                        let conversation_id = conversation.id.clone();
-                                        let plan_id = pending.plan_id.clone();
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
-                                            conversation_id,
-                                            plan_id,
-                                            decision: crate::domain::models::plan::PlanDecision::Reject,
-                                        });
-                                    }
-                                }
-                                InputAction::PlanCardEdit => {
-                                    if let Some(ref pending) = state.pending_plan_card {
-                                        let conversation_id = conversation.id.clone();
-                                        let plan_id = pending.plan_id.clone();
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardResolved {
-                                            conversation_id,
-                                            plan_id,
-                                            decision: crate::domain::models::plan::PlanDecision::Edit,
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id: card.plan_id,
+                                            decision,
                                         });
                                     }
                                 }
                                 // Story 10.5: Delegation card key handlers
-                                InputAction::DelegateTask => {
-                                    if let Some(ref pending) = state.pending_delegation_card {
-                                        let conversation_id = conversation.id.clone();
-                                        let plan_id = pending.plan_id.clone();
-                                        let task_number = pending.task_number;
-                                        let agent_name = pending.suggestion.agent_name.clone();
-                                        state.pending_delegation_card = None;
+                                action @ (InputAction::DelegateTask | InputAction::RunTaskLocally) => {
+                                    if let Some(DS::Delegation(pending)) = state.decisions.take_resolved() {
                                         state.needs_redraw = true;
                                         let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
-                                            conversation_id,
-                                            plan_id,
-                                            task_number,
-                                            decision: crate::domain::events::DelegationDecision::Delegate,
-                                            agent_name,
-                                        });
-                                    }
-                                }
-                                InputAction::RunTaskLocally => {
-                                    if let Some(ref pending) = state.pending_delegation_card {
-                                        let conversation_id = conversation.id.clone();
-                                        let plan_id = pending.plan_id.clone();
-                                        let task_number = pending.task_number;
-                                        let agent_name = pending.suggestion.agent_name.clone();
-                                        state.pending_delegation_card = None;
-                                        state.needs_redraw = true;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskDelegationResolved {
-                                            conversation_id,
-                                            plan_id,
-                                            task_number,
-                                            decision: crate::domain::events::DelegationDecision::RunLocally,
-                                            agent_name,
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id: pending.plan_id.clone(),
+                                            task_number: pending.task_number,
+                                            decision: if matches!(action, InputAction::DelegateTask) {
+                                                crate::domain::events::DelegationDecision::Delegate
+                                            } else {
+                                                crate::domain::events::DelegationDecision::RunLocally
+                                            },
+                                            agent_name: pending.suggestion.agent_name.clone(),
                                         });
                                     }
                                 }
@@ -1557,11 +1465,10 @@ pub async fn run(
                                 }
                                 InputAction::TeamRetractConfirm | InputAction::TeamRetractDecline => crate::infrastructure::runtime::transparency_bridge::resolve_team_retract(&mut state, matches!(action, InputAction::TeamRetractConfirm), &app_state).await,
                                 InputAction::DelegationCardCancel => {
-                                    if let Some(ref pending) = state.pending_delegation_card {
+                                    if let Some(DS::Delegation(pending)) = state.decisions.take_resolved() {
                                         let conv_id = conversation.id.clone();
                                         let plan_id = pending.plan_id.clone();
                                         let task_number = pending.task_number;
-                                        state.pending_delegation_card = None;
                                         let plan = match conversation.plans.get_mut(&plan_id) {
                                             Some(p) => p,
                                             None => {
@@ -1609,96 +1516,293 @@ pub async fn run(
                                     }
                                     state.needs_redraw = true;
                                 }
-                                InputAction::SkillTrustAccept => {
-                                    let handled = if let Some(pending) = state.pending_activation.take() {
-                                        state.pending_activation_inspect_content = None;
-                                        skill_activator
-                                            .mark_trusted(&pending.conversation_id, pending.skill_file.clone())
-                                            .await;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
-                                            conversation_id: pending.conversation_id,
-                                            skill_name: pending.skill_name,
-                                            skill_file: pending.skill_file,
-                                            arguments: pending.arguments,
-                                            trusted: true,
-                                        });
-                                        if state.pending_skill_trust.is_none() {
-                                            reducer::restore_focus_after_modal(&mut state);
-                                            state.skill_trust_inspect_mode = false;
-                                        }
-                                        state.needs_redraw = true;
-                                        true
-                                    } else if let Some(pending) = state.pending_skill_trust.take() {
-                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Accepted);
-                                        true
-                                    } else {
-                                        tracing::error!("SkillTrustAccept received with no pending trust state");
-                                        false
+                                InputAction::SkillTrustAccept | InputAction::SkillTrustDecline => {
+                                    let accepted = matches!(action, InputAction::SkillTrustAccept);
+                                    let Some(DS::SkillTrust(trust)) = state.decisions.take_resolved() else {
+                                        tracing::error!("skill trust answer received with no pending trust state");
+                                        continue;
                                     };
-                                    if handled && state.pending_skill_trust.is_none() {
-                                        reducer::advance_skill_trust_queue(&mut state);
-                                    }
-                                }
-                                InputAction::SkillTrustDecline => {
-                                    let handled = if let Some(pending) = state.pending_activation.take() {
-                                        state.pending_activation_inspect_content = None;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
-                                            conversation_id: pending.conversation_id,
-                                            skill_name: pending.skill_name,
-                                            skill_file: pending.skill_file,
-                                            arguments: pending.arguments,
-                                            trusted: false,
-                                        });
-                                        if state.pending_skill_trust.is_none() {
-                                            reducer::restore_focus_after_modal(&mut state);
-                                            state.skill_trust_inspect_mode = false;
+                                    let trust = *trust;
+                                    match trust.origin {
+                                        dq::SkillOrigin::User { arguments, conversation_id } => {
+                                            if accepted {
+                                                skill_activator.mark_trusted(&conversation_id, trust.skill_file.clone()).await;
+                                            }
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::CompleteSkillActivation {
+                                                conversation_id,
+                                                skill_name: trust.skill_name,
+                                                skill_file: trust.skill_file,
+                                                arguments,
+                                                trusted: accepted,
+                                            });
                                         }
-                                        state.needs_redraw = true;
-                                        true
-                                    } else if let Some(pending) = state.pending_skill_trust.take() {
-                                        let _ = pending.response_tx.send(crate::domain::models::SkillTrustResponse::Declined);
-                                        true
-                                    } else {
-                                        tracing::error!("SkillTrustDecline received with no pending trust state");
-                                        false
-                                    };
-                                    if handled && state.pending_skill_trust.is_none() {
-                                        reducer::advance_skill_trust_queue(&mut state);
+                                        dq::SkillOrigin::Model { reply } => {
+                                            let _ = reply.send(if accepted { crate::domain::models::SkillTrustResponse::Accepted } else { crate::domain::models::SkillTrustResponse::Declined });
+                                        }
                                     }
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::SkillTrustInspect => {
-                                    if let Some(pending) = &state.pending_activation {
-                                        if state.pending_activation_inspect_content.is_none() {
-                                            let path = pending.skill_file.clone();
-                                            let content = tokio::task::spawn_blocking(move || {
-                                                std::fs::read_to_string(&path)
-                                                    .unwrap_or_else(|_| "(file read error)".to_string())
-                                            })
-                                            .await
-                                            .unwrap_or_else(|_| "(file read error)".to_string());
-                                            state.pending_activation_inspect_content = Some(content);
-                                        }
-                                    } else if let Some(ref mut pending) = state.pending_skill_trust {
-                                        if pending.inspect_content.is_none() {
-                                            let path = pending.skill_file.clone();
-                                            let content = tokio::task::spawn_blocking(move || {
-                                                std::fs::read_to_string(&path)
-                                                    .unwrap_or_else(|_| "(file read error)".to_string())
-                                            })
-                                            .await
-                                            .unwrap_or_else(|_| "(file read error)".to_string());
-                                            pending.inspect_content = Some(content);
-                                        }
-                                    } else {
-                                        continue;
-                                    }
-                                    state.skill_trust_inspect_mode = true;
-                                    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrustInspect);
+                                    // The item stays queued; the file is read off the render path.
+                                    let Some((key, path)) = dq::inspect_target(&state) else { continue };
+                                    let content = tokio::task::spawn_blocking(move || {
+                                        std::fs::read_to_string(&path).unwrap_or_else(|_| "(file read error)".to_string())
+                                    })
+                                    .await
+                                    .unwrap_or_else(|_| "(file read error)".to_string());
+                                    dq::open_inspect(&mut state, &key, content);
                                     state.needs_redraw = true;
                                 }
                                 InputAction::FocusDecisions => {
                                     let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
                                     crate::adapters::tui::decision_queue::open_waiting(&mut state, &facts);
+                                }
+                                InputAction::Decision(effect @ (DE::SkipCascadeSkip | DE::SkipCascadeContinue | DE::SkipCascadeCancel)) => {
+                                    let Some(DS::SkipCascade(skip_pending)) = state.decisions.take_resolved() else { continue };
+                                    let skip_pending = skip_pending.0;
+                                    let choice = match effect {
+                                        DE::SkipCascadeSkip => crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip,
+                                        DE::SkipCascadeContinue => crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway,
+                                        _ => crate::adapters::tui::state::SkipCascadeChoice::CancelSkip,
+                                    };
+                                    let plan_id = skip_pending.plan_id.clone();
+                                    let conv_id = conversation.id.clone();
+                                    let agents_snapshot = {
+                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                            let guard = provider.agent_registry().read().await;
+                                            guard.agents().to_vec()
+                                        } else {
+                                            vec![]
+                                        }
+                                    };
+                                    match choice {
+                                        crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip => {
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                                for num in &skip_pending.downstream {
+                                                    let idx = (num.saturating_sub(1)) as usize;
+                                                    if idx < plan.tasks.len() {
+                                                        plan.tasks[idx].status = PlanTaskStatus::Skipped;
+                                                        plan.tasks[idx].completed_at_ms = Some(now_ms);
+                                                        plan.tasks[idx].error = Some(format!(
+                                                            "Skipped — upstream Task {} skipped",
+                                                            skip_pending.source_task
+                                                        ));
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                            conversation_id: conv_id.clone(),
+                                                            plan_id: plan_id.clone(),
+                                                            task_number: *num,
+                                                            status: PlanTaskStatus::Skipped,
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
+                                        }
+                                        crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway => {
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
+                                        }
+                                        crate::adapters::tui::state::SkipCascadeChoice::CancelSkip => {
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
+                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
+                                                    plan.tasks[idx].status = skip_pending.source_prior_status;
+                                                    plan.tasks[idx].error = skip_pending.source_prior_error.clone();
+                                                    plan.tasks[idx].completed_at_ms = None;
+                                                }
+                                            }
+                                            if let Some(plan) = conversation.plans.get(&plan_id) {
+                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
+                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        conversation_id: conv_id.clone(),
+                                                        plan_id: plan_id.clone(),
+                                                        task_number: skip_pending.source_task,
+                                                        status: plan.tasks[idx].status,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::Decision(effect @ (DE::PlanDeviationApprove | DE::PlanDeviationEdit | DE::PlanDeviationReject)) => {
+                                    use crate::domain::models::plan::PlanDecision;
+                                    let Some(DS::PlanDeviation(payload)) = state.decisions.take_resolved() else { continue };
+                                    let plan_id = payload.plan_id.clone();
+                                    let decision = match effect {
+                                        DE::PlanDeviationApprove => PlanDecision::Approve,
+                                        DE::PlanDeviationEdit => PlanDecision::Edit,
+                                        _ => PlanDecision::Reject,
+                                    };
+                                    let conv_id = conversation.id.clone();
+                                    match decision {
+                                        PlanDecision::Approve => {
+                                            plan_runtime.clear_deviation_pending(&plan_id).await;
+                                            let agents_snapshot = {
+                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                    let guard = provider.agent_registry().read().await;
+                                                    guard.agents().to_vec()
+                                                } else {
+                                                    vec![]
+                                                }
+                                            };
+                                            plan_runtime.resume_advance(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            &agents_snapshot,
+                                            security.current_mode(),
+                                        ).await;
+                                        }
+                                        PlanDecision::Edit => {
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: NoticeLevel::Warning,
+                                                message: format!("Nothing to edit on auto-skip deviation. Use {} to reject and stop.", crate::adapters::tui::keymap::render::rail(crate::adapters::tui::keymap::Context::PlanDecision, crate::adapters::tui::keymap::table_card::CardCmd::No)),
+                                            });
+                                            // The card stays: `e` answers nothing here.
+                                            dq::raise_plan_deviation(&mut state, &conv_id, *payload);
+                                        }
+                                        PlanDecision::Reject => {
+                                            plan_runtime.clear_deviation_pending(&plan_id).await;
+                                            {
+                                                let plan = match conversation.plans.get_mut(&plan_id) {
+                                                    Some(p) => p,
+                                                    None => continue,
+                                                };
+                                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                                for task in &mut plan.tasks {
+                                                    if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
+                                                        task.status = PlanTaskStatus::Cancelled;
+                                                        task.completed_at_ms = Some(now_ms);
+                                                        task.error = Some("Plan cancelled by user".to_string());
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                            conversation_id: conv_id.clone(),
+                                                            plan_id: plan_id.clone(),
+                                                            task_number: task.number,
+                                                            status: PlanTaskStatus::Cancelled,
+                                                        });
+                                                    }
+                                                }
+                                                plan.status = PlanStatus::Cancelled;
+                                            }
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                                conversation_id: conv_id.clone(),
+                                                plan_id: plan_id.clone(),
+                                                cancelled_at_task: None,
+                                            });
+                                            crate::domain::services::plan_runtime::finish_plan(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                    state.needs_redraw = true;
+                                }
+
+                                InputAction::Decision(DE::CancelPlanConfirm) => {
+                                    {
+                                        let Some(DS::CancelPlan(payload)) = state.decisions.take_resolved() else { continue };
+                                        let plan_id = payload.plan_id;
+                                        // Clear any deviation/skip decision of this tab before cancelling
+                                        dq::withdraw_for(&mut state, DK::PlanDeviation, &conversation.id);
+                                        dq::withdraw_for(&mut state, DK::SkipCascade, &conversation.id);
+                                        let conv_id = conversation.id.clone();
+                                        let has_running = conversation.plans.get(&plan_id)
+                                            .map(|p| p.tasks.iter().any(|t| t.status == PlanTaskStatus::Running))
+                                            .unwrap_or(false);
+                                        if has_running {
+                                            plan_runtime.mark_whole_plan_cancel_pending(&plan_id).await;
+                                            if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
+                                                for (task_n, token) in &snapshot.task_cancels {
+                                                    let is_running = conversation.plans.get(&plan_id)
+                                                        .and_then(|p| p.tasks.get((task_n.saturating_sub(1)) as usize))
+                                                        .map(|t| t.status == PlanTaskStatus::Running)
+                                                        .unwrap_or(false);
+                                                    if is_running {
+                                                        token.cancel();
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                conversation_id: Some(conv_id.clone()),
+                                                level: NoticeLevel::Info,
+                                                message: "Cancelling plan...".to_string(),
+                                            });
+                                        } else {
+                                            let plan = match conversation.plans.get_mut(&plan_id) {
+                                                Some(p) => p,
+                                                None => continue,
+                                            };
+                                            // Guard against plan that became terminal while confirm card was visible
+                                            if plan.status != PlanStatus::Executing {
+                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                    conversation_id: Some(conv_id.clone()),
+                                                    level: NoticeLevel::Info,
+                                                    message: "Plan already finished.".to_string(),
+                                                });
+                                                continue;
+                                            }
+                                            let now_ms = chrono::Utc::now().timestamp_millis();
+                                            for task in &mut plan.tasks {
+                                                if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
+                                                    task.status = PlanTaskStatus::Cancelled;
+                                                    task.completed_at_ms = Some(now_ms);
+                                                    task.error = Some("Plan cancelled by user".to_string());
+                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
+                                                        conversation_id: conv_id.clone(),
+                                                        plan_id: plan_id.clone(),
+                                                        task_number: task.number,
+                                                        status: PlanTaskStatus::Cancelled,
+                                                    });
+                                                }
+                                            }
+                                            plan.status = PlanStatus::Cancelled;
+                                            let _ = plan;
+                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
+                                                conversation_id: conv_id.clone(),
+                                                plan_id: plan_id.clone(),
+                                                cancelled_at_task: None,
+                                            });
+                                            crate::domain::services::plan_runtime::finish_plan(
+                                                &conv_id,
+                                                &plan_id,
+                                                &mut conversation,
+                                                app_state.event_bus.as_ref(),
+                                            );
+                                            plan_runtime.remove_plan(&plan_id).await;
+                                        }
+                                    }
+                                    state.needs_redraw = true;
                                 }
                                 InputAction::Decision(effect) => {
                                     use crate::adapters::tui::decision_queue::DecisionEffect;
@@ -1710,17 +1814,7 @@ pub async fn run(
                                             crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
                                         }
                                         DecisionEffect::RecoveryNewSession => {
-                                            conversation.messages.clear();
-                                            conversation.title = String::new();
-                                            conversation.id = generate_conversation_id();
-                                            conversation.session_id = Some(generate_conversation_id());
-                                            conversation.created_at = crate::domain::models::session_meta::now_unix();
-                                            conversation.updated_at = crate::domain::models::session_meta::now_unix();
-                                            conversation.last_response_at = None;
-                                            conversation.usage = None;
-                                            if state.modal_stack.is_empty() {
-                                                reducer::set_base(&mut state, FocusState::Input);
-                                            }
+                                            decision_effects::start_new_session(&mut conversation, &mut state);
                                             // Persist the fresh conversation with clean_exit = true
                                             // (avoids phantom crash detection on next startup)
                                             let fs_ref = fs_storage.clone();
@@ -1739,39 +1833,67 @@ pub async fn run(
                                                 }
                                             }));
                                         }
-                                        DecisionEffect::CarryoverAccept => {
-                                            state.compacting = true;
-                                            notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, CompactionPurpose::Carryover, &domain_tx, &app_state, &router);
+                                        DecisionEffect::CarryoverAccept | DecisionEffect::ContextCompact => {
+                                            let outcome = decision_effects::request_compaction(effect, &mut state, &conversation, &streaming, &provider, config, &domain_tx, &AppContext::new(&app_state, &router));
+                                            notice_actions::spawn_compaction(outcome, &app_state);
                                         }
                                         DecisionEffect::CarryoverDecline => {
-                                            // Story 7.4 AC10: open a fresh tab immediately (no carryover).
-                                            turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
-                                            streaming = StreamingState::default();
-                                            save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
-                                            tab_manager.create_tab();
-                                            load_active_tab(&tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue);
-                                            state.input_buffer.clear();
-                                            state.cursor_position = 0;
-                                            presentation::reducer::settle_stage_base(&mut state, FocusState::Input);
-                                            state.status = StatusState::Idle;
-                                            state.active_agent_name = None;
-                                            session_index.set_open(&conversation.id, true);
-                                            session_index.set_active(Some(&conversation.id));
+                                            decision_effects::open_fresh_tab(&mut turn_lifecycle, &mut tab_manager, &mut conversation, &mut streaming, &mut session_manager, &mut state, &mut turn_queue, &mut session_index);
                                         }
                                         DecisionEffect::BudgetContinue => {
-                                            // `Continue` holds for this day and limit: the next recompute does not raise it again (A18).
-                                            handlers::budget::acknowledge_daily_budget(&mut state, &AppContext::new(&app_state, &router));
+                                            decision_effects::budget_continue(&mut state, &AppContext::new(&app_state, &router));
                                         }
                                         DecisionEffect::BudgetSwitchCheaper => {
-                                            handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
+                                            decision_effects::budget_switch_cheaper(&mut state, &AppContext::new(&app_state, &router), config);
                                         }
                                         DecisionEffect::BudgetPause => {
                                             notice_actions::budget_pause(&mut state, &app_state, &conversation.id).await;
                                         }
-                                        DecisionEffect::ContextCompact => {
-                                            notice_actions::trigger_compaction(&mut state, &conversation, &streaming, &provider, config, CompactionPurpose::Inline, &domain_tx, &app_state, &router);
+                                        DecisionEffect::QuestionSend
+                                        | DecisionEffect::QuestionSkip
+                                        | DecisionEffect::SpawnGateCancel
+                                        | DecisionEffect::AgentKillDecline
+                                        | DecisionEffect::CancelPlanDecline => {
+                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
                                         }
-                                        DecisionEffect::AttachLargeImage
+                                        DecisionEffect::AgentKillConfirm => {
+                                            let Some(DS::AgentKill(kill)) = state.decisions.take_resolved() else { continue };
+                                            let agent_id = kill.agent_id;
+                                            if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
+                                                let registry = provider.registry();
+                                                match registry.cascade_kill(&agent_id, std::time::Duration::from_millis(500)).await {
+                                                    Ok(_) => agent_inspector_keys::close(&mut state),
+                                                    Err(crate::infrastructure::subagent::registry::CascadeKillError::Partial { killed, unresponsive }) => {
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            conversation_id: Some(conversation.id.clone()),
+                                                            level: NoticeLevel::Warning,
+                                                            message: format!("Cascade kill partial: {} killed, {} unresponsive — see logs.", killed.len(), unresponsive.len()),
+                                                        });
+                                                        agent_inspector_keys::close(&mut state);
+                                                    }
+                                                    Err(crate::infrastructure::subagent::registry::CascadeKillError::Durability(error)) => {
+                                                        let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
+                                                            conversation_id: Some(conversation.id.clone()),
+                                                            level: NoticeLevel::Error,
+                                                            message: format!("Cascade kill refused: terminal checkpoint was not durable ({error})."),
+                                                        });
+                                                    }
+                                                    Err(crate::infrastructure::subagent::registry::CascadeKillError::NotFound(_)) => agent_inspector_keys::close(&mut state),
+                                                }
+                                            } else {
+                                                notifications::warning(&mut state, NoticeSource::Task, "Kill unavailable");
+                                            }
+                                            refresh_subagent_panel_cache(&mut state, &app_state.agent_core).await;
+                                        }
+                                        DecisionEffect::SkillTrustAccept | DecisionEffect::SkillTrustDecline | DecisionEffect::SkillTrustInspect
+                                        | DecisionEffect::PlanApproveNormal | DecisionEffect::PlanApproveAutoEdit | DecisionEffect::PlanReject | DecisionEffect::PlanRevise
+                                        | DecisionEffect::PlanCardApprove | DecisionEffect::PlanCardReject | DecisionEffect::PlanCardEdit
+                                        | DecisionEffect::DelegateTask | DecisionEffect::RunTaskLocally | DecisionEffect::DelegationCardCancel
+                                        | DecisionEffect::SpawnGateConfirm
+                                        | DecisionEffect::PlanDeviationApprove | DecisionEffect::PlanDeviationEdit | DecisionEffect::PlanDeviationReject
+                                        | DecisionEffect::SkipCascadeSkip | DecisionEffect::SkipCascadeContinue | DecisionEffect::SkipCascadeCancel
+                                        | DecisionEffect::CancelPlanConfirm
+                                        | DecisionEffect::AttachLargeImage
                                         | DecisionEffect::CancelLargeImage
                                         | DecisionEffect::ConfirmDelete
                                         | DecisionEffect::PermissionAllowOnce
@@ -1804,14 +1926,6 @@ pub async fn run(
                                     if let HandlerOutcome::Notify(event) = outcome {
                                         let _ = app_state.event_bus.emit_domain(event);
                                     }
-                                }
-                                InputAction::SubmitQuestionAnswer(answer) => {
-                                    // Send answer back via oneshot channel
-                                    if let Some(tx) = state.question_response_tx.take() {
-                                        let _ = tx.send(answer);
-                                    }
-                                    reducer::set_base(&mut state, FocusState::Input);
-                                    state.needs_redraw = true;
                                 }
                                 InputAction::ExecuteCommand { name: cmd_name, args: cmd_args } => {
                                     let cmd_arg: Option<&str> = cmd_args.as_deref();
@@ -2299,7 +2413,7 @@ pub async fn run(
                                             status,
                                         });
                                     }
-                                    let should_advance = state.task_panel_state.skip_cascade_pending.is_none();
+                                    let should_advance = !state.decisions.items().any(|item| item.kind == crate::adapters::tui::decision_queue::DecisionKind::SkipCascade && item.conversation_id.as_deref() == Some(conversation.id.as_str()));
                                     if should_advance {
                                         let conv_id = conversation.id.clone();
                                         let agents_snapshot = {
@@ -2511,7 +2625,7 @@ pub async fn run(
                                     let executing_plan = conversation.plans.values()
                                         .find(|p| p.status == PlanStatus::Executing);
                                     if let Some(plan) = executing_plan {
-                                        arrive_cancel_plan_confirmation(&mut state, plan.id.clone());
+                                        handlers::plan_decisions::arrive_cancel_plan_confirmation(&mut state, &conversation, plan.id.clone());
                                     } else {
                                         let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                             conversation_id: Some(conversation.id.clone()),
@@ -2626,247 +2740,6 @@ pub async fn run(
                                     );
                                 }
 
-                                InputAction::SkipCascadeAck(choice) => {
-                                    let skip_pending = match state.task_panel_state.skip_cascade_pending.take() {
-                                        Some(s) => s,
-                                        None => continue,
-                                    };
-                                    let plan_id = skip_pending.plan_id.clone();
-                                    let conv_id = conversation.id.clone();
-                                    let agents_snapshot = {
-                                        if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                            let guard = provider.agent_registry().read().await;
-                                            guard.agents().to_vec()
-                                        } else {
-                                            vec![]
-                                        }
-                                    };
-                                    match choice {
-                                        crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip => {
-                                            {
-                                                let plan = match conversation.plans.get_mut(&plan_id) {
-                                                    Some(p) => p,
-                                                    None => continue,
-                                                };
-                                                let now_ms = chrono::Utc::now().timestamp_millis();
-                                                for num in &skip_pending.downstream {
-                                                    let idx = (num.saturating_sub(1)) as usize;
-                                                    if idx < plan.tasks.len() {
-                                                        plan.tasks[idx].status = PlanTaskStatus::Skipped;
-                                                        plan.tasks[idx].completed_at_ms = Some(now_ms);
-                                                        plan.tasks[idx].error = Some(format!(
-                                                            "Skipped — upstream Task {} skipped",
-                                                            skip_pending.source_task
-                                                        ));
-                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                            conversation_id: conv_id.clone(),
-                                                            plan_id: plan_id.clone(),
-                                                            task_number: *num,
-                                                            status: PlanTaskStatus::Skipped,
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                            plan_runtime.resume_advance(
-                                                &conv_id,
-                                                &plan_id,
-                                                &mut conversation,
-                                                app_state.event_bus.as_ref(),
-                                            &agents_snapshot,
-                                            security.current_mode(),
-                                        ).await;
-                                        }
-                                        crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway => {
-                                            plan_runtime.resume_advance(
-                                                &conv_id,
-                                                &plan_id,
-                                                &mut conversation,
-                                                app_state.event_bus.as_ref(),
-                                            &agents_snapshot,
-                                            security.current_mode(),
-                                        ).await;
-                                        }
-                                        crate::adapters::tui::state::SkipCascadeChoice::CancelSkip => {
-                                            {
-                                                let plan = match conversation.plans.get_mut(&plan_id) {
-                                                    Some(p) => p,
-                                                    None => continue,
-                                                };
-                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
-                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
-                                                    plan.tasks[idx].status = skip_pending.source_prior_status;
-                                                    plan.tasks[idx].error = skip_pending.source_prior_error.clone();
-                                                    plan.tasks[idx].completed_at_ms = None;
-                                                }
-                                            }
-                                            if let Some(plan) = conversation.plans.get(&plan_id) {
-                                                let idx = (skip_pending.source_task.saturating_sub(1)) as usize;
-                                                if idx < plan.tasks.len() && plan.tasks[idx].number == skip_pending.source_task {
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                        conversation_id: conv_id.clone(),
-                                                        plan_id: plan_id.clone(),
-                                                        task_number: skip_pending.source_task,
-                                                        status: plan.tasks[idx].status,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                    state.needs_redraw = true;
-                                }
-
-                                InputAction::PlanDeviationDecided(plan_id, decision) => {
-                                    use crate::domain::models::plan::PlanDecision;
-                                    let conv_id = conversation.id.clone();
-                                    match decision {
-                                        PlanDecision::Approve => {
-                                            plan_runtime.clear_deviation_pending(&plan_id).await;
-                                            state.task_panel_state.pending_deviation = None;
-                                            let agents_snapshot = {
-                                                if let Some(provider) = get_subagent_provider(&app_state.agent_core) {
-                                                    let guard = provider.agent_registry().read().await;
-                                                    guard.agents().to_vec()
-                                                } else {
-                                                    vec![]
-                                                }
-                                            };
-                                            plan_runtime.resume_advance(
-                                                &conv_id,
-                                                &plan_id,
-                                                &mut conversation,
-                                                app_state.event_bus.as_ref(),
-                                            &agents_snapshot,
-                                            security.current_mode(),
-                                        ).await;
-                                        }
-                                        PlanDecision::Edit => {
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conv_id.clone()),
-                                                level: NoticeLevel::Warning,
-                                                message: format!("Nothing to edit on auto-skip deviation. Use {} to reject and stop.", crate::adapters::tui::keymap::render::rail(crate::adapters::tui::keymap::Context::PlanDecision, crate::adapters::tui::keymap::table_card::CardCmd::No)),
-                                            });
-                                        }
-                                        PlanDecision::Reject => {
-                                            plan_runtime.clear_deviation_pending(&plan_id).await;
-                                            state.task_panel_state.pending_deviation = None;
-                                            {
-                                                let plan = match conversation.plans.get_mut(&plan_id) {
-                                                    Some(p) => p,
-                                                    None => continue,
-                                                };
-                                                let now_ms = chrono::Utc::now().timestamp_millis();
-                                                for task in &mut plan.tasks {
-                                                    if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
-                                                        task.status = PlanTaskStatus::Cancelled;
-                                                        task.completed_at_ms = Some(now_ms);
-                                                        task.error = Some("Plan cancelled by user".to_string());
-                                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                            conversation_id: conv_id.clone(),
-                                                            plan_id: plan_id.clone(),
-                                                            task_number: task.number,
-                                                            status: PlanTaskStatus::Cancelled,
-                                                        });
-                                                    }
-                                                }
-                                                plan.status = PlanStatus::Cancelled;
-                                            }
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
-                                                conversation_id: conv_id.clone(),
-                                                plan_id: plan_id.clone(),
-                                                cancelled_at_task: None,
-                                            });
-                                            crate::domain::services::plan_runtime::finish_plan(
-                                                &conv_id,
-                                                &plan_id,
-                                                &mut conversation,
-                                                app_state.event_bus.as_ref(),
-                                            );
-                                        }
-                                        _ => {}
-                                    }
-                                    state.needs_redraw = true;
-                                }
-
-                                InputAction::CancelPlanConfirm(confirmed) => {
-                                    if confirmed {
-                                        let plan_id = match state.task_panel_state.cancel_plan_confirm.take() {
-                                            Some(id) => id,
-                                            None => continue,
-                                        };
-                                        // Clear any overlay cards before cancelling
-                                        state.task_panel_state.pending_deviation = None;
-                                        state.task_panel_state.skip_cascade_pending = None;
-                                        let conv_id = conversation.id.clone();
-                                        let has_running = conversation.plans.get(&plan_id)
-                                            .map(|p| p.tasks.iter().any(|t| t.status == PlanTaskStatus::Running))
-                                            .unwrap_or(false);
-                                        if has_running {
-                                            plan_runtime.mark_whole_plan_cancel_pending(&plan_id).await;
-                                            if let Some(snapshot) = plan_runtime.snapshot(&plan_id).await {
-                                                for (task_n, token) in &snapshot.task_cancels {
-                                                    let is_running = conversation.plans.get(&plan_id)
-                                                        .and_then(|p| p.tasks.get((task_n.saturating_sub(1)) as usize))
-                                                        .map(|t| t.status == PlanTaskStatus::Running)
-                                                        .unwrap_or(false);
-                                                    if is_running {
-                                                        token.cancel();
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                conversation_id: Some(conv_id.clone()),
-                                                level: NoticeLevel::Info,
-                                                message: "Cancelling plan...".to_string(),
-                                            });
-                                        } else {
-                                            let plan = match conversation.plans.get_mut(&plan_id) {
-                                                Some(p) => p,
-                                                None => continue,
-                                            };
-                                            // Guard against plan that became terminal while confirm card was visible
-                                            if plan.status != PlanStatus::Executing {
-                                                let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
-                                                    conversation_id: Some(conv_id.clone()),
-                                                    level: NoticeLevel::Info,
-                                                    message: "Plan already finished.".to_string(),
-                                                });
-                                                continue;
-                                            }
-                                            let now_ms = chrono::Utc::now().timestamp_millis();
-                                            for task in &mut plan.tasks {
-                                                if !crate::domain::services::plan_runtime::is_terminal_pub(task.status) {
-                                                    task.status = PlanTaskStatus::Cancelled;
-                                                    task.completed_at_ms = Some(now_ms);
-                                                    task.error = Some("Plan cancelled by user".to_string());
-                                                    let _ = app_state.event_bus.emit_domain(AppEvent::PlanTaskStatusChanged {
-                                                        conversation_id: conv_id.clone(),
-                                                        plan_id: plan_id.clone(),
-                                                        task_number: task.number,
-                                                        status: PlanTaskStatus::Cancelled,
-                                                    });
-                                                }
-                                            }
-                                            plan.status = PlanStatus::Cancelled;
-                                            let _ = plan;
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCancelled {
-                                                conversation_id: conv_id.clone(),
-                                                plan_id: plan_id.clone(),
-                                                cancelled_at_task: None,
-                                            });
-                                            crate::domain::services::plan_runtime::finish_plan(
-                                                &conv_id,
-                                                &plan_id,
-                                                &mut conversation,
-                                                app_state.event_bus.as_ref(),
-                                            );
-                                            plan_runtime.remove_plan(&plan_id).await;
-                                        }
-                                    } else {
-                                        state.task_panel_state.cancel_plan_confirm = None;
-                                    }
-                                    state.needs_redraw = true;
-                                }
                                 // ─── End Story 6.4 ───
                                 InputAction::ImageFormatError => {
                                     notifications::error(&mut state, NoticeSource::Image, "Unsupported image format. Supported: PNG, JPEG, GIF, WebP");
@@ -3127,7 +3000,6 @@ pub async fn run(
                                         if let Some(entry) = state.selected_agent().cloned() {
                                             state.agent_panel_state.drill_down_agent = Some(entry.agent_id);
                                             state.agent_panel_state.inspector_scroll_offset = 0;
-                                            state.agent_panel_state.pending_kill_confirm = None;
                                             state.needs_redraw = true;
                                         }
                                         continue;
@@ -3509,7 +3381,7 @@ pub async fn run(
                                 // ── Rewind Conversation (Story 4-3b) ─────────────────
                                 InputAction::RewindAtMessage => {
                                     // DF-018 guard: block if permission/question overlay is active
-                                    if state.decisions.holds(crate::adapters::tui::decision_queue::DecisionKind::Permission) || state.ask_user_question.is_some() {
+                                    if state.decisions.holds(crate::adapters::tui::decision_queue::DecisionKind::Permission) || state.decisions.holds(crate::adapters::tui::decision_queue::DecisionKind::Question) {
                                         notifications::info(&mut state, NoticeSource::Session, "Cannot rewind: a permission/question is pending \u{2014} answer it first");
                                         state.needs_redraw = true;
                                     } else if streaming.is_streaming {
@@ -3637,8 +3509,7 @@ pub async fn run(
                                                 // 5. Cancel in-flight permission/question + drain queue (AC3 step 5)
                                                 // Dropping response_tx closes the channel → turn gets Err
                                                 drop(crate::adapters::tui::decision_queue::drain_permissions(&mut state));
-                                                drop(state.ask_user_question.take());
-                                                drop(state.question_response_tx.take());
+                                                crate::adapters::tui::decision_queue::drain_questions(&mut state, &conversation.id);
                                                 while turn_queue.dequeue().is_some() {}
                                                 // Abort active turn
                                                 turn_lifecycle.interrupt_active(&mut tab_manager, &mut conversation, &mut streaming, &mut state.pending_resolved_model);
@@ -4652,18 +4523,10 @@ pub async fn run(
                                 action @ (InputAction::OpenWaveOverlay | InputAction::CloseWaveOverlay
                                 | InputAction::WaveDrillSpoke(_) | InputAction::OpenDivergeView
                                 | InputAction::CloseDivergeView | InputAction::DismissWave) => {
-                                    // SpawnGate remains legacy; its cancel reused this action
-                                    // before Wave was a frame and must still clear its own gate.
-                                    if matches!(action, InputAction::CloseWaveOverlay)
-                                        && !presentation::is_open(&state, presentation::Surface::WaveOverlay)
-                                        && state.pending_spawn_gate.take().is_some()
-                                    {
-                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
-                                    }
                                     handlers::wave_overlay::apply(&mut state, &conversation.id, &action);
                                 }
                                 InputAction::SpawnGateConfirm => {
-                                    if let Some(mut pending) = state.pending_spawn_gate.take() {
+                                    if let Some(crate::adapters::tui::decision_queue::DecisionSubject::SpawnGate(mut pending)) = state.decisions.take_resolved() {
                                         let effective_n = pending.effective_n();
                                         match &mut pending.spec {
                                             crate::adapters::tui::fanout_spec::FanOutSpec::Identical {
@@ -4702,24 +4565,6 @@ pub async fn run(
                                                 });
                                             }
                                         }
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::SpawnGateCap => {
-                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
-                                        gate.cap_at_threshold();
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::SpawnGateAdjustLeft => {
-                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
-                                        gate.adjust_left();
-                                    }
-                                    state.needs_redraw = true;
-                                }
-                                InputAction::SpawnGateAdjustRight => {
-                                    if let Some(gate) = state.pending_spawn_gate.as_mut() {
-                                        gate.adjust_right();
                                     }
                                     state.needs_redraw = true;
                                 }
@@ -5135,27 +4980,20 @@ pub async fn run(
                         crate::infrastructure::runtime::approval_bridge::apply(&mut state, event, review);
                     }
                     AppEvent::PlanApprovalRequested { conversation_id, plan_path, contents, summary } => {
-                        let pending = crate::adapters::tui::state::PendingPlanApproval {
-                            conversation_id,
-                            plan_path,
-                            contents,
-                            summary,
-                        };
-                        state.pending_plan_approval = Some(pending);
-                        // Defer focus if an apply-confirmation card owns it: the
-                        // apply card's intercepts require Confirmation(ArtifactApply)
-                        // focus and would strand if stolen. The plan card is surfaced
-                        // by the shared reducer when the apply card resolves.
-                        if state.pending_artifact_card.is_none() {
-                            reducer::raise_confirmation(&mut state, ConfirmationType::PlanApproval);
-                        }
+                        crate::adapters::tui::decision_queue::raise_plan_approval(&mut state, crate::adapters::tui::decision_queue::PlanApprovalPayload { conversation_id, plan_path, contents, summary });
                         state.needs_redraw = true;
                     }
-                    AppEvent::PlanApprovalResolved { conversation_id: _conversation_id, outcome } => {
-                        state.pending_plan_approval = None;
-                        reducer::restore_focus_after_modal(&mut state);
+                    AppEvent::PlanApprovalResolved { conversation_id: origin, outcome } => {
                         state.needs_redraw = true;
-
+                        if !crate::adapters::tui::decision_queue::plan_approval_applies(&origin, &conversation.id, tab_manager.active_tab().read_only) {
+                            // The tab in front is not the approval's writable origin (it changed after the
+                            // answer): nothing mutates or submits here; the approval returns to its own tab.
+                            if let Some(tab) = tab_manager.find_by_conversation_mut(&origin) {
+                                let plan_path = app_state.plan_manager.plan_file_for(&mut tab.session_meta).path;
+                                let contents = tokio::fs::read_to_string(&plan_path).await.unwrap_or_default();
+                                crate::adapters::tui::decision_queue::raise_plan_approval(&mut state, crate::adapters::tui::decision_queue::PlanApprovalPayload { conversation_id: origin, plan_path, contents, summary: "Plan ready for review.".to_string() });
+                            }
+                        } else {
                         match outcome {
                             crate::domain::models::PlanApprovalOutcome::ApproveNormal => {
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SetPermissionMode(PermissionMode::Normal));
@@ -5241,6 +5079,7 @@ pub async fn run(
                             crate::domain::models::PlanApprovalOutcome::Revise => {
                             }
                         }
+                        }
                     }
                     #[cfg(feature = "a2a")] AppEvent::TeamProposalReady { proposal } => crate::infrastructure::runtime::team_proposal_bridge::proposal_ready(&mut state, &app_state, proposal).await,
                     AppEvent::PlanProposed { conversation_id, plan } => {
@@ -5258,17 +5097,19 @@ pub async fn run(
                             tracing::warn!("PlanCardResolved for mismatched conversation");
                         } else {
                             let cid = conversation.id.clone();
+                            // The resolved item is gone: the editor reads the plan as it was shown.
+                            let edit_snapshot = matches!(decision, crate::domain::models::plan::PlanDecision::Edit)
+                                .then(|| conversation.plans.get(&plan_id).cloned())
+                                .flatten();
                             handlers::plan_card::handle_plan_decision(&mut conversation, &plan_id, &decision);
                             match decision {
                                 crate::domain::models::plan::PlanDecision::Approve => {
-                                    reducer::restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::PlanExecutionStarted {
                                         conversation_id: cid,
                                         plan_id,
                                     });
                                 }
                                 crate::domain::models::plan::PlanDecision::Reject => {
-                                    reducer::restore_focus_after_modal(&mut state);
                                     let _ = domain_tx.send(AppEvent::SystemNotice {
                                         conversation_id: Some(conversation.id.clone()),
                                         level: NoticeLevel::Info,
@@ -5282,24 +5123,21 @@ pub async fn run(
                                     });
                                 }
                                 crate::domain::models::plan::PlanDecision::Edit => {
-                                    if let Some(ref pending) = state.pending_plan_card {
-                                        if pending.plan_id == plan_id {
-                                            let plan_snapshot = pending.plan_snapshot.clone();
-                                            let result = crate::adapters::tui::editor_suspend::run_editor_on_plan(&plan_snapshot).await;
-                                            let edited_plan = match result {
-                                                Ok(Some(p)) => Some(p),
-                                                Ok(None) => None,
-                                                Err(e) => {
-                                                    tracing::warn!("Plan card editor error: {}", e);
-                                                    None
-                                                }
-                                            };
-                                            let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardEditCompleted {
-                                                conversation_id: conversation.id.clone(),
-                                                plan_id,
-                                                edited_plan,
-                                            });
-                                        }
+                                    if let Some(plan_snapshot) = edit_snapshot {
+                                        let result = crate::adapters::tui::editor_suspend::run_editor_on_plan(&plan_snapshot).await;
+                                        let edited_plan = match result {
+                                            Ok(Some(p)) => Some(p),
+                                            Ok(None) => None,
+                                            Err(e) => {
+                                                tracing::warn!("Plan card editor error: {}", e);
+                                                None
+                                            }
+                                        };
+                                        let _ = app_state.event_bus.emit_domain(AppEvent::PlanCardEditCompleted {
+                                            conversation_id: conversation.id.clone(),
+                                            plan_id,
+                                            edited_plan,
+                                        });
                                     }
                                 }
                                 crate::domain::models::plan::PlanDecision::AutoApproveYolo => {
@@ -5485,6 +5323,7 @@ pub async fn run(
                             "Plan completed: {} completed, {} failed, {} skipped, ~{}ms",
                             completed, failed, skipped, total_elapsed_ms
                         );
+                        handlers::plan_decisions::plan_settled(&mut state, &plan_id);
                         if conversation_id == conversation.id {
                             state.task_panel_state.last_executed_plan_id = Some(plan_id.clone());
                             // PD1 (Sally A1): a real plan-level failure trumps user-set
@@ -5522,6 +5361,7 @@ pub async fn run(
                                 None => "Plan cancelled".to_string(),
                             };
                             tracing::info!("{}", msg);
+                            handlers::plan_decisions::plan_settled(&mut state, &plan_id);
                             if conversation_id == conversation.id {
                                 state.task_panel_state.last_executed_plan_id = Some(plan_id);
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -5553,8 +5393,8 @@ pub async fn run(
                                     });
                                 }
                             } else {
-                                // Normal mode: show delegation card
-                                arrive_delegation_card(&mut state, crate::adapters::tui::state::PendingDelegationCard {
+                                // Normal mode: raise the delegation decision
+                                handlers::plan_decisions::arrive_delegation_card(&mut state, crate::adapters::tui::decision_queue::PendingDelegationCard {
                                     conversation_id,
                                     plan_id,
                                     task_number,
@@ -5708,7 +5548,7 @@ pub async fn run(
                                 ).await;
                                 }
                             } else if cid == conversation.id {
-                                arrive_deviation_card(&mut state, pid, deviation_kind);
+                                handlers::plan_decisions::arrive_plan_deviation(&mut state, &conversation, pid, deviation_kind);
                             }
                         }
                         AppEvent::SetPermissionMode(mode) => {
@@ -5980,47 +5820,14 @@ pub async fn run(
                         question,
                         response_tx,
                     } => {
-                        // Only display question if it belongs to the active tab
-                        if conversation_id == conversation.id {
+                        let rewinding = matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)));
+                        if conversation_id == conversation.id && rewinding {
                             // DF-018 inverse guard (AC6, Story 4-3b): rewind overlay active →
-                            // drop the question request silently (its turn will be truncated).
-                            if matches!(
-                                state.focus,
-                                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
-                            ) {
-                                tracing::debug!(
-                                    "Dropping AskUserQuestion for conversation {} — rewind in progress",
-                                    conversation_id
-                                );
-                                // Drop response_tx — turn gets RecvError on the other end
-                            } else {
-                                use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-                                state.ask_user_question = Some(AskUserQuestionState {
-                                    tool_use_id,
-                                    question,
-                                    input_buffer: String::new(),
-                                    cursor_position: 0,
-                                    submitted_answer: None,
-                                });
-                                state.question_response_tx = Some(response_tx);
-                                reducer::raise_confirmation(&mut state, ConfirmationType::Question);
-                                state.needs_redraw = true;
-                            }
-                        } else if let Some(_tab) = tab_manager.find_by_conversation_mut(&conversation_id) {
-                            // Background tab: store for later (when tab becomes active)
-                            // TODO: Add ask_user_question state to TabState for proper routing
-                            tracing::warn!("AskUserQuestion for background tab {} - storing for later", conversation_id);
-                            // For now, show it immediately (temporary until full per-tab state)
-                            use crate::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
-                            state.ask_user_question = Some(AskUserQuestionState {
-                                tool_use_id,
-                                question,
-                                input_buffer: String::new(),
-                                cursor_position: 0,
-                                submitted_answer: None,
-                            });
-                            state.question_response_tx = Some(response_tx);
-                            reducer::raise_confirmation(&mut state, ConfirmationType::Question);
+                            // drop the request; response_tx drops, the turn gets RecvError.
+                            tracing::debug!("Dropping AskUserQuestion for conversation {} — rewind in progress", conversation_id);
+                        } else if conversation_id == conversation.id || tab_manager.find_by_conversation_mut(&conversation_id).is_some() {
+                            // Active or background tab: a queue item, answered in its own turn.
+                            crate::adapters::tui::decision_queue::raise_question(&mut state, &conversation_id, tool_use_id, question, response_tx);
                             state.needs_redraw = true;
                         }
                         // Silently drop if conversation not found (tab closed)
@@ -6296,17 +6103,9 @@ pub async fn run(
                                 && !skill_activator.is_trusted(&conversation_id, &def.file).await;
 
                             if needs_trust {
-                                let pending = crate::adapters::tui::state::PendingSkillActivation {
-                                    skill_name: name.clone(),
-                                    skill_file: def.file.clone(),
-                                    arguments: arguments.clone(),
-                                    conversation_id: conversation_id.clone(),
-                                };
-
-                                if state.pending_activation.is_some() {
+                                if crate::adapters::tui::decision_queue::raise_user_skill_trust(&mut state, &conversation_id, name.clone(), def.file.clone(), arguments.clone()).is_none() {
                                     tracing::error!(
                                         skill = %name,
-                                        existing = ?state.pending_activation.as_ref().map(|p| &p.skill_name),
                                         "second user-driven skill trust prompt while one is already pending; dropping"
                                     );
                                     let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -6317,12 +6116,8 @@ pub async fn run(
                                             name
                                         ),
                                     });
-                                } else {
-                                    state.pending_activation = Some(pending);
-                                    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
-                                    state.skill_trust_inspect_mode = false;
-                                    state.needs_redraw = true;
                                 }
+                                state.needs_redraw = true;
                                 continue;
                             }
 
@@ -6374,23 +6169,8 @@ pub async fn run(
                         state.needs_redraw = true;
                     }
                     AppEvent::SkillTrustPrompt { skill_name, skill_file, response_tx } => {
-                        // Model-driven activation path: the SkillActivator emits this event
-                        // when a workspace-tier skill requires trust (Story 5-2 AC9).
-                        // Promote the carried oneshot sender into pending_skill_trust so
-                        // the existing y/n/i input actions consume it.
-                        let trust_state = crate::adapters::tui::state::SkillTrustState {
-                            skill_name,
-                            skill_file,
-                            response_tx,
-                            inspect_content: None,
-                        };
-                        if state.pending_skill_trust.is_some() {
-                            state.skill_trust_queue.push_back(trust_state);
-                        } else {
-                            state.pending_skill_trust = Some(trust_state);
-                            reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
-                        }
-                        state.needs_redraw = true;
+                        // Model-driven activation (Story 5-2 AC9): a queue item, FIFO with its peers.
+                        crate::adapters::tui::decision_queue::raise_model_skill_trust(&mut state, skill_name, skill_file, response_tx);
                     }
                     AppEvent::CompleteSkillActivation {
                         conversation_id,
@@ -7314,7 +7094,8 @@ pub fn position_cross_search_result(
     };
 }
 
-fn save_active_tab(
+#[doc(hidden)]
+pub fn save_active_tab(
     tab_manager: &mut TabManager,
     conversation: &Conversation,
     streaming: &StreamingState,
@@ -7705,11 +7486,6 @@ pub fn render(
     let wave_frame_open = presentation::is_open(state, presentation::Surface::WaveOverlay);
     let TuiState {
         ref feedback_blocks,
-        ref pending_skill_trust,
-        ref skill_trust_queue,
-        skill_trust_inspect_mode,
-        ref pending_activation,
-        ref ask_user_question,
         ref theme,
         ref status,
         ref token_usage,
@@ -8019,86 +7795,8 @@ pub fn render(
                     .unwrap_or(&[]);
                 let mut skip_chat_render = false;
 
-                // Story 6.4: render priority chain (cards > drill-down > chat)
-                // 1. Plan deviation card (AC5)
-                if let Some((pid, _)) = &state.task_panel_state.pending_deviation
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Deviation) {
-                    use crate::adapters::tui::widgets::plan_deviation_card;
-                    let plan_data = conversation.plans.get(pid);
-                    let (original, current, changed, summary) = if let Some(plan) = plan_data {
-                        let original_count = plan.tasks.len() as u32;
-                        let changed_steps: Vec<u32> = plan
-                            .tasks
-                            .iter()
-                            .filter(|t| t.status == PlanTaskStatus::Skipped)
-                            .map(|t| t.number)
-                            .collect();
-                        let current_count = original_count;
-                        let summary_str = format!(
-                            "{} task(s) auto-skipped due to upstream failure.",
-                            changed_steps.len()
-                        );
-                        (original_count, current_count, changed_steps, summary_str)
-                    } else {
-                        (0u32, 0u32, vec![], "".to_string())
-                    };
-                    plan_deviation_card::render(
-                        app_layout.chat_pane,
-                        frame.buffer_mut(),
-                        original,
-                        current,
-                        &changed,
-                        &summary,
-                    );
-                    skip_chat_render = true;
-                }
-                // 2. Cancel plan confirm card (AC6)
-                else if let Some(pid) = &state.task_panel_state.cancel_plan_confirm
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::CancelPlan) {
-                    use crate::adapters::tui::widgets::cancel_plan_confirm_card;
-                    let (plan_title, n_pending, n_completed) = conversation
-                        .plans
-                        .get(pid)
-                        .map(|plan| {
-                            let pending = plan
-                                .tasks
-                                .iter()
-                                .filter(|t| {
-                                    !crate::domain::services::plan_runtime::is_terminal_pub(
-                                        t.status,
-                                    )
-                                })
-                                .count() as u32;
-                            let completed = plan
-                                .tasks
-                                .iter()
-                                .filter(|t| t.status == PlanTaskStatus::Completed)
-                                .count() as u32;
-                            (plan.title.clone(), pending, completed)
-                        })
-                        .unwrap_or_default();
-                    cancel_plan_confirm_card::render(
-                        app_layout.chat_pane,
-                        frame.buffer_mut(),
-                        &plan_title,
-                        n_pending,
-                        n_completed,
-                    );
-                    skip_chat_render = true;
-                }
-                // 3. Skip cascade card (AC2)
-                else if let Some(pending) = &state.task_panel_state.skip_cascade_pending
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::SkipCascade) {
-                    use crate::adapters::tui::widgets::task_skip_cascade_card;
-                    task_skip_cascade_card::render(
-                        app_layout.chat_pane,
-                        frame.buffer_mut(),
-                        pending,
-                    );
-                    skip_chat_render = true;
-                }
-                // 4. Existing drill-down view (6-3)
-                else if let Some(task_number) = state.task_panel_state.drill_down_task {
+                // Drill-down view (6-3); the decision cards paint as queue frames.
+                if let Some(task_number) = state.task_panel_state.drill_down_task {
                     let plan_opt = state
                         .task_panel_state
                         .last_executed_plan_id
@@ -8155,7 +7853,6 @@ pub fn render(
                             frame.buffer_mut(),
                             &entry,
                             state.agent_panel_state.inspector_scroll_offset,
-                            state.agent_panel_state.pending_kill_confirm.as_ref(),
                             theme,
                             &state.agent_panel_state.spool_tail_cache,
                             &state.agent_panel_state.cached_entries,
@@ -8165,7 +7862,6 @@ pub fn render(
                     } else {
                         state.agent_panel_state.drill_down_agent = None;
                         state.agent_panel_state.inspector_scroll_offset = 0;
-                        state.agent_panel_state.pending_kill_confirm = None;
                         state.needs_redraw = true;
                     }
                 }
@@ -8220,9 +7916,7 @@ pub fn render(
                         focused_match_opt,
                         search_state.matches.as_slice(),
                         bookmark_indices,
-                        state.pending_plan_card.as_ref().filter(|_| {
-                            inline_card == Some(crate::adapters::tui::app::InlineCard::Plan)
-                        }),
+                        crate::adapters::tui::handlers::plan_card::pending_plan_id(&state.decisions, &conversation.id),
                         liveness_ref,
                         open_prose_ref,
                         chat_pane::ToolFocus {
@@ -8242,9 +7936,6 @@ pub fn render(
                 opaque.host(paint_wave_base(
                     frame,
                     app_layout.chat_pane,
-                    state.pending_spawn_gate.as_ref().filter(|_| {
-                        inline_card == Some(crate::adapters::tui::app::InlineCard::Spawn)
-                    }),
                     state.wave_run.as_deref(),
                     state.wave_state.as_ref(),
                     state.rerunning_slot,
@@ -8264,28 +7955,6 @@ pub fn render(
                 state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
                 opaque.host(card.as_ref().map(|card| card.area()));
                 state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
-                // Story 10.5: render delegation suggestion card as a centered popup over chat pane
-                if let Some(card) = &state.pending_delegation_card
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Delegation) {
-                    let card_width = 60u16.min(app_layout.chat_pane.width);
-                    let card_height = 6u16.min(app_layout.chat_pane.height);
-                    let card_area = Rect {
-                        x: app_layout.chat_pane.x
-                            + (app_layout.chat_pane.width.saturating_sub(card_width)) / 2,
-                        y: app_layout.chat_pane.y
-                            + (app_layout.chat_pane.height.saturating_sub(card_height)) / 2,
-                        width: card_width,
-                        height: card_height,
-                    };
-                    crate::adapters::tui::widgets::delegation_card::render(
-                        card_area,
-                        frame.buffer_mut(),
-                        card,
-                        theme,
-                    );
-                    opaque.host(Some(card_area));
-                }
-
                 // Story 11.2a: render the memory-consolidation review card as a
                 // bottom-anchored inline card over the chat pane (helpful review,
                 // never a modal interruption — UX).
@@ -8343,124 +8012,6 @@ pub fn render(
                     opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
                         frame.buffer_mut(), card_lines, theme.colors.decision_border, app_layout.chat_pane,
                     )));
-                }
-
-                // Render skill trust prompt at bottom of chat pane (Story 5-2 AC4)
-                let trust_selected = matches!(focus, FocusState::Overlay(OverlayType::Confirmation(
-                    ConfirmationType::SkillTrust | ConfirmationType::SkillTrustInspect
-                )));
-                if let Some(pending) = pending_activation
-                    && trust_selected {
-                    use crate::adapters::tui::widgets::skill_trust_prompt;
-                    if skill_trust_inspect_mode {
-                        let fallback = "(loading…)".to_string();
-                        let content = state
-                            .pending_activation_inspect_content
-                            .as_ref()
-                            .unwrap_or(&fallback);
-                        let prompt_lines = skill_trust_prompt::render_inspect_lines(
-                            &pending.skill_name,
-                            content,
-                            20,
-                            theme,
-                        );
-                        let prompt_height = prompt_lines.len() as u16;
-                        let prompt_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - prompt_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: prompt_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
-                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
-                        frame.render_widget(paragraph, prompt_area);
-                        opaque.host(Some(prompt_area));
-                    } else {
-                        let prompt_lines =
-                            skill_trust_prompt::render_trust_lines(&pending.skill_name, theme, 0);
-                        let prompt_height = prompt_lines.len() as u16;
-                        let prompt_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - prompt_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: prompt_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
-                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
-                        frame.render_widget(paragraph, prompt_area);
-                        opaque.host(Some(prompt_area));
-                    }
-                } else if let Some(trust) = pending_skill_trust
-                    && trust_selected {
-                    use crate::adapters::tui::widgets::skill_trust_prompt;
-                    if skill_trust_inspect_mode {
-                        // H5: read from the pre-cached body populated when the user pressed `i`
-                        // (populated via spawn_blocking in the SkillTrustInspect handler).
-                        // Never read from disk on the render path.
-                        let fallback = "(loading…)".to_string();
-                        let content = trust.inspect_content.as_ref().unwrap_or(&fallback);
-                        let prompt_lines = skill_trust_prompt::render_inspect_lines(
-                            &trust.skill_name,
-                            content,
-                            20,
-                            theme,
-                        );
-                        let prompt_height = prompt_lines.len() as u16;
-                        let prompt_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - prompt_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: prompt_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
-                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
-                        frame.render_widget(paragraph, prompt_area);
-                        opaque.host(Some(prompt_area));
-                    } else {
-                        let prompt_lines = skill_trust_prompt::render_trust_lines(
-                            &trust.skill_name,
-                            theme,
-                            skill_trust_queue.len(),
-                        );
-                        let prompt_height = prompt_lines.len() as u16;
-                        let prompt_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - prompt_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: prompt_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(prompt_lines);
-                        frame.render_widget(ratatui::widgets::Clear, prompt_area);
-                        frame.render_widget(paragraph, prompt_area);
-                        opaque.host(Some(prompt_area));
-                    }
-                }
-
-                // Render AskUserQuestion card at bottom of chat pane if active
-                if let Some(aq) = ask_user_question
-                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
-                    use crate::adapters::tui::widgets::ask_user_question;
-                    let aq_lines = ask_user_question::render_ask_user_lines(
-                        aq,
-                        app_layout.chat_pane.width,
-                        theme,
-                    );
-                    let aq_height = aq_lines.len() as u16;
-                    let aq_area = ratatui::prelude::Rect {
-                        x: app_layout.chat_pane.x,
-                        y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                            - aq_height.min(app_layout.chat_pane.height),
-                        width: app_layout.chat_pane.width,
-                        height: aq_height.min(app_layout.chat_pane.height),
-                    };
-                    let paragraph = ratatui::widgets::Paragraph::new(aq_lines);
-                    frame.render_widget(ratatui::widgets::Clear, aq_area);
-                    frame.render_widget(paragraph, aq_area);
-                    opaque.host(Some(aq_area));
                 }
 
                 // Render fork confirmation card at bottom of chat pane if pending (Story 4-3a, AC1)
@@ -8528,22 +8079,6 @@ pub fn render(
                         frame.render_widget(ratatui::widgets::Clear, rewind_area);
                         frame.render_widget(paragraph, rewind_area);
                         opaque.host(Some(rewind_area));
-                    }
-                }
-
-                // Render plan approval card if pending (Story 6-0d AC4)
-                if *focus
-                    == FocusState::Overlay(
-                        crate::domain::models::visual::OverlayType::Confirmation(
-                            crate::domain::models::visual::ConfirmationType::PlanApproval,
-                        ),
-                    )
-                {
-                    if let Some(ref pending) = state.pending_plan_approval {
-                        use crate::adapters::tui::widgets::plan_approval;
-                        let card_area = plan_approval::plan_approval_area(frame.area());
-                        plan_approval::render_plan_approval_card(frame, card_area, pending, theme);
-                        opaque.host(Some(card_area));
                     }
                 }
 
@@ -9223,30 +8758,6 @@ pub fn complete_bulk_delete(state: &mut TuiState) {
 }
 
 // Small presentation arms shared by the live arrivals and their focus witnesses.
-fn arrive_delegation_card(
-    state: &mut TuiState,
-    card: crate::adapters::tui::state::PendingDelegationCard,
-) {
-    state.pending_delegation_card = Some(card);
-    reducer::take_chat_focus_for_card(state, true);
-    state.needs_redraw = true;
-}
-
-fn arrive_deviation_card(
-    state: &mut TuiState,
-    plan_id: String,
-    kind: crate::domain::models::plan::PlanDeviationKind,
-) {
-    state.task_panel_state.pending_deviation = Some((plan_id, kind));
-    reducer::take_chat_focus_for_card(state, true);
-    state.needs_redraw = true;
-}
-
-fn arrive_cancel_plan_confirmation(state: &mut TuiState, plan_id: String) {
-    state.task_panel_state.cancel_plan_confirm = Some(plan_id);
-    reducer::take_chat_focus_for_card(state, true);
-}
-
 fn arrive_consolidation_card(
     state: &mut TuiState,
     card: crate::adapters::tui::state::PendingConsolidationCard,
@@ -9531,133 +9042,6 @@ mod tests {
                 assert_eq!(state.input_buffer, draft);
             }
         }
-        // Exercise the decision front door, then the event application's retirement boundary.
-        let mut state = TuiState::new(80, 24);
-        arrive(&mut state);
-        let (key, expected) = match crate::adapters::tui::app::inline_card(&state).unwrap() {
-            crate::adapters::tui::app::InlineCard::Delegation => {
-                (E::KeyPress('l'), InputAction::RunTaskLocally)
-            }
-            crate::adapters::tui::app::InlineCard::Deviation => (
-                E::KeyPress('n'),
-                InputAction::PlanDeviationDecided(
-                    "p1".into(),
-                    crate::domain::models::plan::PlanDecision::Reject,
-                ),
-            ),
-            crate::adapters::tui::app::InlineCard::Spawn => {
-                (E::SpecialKey(K::Enter), InputAction::SpawnGateConfirm)
-            }
-            _ => return,
-        };
-        if !recovers_input {
-            handle_input(&mut state, &E::KeyPress('i'));
-            assert_eq!(state.focus, FocusState::Chat, "card still owns i");
-        }
-        assert_eq!(handle_input(&mut state, &key), expected);
-        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
-            state.pending_delegation_card = None;
-            state.task_panel_state.pending_deviation = None;
-            state.pending_spawn_gate = None;
-        });
-        assert_eq!(
-            state.focus,
-            FocusState::Input,
-            "last decision returns borrowed focus"
-        );
-    }
-
-    #[test]
-    fn story21_3_borrowed_focus_waits_for_last_local_card() {
-        use crate::domain::events::DomainInputEvent as E;
-        let mut state = TuiState::new(80, 24);
-        arrive_cancel_plan_confirmation(&mut state, "p1".into());
-        arrive_deviation_card(
-            &mut state,
-            "p1".into(),
-            crate::domain::models::plan::PlanDeviationKind::AutoSkipBlockedTasks { source_task: 1 },
-        );
-        assert_eq!(
-            handle_input(&mut state, &E::KeyPress('n')),
-            InputAction::PlanDeviationDecided(
-                "p1".into(),
-                crate::domain::models::plan::PlanDecision::Reject
-            )
-        );
-        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
-            state.task_panel_state.pending_deviation = None;
-        });
-        assert_eq!(state.focus, FocusState::Chat);
-        assert_eq!(
-            handle_input(&mut state, &E::KeyPress('n')),
-            InputAction::CancelPlanConfirm(false)
-        );
-        crate::adapters::tui::app::with_card_focus_reconcile(&mut state, |state| {
-            state.task_panel_state.cancel_plan_confirm = None;
-        });
-        assert_eq!(state.focus, FocusState::Input);
-    }
-
-    #[test]
-    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_delegation() {
-        use crate::domain::services::delegation_decider::{DelegationReason, DelegationSuggestion};
-        retained_card_arrival(
-            |state| {
-                arrive_delegation_card(
-                    state,
-                    crate::adapters::tui::state::PendingDelegationCard {
-                        conversation_id: "c1".into(),
-                        plan_id: "p1".into(),
-                        task_number: 1,
-                        suggestion: DelegationSuggestion {
-                            task_number: 1,
-                            agent_name: "worker".into(),
-                            reason: DelegationReason::ExplicitAgentMention,
-                            auto_proceed: false,
-                        },
-                    },
-                );
-                assert_eq!(
-                    state.pending_delegation_card.as_ref().unwrap().plan_id,
-                    "p1"
-                );
-            },
-            true,
-        );
-    }
-
-    #[test]
-    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_deviation() {
-        retained_card_arrival(
-            |state| {
-                arrive_deviation_card(
-                    state,
-                    "p1".into(),
-                    crate::domain::models::plan::PlanDeviationKind::AutoSkipBlockedTasks {
-                        source_task: 1,
-                    },
-                );
-                assert_eq!(
-                    state.task_panel_state.pending_deviation.as_ref().unwrap().0,
-                    "p1"
-                );
-            },
-            false,
-        );
-    }
-
-    #[test]
-    fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_cancel_plan_confirm() {
-        retained_card_arrival(
-            |state| {
-                arrive_cancel_plan_confirmation(state, "p1".into());
-                assert_eq!(
-                    state.task_panel_state.cancel_plan_confirm.as_deref(),
-                    Some("p1")
-                );
-            },
-            false,
-        );
     }
 
     #[test]
@@ -9720,27 +9104,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_spawn_gate() {
+    async fn story21_6_spawn_gate_and_plan_decisions_arrive_without_touching_the_draft() {
         let workspace = tempfile::tempdir().unwrap();
         let (app_state, _rx) = transparency_bridge::bridge_app_state(workspace.path());
         let config = AppConfig {
             fanout_spawn_gate_threshold: 2,
             ..AppConfig::default()
         };
-        retained_card_arrival(
-            |state| {
-                transparency_bridge::fanout_command(
-                    state,
-                    "c1",
-                    Some("3 retained arrival"),
-                    false,
-                    &config,
-                    &app_state,
-                );
-                assert_eq!(state.pending_spawn_gate.as_ref().unwrap().requested, 3);
-            },
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Input;
+        state.input_buffer = "  exact draft λ\nsecond line  ".into();
+        state.cursor_position = state.input_buffer.chars().count();
+        let (draft, cursor) = (state.input_buffer.clone(), state.cursor_position);
+        transparency_bridge::fanout_command(
+            &mut state,
+            "c1",
+            Some("3 retained arrival"),
             false,
+            &config,
+            &app_state,
         );
+        let conversation = crate::domain::models::Conversation {
+            id: "c1".into(),
+            ..Default::default()
+        };
+        handlers::plan_decisions::arrive_cancel_plan_confirmation(
+            &mut state,
+            &conversation,
+            "p1".into(),
+        );
+        handlers::plan_decisions::arrive_plan_deviation(
+            &mut state,
+            &conversation,
+            "p1".into(),
+            crate::domain::models::plan::PlanDeviationKind::AutoSkipBlockedTasks { source_task: 1 },
+        );
+        for kind in [
+            crate::adapters::tui::decision_queue::DecisionKind::SpawnGate,
+            crate::adapters::tui::decision_queue::DecisionKind::CancelPlan,
+            crate::adapters::tui::decision_queue::DecisionKind::PlanDeviation,
+        ] {
+            assert_eq!(state.decisions.count(kind), 1, "{kind:?}");
+        }
+        assert_eq!(
+            state.input_buffer, draft,
+            "an arrival never edits the draft"
+        );
+        assert_eq!(state.cursor_position, cursor);
     }
 
     #[test]

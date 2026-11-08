@@ -10,9 +10,6 @@ use ratatui::backend::TestBackend;
 
 use rustain::adapters::tui::state::TabRenderState;
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::ask_user_question::{
-    AskUserQuestionState, render_ask_user_lines,
-};
 use rustain::adapters::tui::widgets::{chat_pane, feedback_block, status_bar};
 use rustain::domain::models::{
     ChatMessage, Conversation, FeedbackBlock, FeedbackLevel, MessageRole, StatusState,
@@ -124,37 +121,80 @@ fn test_warning_feedback_max_lines() {
     );
 }
 
-/// AC4: AskUserQuestion card with double border.
+/// AC4 (21-6 6-C): the AskUserQuestion card is a `Decision: Question` L3 frame (the
+/// old inline double-border card is gone), with the question and its answer field inside.
 // Covers: FR32 (ask user question)
 #[test]
 fn test_ask_user_question_card_double_border() {
-    let theme = Theme::dark();
-    let state = AskUserQuestionState {
-        tool_use_id: "tu-1".to_string(),
-        question: "What is your project name?".to_string(),
-        input_buffer: "MyProject".to_string(),
-        cursor_position: 9,
-        submitted_answer: None,
-    };
-    let lines = render_ask_user_lines(&state, 60, &theme);
+    use ratatui::layout::Rect;
+    use rustain::adapters::tui::decision_queue;
+    use rustain::adapters::tui::keymap::Host;
+    use rustain::adapters::tui::layout::compute_layout;
+    use rustain::adapters::tui::notification_log::LogFacts;
+    use rustain::adapters::tui::presentation::{self, Shell};
+    use rustain::adapters::tui::state::TuiState;
+    use rustain::domain::models::visual::DensityMode;
 
-    let first: String = lines[0]
-        .spans
-        .iter()
-        .map(|s| s.content.to_string())
+    let mut state = TuiState::new(60, 24);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    decision_queue::raise_question(
+        &mut state,
+        "c1",
+        "tu-1".to_string(),
+        "What is your project name?".to_string(),
+        tx,
+    );
+    let layout = compute_layout(
+        Rect::new(0, 0, 60, 24),
+        &state.theme,
+        &state.input_buffer,
+        1,
+        false,
+        DensityMode::Focus,
+    )
+    .expect("60x24 is above the floor");
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            let shell = Shell::new(frame.area(), &layout);
+            presentation::compose(
+                frame,
+                &state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..24)
+        .map(|y| {
+            (0..60)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol().to_owned())
+                .collect::<String>()
+        })
         .collect();
-    assert!(first.contains('╔'), "Should have double border top");
-    assert!(first.contains('╗'), "Should have double border top-right");
-
-    let last: String = lines
-        .last()
-        .unwrap()
-        .spans
+    let top = rows
         .iter()
-        .map(|s| s.content.to_string())
-        .collect();
-    assert!(last.contains('╚'), "Should have double border bottom");
-    assert!(last.contains('╝'), "Should have double border bottom-right");
+        .position(|row| row.contains("Decision: Question"))
+        .expect("the frame title");
+    assert!(
+        rows[top].starts_with('┌') && rows[top].contains('┐'),
+        "L3 top border"
+    );
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.starts_with('└') && row.contains('┘'))
+        .expect("L3 bottom border");
+    assert!(bottom > top);
+    let screen = rows.join("\n");
+    assert!(screen.contains("What is your project name?"), "{screen}");
+    assert!(
+        !screen.contains('╔') && !screen.contains('╚'),
+        "the old double-border inline card is gone"
+    );
 }
 
 /// AC5 (Story 21.1 AC1): a notice is visible until its store deadline and is

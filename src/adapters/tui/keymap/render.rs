@@ -210,6 +210,33 @@ pub fn rail_pair(
     format!("{}/{}", rail_key(context, first), rail_key(context, second))
 }
 
+/// The glyph of an arrow key (`←`), else its long label: the compact form a rail paints.
+fn arrow_glyph(key: Key) -> String {
+    match key {
+        Key::Left => "←".to_owned(),
+        Key::Right => "→".to_owned(),
+        Key::Up => "↑".to_owned(),
+        Key::Down => "↓".to_owned(),
+        other => other.label(),
+    }
+}
+
+/// One rail item for two arrow rows (`[←/→]`), generated from the rows of `context`:
+/// the glyph rail the spawn gate's adjust keys paint. `?` for a command without a row.
+pub fn rail_arrows(
+    context: Context,
+    first: impl Into<CommandId>,
+    second: impl Into<CommandId>,
+) -> String {
+    let glyph = |command: CommandId| {
+        table()
+            .iter()
+            .find(|row| row.context == context && row.command == command)
+            .map_or_else(|| "?".to_owned(), |row| arrow_glyph(row.keys[0]))
+    };
+    format!("[{}/{}]", glyph(first.into()), glyph(second.into()))
+}
+
 /// One cue naming `items` (context, command pairs, painted as `[key] Label`): the text
 /// `Esc` and `Ctrl+C` post on a card instead of deciding it (A8).
 pub fn cue(items: &[(Context, CommandId)]) -> String {

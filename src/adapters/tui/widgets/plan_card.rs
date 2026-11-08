@@ -1,9 +1,8 @@
 use ratatui::prelude::*;
 use ratatui::widgets::BorderType;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
+use crate::adapters::tui::keymap::render::leader_follow_up_compact;
+use crate::adapters::tui::keymap::table::LeaderCmd;
 use crate::adapters::tui::text_geometry as geom;
 use crate::domain::models::plan::{Plan, PlanStatus, PlanSubTask, PlanTaskStatus};
 use crate::domain::services::plan_runtime::format_elapsed_ms;
@@ -349,74 +348,16 @@ pub fn render_plan_card_lines<'a>(
         }
     }
 
-    if is_pending {
-        if let Some(ref effort) = plan.estimated_effort {
-            let mut effort_parts = Vec::new();
-            if let Some(tc) = effort.tool_calls {
-                effort_parts.push(format!("{} tool calls", tc));
-            }
-            if let Some(secs) = effort.seconds {
-                effort_parts.push(format!("~{}s", secs));
-            }
-            if !effort_parts.is_empty() {
-                let effort_text = format!("Estimated: {}", effort_parts.join(", "));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        vertical_char,
-                        Style::default().fg(theme.colors.decision_border),
-                    ),
-                    Span::styled(
-                        format!("  {}", effort_text),
-                        Style::default()
-                            .fg(theme.colors.fg_muted)
-                            .add_modifier(Modifier::ITALIC)
-                            .add_modifier(Modifier::DIM),
-                    ),
-                    Span::raw(geom::spaces(
-                        inner_width.saturating_sub(2 + geom::cells(&effort_text)),
-                    )),
-                    Span::styled(
-                        vertical_char,
-                        Style::default().fg(theme.colors.decision_border),
-                    ),
-                ]));
-            }
-        }
-
-        let (yes, edit, no) = (
-            rail(Context::PlanDecision, CardCmd::Yes),
-            rail(Context::PlanDecision, CardCmd::Edit),
-            rail(Context::PlanDecision, CardCmd::No),
-        );
-        let action_text = format!("{yes} Approve  {edit} Edit  {no} Reject");
-        let action_display = if geom::cells(&action_text) > inner_width {
-            format!("{yes} {edit} {no}")
-        } else {
-            action_text
-        };
-        let action_pad = inner_width.saturating_sub(geom::cells(&action_display));
-        let action_left = action_pad / 2;
-        let action_right = action_pad - action_left;
-        lines.push(Line::from(vec![
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
-            Span::raw(" ".repeat(action_left)),
-            Span::styled(yes, Style::default().fg(theme.colors.success)),
-            Span::raw(" Approve  "),
-            Span::styled(edit, Style::default().fg(theme.colors.info)),
-            Span::raw(" Edit  "),
-            Span::styled(no, Style::default().fg(theme.colors.error)),
-            Span::raw(" Reject"),
-            Span::raw(" ".repeat(action_right)),
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
-        ]));
+    // The decision itself is answered through its `Decision: Plan card` frame (FR-21-6-f):
+    // the Stage row paints no rail, and the pending marker takes the status row's place, so
+    // the row is as tall with the decision as without it.
+    let status_text = if is_pending {
+        format!(
+            "[awaiting your decision — {}]",
+            leader_follow_up_compact(LeaderCmd::Decisions)
+        )
     } else {
-        let status_text = match plan.status {
+        match plan.status {
             PlanStatus::Executing => {
                 if let Some(ts) = plan.resolved_at {
                     format!("[approved {}]", format_timestamp(ts))
@@ -447,25 +388,25 @@ pub fn render_plan_card_lines<'a>(
                     "[cancelled]".to_string()
                 }
             }
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
-            Span::styled(
-                format!("  {}", status_text),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-            Span::raw(geom::spaces(
-                inner_width.saturating_sub(2 + geom::cells(&status_text)),
-            )),
-            Span::styled(
-                vertical_char,
-                Style::default().fg(theme.colors.decision_border),
-            ),
-        ]));
-    }
+        }
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            vertical_char,
+            Style::default().fg(theme.colors.decision_border),
+        ),
+        Span::styled(
+            format!("  {}", status_text),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(geom::spaces(
+            inner_width.saturating_sub(2 + geom::cells(&status_text)),
+        )),
+        Span::styled(
+            vertical_char,
+            Style::default().fg(theme.colors.decision_border),
+        ),
+    ]));
 
     let bottom_border = match border_type {
         BorderType::Double => {
@@ -629,10 +570,23 @@ mod tests {
             })
             .collect();
         assert!(text.contains("Plan: Test Plan"));
-        assert!(text.contains("[y] Approve  [e] Edit  [n] Reject"));
-        assert!(text.contains("Estimated:"));
-        assert!(text.contains("5 tool calls"));
-        assert!(!text.contains("~5 tool calls"));
+        // 21-6 6-C (FR-21-6-f): the Stage row has no rail and no pending-only rows; the
+        // decision is answered through its frame, and the estimate shows there.
+        assert!(!text.contains("[y]") && !text.contains("Approve"));
+        assert!(!text.contains("Estimated:"));
+        assert!(text.contains("[awaiting your decision"));
+    }
+
+    #[test]
+    fn story21_6_the_stage_row_is_as_tall_with_the_decision_as_without_it() {
+        let plan = make_plan();
+        for width in [60u16, 80, 130] {
+            assert_eq!(
+                plan_card_height(&plan, width, true),
+                plan_card_height(&plan, width, false),
+                "{width}"
+            );
+        }
     }
 
     #[test]

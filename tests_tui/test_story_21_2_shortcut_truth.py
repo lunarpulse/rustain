@@ -505,9 +505,22 @@ def _exercise(binary, evidence, root, monkeypatch):
         _wait(tui, lambda s: "yen-k12" not in _composer(s), "typed letters erased")
         tui.send(ESC)
         _wait(tui, lambda _s: tui._screen.cursor.hidden, "Chat focus")
+        # 21.6 6-C: a plan decision is answerable only through its frame, so a Chat `n`
+        # decides nothing; the explicit key on the opened frame rejects the exact plan once.
         tui.send("n")
-        screen = _wait(tui, lambda s: REJECT_ACK in s and "Ready" in _status_row(s), "Chat n rejected the exact plan")
-        _capture(tui, evidence, "10-plan-rejected-in-chat", screen)
+        tui.send("\x18q")
+        _wait(tui, lambda s: "[Enter] Open  [Esc] Back  [Up/Down] Select" in s, "Needs-you list")
+        tui.send("\r")
+        rail = "[y] Approve  [e] Edit  [n] Reject  [Esc] Later"
+        framed = lambda s: "┌ Decision: Plan" in s and rail in s
+        _wait(tui, framed, "plan decision frame")
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline:
+            assert framed(tui.get_screen_text()), "plan frame changed inside its inert window"
+        assert "rejection" not in kinds(), kinds()
+        tui.send("n")
+        screen = _wait(tui, lambda s: REJECT_ACK in s and "Ready" in _status_row(s), "frame n rejected the exact plan")
+        _capture(tui, evidence, "10-plan-rejected-in-frame", screen)
         assert kinds().count("rejection") == 1, kinds()
         # Focus is observed, never assumed: a stray `i` would land in the composer.
         if tui._screen.cursor.hidden:

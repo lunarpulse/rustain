@@ -655,7 +655,10 @@ fn render(conversation: &Conversation, state: &TuiState) -> String {
                 None,
                 &[],
                 &[],
-                state.pending_plan_card.as_ref(),
+                rustain::adapters::tui::handlers::plan_card::pending_plan_id(
+                    &state.decisions,
+                    &conversation.id,
+                ),
                 None,
                 None,
                 Default::default(),

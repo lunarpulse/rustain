@@ -262,16 +262,12 @@ fn k10_open_surfaces_are_never_taken_from() {
         ("in-conversation search", |s| {
             reducer::open(s, Surface::Search);
         }),
-        ("ask_user_question", |s| {
-            s.ask_user_question = Some(
-                rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState {
-                    tool_use_id: "tu-1".to_string(),
-                    question: "What?".to_string(),
-                    input_buffer: String::new(),
-                    cursor_position: 0,
-                    submitted_answer: None,
-                },
-            );
+        ("question frame", |s| {
+            // Old: a hand-seeded `ask_user_question` slot. New: a queue item raised by its
+            // producer; its frame holds the stack, so an arrival never takes it.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::mem::forget(rx);
+            decision_queue::raise_question(s, "c1", "tu-1".into(), "What?".into(), tx);
         }),
         ("a deferred large image", |s| {
             // Old: a hand-seeded large-image slot ("a proposal card"). New: the image is
@@ -280,8 +276,18 @@ fn k10_open_surfaces_are_never_taken_from() {
             decision_queue::raise_large_image(s, large_image(), "big");
             decision_queue::handle_key(s, PaneKey::CtrlC, &LogFacts::default());
         }),
-        ("a plan-cancel confirmation", |s| {
-            s.task_panel_state.cancel_plan_confirm = Some("plan-1".into());
+        ("a cancel-plan frame", |s| {
+            // Old: a hand-seeded `cancel_plan_confirm` slot. New: the queue item and its frame.
+            decision_queue::raise_cancel_plan(
+                s,
+                "c1",
+                decision_queue::CancelPlanPayload {
+                    plan_id: "plan-1".into(),
+                    title: "Plan".into(),
+                    pending: 1,
+                    completed: 0,
+                },
+            );
         }),
         ("autocomplete popup", |s| {
             handle_input(s, &key('/'));
@@ -323,7 +329,10 @@ fn k10_open_surfaces_are_never_taken_from() {
         );
         assert_eq!(
             is_open(&state, Surface::Decision),
-            name == "permission frame",
+            matches!(
+                name,
+                "permission frame" | "question frame" | "a cancel-plan frame"
+            ),
             "{name}"
         );
         assert_eq!(

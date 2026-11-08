@@ -98,6 +98,33 @@ pub fn pane_effect_availability(
         | DecisionEffect::ConsentOnce
         | DecisionEffect::ConsentAlways
         | DecisionEffect::ConsentDecline
+        | DecisionEffect::QuestionSend
+        | DecisionEffect::QuestionSkip
+        | DecisionEffect::SkillTrustAccept
+        | DecisionEffect::SkillTrustDecline
+        | DecisionEffect::SkillTrustInspect
+        | DecisionEffect::PlanApproveNormal
+        | DecisionEffect::PlanApproveAutoEdit
+        | DecisionEffect::PlanReject
+        | DecisionEffect::PlanRevise
+        | DecisionEffect::PlanCardApprove
+        | DecisionEffect::PlanCardReject
+        | DecisionEffect::PlanCardEdit
+        | DecisionEffect::PlanDeviationApprove
+        | DecisionEffect::PlanDeviationEdit
+        | DecisionEffect::PlanDeviationReject
+        | DecisionEffect::SkipCascadeSkip
+        | DecisionEffect::SkipCascadeContinue
+        | DecisionEffect::SkipCascadeCancel
+        | DecisionEffect::CancelPlanConfirm
+        | DecisionEffect::CancelPlanDecline
+        | DecisionEffect::DelegateTask
+        | DecisionEffect::RunTaskLocally
+        | DecisionEffect::DelegationCardCancel
+        | DecisionEffect::SpawnGateConfirm
+        | DecisionEffect::SpawnGateCancel
+        | DecisionEffect::AgentKillConfirm
+        | DecisionEffect::AgentKillDecline
         | DecisionEffect::CancelDelete => Availability::Available,
     }
 }

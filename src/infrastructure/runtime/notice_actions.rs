@@ -136,16 +136,24 @@ pub(crate) fn trigger_compaction(
     router: &crate::adapters::provider::ProviderRouter,
 ) {
     let app_context = AppContext::new(app_state, router);
-    match handlers::compaction::handle_trigger_compaction(
-        conversation,
-        streaming,
-        state,
-        provider,
-        config,
-        domain_tx,
-        purpose,
-        &app_context,
-    ) {
+    spawn_compaction(
+        handlers::compaction::handle_trigger_compaction(
+            conversation,
+            streaming,
+            state,
+            provider,
+            config,
+            domain_tx,
+            purpose,
+            &app_context,
+        ),
+        app_state,
+    );
+}
+
+/// Run the request a compaction trigger returned (memory flush first, then compact).
+pub(crate) fn spawn_compaction(outcome: HandlerOutcome, app_state: &AppState) {
+    match outcome {
         HandlerOutcome::Quiet => {}
         HandlerOutcome::RequestCompaction(payload) => {
             tokio::spawn(handlers::compaction::flush_then_compact(
@@ -170,10 +178,7 @@ pub(crate) async fn budget_pause(
     };
     match app_state.budget_state_store.save(&new_state).await {
         Ok(()) => {
-            if let Some(db) = state.daily_budget.as_mut() {
-                db.dismissed_until_unix = next_midnight;
-            }
-            handlers::budget::handle_clear_daily_budget_warning(state);
+            super::decision_effects::apply_budget_pause(state, next_midnight);
             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                 conversation_id: Some(conversation_id.to_owned()),
                 level: crate::domain::models::NoticeLevel::Info,

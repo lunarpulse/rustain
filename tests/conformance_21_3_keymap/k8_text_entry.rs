@@ -1,16 +1,18 @@
-//! K8: composer and decision feedback use grapheme-safe caret editing; question
-//! answers retain their legacy tail editor. Attached twins live in attach_keys.rs.
+//! K8: composer, decision feedback and the question answer use grapheme-safe caret
+//! editing (6-C moved the answer into the frame's own `TextField`). Attached twins live
+//! in attach_keys.rs.
 
+use crate::conformance_21_6_decision_queue::raisers::open_ready;
 use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::{DecisionKind, DecisionSubject};
 use rustain::adapters::tui::keymap::resolve::resolve_in;
 use rustain::adapters::tui::keymap::table::GlobalCmd;
 use rustain::adapters::tui::keymap::{
     Binding, CommandId, Context, Host, Key, Resolved, bind, resolve,
 };
+use rustain::adapters::tui::presentation::text_field::TextField;
 use rustain::adapters::tui::state::TuiState;
-use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
 use super::k4_overlays::cross_search_state;
 use super::support::{feedback, fresh, is_inert, permission, press};
@@ -279,10 +281,17 @@ struct Field {
     set: fn(&mut TuiState, &str),
 }
 
-fn confirmation(state: &mut TuiState, kind: ConfirmationType) {
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(kind));
+/// The open question's answer field (the frame owns it; the composer never does).
+fn question_field(state: &TuiState) -> &TextField {
+    state
+        .decisions
+        .items()
+        .find_map(|item| match &item.subject {
+            DecisionSubject::Question(payload) => Some(&payload.field),
+            _ => None,
+        })
+        .expect("a question is open")
 }
-
 const FIELDS: &[Field] = &[
     Field {
         name: "command palette filter",
@@ -353,17 +362,20 @@ const FIELDS: &[Field] = &[
     Field {
         name: "question answer",
         open: |s| {
-            s.ask_user_question = Some(AskUserQuestionState {
-                tool_use_id: "tu-1".to_string(),
-                question: "What?".to_string(),
-                input_buffer: String::new(),
-                cursor_position: 0,
-                submitted_answer: None,
-            });
-            confirmation(s, ConfirmationType::Question);
+            let (state, _clock, hold) = open_ready(DecisionKind::Question, "What?");
+            // The turn keeps waiting: the receiver outlives the test state.
+            std::mem::forget(hold);
+            *s = state;
         },
-        text: |s| &s.ask_user_question.as_ref().expect("open").input_buffer,
-        set: |s, text| s.ask_user_question.as_mut().expect("open").input_buffer = text.into(),
+        text: |s| question_field(s).as_str(),
+        set: |s, text| {
+            press(s, Key::Ctrl('a'));
+            press(s, Key::Ctrl('k'));
+            rustain::adapters::tui::app::handle_input(
+                s,
+                &rustain::domain::events::DomainInputEvent::Paste(text.into()),
+            );
+        },
     },
 ];
 
@@ -372,7 +384,7 @@ const FIELDS: &[Field] = &[
 fn append_only_fields_edit_their_tail_by_grapheme() {
     for field in FIELDS {
         let name = field.name;
-        if name == "permission feedback" {
+        if name == "permission feedback" || name == "question answer" {
             continue; // Caret-aware behavior is witnessed separately below.
         }
         let mut state = fresh();
@@ -472,5 +484,58 @@ fn permission_feedback_edits_at_a_grapheme_safe_caret() {
             state.multiline_mode
         ),
         draft
+    );
+}
+
+#[test]
+fn question_answer_edits_at_a_grapheme_safe_caret_and_never_moves_the_composer() {
+    use rustain::adapters::tui::app::handle_input;
+    use rustain::domain::events::DomainInputEvent;
+
+    let (mut state, _clock, hold) = open_ready(DecisionKind::Question, "What?");
+    std::mem::forget(hold);
+    state.input_buffer = "retained\ncomposer draft".into();
+    state.cursor_position = 5;
+    let draft = (
+        state.input_buffer.clone(),
+        state.cursor_position,
+        state.multiline_mode,
+    );
+    let paste = |s: &mut TuiState, text: &str| {
+        handle_input(s, &DomainInputEvent::Paste(text.into()));
+    };
+    paste(&mut state, "alpha beta");
+    press(&mut state, Key::Ctrl('a'));
+    assert_eq!(question_field(&state).cursor(), 0);
+    press(&mut state, Key::Right);
+    press(&mut state, Key::Char('X'));
+    assert_eq!(question_field(&state).as_str(), "aXlpha beta");
+    press(&mut state, Key::Left);
+    press(&mut state, Key::Backspace);
+    assert_eq!(question_field(&state).as_str(), "Xlpha beta");
+    press(&mut state, Key::End);
+    press(&mut state, Key::Ctrl('w'));
+    assert_eq!(question_field(&state).as_str(), "Xlpha ");
+    paste(&mut state, FAMILY);
+    press(&mut state, Key::Ctrl('h'));
+    assert_eq!(question_field(&state).as_str(), "Xlpha ");
+    press(&mut state, Key::Home);
+    press(&mut state, Key::Ctrl('k'));
+    assert_eq!(question_field(&state).as_str(), "");
+    paste(&mut state, "one two");
+    press(&mut state, Key::Ctrl('a'));
+    press(&mut state, Key::Right);
+    press(&mut state, Key::Ctrl('u'));
+    assert_eq!(question_field(&state).as_str(), "ne two");
+    press(&mut state, Key::Ctrl('e'));
+    assert_eq!(question_field(&state).cursor(), 6);
+    assert_eq!(
+        (
+            state.input_buffer,
+            state.cursor_position,
+            state.multiline_mode
+        ),
+        draft,
+        "the composer is untouched by the answer field"
     );
 }

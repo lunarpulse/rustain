@@ -340,9 +340,15 @@ fn ac5_plan_card_renders_pending() {
         })
         .collect();
     assert!(text.contains("Plan: Refactor"));
-    assert!(text.contains("[y]"));
-    assert!(text.contains("[e]"));
-    assert!(text.contains("[n]"));
+    // 21-6 6-C (FR-21-6-f): the Stage row keeps no rail; the decision is answered through
+    // its frame and the row only marks that it waits (same height as without the marker).
+    assert!(!text.contains("[y]") && !text.contains("[e]") && !text.contains("[n]"));
+    assert!(text.contains("[awaiting your decision"), "{text}");
+    assert_eq!(
+        lines.len(),
+        render_plan_card_lines(&plan, &theme, 80, false).len(),
+        "pending or not, the row is as tall"
+    );
 }
 
 #[test]
@@ -390,32 +396,62 @@ fn ac5_missing_plan_fallback() {
 
 #[test]
 fn ac6_plan_proposed_sets_pending() {
-    let card = rustain::adapters::tui::state::PendingPlanCard {
-        conversation_id: "c1".to_string(),
-        plan_id: "plan-1".to_string(),
-        plan_snapshot: make_plan_with_tasks(2),
+    use rustain::adapters::tui::decision_queue::{
+        self, DecisionKind, DecisionSubject, PlanCardPayload,
     };
-    assert_eq!(card.plan_id, "plan-1");
-    assert_eq!(card.plan_snapshot.tasks.len(), 2);
+    use rustain::adapters::tui::state::TuiState;
+    let mut state = TuiState::new(80, 24);
+    decision_queue::raise_plan_card(
+        &mut state,
+        PlanCardPayload {
+            conversation_id: "c1".to_string(),
+            plan_id: "plan-1".to_string(),
+            plan_snapshot: make_plan_with_tasks(2),
+        },
+    );
+    let item = state
+        .decisions
+        .items()
+        .next()
+        .expect("the plan card is queued");
+    assert_eq!(item.kind, DecisionKind::PlanCard);
+    assert_eq!(item.conversation_id.as_deref(), Some("c1"));
+    match &item.subject {
+        DecisionSubject::PlanCard(card) => {
+            assert_eq!(card.plan_id, "plan-1");
+            assert_eq!(card.plan_snapshot.tasks.len(), 2);
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]
 fn ac6_pending_invariant_one_per_conversation() {
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::decision_queue::{self, PlanCardPayload};
     use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
-    assert!(state.pending_plan_card.is_none());
+    assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
 
-    state.pending_plan_card = Some(rustain::adapters::tui::state::PendingPlanCard {
+    let card = |tasks| PlanCardPayload {
         conversation_id: "c1".to_string(),
         plan_id: "plan-1".to_string(),
-        plan_snapshot: make_plan_with_tasks(1),
-    });
-    assert!(state.pending_plan_card.is_some());
+        plan_snapshot: make_plan_with_tasks(tasks),
+    };
+    decision_queue::raise_plan_card(&mut state, card(1));
+    assert!(decision_queue::plan_card_pending(&state, "plan-1"));
+    // The same plan raised again updates in place: still exactly one pending card.
+    decision_queue::raise_plan_card(&mut state, card(3));
+    assert_eq!(state.decisions.len(), 1);
+    assert_eq!(
+        decision_queue::plan_card_snapshot(&state, "plan-1").map(|plan| plan.tasks.len()),
+        Some(3)
+    );
 
-    state.pending_plan_card = None;
-    assert!(state.pending_plan_card.is_none());
+    decision_queue::withdraw_plan_card(&mut state, "plan-1");
+    assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
+    assert!(state.decisions.is_empty());
 }
 
 // ── AC7: Approve / Reject / Edit ─────────────────────────────────────────
@@ -819,34 +855,46 @@ fn ac10_fork_copies_plan() {
 #[test]
 fn ac11_interaction_state_review_plan() {
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::decision_queue::{self, PlanCardPayload};
     use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
-    assert!(state.pending_plan_card.is_none());
+    assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
 
-    state.pending_plan_card = Some(rustain::adapters::tui::state::PendingPlanCard {
-        conversation_id: "c1".to_string(),
-        plan_id: "plan-1".to_string(),
-        plan_snapshot: make_plan_with_tasks(2),
-    });
+    decision_queue::raise_plan_card(
+        &mut state,
+        PlanCardPayload {
+            conversation_id: "c1".to_string(),
+            plan_id: "plan-1".to_string(),
+            plan_snapshot: make_plan_with_tasks(2),
+        },
+    );
 
-    assert!(state.pending_plan_card.is_some());
+    assert!(decision_queue::plan_card_pending(&state, "plan-1"));
+    assert_eq!(
+        decision_queue::plan_card_snapshot(&state, "plan-1").map(|plan| plan.tasks.len()),
+        Some(2)
+    );
 }
 
 #[test]
 fn ac11_interaction_state_back_to_awaiting_on_reject() {
     use rustain::adapters::tui::color_detect::ColorCapability;
+    use rustain::adapters::tui::decision_queue::{self, PlanCardPayload};
     use rustain::adapters::tui::state::TuiState;
 
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
 
-    state.pending_plan_card = Some(rustain::adapters::tui::state::PendingPlanCard {
-        conversation_id: "c1".to_string(),
-        plan_id: "plan-1".to_string(),
-        plan_snapshot: make_plan_with_tasks(2),
-    });
-    assert!(state.pending_plan_card.is_some());
+    decision_queue::raise_plan_card(
+        &mut state,
+        PlanCardPayload {
+            conversation_id: "c1".to_string(),
+            plan_id: "plan-1".to_string(),
+            plan_snapshot: make_plan_with_tasks(2),
+        },
+    );
+    assert!(decision_queue::plan_card_pending(&state, "plan-1"));
 
-    state.pending_plan_card = None;
-    assert!(state.pending_plan_card.is_none());
+    decision_queue::withdraw_plan_card(&mut state, "plan-1");
+    assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
 }

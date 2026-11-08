@@ -21,6 +21,7 @@ const TEST_FILES: &[&str] = &[
     "src/adapters/daemon/server/turn_interrupt/tests.rs",
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",
+    "src/adapters/tui/decision_queue/cards_tests.rs",
     "src/adapters/tui/story21_2_slash_tests.rs",
     "src/infrastructure/runtime/attach_loop/inspect_hint_tests.rs",
     "src/infrastructure/runtime/state_extraction_tests.rs",
@@ -309,6 +310,14 @@ const RULES: &[(&str, &str)] = &[
         "decision-21-6-b",
         r"\b(?:pending_permission|permission_queue|PermissionQueue|pending_feedback_input|permission_reader|PermissionReaderState|FeedbackInputState|PendingPermission|AttachedApprovals|PendingConsentApproval|permission_modal_owns_focus)\b|\bConfirmationType\s*::\s*(?:Permission|PermissionFeedback)\b|\bapproval_bridge\s*::\s*advance\b",
     ),
+    // Story 21.6 slice 6-C (A20): the inline question, skill-trust, plan-family, delegation,
+    // spawn-gate and agent-kill slots, their focus-mirror variants and the trust-queue
+    // advance are gone. Field/type/fn accesses, never module paths:
+    // `widgets::ask_user_question::` line builders and `decision_queue::` stay legal.
+    (
+        "decision-21-6-c",
+        r"\.\s*ask_user_question\b|\btask_panel_state\s*\.\s*pending_deviation\b|\b(?:question_response_tx|pending_skill_trust|skill_trust_queue|skill_trust_inspect_mode|pending_activation(?:_inspect_content)?|pending_plan_approval|pending_plan_card|skip_cascade_pending|cancel_plan_confirm|pending_delegation_card|pending_spawn_gate|pending_kill_confirm|advance_skill_trust_queue)\b|\bConfirmationType\s*::\s*(?:Question|SkillTrust|SkillTrustInspect|PlanApproval)\b",
+    ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
         "migrated-owner",
@@ -551,6 +560,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "field-tail",
                     "decision-21-6-a",
                     "decision-21-6-b",
+                    "decision-21-6-c",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -2119,5 +2129,77 @@ fn k11b_permission_and_consent_symbols_are_unpinnable_and_reused_apis_pass() {
     assert!(
         !errors.iter().any(|s| s.contains("decision-21-6-b|")),
         "{errors:?}"
+    );
+}
+
+/// 6-C (A20): the retired question, skill-trust, plan-family, delegation, spawn-gate and
+/// agent-kill owners cannot be pinned, while the reused builders and queue APIs stay legal.
+#[test]
+fn k11c_inline_card_symbols_are_unpinnable_and_reused_apis_pass() {
+    for text in [
+        "let q = state.ask_user_question.take();",
+        "let tx = state.question_response_tx.take();",
+        "state.pending_skill_trust = None;",
+        "state.skill_trust_queue.push_back(x);",
+        "state.skill_trust_inspect_mode = true;",
+        "state.pending_activation = None;",
+        "state.pending_activation_inspect_content = None;",
+        "state.pending_plan_approval.take();",
+        "state.pending_plan_card.take();",
+        "state.task_panel_state.pending_deviation = None;",
+        "panel.skip_cascade_pending = None;",
+        "panel.cancel_plan_confirm = None;",
+        "state.pending_delegation_card.take();",
+        "state.pending_spawn_gate.take();",
+        "panel.pending_kill_confirm = None;",
+        "advance_skill_trust_queue(state);",
+        "let kind = ConfirmationType::Question;",
+        "let kind = ConfirmationType::SkillTrust;",
+        "let kind = ConfirmationType::SkillTrustInspect;",
+        "let kind = ConfirmationType::PlanApproval;",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("decision-21-6-c|real|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|error| error.split_once(": ").unwrap().1)
+            .collect();
+        let pins = [("src/x.rs", "21-6", sites.as_slice())];
+        let errors = scan(&files, &pins);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("decision-21-6-c|")),
+            "{text}: a pin never exempts a 21-6 symbol: {errors:?}"
+        );
+    }
+    // Positive control through the same scanner: the queue's own entry points and the
+    // reused line builders are module paths and payload names, never the retired slots.
+    let legal = "fn real() { widgets::ask_user_question::question_lines(q); \
+                 let _ = widgets::cancel_plan_confirm_card::lines(c); \
+                 decision_queue::question::raise_question(s, c, id, q, tx); \
+                 decision_queue::raise_plan_card(s, payload); \
+                 s.decisions.holds(DecisionKind::SkillTrust); \
+                 let k = DecisionKind::Question; \
+                 let _: ConfirmationType = ConfirmationType::Permission; }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("decision-21-6-c|")),
+        "{errors:?}"
+    );
+    // The same retired text inside a `#[cfg(test)]` item is test code, not production.
+    let test_only = "#[cfg(test)] mod tests { fn t(s: &mut S) { s.ask_user_question.take(); } }";
+    assert!(
+        scan(&[("src/x.rs".into(), test_only.into())], &[])
+            .iter()
+            .all(|s| !s.contains("decision-21-6-c|"))
     );
 }

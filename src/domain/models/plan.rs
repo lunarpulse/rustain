@@ -6,7 +6,7 @@
 //! with pre-6-1a sessions) while allowing rich plan data to be stored separately.
 //!
 //! **Key invariants:**
-//! - At most one pending plan card per conversation (enforced by `TuiState::pending_plan_card`)
+//! - At most one pending plan card per conversation (enforced by the decision queue's `PlanCard` item)
 //! - `propose_plan` is risk-Safe — never routes through `ApprovalRuntime`
 //! - Plans are serialized with `#[serde(default)]` for backward compatibility
 //!

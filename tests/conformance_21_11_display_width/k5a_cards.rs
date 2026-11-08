@@ -21,9 +21,7 @@ use ratatui::widgets::Paragraph;
 
 use rustain::adapters::tui::state::{RevertPreviewItem, RewindPreview};
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::ask_user_question::{
-    AskUserQuestionState, render_ask_user_lines,
-};
+use rustain::adapters::tui::widgets::ask_user_question::question_lines;
 use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
 use rustain::adapters::tui::widgets::plan_card::render_plan_card_lines;
 use rustain::adapters::tui::widgets::rewind_confirm::render_rewind_confirmation_lines;
@@ -340,110 +338,206 @@ fn k5a_plan_card_icon_and_badge_rows_keep_the_right_border() {
 }
 
 // ───────────────────────── ask-user question ─────────────────────────
+//
+// 21-6 6-C: the question is the body of a `Decision: Question` frame. The body builder
+// (`question_lines`) wraps by display cells; the frame owns the border, so the old
+// "right border" witnesses are re-pointed to the builder rows and to the painted frame.
 
-fn ask_state(question: &str, input: &str, submitted: Option<&str>) -> AskUserQuestionState {
-    AskUserQuestionState {
-        tool_use_id: "k5a".to_string(),
-        question: question.to_string(),
-        input_buffer: input.to_string(),
-        cursor_position: input.chars().count(),
-        submitted_answer: submitted.map(str::to_string),
-    }
+/// Row text of a border-less builder row, trailing blanks trimmed.
+fn plain_row(buffer: &Buffer, y: u16) -> String {
+    glyphs(buffer, y).concat().trim_end().to_string()
 }
 
-fn ask_buffer(state: &AskUserQuestionState, width: u16) -> Buffer {
-    paint_lines(render_ask_user_lines(state, width, &Theme::dark()), width)
+fn question_buffer(question: &str, width: usize) -> Buffer {
+    let lines = question_lines(question, width, &Theme::dark());
+    paint_lines(lines, u16::try_from(width).expect("builder width fits u16"))
 }
 
 #[test]
 fn k5a_ask_question_is_fully_wrapped_never_clipped() {
-    // Width 30 → 26-cell rows: C×20 (40 cells) must wrap, its tail joins A×10.
+    // Width 26: C×20 (40 cells) must wrap, its tail joins A×10.
     let question = format!("{} {}", C.repeat(20), A.repeat(10));
-    let buf = ask_buffer(&ask_state(&question, "", None), 30);
-    assert_right_border(&buf, "║");
-    assert_eq!(interior(&buf, 1), C.repeat(13));
+    let buf = question_buffer(&question, 26);
+    assert_eq!(plain_row(&buf, 0), C.repeat(13));
     assert_eq!(
-        interior(&buf, 2),
+        plain_row(&buf, 1),
         format!("{} {}", C.repeat(7), A.repeat(10))
     );
     // ASCII control: a short question is one untouched row.
-    let buf = ask_buffer(
-        &ask_state("What is the name of your project?", "", None),
-        60,
-    );
-    assert_right_border(&buf, "║");
-    assert_eq!(interior(&buf, 1), "What is the name of your project?");
-    assert_eq!(interior(&buf, 2), "> _");
+    let buf = question_buffer("What is the name of your project?", 56);
+    assert_eq!(buf.area.height, 1);
+    assert_eq!(plain_row(&buf, 0), "What is the name of your project?");
 
     // Real inner widths 56/76/126: exact fit stays one row, one over wraps.
-    for (width, inner) in [(60u16, 56usize), (80, 76), (130, 126)] {
+    for inner in [56usize, 76, 126] {
         for (unit, cells) in UNITS {
             let exact = unit.repeat(inner / cells);
-            let buf = ask_buffer(&ask_state(&exact, "", None), width);
-            assert_right_border(&buf, "║");
-            assert_eq!(buf.area.height, 4, "{unit:?} at {width}");
-            assert_eq!(interior(&buf, 1), exact);
+            let buf = question_buffer(&exact, inner);
+            assert_eq!(buf.area.height, 1, "{unit:?} at {inner}");
+            assert_eq!(plain_row(&buf, 0), exact);
 
-            let buf = ask_buffer(&ask_state(&unit.repeat(inner / cells + 1), "", None), width);
-            assert_right_border(&buf, "║");
-            assert_eq!(buf.area.height, 5);
-            assert_eq!(interior(&buf, 1), exact);
-            assert_eq!(interior(&buf, 2), unit);
+            let buf = question_buffer(&unit.repeat(inner / cells + 1), inner);
+            assert_eq!(buf.area.height, 2, "{unit:?} at {inner}");
+            assert_eq!(plain_row(&buf, 0), exact);
+            assert_eq!(plain_row(&buf, 1), unit);
+        }
+    }
+}
+
+/// The painted frame's body rows, borders stripped, concatenated: a wrapped unbroken
+/// question reads back whole.
+fn frame_body(buffer: &Buffer) -> String {
+    (buffer.area.top()..buffer.area.bottom())
+        .map(|y| {
+            let row = plain_row(buffer, y);
+            // At >= 100 columns the frame is centered: only what sits between its borders.
+            match (row.find('│'), row.rfind('│')) {
+                (Some(open), Some(close)) if close > open => {
+                    row[open + '│'.len_utf8()..close].trim().to_string()
+                }
+                _ => String::new(),
+            }
+        })
+        .collect::<String>()
+}
+
+/// Frame width at `terminal_width` (mirrors `presentation::geometry::frame_rect`).
+fn frame_cells(terminal_width: u16) -> usize {
+    if terminal_width < 100 {
+        usize::from(terminal_width)
+    } else {
+        (usize::from(terminal_width) * 9 / 10).max(1)
+    }
+}
+
+/// Cells from the first to the last `│` of row `y`, both included (0 when it has none).
+fn frame_span(buffer: &Buffer, y: u16) -> usize {
+    let cells = glyphs(buffer, y);
+    match (
+        cells.iter().position(|glyph| glyph == "│"),
+        cells.iter().rposition(|glyph| glyph == "│"),
+    ) {
+        (Some(open), Some(close)) => cells[open..=close]
+            .iter()
+            .map(|glyph| UnicodeWidthStr::width(glyph.as_str()))
+            .sum(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn k5a_ask_question_in_the_frame_is_complete_by_cells_at_60_80_130() {
+    use crate::conformance_21_6_decision_queue::support::{clocked, facts, paint as paint_frame};
+    for width in [60u16, 80, 130] {
+        for (unit, cells) in UNITS {
+            let question = unit.repeat(usize::from(width) * 2 / cells);
+            let (mut state, _clock) = clocked(width, 24);
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            rustain::adapters::tui::decision_queue::raise_question(
+                &mut state,
+                "c1",
+                "k5a".into(),
+                question.clone(),
+                tx,
+            );
+            let buffer = paint_frame(&mut state, &facts("c1"), width, 24);
+            assert!(
+                frame_body(&buffer).contains(&question),
+                "{unit:?} at {width}: the whole question is painted"
+            );
         }
     }
 }
 
 #[test]
 fn k5a_ask_editable_suffix_and_caret_stay_visible_with_answer_bytes_intact() {
-    // After `> ` and the caret: 53 / 73 / 123 cells of answer remain visible.
-    for (width, visible) in [(60u16, 53usize), (80, 73), (130, 123)] {
+    use crate::conformance_21_6_decision_queue::support::{
+        clocked, facts, paint as paint_frame, row_of, row_text,
+    };
+    use rustain::adapters::tui::app::handle_input;
+    use rustain::adapters::tui::decision_queue::DecisionSubject;
+    use rustain::domain::events::DomainInputEvent;
+    for width in [60u16, 80, 130] {
         for (unit, cells) in UNITS {
-            let whole = unit.repeat(visible / cells);
-            let buf = ask_buffer(&ask_state("Q?", &whole, None), width);
-            assert_right_border(&buf, "║");
-            assert_eq!(interior(&buf, 2), format!("> {whole}_"));
-
-            let long = format!("HEAD{}", unit.repeat(visible / cells + 3));
-            let state = ask_state("Q?", &long, None);
-            let buf = ask_buffer(&state, width);
-            assert_right_border(&buf, "║");
-            let row = interior(&buf, 2);
-            // The editable end of the answer: exactly the last `visible` cells'
-            // worth of whole units (HEAD scrolled off), then the caret.
-            assert_eq!(
-                row,
-                format!("> {}_", unit.repeat(visible / cells)),
-                "width {width}"
+            let long = format!("HEAD{}", unit.repeat(usize::from(width) / cells + 3));
+            let (mut state, _clock) = clocked(width, 24);
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            rustain::adapters::tui::decision_queue::raise_question(
+                &mut state,
+                "c1",
+                "k5a".into(),
+                "Q?".into(),
+                tx,
             );
-            assert_eq!(state.input_buffer, long, "answer bytes untouched");
+            handle_input(&mut state, &DomainInputEvent::Paste(long.clone()));
+            let buffer = paint_frame(&mut state, &facts("c1"), width, 24);
+            let at = row_of(&buffer, "Answer: ").expect("the answer row");
+            let row = row_text(&buffer, at);
+            // The editable end stays visible: HEAD scrolled off, whole units remain, then
+            // the caret, and the row keeps its right border in the last column.
+            assert!(!row.contains("HEAD"), "{unit:?} at {width}: {row}");
+            assert!(row.contains(unit), "{unit:?} at {width}: {row}");
+            assert!(
+                row.contains('▋'),
+                "{unit:?} at {width}: the caret is visible: {row}"
+            );
+            // Border to border the row is exactly the frame (a full sheet below 100
+            // columns, 90 % centered above): the right border closes the answer row.
+            assert_eq!(
+                frame_span(&buffer, at),
+                frame_cells(width),
+                "{unit:?} at {width}"
+            );
+            assert!(UnicodeWidthStr::width(row.as_str()) <= usize::from(width));
+            // The answer bytes are untouched (only the view clips).
+            let stored = state
+                .decisions
+                .items()
+                .find_map(|item| match &item.subject {
+                    DecisionSubject::Question(payload) => Some(payload.field.as_str().to_owned()),
+                    _ => None,
+                });
+            assert_eq!(
+                stored.as_deref(),
+                Some(long.as_str()),
+                "answer bytes untouched"
+            );
         }
     }
 }
 
 #[test]
 fn k5a_ask_mixed_answer_places_the_right_border() {
+    use crate::conformance_21_6_decision_queue::support::{
+        clocked, facts, paint as paint_frame, row_of, row_text,
+    };
+    use rustain::adapters::tui::app::handle_input;
+    use rustain::domain::events::DomainInputEvent;
     let typed = format!("{G}{C}");
     for width in [60u16, 80, 130] {
-        let buf = ask_buffer(&ask_state("Q?", &typed, None), width);
-        assert_right_border(&buf, "║");
-        assert_eq!(interior(&buf, 2), format!("> {typed}_"));
-        let buf = ask_buffer(&ask_state("Q?", "", Some(&typed)), width);
-        assert_right_border(&buf, "║");
-        assert_eq!(interior(&buf, 2), format!("> {typed}"));
-    }
-    // A submitted answer longer than the row wraps and stays complete
-    // (`> ` plus 54 cells on the first row, 54 cells on the next).
-    for (answer, first, rest) in [
-        (C.repeat(40), C.repeat(27), C.repeat(13)),
-        (G.repeat(40), G.repeat(27), G.repeat(13)),
-        (A.repeat(80), A.repeat(54), A.repeat(26)),
-    ] {
-        let buf = ask_buffer(&ask_state("Q?", "", Some(&answer)), 60);
-        assert_right_border(&buf, "║");
-        let rows: Vec<String> = (2..buf.area.bottom() - 1)
-            .map(|y| interior(&buf, y))
-            .collect();
-        assert_eq!(rows, vec![format!("> {first}"), rest]);
+        let (mut state, _clock) = clocked(width, 24);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        rustain::adapters::tui::decision_queue::raise_question(
+            &mut state,
+            "c1",
+            "k5a".into(),
+            "Q?".into(),
+            tx,
+        );
+        handle_input(&mut state, &DomainInputEvent::Paste(typed.clone()));
+        let buffer = paint_frame(&mut state, &facts("c1"), width, 24);
+        let at = row_of(&buffer, "Answer: ").expect("the answer row");
+        let row = row_text(&buffer, at);
+        assert!(row.contains(&format!("Answer: {typed}")), "{width}: {row}");
+        assert_eq!(
+            frame_span(&buffer, at),
+            frame_cells(width),
+            "{width}: the right border closes the frame"
+        );
+        assert!(
+            UnicodeWidthStr::width(row.as_str()) <= usize::from(width),
+            "{width}"
+        );
     }
 }
 

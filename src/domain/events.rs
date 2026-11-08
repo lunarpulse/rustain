@@ -264,7 +264,7 @@ pub enum AppEvent {
 
     /// Story 11.2a — `/memory consolidate` background sub-turn proposed durable
     /// facts to promote. The event-loop handler stores a `PendingConsolidationCard`
-    /// (mirrors the `PlanProposed` → `pending_plan_card` grammar).
+    /// (mirrors the `PlanProposed` → plan-card decision grammar).
     MemoryConsolidationProposed {
         conversation_id: ConversationId,
         proposals: Vec<crate::domain::models::MemoryFact>,

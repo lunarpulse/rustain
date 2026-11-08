@@ -950,6 +950,8 @@ const PANE: &[W] = &[
     wp(&[Key::Char('n')], "Consumed | focused=true items=[(Carryover, false)]", |s| *s = pane(DecisionKind::ContextWarning)),
     w(&[Key::PageUp], "Consumed | focused=true items=[(Budget, false)]"),
     w(&[Key::PageDown], "Consumed | focused=true items=[(Budget, false)]"),
+    // `c` copies through the route's clipboard seam (the payload is pinned by `story21_6_*` copy tests).
+    w(&[Key::Char('c')], "Consumed | focused=true items=[(Budget, false)]"),
     wp(&[Key::PageUp], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
     wp(&[Key::PageDown], "Consumed | focused=true items=[(Permission, false)]", |s| *s = super::support::permission()),
     w(&[Key::Ctrl('x')], "Consumed | focused=true items=[(Budget, false)]"),
@@ -995,6 +997,12 @@ fn decision_rows_by_value_and_every_other_key_is_swallowed() {
         let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
         let draft = (state.input_buffer.clone(), state.cursor_position);
         let focus = state.focus.clone();
+        let copies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = copies.clone();
+        state.clipboard_copier = Some(Arc::new(move |text: &str| {
+            sink.lock().unwrap().push(text.to_owned());
+            rustain::adapters::tui::clipboard::ClipboardResult::Osc52Success
+        }));
         let out = match decode(key) {
             Some(event) => presentation::route(state, &event, Host::Local, &facts())
                 .expect("the pane boundary owns every decoded key")
@@ -1002,6 +1010,19 @@ fn decision_rows_by_value_and_every_other_key_is_swallowed() {
             None => InputAction::Ignored,
         };
         assert!(presentation::consistent(state));
+        let copied = copies.lock().unwrap().clone();
+        if key == Key::Char('c') {
+            assert_eq!(
+                copied,
+                ["the question"],
+                "`c` copies the item's original text once"
+            );
+            let last = state.notifications.records().last().expect("copy notice");
+            assert_eq!(last.message, "Copied to clipboard");
+            assert_eq!(last.severity, NoticeSeverity::Success);
+        } else {
+            assert!(copied.is_empty(), "only `c` reaches the clipboard: {key:?}");
+        }
         assert_eq!(state.focus, focus, "pane keys preserve base focus");
         assert_eq!(
             (state.input_buffer.as_str(), state.cursor_position),

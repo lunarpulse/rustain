@@ -211,6 +211,20 @@ fn ac1_resume_was_running_resets_started_at_ms() {
 
 // ── AC2: Skip ────────────────────────────────────────────────────────────────
 
+/// The skip-cascade decision queued by the skip handler, if any.
+fn queued_cascade(
+    state: &TuiState,
+) -> Option<rustain::adapters::tui::decision_queue::SkipCascadePending> {
+    use rustain::adapters::tui::decision_queue::DecisionSubject;
+    state
+        .decisions
+        .items()
+        .find_map(|item| match &item.subject {
+            DecisionSubject::SkipCascade(payload) => Some(payload.0.clone()),
+            _ => None,
+        })
+}
+
 #[test]
 fn ac2_skip_pending_no_dependents() {
     let plan = make_plan(
@@ -224,7 +238,8 @@ fn ac2_skip_pending_no_dependents() {
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Skipped);
     assert_eq!(plan.tasks[0].error.as_deref(), Some("Skipped by user"));
     // No cascade card for no dependents
-    assert!(state.task_panel_state.skip_cascade_pending.is_none());
+    assert!(queued_cascade(&state).is_none());
+    assert!(state.decisions.is_empty());
 }
 
 #[test]
@@ -241,13 +256,19 @@ fn ac2_skip_with_dependents_shows_cascade() {
     handle_task_skip(&mut state, &mut conv, 1);
     let plan = conv.plans.get("test-plan").unwrap();
     assert_eq!(plan.tasks[0].status, PlanTaskStatus::Skipped);
-    // Cascade card should be pending because T2 depends on T1
-    assert!(state.task_panel_state.skip_cascade_pending.is_some());
-    let pending = state
-        .task_panel_state
-        .skip_cascade_pending
-        .as_ref()
-        .unwrap();
+    // The cascade decision is queued (a frame) because T2 depends on T1
+    let pending = queued_cascade(&state).expect("the cascade decision is queued");
+    assert_eq!(
+        state
+            .decisions
+            .items()
+            .next()
+            .unwrap()
+            .conversation_id
+            .as_deref(),
+        Some(conv.id.as_str()),
+        "it waits in the conversation that raised it"
+    );
     assert_eq!(pending.source_task, 1);
     assert_eq!(pending.source_prior_status, PlanTaskStatus::Pending);
     assert_eq!(pending.downstream, vec![2]);
@@ -299,11 +320,7 @@ fn ac2_skip_failed_preserves_prior_status_in_cascade() {
     let (mut conv, mut state) = make_conv(plan);
 
     handle_task_skip(&mut state, &mut conv, 1);
-    let pending = state
-        .task_panel_state
-        .skip_cascade_pending
-        .as_ref()
-        .unwrap();
+    let pending = queued_cascade(&state).expect("the cascade decision is queued");
     assert_eq!(pending.source_prior_status, PlanTaskStatus::Failed);
 }
 

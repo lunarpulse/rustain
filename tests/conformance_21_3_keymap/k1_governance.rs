@@ -46,10 +46,47 @@ fn shipped_table_passes_governance() {
 #[test]
 fn decision_contexts_have_the_declared_parents_and_both_host_routes() {
     use rustain::adapters::tui::keymap::{Host, Resolved, resolve};
-    assert_eq!(Context::ALL.len(), 59);
+    assert_eq!(Context::ALL.len(), 61);
     assert_eq!(Context::Permission.parents(), &[Context::Decision]);
     assert_eq!(Context::Consent.parents(), &[Context::Decision]);
     assert_eq!(Context::DecisionCompose.parents(), &[Context::CaretField]);
+    // 6-C: the moved cards are decision frames (children of `Decision`); the question's
+    // open answer field is a decision field (child of `DecisionCompose`).
+    for context in [
+        Context::QuestionIdle,
+        Context::SkillTrust,
+        Context::SkillTrustInspect,
+        Context::PlanApproval,
+        Context::PlanDecision,
+        Context::SkipCascade,
+        Context::Delegation,
+        Context::SpawnGate,
+        Context::DecisionConfirm,
+    ] {
+        assert_eq!(context.parents(), &[Context::Decision], "{context:?}");
+        for key in [
+            Key::Esc,
+            Key::Ctrl('c'),
+            Key::Ctrl('q'),
+            Key::PageUp,
+            Key::PageDown,
+            Key::Char('c'),
+        ] {
+            if context == Context::SkillTrustInspect && matches!(key, Key::Esc | Key::Ctrl('c')) {
+                continue; // the reader's own Back rows
+            }
+            assert!(
+                matches!(resolve(context, Host::Local, &[key]), Resolved::Hit(row) if row.context == Context::Decision),
+                "{context:?}: {key:?} is the Decision parent's row"
+            );
+        }
+    }
+    assert_eq!(Context::Question.parents(), &[Context::DecisionCompose]);
+    // `Esc` defers every one of them; `c` is never Copy while a field is open.
+    assert!(matches!(
+        resolve(Context::Question, Host::Local, &[Key::Char('c')]),
+        Resolved::Miss
+    ));
     assert!(matches!(
         resolve(Context::Consent, Host::Attached, &[Key::Char('n')]),
         Resolved::Hit(row) if row.label == "Decline"

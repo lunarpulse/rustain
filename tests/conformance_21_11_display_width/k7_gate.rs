@@ -102,10 +102,7 @@ const SITES: &[Site] = &[
             "wrap_description"
         ]
     ),
-    site!(
-        "widgets/ask_user_question.rs",
-        ["render_ask_user_lines", "wrap_question"]
-    ),
+    site!("widgets/ask_user_question.rs", ["question_lines"]),
     site!(
         "widgets/fork_confirm.rs",
         ["render_fork_confirmation_lines"]
@@ -139,7 +136,7 @@ const SITES: &[Site] = &[
     ),
     site!(
         "widgets/skill_trust_prompt.rs",
-        ["render_trust_lines", "render_inspect_lines"]
+        ["trust_lines", "inspect_lines"]
     ),
     site!("widgets/usage_panel.rs", ["truncate_model"]),
     site!("widgets/result_row.rs", ["render_result_row"]),

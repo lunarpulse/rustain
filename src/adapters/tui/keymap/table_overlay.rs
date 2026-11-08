@@ -50,7 +50,7 @@ pub enum OverlayCmd {
     QuitYes, QuitNo,
     // Decision frame.
     PaneQuit, PaneBack, PaneEnter, PaneEsc, PaneYes, PaneNo, PaneSwitch, PanePause, PaneCompact,
-    PaneScrollUp, PaneScrollDown,
+    PaneScrollUp, PaneScrollDown, PaneCopy,
     // Needs-you list (S-QUEUE).
     QueuePrev, QueueNext, QueueOpen, QueueBack,
     // Recipient surface.
@@ -259,6 +259,7 @@ pub const ROWS: &[Binding] = &[
     d(&[Key::Char('k')], OverlayCmd::PaneCompact).does("Compact the conversation (a context warning)"),
     d(&[Key::PageUp], OverlayCmd::PaneScrollUp).does("Scroll the decision body up"),
     d(&[Key::PageDown], OverlayCmd::PaneScrollDown).does("Scroll the decision body down"),
+    d(&[Key::Char('c')], OverlayCmd::PaneCopy).copy().does("Copy the decision's text (every decision frame; not while a text field is open)"),
     // ── Needs-you list (S-QUEUE): select, open, back; nothing here ever decides ──
     bind(Context::DecisionQueue, &[Key::Up], CommandId::Overlay(OverlayCmd::QueuePrev), "Select").does("Select the previous waiting decision"),
     bind(Context::DecisionQueue, &[Key::Char('k')], CommandId::Overlay(OverlayCmd::QueuePrev), "").does("Select the previous waiting decision"),

@@ -62,6 +62,30 @@ def submit_slash(t: RustainTUI, cmd: str, delay: float = CHAR_DELAY) -> None:
     t.send("\r")
 
 
+def settle(t: RustainTUI, timeout: float = 30.0, duration: float = 0.7) -> str:
+    """Decision keys are inert for 500 ms after a frame's first paint (Story 21.6): wait
+    structurally until the whole screen has stayed unchanged for ``duration``."""
+    previous, since = None, None
+    deadline = time.monotonic() + timeout
+    while True:
+        screen = t.get_screen_text()
+        now = time.monotonic()
+        assert now < deadline, screen
+        if screen != previous:
+            previous, since = screen, now
+        elif now - since >= duration:
+            return screen
+
+
+def reopen_from_list(t: RustainTUI, body_text: str) -> None:
+    """`Ctrl+X q` opens the Needs-you list, `Enter` opens the selected deferred decision."""
+    t.send("\x18q")
+    assert t.wait_for_screen("[Enter] Open", timeout=5.0), t.get_screen_text()
+    settle(t)
+    t.send("\r")
+    assert t.wait_for_screen(body_text, timeout=5.0), t.get_screen_text()
+
+
 def write_workspace_skill(
     workspace: Path,
     name: str,
@@ -139,7 +163,9 @@ def test_skill_appears_in_slash_autocomplete(tmp_path):
 
 @pytest.mark.story_5_2
 def test_workspace_skill_triggers_trust_prompt(tmp_path):
-    """AC4: activating a workspace-tier skill shows the trust prompt with canonical text."""
+    """AC4: activating a workspace-tier skill shows the trust decision frame with canonical text.
+
+    21.6: the prompt is the `Decision: Skill trust` frame; its rail is generated from the keymap."""
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "risky-skill")
@@ -147,9 +173,9 @@ def test_workspace_skill_triggers_trust_prompt(tmp_path):
         _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/risky-skill")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
-        t.assert_screen_contains("[y]")
-        t.assert_screen_contains("[n]")
-        t.assert_screen_contains("[i]")
+        screen = settle(t)
+        assert "Decision: Skill trust" in screen, screen
+        assert "[y] Trust  [n] Decline  [i] Inspect" in screen, screen
 
 
 @pytest.mark.story_5_2
@@ -166,6 +192,7 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
         _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/declined-skill")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
+        settle(t)  # decision keys are inert 500 ms after the frame's first paint
         t.send("n")
         assert t.wait_for_screen("not trusted", timeout=3.0)
     finally:
@@ -174,8 +201,9 @@ def test_trust_prompt_decline_via_n_key(tmp_path):
 
 @pytest.mark.story_5_2
 def test_trust_prompt_esc_never_declines(tmp_path):
-    """21.3 AC16 (was 5-2 AC4 "Esc is equivalent to ``n``"): Esc never decides a card. It posts the
-    cue, the trust prompt stays pending and only the explicit ``n`` declines."""
+    """21.3 AC16 (was 5-2 AC4 "Esc is equivalent to ``n``"): Esc never decides a card. 21.6: Esc
+    defers the trust decision (the frame closes, the ``Needs you (1)`` chip waits), nothing is
+    declined, and the explicit ``n`` on the reopened frame is the only decline."""
     ws = tmp_path / "ws"
     ws.mkdir()
     write_workspace_skill(ws, "esc-decline")
@@ -185,10 +213,13 @@ def test_trust_prompt_esc_never_declines(tmp_path):
         _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/esc-decline")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
+        settle(t)
         t.send(ESC)
-        assert t.wait_for_screen("never decide this card", timeout=3.0)
-        t.assert_screen_contains("Trust and enable this skill", msg="Esc must leave the trust prompt pending")
+        assert t.wait_for_screen_not_contains("Decision: Skill trust", timeout=3.0)
+        assert t.wait_for_screen("Needs you (1)", timeout=3.0)
         t.assert_screen_not_contains("not trusted", msg="Esc must not decline the skill")
+        reopen_from_list(t, "Trust and enable this skill")
+        settle(t)
         t.send("n")
         assert t.wait_for_screen("not trusted", timeout=3.0)
     finally:
@@ -210,10 +241,13 @@ def test_trust_prompt_inspect_shows_file_content(tmp_path):
         _wait_for_skills_loaded(t, count=1)
         submit_slash(t, "/inspectable")
         assert t.wait_for_screen("Trust and enable this skill", timeout=5.0)
+        settle(t)
         t.send("i")
         assert t.wait_for_screen("Unique Inspect Marker 7c4f", timeout=3.0)
+        settle(t)
         t.send(ESC)
         assert t.wait_for_screen("Trust and enable this skill", timeout=3.0)
+        assert "Decision: Skill trust" in t.get_screen_text()
 
 
 @pytest.mark.story_5_2

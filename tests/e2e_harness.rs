@@ -294,7 +294,10 @@ impl TestHarness {
                         .flatten(),
                     &state.search_state.matches,
                     &tab.session_meta.bookmarks,
-                    state.pending_plan_card.as_ref(),
+                    rustain::adapters::tui::handlers::plan_card::pending_plan_id(
+                        &state.decisions,
+                        &conversation.id,
+                    ),
                     None,
                     tab.reducer.open_prose.as_deref(),
                     chat_pane::ToolFocus {

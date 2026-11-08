@@ -1,51 +1,32 @@
-//! Cancel plan confirmation card — Story 6.4.
-//! Key bindings: [y] Cancel all / [n] Keep running.
+//! Cancel plan confirmation body — Story 6.4: the rows of the `Decision: Cancel plan`
+//! frame (Story 21.6 6-C). Keys: the frame's rail (`[y] Confirm  [n] Decline`).
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-
-pub fn render(area: Rect, buf: &mut Buffer, plan_title: &str, n_pending: u32, n_completed: u32) {
-    if area.width < 25 || area.height < 3 {
-        return;
-    }
-    let style = Style::default();
-    buf.set_string(area.x, area.y, "┌─ Cancel plan? ──────────────", style);
-    if area.height > 1 {
-        buf.set_string(area.x, area.y + 1, format!("│ {}", plan_title), style);
-    }
-    if area.height > 2 {
-        buf.set_string(
-            area.x,
-            area.y + 2,
-            format!(
-                "│ {} task(s) remaining, {} completed (will be kept)",
-                n_pending, n_completed
-            ),
-            style,
-        );
-    }
-    if area.height > 3 {
-        buf.set_string(
-            area.x,
-            area.y + 3,
-            format!(
-                "│ {} Cancel all   {} Keep running",
-                rail(Context::Confirm, CardCmd::Yes),
-                rail(Context::Confirm, CardCmd::No)
-            ),
-            style,
-        );
-    }
-    if area.height > 4 {
-        buf.set_string(area.x, area.y + 4, "└────────────────────────────", style);
-    }
+/// The plan's title and what cancelling leaves behind.
+pub fn lines(plan_title: &str, n_pending: u32, n_completed: u32) -> Vec<Line<'static>> {
+    vec![
+        Line::from(plan_title.to_owned()),
+        Line::from(format!(
+            "{} task(s) remaining, {} completed (will be kept)",
+            n_pending, n_completed
+        )),
+    ]
 }
 
-pub fn desired_height() -> u16 {
-    6
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn story21_6_the_rows_name_the_plan_and_the_counts() {
+        let rows: Vec<String> = lines("Ship it", 3, 2)
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(
+            rows,
+            ["Ship it", "3 task(s) remaining, 2 completed (will be kept)"]
+        );
+    }
 }

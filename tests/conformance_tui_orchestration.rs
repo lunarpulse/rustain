@@ -8,10 +8,7 @@ use std::sync::{
 };
 
 use rustain::adapters::tui::{
-    app::InputAction,
-    handlers::wave_overlay,
-    presentation::Surface,
-    state::{PendingSpawnGate, WaveViewState},
+    app::InputAction, handlers::wave_overlay, presentation::Surface, state::WaveViewState,
 };
 use rustain::domain::models::orchestration::{
     DrillId, ForkJoinOutcome, SpokeResult, SynthesisView,
@@ -87,7 +84,6 @@ impl WaveHandle for PaintWave {
 }
 
 fn paint_base(
-    gate: Option<&PendingSpawnGate>,
     handle: Option<&dyn WaveHandle>,
     wave: Option<&WaveViewState>,
     frame_open: bool,
@@ -99,7 +95,6 @@ fn paint_base(
             let _ = rustain::infrastructure::runtime::event_loop::paint_wave_base(
                 frame,
                 frame.area(),
-                gate,
                 handle,
                 wave,
                 None,
@@ -182,9 +177,6 @@ fn wave_input_actions_are_produced_and_consumed() {
         "CloseDivergeView",
         "DismissWave",
         "SpawnGateConfirm",
-        "SpawnGateCap",
-        "SpawnGateAdjustLeft",
-        "SpawnGateAdjustRight",
     ] {
         assert!(
             count(app, &format!("InputAction::{action}")) >= 1,
@@ -222,28 +214,64 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
     assert!(!advanced.contains("0/3 done"));
     assert_ne!(first, advanced, "runtime progress must change pixels");
 
-    h.state.pending_spawn_gate = Some(PendingSpawnGate {
-        spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("5 payload-safe-fixture"))
-            .unwrap(),
-        requested: 5,
-        threshold: 2,
-        adjusted: None,
-    });
+    // The gate is a queue item raised for the active conversation; its frame covers the
+    // Stage (and the strip under it) and the real keys adjust the queued count.
+    let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    h.state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
+    let active = h.conversation.id.clone();
+    rustain::adapters::tui::decision_queue::raise_spawn_gate(
+        &mut h.state,
+        &active,
+        rustain::adapters::tui::decision_queue::PendingSpawnGate {
+            spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("5 payload-safe-fixture"))
+                .unwrap(),
+            requested: 5,
+            threshold: 2,
+            adjusted: None,
+        },
+    );
     let gated = render_runtime(&mut h, &mut tabs, &core);
     assert!(
-        gated.contains("spawn 5?") && gated.contains("confirm"),
+        gated.contains("spawn 5?") && gated.contains("Confirm"),
         "{gated}"
     );
     assert!(!gated.contains("2/3 done"), "gate must replace the strip");
     assert_ne!(advanced, gated, "runtime must paint the pending gate");
 
-    h.state.pending_spawn_gate.as_mut().unwrap().adjusted = Some(4);
+    // The first paint started the inert clock: let it pass, then `Left` spawns one fewer.
+    clock.advance(rustain::adapters::tui::decision_queue::INERT_AFTER_PAINT);
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_conversation_id: Some(active.clone()),
+        ..Default::default()
+    };
+    let left = rustain::adapters::tui::presentation::route(
+        &mut h.state,
+        &rustain::domain::events::DomainInputEvent::SpecialKey(
+            rustain::domain::events::DomainKey::Left,
+        ),
+        rustain::adapters::tui::keymap::Host::Local,
+        &facts,
+    );
+    assert!(left.is_some(), "the open gate frame owns the key");
     let adjusted = render_runtime(&mut h, &mut tabs, &core);
     assert!(adjusted.contains("spawn 4?"), "{adjusted}");
     assert!(!adjusted.contains("spawn 5?"));
     assert_ne!(gated, adjusted, "runtime must repaint gate adjustment");
 
-    h.state.pending_spawn_gate = None;
+    // `n` cancels the spawn: the queued gate leaves and the strip is back.
+    let cancelled = rustain::adapters::tui::presentation::route(
+        &mut h.state,
+        &rustain::domain::events::DomainInputEvent::KeyPress('n'),
+        rustain::adapters::tui::keymap::Host::Local,
+        &facts,
+    );
+    assert!(cancelled.is_some());
+    assert!(h.state.decisions.is_empty());
     let restored = render_runtime(&mut h, &mut tabs, &core);
     assert!(
         restored.contains("2/3 done") && !restored.contains("spawn 4?"),
@@ -260,43 +288,35 @@ fn runtime_render_wires_live_wave_strip_and_pending_spawn_gate() {
 #[test]
 fn wave_widgets_are_called_from_chat_pane_composition_root() {
     let mut wave = WaveViewState::started(AgentId::root(), 3);
-    let first = paint_base(None, None, Some(&wave), false);
+    let first = paint_base(None, Some(&wave), false);
     assert!(
         first.contains("3 handles") && first.contains("0/3 done"),
         "{first}"
     );
     wave.completed_count = 2;
-    let advanced = paint_base(None, None, Some(&wave), false);
+    let advanced = paint_base(None, Some(&wave), false);
     assert!(advanced.contains("2/3 done"), "{advanced}");
     assert_ne!(
         first, advanced,
         "real live-strip progress must change pixels"
     );
-    assert!(!paint_base(None, None, None, false).contains("handles"));
+    assert!(!paint_base(None, None, false).contains("handles"));
 
     let handle = PaintWave::new(2);
-    let mut gate = PendingSpawnGate {
-        spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("5 payload-safe-fixture"))
-            .unwrap(),
-        requested: 5,
-        threshold: 2,
-        adjusted: None,
-    };
-    let gated = paint_base(Some(&gate), Some(handle.as_ref()), Some(&wave), false);
-    assert!(
-        gated.contains("spawn 5?") && gated.contains("confirm"),
-        "{gated}"
-    );
+    // With a decision frame open (the spawn gate is one) the base paints no retained
+    // snapshot and pulls none: the frame owns the Stage. The same call with no frame
+    // pulls it (the positive control).
+    let gated = paint_base(Some(handle.as_ref()), Some(&wave), true);
     assert!(!gated.contains("PULLED-SPOKE") && !gated.contains("2/3 done"));
     assert_eq!(
         handle.snapshots.load(Ordering::SeqCst),
         0,
-        "gate wins before a retained snapshot is pulled"
+        "an open frame wins before a retained snapshot is pulled"
     );
-    gate.adjusted = Some(4);
-    let adjusted = paint_base(Some(&gate), Some(handle.as_ref()), Some(&wave), false);
-    assert!(adjusted.contains("spawn 4?"), "{adjusted}");
-    assert_ne!(gated, adjusted);
+    let open = paint_base(Some(handle.as_ref()), Some(&wave), false);
+    assert!(open.contains("PULLED-SPOKE"), "{open}");
+    assert_eq!(handle.snapshots.load(Ordering::SeqCst), 1);
+    assert_ne!(gated, open);
 
     let (mut h, tabs) = wave_stage(handle.clone());
     h.render_active_tab(&tabs);
@@ -483,7 +503,7 @@ fn wave_render_pulls_count_from_handle_not_push_counter() {
     let mut push = WaveViewState::started(AgentId::root(), 19);
     push.completed_count = 18;
     let old = PaintWave::new(2);
-    let first = paint_base(None, Some(old.as_ref()), Some(&push), false);
+    let first = paint_base(Some(old.as_ref()), Some(&push), false);
     assert!(
         first.contains("PULLED-SPOKE-1") && !first.contains("PULLED-SPOKE-2"),
         "{first}"
@@ -491,18 +511,18 @@ fn wave_render_pulls_count_from_handle_not_push_counter() {
     push.completed_count = 17;
     assert_eq!(
         first,
-        paint_base(None, Some(old.as_ref()), Some(&push), false),
+        paint_base(Some(old.as_ref()), Some(&push), false),
         "stale push changes cannot affect retained paint"
     );
     let swapped = PaintWave::new(3);
-    let changed = paint_base(None, Some(swapped.as_ref()), Some(&push), false);
+    let changed = paint_base(Some(swapped.as_ref()), Some(&push), false);
     assert!(changed.contains("PULLED-SPOKE-2"), "{changed}");
     assert_ne!(
         first, changed,
         "swapping the actual handle must visibly change the result rows"
     );
     let reads = swapped.snapshots.load(Ordering::SeqCst);
-    assert!(!paint_base(None, Some(swapped.as_ref()), Some(&push), true).contains("PULLED-SPOKE"));
+    assert!(!paint_base(Some(swapped.as_ref()), Some(&push), true).contains("PULLED-SPOKE"));
     assert_eq!(
         swapped.snapshots.load(Ordering::SeqCst),
         reads,
@@ -567,7 +587,7 @@ fn fanout_consults_gate_decision_before_launch() {
     );
     assert!(
         fanout_command.contains("GateDecision::Refuse")
-            && fanout_command.contains("pending_spawn_gate"),
+            && fanout_command.contains("raise_spawn_gate"),
         "the Refuse path must open the spawn gate, not silently launch"
     );
     assert!(

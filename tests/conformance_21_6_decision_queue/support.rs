@@ -27,10 +27,24 @@ use rustain::domain::models::visual::DensityMode;
 use rustain::domain::models::{NotificationsConfig, PermissionMode, StatusState};
 use unicode_width::UnicodeWidthStr;
 
-/// A `TuiState` whose notification store runs on a `MockClock`.
+/// Install a recording copier (never the real clipboard); the shared list holds every
+/// text the state's `c` copy handed it.
+pub fn record_copies(state: &mut TuiState) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let copies = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = copies.clone();
+    state.clipboard_copier = Some(Arc::new(move |text: &str| {
+        sink.lock().unwrap().push(text.to_owned());
+        rustain::adapters::tui::clipboard::ClipboardResult::Osc52Success
+    }));
+    copies
+}
+
+/// A `TuiState` whose notification store runs on a `MockClock` and whose clipboard
+/// is a recorder (hermetic: no test writes the real clipboard or home).
 pub fn clocked(width: u16, height: u16) -> (TuiState, Arc<MockClock>) {
     let clock = Arc::new(MockClock::new(Instant::now()));
     let mut state = TuiState::new(width, height);
+    record_copies(&mut state);
     state.notifications =
         NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
     let layout = layout_of(&state, width, height);

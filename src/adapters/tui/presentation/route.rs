@@ -229,6 +229,21 @@ pub fn route(
             }
             Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),
             Some(PaneOutcome::Quit) => RouteEffect::QuitRequest,
+            // `c` on any decision frame copies the item's original text (both hosts).
+            Some(PaneOutcome::Copy(text)) => {
+                let copier = state.clipboard_copier.clone();
+                match copier {
+                    Some(copier) => crate::adapters::tui::handlers::clipboard::notify_copy(
+                        state, &text, &*copier,
+                    ),
+                    None => crate::adapters::tui::handlers::clipboard::notify_copy(
+                        state,
+                        &text,
+                        &crate::adapters::tui::clipboard::copy_to_clipboard,
+                    ),
+                }
+                RouteEffect::Consumed
+            }
             Some(PaneOutcome::Consumed) | None => RouteEffect::Consumed,
         },
         Surface::DecisionQueue => match decision_queue::handle_list_key(state, host, key, facts) {

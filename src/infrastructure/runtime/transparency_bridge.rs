@@ -360,14 +360,16 @@ pub(crate) fn fanout_command(
                                 );
                             }
                             GateDecision::Refuse => {
-                                state.pending_spawn_gate =
-                                    Some(crate::adapters::tui::state::PendingSpawnGate {
+                                crate::adapters::tui::decision_queue::raise_spawn_gate(
+                                    state,
+                                    conversation_id,
+                                    crate::adapters::tui::decision_queue::PendingSpawnGate {
                                         spec,
                                         requested,
                                         threshold,
                                         adjusted: None,
-                                    });
-                                crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, true);
+                                    },
+                                );
                                 state.needs_redraw = true;
                             }
                         }

@@ -9,7 +9,7 @@
 //! next to them (`cargo test --lib story21_6_`).
 
 #[path = "conformance_21_6_decision_queue/support.rs"]
-mod support;
+pub(crate) mod support;
 
 #[path = "conformance_21_6_decision_queue/k1_queue.rs"]
 mod k1_queue;
@@ -25,3 +25,18 @@ mod k4_permission;
 
 #[path = "conformance_21_6_decision_queue/k6_list.rs"]
 mod k6_list;
+
+#[path = "conformance_21_6_decision_queue/raisers.rs"]
+pub(crate) mod raisers;
+
+#[path = "conformance_21_6_decision_queue/k3b_effects.rs"]
+mod k3b_effects;
+
+#[path = "conformance_21_6_decision_queue/k7_question.rs"]
+mod k7_question;
+
+#[path = "conformance_21_6_decision_queue/k8_invariance.rs"]
+mod k8_invariance;
+
+#[path = "conformance_21_6_decision_queue/k16_patch.rs"]
+mod k16_patch;

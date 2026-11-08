@@ -3,15 +3,19 @@
 //! The registry rows of the focused item's context (a kind's own rows, then its
 //! `Context::Decision` parent) resolve the key; the item's kind maps the command to
 //! its existing effect. Rail keys are inert for 500 ms after the first paint
-//! (dropped, never replayed); `Esc`, `Ctrl+C`, `Ctrl+Q` and scrolling never decide.
-//! The Review reader and the Deny + feedback field are sub-contexts of the frame:
-//! `Esc` / `Ctrl+C` leave them before they would defer the item.
+//! (dropped, never replayed); `Esc`, `Ctrl+C`, `Ctrl+Q`, `c` (copy) and scrolling never
+//! decide. The Review reader, the Deny + feedback field, the question's answer field and
+//! the skill file reader are sub-contexts of the frame: `Esc` / `Ctrl+C` leave them
+//! before they would defer the item.
 
 use super::compose::{self, FieldKey};
+use super::question::ANSWER_MAX_BYTES;
+use super::skill_trust;
 use super::{
     DecisionEffect, DecisionItem, DecisionKey, DecisionKind, DecisionSubject, EscPolicy,
-    PermissionPayload, Responder, current, request_carryover,
+    PermissionPayload, Responder, current, focused_key, request_carryover,
 };
+use crate::adapters::tui::handlers::clipboard::notify_failure;
 use crate::adapters::tui::keymap::table_card::CardCmd;
 use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
 use crate::adapters::tui::keymap::table_permission::PermissionCmd;
@@ -20,7 +24,7 @@ use crate::adapters::tui::notification_log::LogFacts;
 use crate::adapters::tui::presentation::text_field::TextField;
 use crate::adapters::tui::presentation::{self, Surface};
 use crate::adapters::tui::state::TuiState;
-use crate::adapters::tui::widgets::decision_frame;
+use crate::adapters::tui::widgets::decision_frame::{self, CopySource};
 use crate::domain::events::DomainInputEvent;
 
 /// Rows one `PgUp`/`PgDn` moves the body.
@@ -33,15 +37,20 @@ pub enum PaneKey {
     Enter,
     Esc,
     CtrlC,
+    CtrlD,
     CtrlQ,
     PageUp,
     PageDown,
+    Up,
+    Down,
+    Left,
+    Right,
     /// Any other user input: consumed, never leaked to the surface below.
     Other,
 }
 
 /// What the host must do after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneOutcome {
     /// Swallowed (inert window, unmapped key, deferral, a new item raised).
     Consumed,
@@ -49,6 +58,9 @@ pub enum PaneOutcome {
     Quit,
     /// Run this existing effect exactly once.
     Effect(DecisionEffect),
+    /// `c`: copy this text (the item's original, bounded to the copy limit) with the
+    /// host's clipboard and its one copy notice.
+    Copy(String),
 }
 
 impl PaneKey {
@@ -58,9 +70,14 @@ impl PaneKey {
             PaneKey::Enter => Key::Enter,
             PaneKey::Esc => Key::Esc,
             PaneKey::CtrlC => Key::Ctrl('c'),
+            PaneKey::CtrlD => Key::Ctrl('d'),
             PaneKey::CtrlQ => Key::Ctrl('q'),
             PaneKey::PageUp => Key::PageUp,
             PaneKey::PageDown => Key::PageDown,
+            PaneKey::Up => Key::Up,
+            PaneKey::Down => Key::Down,
+            PaneKey::Left => Key::Left,
+            PaneKey::Right => Key::Right,
             PaneKey::Other => Key::Other,
         }
     }
@@ -74,6 +91,7 @@ enum Cmd {
     Esc,
     ScrollUp,
     ScrollDown,
+    Copy,
     Enter,
     Yes,
     No,
@@ -86,9 +104,8 @@ enum Cmd {
     Deny,
     Feedback,
     Review,
-    ConsentOnce,
-    ConsentAlways,
-    ConsentDecline,
+    /// A card row (consent, question, skill trust, plan, delegation, spawn gate, …).
+    Card(CardCmd),
 }
 
 fn command_of(id: CommandId) -> Option<Cmd> {
@@ -98,6 +115,7 @@ fn command_of(id: CommandId) -> Option<Cmd> {
         CommandId::Overlay(OverlayCmd::PaneEsc) => Cmd::Esc,
         CommandId::Overlay(OverlayCmd::PaneScrollUp) => Cmd::ScrollUp,
         CommandId::Overlay(OverlayCmd::PaneScrollDown) => Cmd::ScrollDown,
+        CommandId::Overlay(OverlayCmd::PaneCopy) => Cmd::Copy,
         CommandId::Overlay(OverlayCmd::PaneEnter) => Cmd::Enter,
         CommandId::Overlay(OverlayCmd::PaneYes) => Cmd::Yes,
         CommandId::Overlay(OverlayCmd::PaneNo) => Cmd::No,
@@ -110,9 +128,7 @@ fn command_of(id: CommandId) -> Option<Cmd> {
         CommandId::Permission(PermissionCmd::Deny) => Cmd::Deny,
         CommandId::Permission(PermissionCmd::DenyWithFeedback) => Cmd::Feedback,
         CommandId::Permission(PermissionCmd::Review) => Cmd::Review,
-        CommandId::Card(CardCmd::Yes) => Cmd::ConsentOnce,
-        CommandId::Card(CardCmd::Always) => Cmd::ConsentAlways,
-        CommandId::Card(CardCmd::No) => Cmd::ConsentDecline,
+        CommandId::Card(card) => Cmd::Card(card),
         _ => return None,
     })
 }
@@ -161,20 +177,28 @@ pub fn handle_domain_event(
     Some(execute(state, key, facts, host))
 }
 
-/// The Deny + feedback field of a permission item, when it is open.
-fn composing(item: &DecisionItem) -> bool {
-    matches!(&item.subject, DecisionSubject::Permission(payload) if payload.feedback.is_some())
-}
-
-/// The registry context that resolves this item's keys now.
+/// The registry context that resolves this item's keys now: its kind's, or its open
+/// sub-context's (the Deny + feedback field, the question's answer field, the skill file).
 pub(crate) fn context_of(item: &DecisionItem) -> Context {
     if item.is_stale() {
-        Context::Decision
-    } else if composing(item) {
-        Context::DecisionCompose
-    } else {
-        item.kind.context()
+        return Context::Decision;
     }
+    match &item.subject {
+        DecisionSubject::Permission(payload) if payload.feedback.is_some() => {
+            Context::DecisionCompose
+        }
+        DecisionSubject::Question(payload) if payload.editing => Context::Question,
+        DecisionSubject::SkillTrust(payload) if payload.inspecting => Context::SkillTrustInspect,
+        _ => item.kind.context(),
+    }
+}
+
+/// True while the item's own text field is open and takes the keys.
+fn field_open(item: &DecisionItem) -> bool {
+    matches!(
+        context_of(item),
+        Context::DecisionCompose | Context::Question
+    )
 }
 
 fn payload_mut<'a>(
@@ -187,28 +211,48 @@ fn payload_mut<'a>(
     }
 }
 
-/// Edit the open field of the focused permission with `edit` (a paste, a key).
-/// False when no field is open.
-pub(crate) fn edit_field(state: &mut TuiState, edit: impl FnOnce(&mut TextField) -> bool) -> bool {
-    let Some(key) = state
-        .modal_stack
-        .all_frames()
-        .find(|frame| frame.surface == Surface::Decision)
-        .and_then(|frame| frame.decision.clone())
-    else {
+/// THE edit target of a decision frame (Rule A, M8): the one text field the item owns
+/// while it is open (the Deny + feedback field, the question's answer field) and its byte
+/// bound. A frame's keys and paste edit this field and never `state.input_buffer`.
+fn edit_target(subject: &mut DecisionSubject) -> Option<(&mut TextField, usize)> {
+    match subject {
+        DecisionSubject::Permission(payload) => payload
+            .feedback
+            .as_mut()
+            .map(|field| (field, super::permission::FEEDBACK_MAX_BYTES)),
+        DecisionSubject::Question(payload) if payload.editing => {
+            Some((&mut payload.field, ANSWER_MAX_BYTES))
+        }
+        _ => None,
+    }
+}
+
+/// Edit the open field of the focused frame with `edit` (a paste, a key); `edit` gets
+/// the field and its byte bound. False when no field is open.
+pub(crate) fn edit_field(
+    state: &mut TuiState,
+    edit: impl FnOnce(&mut TextField, usize) -> bool,
+) -> bool {
+    let Some(key) = focused_key(state) else {
         return false;
     };
-    let Some(field) = payload_mut(state, &key).and_then(|payload| payload.feedback.as_mut()) else {
+    let Some(item) = state.decisions.item_mut(&key) else {
         return false;
     };
-    edit(field);
+    if item.is_stale() {
+        return false;
+    }
+    let Some((field, max)) = edit_target(&mut item.subject) else {
+        return false;
+    };
+    edit(field, max);
     state.needs_redraw = true;
     true
 }
 
 /// Paste into the focused frame's open field.
 pub(crate) fn paste(state: &mut TuiState, text: &str) -> bool {
-    edit_field(state, |field| compose::paste(field, text))
+    edit_field(state, |field, max| compose::paste(field, text, max))
 }
 
 /// Resolve the key in the focused item's context (letters fold case in `Decision`)
@@ -231,10 +275,11 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     let item_key = item.key();
     let kind = item.kind;
     let stale = item.is_stale();
-    let in_field = composing(item);
+    let in_field = field_open(item);
     let reviewing = matches!(&item.subject, DecisionSubject::Permission(p) if p.reviewing);
     let conversation_id = item.conversation_id.clone();
     let context = context_of(item);
+    let inspecting = context == Context::SkillTrustInspect;
     let command = match keymap::resolve(context, host, &[key]) {
         Resolved::Hit(row) => command_of(row.command),
         _ => None,
@@ -250,11 +295,15 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         return PaneOutcome::Consumed;
     }
     if in_field {
-        return field_key(state, facts, host, &item_key, key);
+        return field_key(state, facts, host, &item_key, context, key);
     }
     match command {
         Some(Cmd::Back | Cmd::Esc) if reviewing => {
             leave_review(state, &item_key);
+            return PaneOutcome::Consumed;
+        }
+        Some(Cmd::Card(CardCmd::Back)) if inspecting => {
+            skill_trust::leave_inspect(state, &item_key);
             return PaneOutcome::Consumed;
         }
         Some(Cmd::Back) => {
@@ -268,13 +317,23 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
             return PaneOutcome::Consumed;
         }
         Some(Cmd::ScrollUp) => {
-            scroll(state, &item_key, false);
+            scroll(state, &item_key, false, SCROLL_PAGE);
             return PaneOutcome::Consumed;
         }
         Some(Cmd::ScrollDown) => {
-            scroll(state, &item_key, true);
+            scroll(state, &item_key, true, SCROLL_PAGE);
             return PaneOutcome::Consumed;
         }
+        Some(Cmd::Card(CardCmd::Up)) if inspecting => {
+            scroll(state, &item_key, false, 1);
+            return PaneOutcome::Consumed;
+        }
+        Some(Cmd::Card(CardCmd::Down)) if inspecting => {
+            scroll(state, &item_key, true, 1);
+            return PaneOutcome::Consumed;
+        }
+        // Copying decides nothing, so it is never inert either.
+        Some(Cmd::Copy) => return copy(state, &item_key),
         _ => {}
     }
     if state.decisions.inert(state) {
@@ -301,9 +360,67 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         (DecisionKind::Permission, Cmd::Session) => Some(DecisionEffect::PermissionAllowSession),
         (DecisionKind::Permission, Cmd::Always) => Some(DecisionEffect::PermissionAllowAlways),
         (DecisionKind::Permission, Cmd::Deny) => Some(DecisionEffect::PermissionDeny),
-        (DecisionKind::Consent, Cmd::ConsentOnce) => Some(DecisionEffect::ConsentOnce),
-        (DecisionKind::Consent, Cmd::ConsentAlways) => Some(DecisionEffect::ConsentAlways),
-        (DecisionKind::Consent, Cmd::ConsentDecline) => Some(DecisionEffect::ConsentDecline),
+        (DecisionKind::Consent, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::ConsentOnce),
+        (DecisionKind::Consent, Cmd::Card(CardCmd::Always)) => Some(DecisionEffect::ConsentAlways),
+        (DecisionKind::Consent, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::ConsentDecline),
+        (DecisionKind::Question, Cmd::Card(CardCmd::Skip)) => Some(DecisionEffect::QuestionSkip),
+        (DecisionKind::SkillTrust, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::SkillTrustAccept)
+        }
+        (DecisionKind::SkillTrust, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::SkillTrustDecline)
+        }
+        (DecisionKind::PlanApproval, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::PlanApproveNormal)
+        }
+        (DecisionKind::PlanApproval, Cmd::Card(CardCmd::Always)) => {
+            Some(DecisionEffect::PlanApproveAutoEdit)
+        }
+        (DecisionKind::PlanApproval, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::PlanReject),
+        (DecisionKind::PlanCard, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::PlanCardApprove),
+        (DecisionKind::PlanCard, Cmd::Card(CardCmd::Edit)) => Some(DecisionEffect::PlanCardEdit),
+        (DecisionKind::PlanCard, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::PlanCardReject),
+        (DecisionKind::PlanDeviation, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::PlanDeviationApprove)
+        }
+        (DecisionKind::PlanDeviation, Cmd::Card(CardCmd::Edit)) => {
+            Some(DecisionEffect::PlanDeviationEdit)
+        }
+        (DecisionKind::PlanDeviation, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::PlanDeviationReject)
+        }
+        (DecisionKind::SkipCascade, Cmd::Card(CardCmd::CascadeSkip)) => {
+            Some(DecisionEffect::SkipCascadeSkip)
+        }
+        (DecisionKind::SkipCascade, Cmd::Card(CardCmd::Continue)) => {
+            Some(DecisionEffect::SkipCascadeContinue)
+        }
+        (DecisionKind::SkipCascade, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::SkipCascadeCancel)
+        }
+        (DecisionKind::CancelPlan, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::CancelPlanConfirm)
+        }
+        (DecisionKind::CancelPlan, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::CancelPlanDecline)
+        }
+        (DecisionKind::AgentKill, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::AgentKillConfirm)
+        }
+        (DecisionKind::AgentKill, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::AgentKillDecline),
+        (DecisionKind::Delegation, Cmd::Card(CardCmd::Delegate)) => {
+            Some(DecisionEffect::DelegateTask)
+        }
+        (DecisionKind::Delegation, Cmd::Card(CardCmd::RunLocal)) => {
+            Some(DecisionEffect::RunTaskLocally)
+        }
+        (DecisionKind::Delegation, Cmd::Card(CardCmd::CancelPlan)) => {
+            Some(DecisionEffect::DelegationCardCancel)
+        }
+        (DecisionKind::SpawnGate, Cmd::Card(CardCmd::Confirm)) => {
+            Some(DecisionEffect::SpawnGateConfirm)
+        }
+        (DecisionKind::SpawnGate, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::SpawnGateCancel),
         (kind, Cmd::Esc) => match kind.esc() {
             EscPolicy::Resolve(effect) => Some(effect),
             EscPolicy::Defer => {
@@ -336,33 +453,88 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
                 state.decisions.scroll = 0;
             }
         }
+        (DecisionKind::Question, Cmd::Card(CardCmd::Answer)) => {
+            if let Some(DecisionSubject::Question(payload)) =
+                state.decisions.item_mut(&item_key).map(|i| &mut i.subject)
+            {
+                payload.editing = true;
+            }
+        }
+        // Reading the file decides nothing: the item stays queued. A file already read
+        // opens at once; otherwise the host reads it off the paint path.
+        (DecisionKind::SkillTrust, Cmd::Card(CardCmd::Inspect)) => {
+            if !skill_trust::reopen_inspect(state, &item_key) {
+                return PaneOutcome::Effect(DecisionEffect::SkillTrustInspect);
+            }
+        }
+        // Opening the editor decides nothing: the plan stays awaiting approval.
+        (DecisionKind::PlanApproval, Cmd::Card(CardCmd::Edit)) => {
+            return PaneOutcome::Effect(DecisionEffect::PlanRevise);
+        }
+        (
+            DecisionKind::SpawnGate,
+            Cmd::Card(card @ (CardCmd::Cap | CardCmd::Left | CardCmd::Right)),
+        ) => {
+            if let Some(DecisionSubject::SpawnGate(gate)) =
+                state.decisions.item_mut(&item_key).map(|i| &mut i.subject)
+            {
+                match card {
+                    CardCmd::Cap => gate.cap_at_threshold(),
+                    CardCmd::Left => gate.adjust_left(),
+                    _ => gate.adjust_right(),
+                }
+            }
+        }
         _ => {}
     }
     PaneOutcome::Consumed
 }
 
-/// One key while the Deny + feedback field is open: it edits, sends or leaves.
+/// One key while a frame-owned text field is open: it edits, sends or leaves.
 fn field_key(
     state: &mut TuiState,
     facts: &LogFacts,
     host: Host,
     item_key: &DecisionKey,
+    context: Context,
     key: Key,
 ) -> PaneOutcome {
-    let Some(field) = payload_mut(state, item_key).and_then(|payload| payload.feedback.as_mut())
+    let kind = item_key.kind;
+    let Some((field, max)) = state
+        .decisions
+        .item_mut(item_key)
+        .and_then(|item| edit_target(&mut item.subject))
     else {
         return PaneOutcome::Consumed;
     };
-    match compose::apply(field, key, host) {
-        FieldKey::Send => resolve(
-            state,
-            facts,
-            item_key,
-            DecisionEffect::PermissionDenyFeedback,
-        ),
+    let empty = field.is_empty();
+    match compose::apply(field, context, key, host, max) {
+        FieldKey::Send => {
+            // An empty answer sends nothing; a send inside the inert window is dropped
+            // like every deciding key (the field itself types at once).
+            if kind == DecisionKind::Question && empty {
+                return PaneOutcome::Consumed;
+            }
+            if state.decisions.inert(state) {
+                return PaneOutcome::Consumed;
+            }
+            let effect = match kind {
+                DecisionKind::Question => DecisionEffect::QuestionSend,
+                _ => DecisionEffect::PermissionDenyFeedback,
+            };
+            resolve(state, facts, item_key, effect)
+        }
+        FieldKey::Skip => {
+            if state.decisions.inert(state) {
+                return PaneOutcome::Consumed;
+            }
+            resolve(state, facts, item_key, DecisionEffect::QuestionSkip)
+        }
         FieldKey::Back => {
-            if let Some(payload) = payload_mut(state, item_key) {
-                payload.feedback = None;
+            match state.decisions.item_mut(item_key).map(|i| &mut i.subject) {
+                Some(DecisionSubject::Permission(payload)) => payload.feedback = None,
+                Some(DecisionSubject::Question(payload)) => payload.editing = false,
+                _ => {}
             }
             PaneOutcome::Consumed
         }
@@ -431,7 +603,7 @@ fn leave_review(state: &mut TuiState, key: &DecisionKey) {
     state.decisions.scroll = 0;
 }
 
-fn scroll(state: &mut TuiState, key: &DecisionKey, forward: bool) {
+fn scroll(state: &mut TuiState, key: &DecisionKey, forward: bool, step: usize) {
     let Some(item) = state.decisions.item(key) else {
         return;
     };
@@ -439,10 +611,24 @@ fn scroll(state: &mut TuiState, key: &DecisionKey, forward: bool) {
     // A re-wrap (resize) may have shortened the body since the offset was kept.
     let at = state.decisions.scroll.min(rows.saturating_sub(1));
     state.decisions.scroll = if forward {
-        (at + SCROLL_PAGE).min(rows.saturating_sub(1))
+        (at + step).min(rows.saturating_sub(1))
     } else {
-        at.saturating_sub(SCROLL_PAGE)
+        at.saturating_sub(step)
     };
+}
+
+/// `c`: the item's original text, or the refusal when it is above the copy limit.
+fn copy(state: &mut TuiState, key: &DecisionKey) -> PaneOutcome {
+    let Some(item) = state.decisions.item(key) else {
+        return PaneOutcome::Consumed;
+    };
+    match decision_frame::copy_source(item, state) {
+        CopySource::Text(text) => PaneOutcome::Copy(text),
+        CopySource::TooLarge => {
+            notify_failure(state, "decision text exceeds the 8 MiB copy limit");
+            PaneOutcome::Consumed
+        }
+    }
 }
 
 fn defer_current(state: &mut TuiState, key: &DecisionKey) {

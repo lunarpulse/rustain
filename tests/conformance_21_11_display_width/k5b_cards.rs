@@ -509,31 +509,37 @@ fn k5b_apply_card_file_word_boundary_at_the_real_budget() {
 // ── skill trust inspect rows ────────────────────────────────────────────────
 
 #[test]
-fn k5b_skill_inspect_rows_keep_the_fixed_78_cell_budget() {
+fn k5b_skill_inspect_rows_wrap_by_cells_and_never_truncate() {
+    // 21-6 6-C: the old fixed 78-cell budget ellipsized (`...`); the frame body wraps every
+    // line on grapheme boundaries at the frame's inner width and shows the whole file.
     let a = |n: usize| "a".repeat(n);
-    let cases: Vec<(String, String)> = vec![
-        (a(78), a(78)),
-        (a(79), format!("{}...", a(75))),
-        (C.repeat(39), C.repeat(39)),
-        (C.repeat(40), format!("{}...", C.repeat(37))),
-        (format!("{}{G}", a(76)), format!("{}{G}", a(76))),
-        (format!("{}{G}tail", a(74)), format!("{}...", a(74))),
-        (format!("{}{A}zzzz", a(74)), format!("{}{A}...", a(74))),
+    let cases: Vec<String> = vec![
+        a(78),
+        a(79),
+        C.repeat(39),
+        C.repeat(40),
+        format!("{}{G}", a(76)),
+        format!("{}{G}tail", a(74)),
+        format!("{}{A}zzzz", a(74)),
     ];
     let theme = Theme::dark();
-    for (line, want) in cases {
-        let lines = skill_trust_prompt::render_inspect_lines("s", &line, 5, &theme);
+    for line in cases {
+        let lines = skill_trust_prompt::inspect_lines("s", &line, 78, &theme);
         let n = lines.len() as u16;
-        let p = paint(130, n, |f| {
+        let p = paint(78, n, |f| {
             let area = f.area();
             Paragraph::new(lines).render(area, f.buffer_mut());
         });
-        let row = row_text(&p.buffer, 1);
-        let shown = row
-            .strip_prefix("┃ ")
-            .and_then(|r| r.strip_suffix(" ┃"))
-            .unwrap_or_else(|| panic!("rails lost: {row:?}"));
-        assert_eq!(shown, want, "line {line:?}");
+        let rows: Vec<String> = (1..n).map(|y| row_text(&p.buffer, y)).collect();
+        for row in &rows {
+            assert!(UnicodeWidthStr::width(row.trim_end()) <= 78, "{row:?}");
+            assert!(!row.contains("..."), "nothing is ellipsized: {row:?}");
+        }
+        let joined: String = rows.iter().map(|row| row.trim_end()).collect();
+        assert_eq!(joined, line, "the line is shown whole, wrapped");
+        // Exact fit stays one row; one cell over wraps to a second.
+        let fits = UnicodeWidthStr::width(line.as_str()) <= 78;
+        assert_eq!(rows.len(), if fits { 1 } else { 2 }, "line {line:?}");
         assert_whole_clusters(&p.buffer);
     }
 }

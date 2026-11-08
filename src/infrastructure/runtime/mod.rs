@@ -7,6 +7,7 @@ pub mod artifact_bridge;
 pub(crate) mod attach_interrupt;
 #[cfg(unix)]
 pub mod attach_loop;
+pub mod decision_effects;
 pub mod event_bus;
 pub mod event_loop;
 pub mod launchpad_facts;

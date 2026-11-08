@@ -42,6 +42,7 @@ pub mod model_switch;
 pub mod notice;
 pub mod peer_command;
 pub mod plan_card;
+pub(crate) mod plan_decisions;
 pub mod profile_switch;
 pub(crate) mod recipient_actions;
 pub mod render_error;

@@ -178,7 +178,6 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
             .last_printable_at
             .is_some_and(|at| now.saturating_duration_since(at) < decision_queue::TYPING_GRACE)
         || state.pending_leader.is_some()
-        || state.ask_user_question.is_some()
         || app::proposal_higher_confirmation_active(state)
         || state.reverse_search.is_open()
         || !matches!(

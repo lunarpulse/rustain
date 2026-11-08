@@ -358,7 +358,6 @@ const CTRL_WUH: &str = r"Key::Ctrl\('[whu]'|DomainKey::Ctrl[WUH]\b";
 #[rustfmt::skip]
 const FIELD_EDIT_ALLOWLIST: &[Allow] = &[
     ("src/adapters/tui/app.rs", &[
-        "let field_edit = matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h'));",
         "FieldCmd::DeleteWordBack => DomainKey::CtrlW,", "FieldCmd::Clear => DomainKey::CtrlU,", "FieldCmd::DeleteBack => DomainKey::CtrlH,",
         "DomainKey::CtrlW => text_edit::kill_word_back", "DomainKey::CtrlU => text_edit::kill_to_line_start",
         "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlH));", "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlU));", "return Some(DomainInputEvent::SpecialKey(DomainKey::CtrlW));",
@@ -435,6 +434,7 @@ const SKIPPED_TEST_FILES: &[&str] = &[
     "src/adapters/daemon/server/turn_interrupt/tests.rs",
     "src/adapters/responses/tests.rs",
     "src/adapters/tui/auth_outcome_tests.rs",
+    "src/adapters/tui/decision_queue/cards_tests.rs",
     "src/adapters/tui/story21_2_slash_tests.rs",
     "src/infrastructure/runtime/attach_loop/inspect_hint_tests.rs",
     "src/infrastructure/runtime/state_extraction_tests.rs",

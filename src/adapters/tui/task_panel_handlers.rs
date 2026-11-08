@@ -560,15 +560,18 @@ pub fn handle_task_skip(
                     conversation_id: conversation.id.clone(),
                 });
             } else {
-                // Show cascade card
-                state.task_panel_state.skip_cascade_pending =
-                    Some(crate::adapters::tui::state::SkipCascadePending {
+                // Raise the cascade decision (Requested arrival)
+                crate::adapters::tui::handlers::plan_decisions::arrive_skip_cascade(
+                    state,
+                    &conversation.id,
+                    crate::adapters::tui::decision_queue::SkipCascadePending {
                         plan_id: plan_id.clone(),
                         source_task: task_number,
                         source_prior_status: prior_status,
                         source_prior_error: plan.tasks[idx].error.clone(),
                         downstream,
-                    });
+                    },
+                );
             }
 
             notices

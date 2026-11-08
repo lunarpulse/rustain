@@ -874,20 +874,30 @@ fn test_e2e_fork_blocked_during_permission_overlay() {
 
 #[test]
 fn test_e2e_fork_blocked_during_question_overlay() {
-    // DF-018: 'f' key is consumed by the Question overlay
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question));
-    state.ask_user_question = Some(
-        rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState {
-            tool_use_id: "tu-1".to_string(),
-            question: "What?".to_string(),
-            input_buffer: String::new(),
-            cursor_position: 0,
-            submitted_answer: None,
-        },
-    );
-
+    // DF-018: 'f' key is consumed by the Question frame (it types into its answer field)
+    use rustain::adapters::tui::decision_queue::{self, DecisionSubject};
     use rustain::domain::events::DomainInputEvent;
+    let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    let mut state = TuiState::new(80, 24);
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
+    state.focus = FocusState::Chat;
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    decision_queue::raise_question(
+        &mut state,
+        "c1",
+        "tu-1".to_string(),
+        "What?".to_string(),
+        tx,
+    );
+    // First paint starts the inert clock; the window passes before the user types.
+    decision_queue::note_painted(&mut state);
+    clock.advance(decision_queue::INERT_AFTER_PAINT);
+
     let event = DomainInputEvent::KeyPress('f');
     let action = handle_input(&mut state, &event);
 
@@ -895,6 +905,19 @@ fn test_e2e_fork_blocked_during_question_overlay() {
         action,
         InputAction::ForkAtMessage,
         "'f' in Question overlay must NOT produce ForkAtMessage (DF-018)"
+    );
+    assert_eq!(action, InputAction::Consumed);
+    let typed = state
+        .decisions
+        .items()
+        .find_map(|item| match &item.subject {
+            DecisionSubject::Question(payload) => Some(payload.field.as_str().to_owned()),
+            _ => None,
+        });
+    assert_eq!(
+        typed.as_deref(),
+        Some("f"),
+        "the key went to the frame field"
     );
 }
 

@@ -7,13 +7,15 @@ use std::collections::BTreeMap;
 use crate::common;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
-use ratatui::prelude::Rect;
-use ratatui::widgets::{Clear, Paragraph};
 
+use rustain::adapters::tui::decision_queue;
+use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::layout;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::presentation::{self, Shell};
 use rustain::adapters::tui::state::TabRenderState;
+use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState;
 use rustain::adapters::tui::widgets::{chat_pane, input_box, status_bar};
 use rustain::domain::models::tool_call::ApprovalSource;
 use rustain::domain::models::visual::DensityMode;
@@ -349,13 +351,15 @@ fn test_ask_user_question_in_full_layout() {
     let conversation = make_conversation(vec![]);
     let streaming = StreamingState::default();
 
-    let aq_state = AskUserQuestionState {
-        tool_use_id: "tu-ctx-1".to_string(),
-        question: "What is your project name?".to_string(),
-        input_buffer: String::new(),
-        cursor_position: 0,
-        submitted_answer: None,
-    };
+    let mut state = TuiState::new(80, 24);
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    decision_queue::raise_question(
+        &mut state,
+        "test-ctx",
+        "tu-ctx-1".to_string(),
+        "What is your project name?".to_string(),
+        tx,
+    );
 
     terminal
         .draw(|frame| {
@@ -373,23 +377,6 @@ fn test_ask_user_question_in_full_layout() {
                 &mut TabRenderState::default(),
                 &BTreeMap::<String, FeedbackBlock>::new(),
             );
-
-            let aq_lines =
-                rustain::adapters::tui::widgets::ask_user_question::render_ask_user_lines(
-                    &aq_state,
-                    app_layout.chat_pane.width,
-                    &theme,
-                );
-            let aq_height = aq_lines.len() as u16;
-            let aq_area = Rect {
-                x: app_layout.chat_pane.x,
-                y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                    - aq_height.min(app_layout.chat_pane.height),
-                width: app_layout.chat_pane.width,
-                height: aq_height.min(app_layout.chat_pane.height),
-            };
-            frame.render_widget(Clear, aq_area);
-            frame.render_widget(Paragraph::new(aq_lines), aq_area);
 
             status_bar::render(
                 frame,
@@ -435,13 +422,24 @@ fn test_ask_user_question_in_full_layout() {
                 0,
                 None,
             );
+            // The question is a decision frame over the Stage: composed by the shared boundary.
+            let shell = Shell::new(frame.area(), &app_layout);
+            presentation::compose(
+                frame,
+                &state,
+                &shell,
+                Host::Local,
+                &LogFacts::default(),
+                &mut presentation::occlusion::OpaqueRects::new(shell.chat_pane),
+                |_| {},
+            );
         })
         .unwrap();
 
     let text = common::buffer_text(&terminal);
     assert!(
-        text.contains("project name"),
-        "AskUserQuestion should show question text in full layout, got:\n{}",
+        text.contains("project name") && text.contains("Decision: Question"),
+        "AskUserQuestion should show question text in its frame in full layout, got:\n{}",
         text
     );
 }

@@ -44,10 +44,10 @@ Help only: the stream is not interrupted and finishes (`Ready`, no `[interrupted
 carry no smoke witness in the portable-row fixture (only leader rows do), so the six bytes are declared here.
 The leg ends with the leader `Ctrl+X Ctrl+Q` row (fixture row `1811`): the process exits 0.
 
-Leg C (slice 3-C, AC19): in a fresh process a model-proposed plan card is pending.
-Arrival leaves Input focus unchanged; `y` is composer text (the card is not answered);
-`Esc` moves to Chat, where a second `Esc` posts the registry-generated
-cue and decides nothing, a raw `Ctrl+C` neither interrupts nor quits, and the explicit key `n` rejects the plan:
+Leg C (slice 3-C, AC19; 6-C): in a fresh process a model-proposed plan card is pending as a
+`Decision: Plan…` frame (the Stage row keeps the card without a rail). On a settled frame `Esc` defers it
+(the `Needs you (1)` chip waits, nothing is decided), `Ctrl+X q` + `Enter` reopens it, a raw `Ctrl+C`
+defers it again without interrupting or quitting, and the explicit key `n` rejects the plan:
 the provider sees exactly one rejection.
 
 Leg D (3-C patch round, AC19, FR-21-3-c): a SEPARATE test (`test_keymap_truth_attached_permission_card_...`) drives the
@@ -297,37 +297,71 @@ def _chunk(data):
     return f"{len(data):x}\r\n".encode() + data + b"\r\n"
 
 
-def _cue(screen):
-    """The `Esc` / `Ctrl+C` cue toast of a decision card (A8); the card is named by its own words."""
-    return any("never decide this card" in row for row in harness.toast_rows(screen, 3))
+PLAN_CARD_RAIL = "[y] Approve  [e] Edit  [n] Reject  [Esc] Later"
+
+
+def _plan_frame(screen):
+    """The plan card's decision frame (21.6 6-C): a `Decision: Plan…` sheet, the card's own
+    title row inside it and the generated rail; the Stage row paints no rail of its own."""
+    rows = screen.split("\n")
+    top = next((i for i, row in enumerate(rows) if row.startswith("┌ Decision: Plan")), None)
+    if top is None or not rows[top].endswith("┐"):
+        return False
+    bottom = next((i for i in range(top + 1, len(rows)) if rows[i].startswith("└")), None)
+    if bottom is None or not rows[bottom].endswith("┘"):
+        return False
+    inside = rows[top + 1:bottom]
+    if not all(row.startswith("│") and row.endswith("│") for row in inside):
+        return False
+    text = " ".join(row[1:-1].strip() for row in inside)
+    return CARD in text and PLAN_CARD_RAIL in text
 
 
 def _leg_c(tui, evidence, sent, rejections):
-    """Leg C (3-C, AC16/AC17): a pending plan card is never answered by typing, `Esc` or `Ctrl+C`;
-    the explicit key `n` rejects it once."""
+    """Leg C (3-C, AC16/AC17; 6-C): a pending plan card is a decision frame (the Stage row keeps
+    the card without a rail); `Esc` / `Ctrl+C` defer it and never decide, the explicit key `n`
+    rejects it once. Frame keys are inert 500 ms after the first paint, so every key is sent on
+    a SETTLED frame."""
+    def settle(predicate, label):
+        _wait(tui, predicate, label)
+        deadline = time.monotonic() + 0.6
+        while time.monotonic() < deadline:
+            screen = tui.get_screen_text()
+            assert predicate(screen), f"{label} changed:\n{screen}"
+
+    def reopen():
+        _send(tui, sent, "Ctrl+X q", b"\x18q")
+        settle(lambda s: any(row.startswith("┌ Needs you ") for row in s.split("\n"))
+               and "[Enter] Open  [Esc] Back  [Up/Down] Select" in s, "complete Needs-you list")
+        _send(tui, sent, "Enter", b"\r")
+        settle(_plan_frame, "reopened plan frame beyond its guard")
+
     _send(tui, sent, "type plan prompt", PLAN_PROMPT.encode())
     _wait(tui, lambda s: _composer(s) == PLAN_PROMPT, "plan prompt typed")
     _send(tui, sent, "Enter", b"\r")
-    screen = _wait(tui, lambda s: "Plan:" in s and CARD in s and "[y] Approve  [e] Edit  [n] Reject" in s
-                   and "Ready" in harness.status_row(s), "the plan card (full generated rail) is pending and the turn is idle")
+    screen = _wait(tui, lambda s: (_plan_frame(s) or "Needs you (1) ^X q" in harness.status_row(s))
+                   and "Ready" in harness.status_row(s),
+                   "the plan decision (frame or its chip) is pending and the turn is idle")
+    if not _plan_frame(screen):
+        # RU-6: the plan arrived within a second of the typed prompt, so it waits as the chip.
+        reopen()
+        screen = tui.get_screen_text()
     _capture(tui, evidence, "c-01-plan-card", screen)
-    assert not tui._screen.cursor.hidden, screen
-    _send(tui, sent, "y in Input", b"y")
-    screen = _wait(tui, lambda s: _composer(s) == "y", "`y` is composer text while the plan card is pending")
-    assert "Plan:" in screen and CARD in screen, screen
-    _send(tui, sent, "Ctrl+U", CTRL_U)
-    _wait(tui, lambda s: _composer(s) == "", "composer cleared")
-    # `Esc` in Input goes to Chat; there the card owns the keys and `Esc` is a cue, never a decision.
-    _send(tui, sent, "Esc to Chat", b"\x1b")
-    _wait(tui, lambda _s: tui._screen.cursor.hidden, "Chat focus")
-    _send(tui, sent, "Esc on the card", b"\x1b")
-    screen = _wait(tui, _cue, "Esc posts the cue naming the explicit keys")
-    assert "Plan:" in screen and CARD in screen and tui._screen.cursor.hidden, screen
-    _capture(tui, evidence, "c-02-esc-cue", screen)
-    _send(tui, sent, "Ctrl+C on the card", b"\x03")
-    screen = _wait(tui, lambda s: "Plan:" in s and CARD in s, "Ctrl+C leaves the plan card pending")
+    settle(_plan_frame, "plan frame beyond its inert window")
+    # `Esc` defers: the frame closes, the chip waits and the Stage row still holds the card.
+    _send(tui, sent, "Esc on the frame", b"\x1b")
+    screen = _wait(tui, lambda s: "Decision:" not in s and "Plan:" in s and CARD in s
+                   and "Needs you (1) ^X q" in harness.status_row(s), "Esc defers the plan decision")
+    assert not rejections and "rejected" not in screen.lower(), screen
+    _capture(tui, evidence, "c-02-esc-defers", screen)
+    reopen()
+    _send(tui, sent, "Ctrl+C on the frame", b"\x03")
+    screen = _wait(tui, lambda s: "Decision:" not in s and "Plan:" in s and CARD in s
+                   and "Needs you (1) ^X q" in harness.status_row(s), "Ctrl+C defers the plan decision")
     assert tui.child.isalive() and "[interrupted]" not in screen and "System · Quit" not in screen, screen
-    # Ctrl+C decided nothing: the card is still pending, so the explicit `n` below is what rejects it.
+    assert not rejections, "Ctrl+C decided nothing"
+    # Neither key decided: the card is still pending, so the explicit `n` below is what rejects it.
+    reopen()
     _send(tui, sent, "n", b"n")
     screen = _wait(tui, lambda s: "rejected" in s.lower() and "Ready" in harness.status_row(s) and bool(rejections),
                    "the explicit key rejected the plan and the provider saw the rejection")

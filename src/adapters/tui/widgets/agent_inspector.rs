@@ -16,7 +16,6 @@ pub fn render(
     buf: &mut Buffer,
     entry: &AgentRowView,
     scroll_offset: u16,
-    pending_kill_confirm: Option<&crate::domain::models::AgentId>,
     theme: &crate::adapters::tui::theme::Theme,
     spool_tail_cache: &HashMap<crate::domain::models::AgentId, String>,
     cached_entries: &[AgentRowView],
@@ -220,33 +219,15 @@ pub fn render(
 
     lines.push(Line::from(Span::raw("")));
 
-    if pending_kill_confirm == Some(&entry.agent_id) {
-        // Double-bordered kill confirmation card per AC-10-4-7
-        let (confirm_key, confirm) = row_text(InspectorCmd::ConfirmKill);
-        let (cancel_key, cancel) = row_text(InspectorCmd::CancelKill);
-        let (back_key, _) = row_text(InspectorCmd::Close);
-        let kill = format!(
-            "\u{26A0} Kill {} and its subtree?",
-            entry.subagent_type.replace('{', "{{").replace('}', "}}")
-        );
-        lines.push(Line::from(Span::raw("")));
-        lines.push(Line::from(Span::styled(
-            format!("{kill}  [{confirm_key}] {confirm}   [{cancel_key}/{back_key}] {cancel}"),
-            Style::default()
-                .fg(theme.colors.tool_status_error)
-                .add_modifier(Modifier::BOLD),
-        )));
-    } else {
-        use InspectorCmd::{Close, Conversation, Kill, Model, Pause, Tools};
-        let rail = [Pause, Kill, Model, Tools, Conversation, Close].map(|cmd| {
-            let (key, label) = row_text(cmd);
-            format!("[{key}] {label}")
-        });
-        lines.push(Line::from(Span::styled(
-            rail.join("   "),
-            Style::default().fg(theme.colors.fg_secondary),
-        )));
-    }
+    use InspectorCmd::{Close, Conversation, Kill, Model, Pause, Tools};
+    let rail = [Pause, Kill, Model, Tools, Conversation, Close].map(|cmd| {
+        let (key, label) = row_text(cmd);
+        format!("[{key}] {label}")
+    });
+    lines.push(Line::from(Span::styled(
+        rail.join("   "),
+        Style::default().fg(theme.colors.fg_secondary),
+    )));
 
     let content_height = inner.height as usize;
     let total_lines = lines.len();
@@ -260,6 +241,17 @@ pub fn render(
 
     let para = Paragraph::new(visible_lines).wrap(Wrap { trim: false });
     para.render(inner, buf);
+}
+
+/// The body of the `Decision: Kill agent` frame (Story 21.6 6-C): the confirmation the
+/// inspector used to paint under its own rail. The caller sanitizes the agent label.
+pub fn kill_lines(label: &str, theme: &crate::adapters::tui::theme::Theme) -> Vec<Line<'static>> {
+    vec![Line::from(Span::styled(
+        format!("\u{26A0} Kill {label} and its subtree?"),
+        Style::default()
+            .fg(theme.colors.tool_status_error)
+            .add_modifier(Modifier::BOLD),
+    ))]
 }
 
 /// The key and rail label of an inspector command, read from its registry row.
@@ -301,7 +293,6 @@ mod tests {
 
     fn render_to_text(
         entry: &AgentRowView,
-        pending_kill: Option<&AgentId>,
         cache: &HashMap<AgentId, String>,
         width: u16,
         height: u16,
@@ -309,17 +300,7 @@ mod tests {
         let theme = crate::adapters::tui::theme::Theme::dark();
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
-        render(
-            area,
-            &mut buf,
-            entry,
-            0,
-            pending_kill,
-            &theme,
-            cache,
-            &[],
-            MOCK_NOW_UNIX,
-        );
+        render(area, &mut buf, entry, 0, &theme, cache, &[], MOCK_NOW_UNIX);
         let mut text = String::new();
         for y in 0..area.height {
             let mut line = String::new();
@@ -335,7 +316,7 @@ mod tests {
     fn snapshot_inspector_idle() {
         let entry = make_entry("code-reviewer", NodeState::Created);
         let cache = HashMap::new();
-        let text = render_to_text(&entry, None, &cache, 60, 20);
+        let text = render_to_text(&entry, &cache, 60, 20);
         insta::assert_snapshot!(text);
     }
 
@@ -347,15 +328,27 @@ mod tests {
             entry.agent_id.clone(),
             "hello\nworld\nworking...".to_string(),
         );
-        let text = render_to_text(&entry, None, &cache, 60, 20);
+        let text = render_to_text(&entry, &cache, 60, 20);
         insta::assert_snapshot!(text);
     }
 
     #[test]
-    fn snapshot_inspector_kill_confirm() {
+    fn story21_6_the_kill_confirmation_is_a_decision_frame_not_an_inspector_row() {
+        let theme = crate::adapters::tui::theme::Theme::dark();
+        let rows: Vec<String> = kill_lines("reviewer", &theme)
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rows, ["\u{26A0} Kill reviewer and its subtree?"]);
         let entry = make_entry("reviewer", NodeState::Running);
-        let cache = HashMap::new();
-        let text = render_to_text(&entry, Some(&entry.agent_id), &cache, 60, 20);
-        insta::assert_snapshot!(text);
+        let text = render_to_text(&entry, &HashMap::new(), 60, 30);
+        assert!(
+            !text.contains("Kill reviewer and its subtree?"),
+            "the inspector never paints the confirmation itself: {text}"
+        );
+        assert!(
+            text.contains("Kill (cascade)"),
+            "the rail keeps the kill key: {text}"
+        );
     }
 }

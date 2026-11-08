@@ -1,75 +1,52 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-    widgets::Widget,
-};
+//! Delegation suggestion body — Story 10.5: the rows of the `Decision: Delegate task`
+//! frame (Story 21.6 6-C). Keys: the frame's rail (`[d] Delegate  [l] Run locally
+//! [x] Cancel plan`).
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::PendingDelegationCard;
+use ratatui::prelude::*;
+
+use crate::adapters::tui::decision_queue::PendingDelegationCard;
 use crate::adapters::tui::theme::Theme;
+use crate::domain::services::delegation_decider::DelegationReason;
 
-/// Render a delegation suggestion modal card.
-/// Mirrors the plan_card.rs signature.
-pub fn render(area: Rect, buf: &mut Buffer, card: &PendingDelegationCard, theme: &Theme) {
-    let block = ratatui::widgets::Block::default()
-        .title(format!(" Delegate Task {}? ", card.task_number))
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    let inner = block.inner(area);
-    block.render(area, buf);
-
-    let agent_name = &card.suggestion.agent_name;
-    let reason_text = match &card.suggestion.reason {
-        crate::domain::services::delegation_decider::DelegationReason::ExplicitAgentMention => {
-            "explicit mention".to_string()
+/// The suggestion's reason in words.
+fn reason_text(reason: &DelegationReason) -> String {
+    match reason {
+        DelegationReason::ExplicitAgentMention => "explicit mention".to_string(),
+        DelegationReason::DescriptionMatch { overlap_score } => {
+            format!("keyword match (score {overlap_score})")
         }
-        crate::domain::services::delegation_decider::DelegationReason::DescriptionMatch {
-            overlap_score,
-        } => format!("keyword match (score {})", overlap_score),
-        crate::domain::services::delegation_decider::DelegationReason::Heuristic => {
-            "heuristic".to_string()
-        }
-    };
-
-    let lines = [
-        format!("  → {}  ({})", agent_name, reason_text),
-        format!(
-            "  {} Delegate    {} Run locally    {} Cancel plan",
-            rail(Context::Delegation, CardCmd::Delegate),
-            rail(Context::Delegation, CardCmd::RunLocal),
-            rail(Context::Delegation, CardCmd::CancelPlan)
-        ),
-    ];
-
-    for (i, line) in lines.iter().enumerate() {
-        let y = inner.y + i as u16;
-        if y < inner.bottom() {
-            buf.set_stringn(
-                inner.x,
-                y,
-                line,
-                inner.width as usize,
-                Style::default().fg(theme.colors.fg_primary),
-            );
-        }
+        DelegationReason::Heuristic => "heuristic".to_string(),
     }
+}
+
+/// The task and the agent the decider suggests for it. The caller sanitizes the agent
+/// name before it gets here; the copy path passes the original bytes.
+pub fn lines(card: &PendingDelegationCard, theme: &Theme) -> Vec<Line<'static>> {
+    let primary = Style::default().fg(theme.colors.fg_primary);
+    vec![
+        Line::from(Span::styled(
+            format!("Delegate Task {}?", card.task_number),
+            primary.add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!(
+                "→ {}  ({})",
+                card.suggestion.agent_name,
+                reason_text(&card.suggestion.reason)
+            ),
+            primary,
+        )),
+    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::tui::color_detect::ColorCapability;
-    use crate::adapters::tui::state::PendingDelegationCard;
-    use crate::domain::models::tab::ConversationId;
-    use crate::domain::services::delegation_decider::{DelegationReason, DelegationSuggestion};
+    use crate::domain::services::delegation_decider::DelegationSuggestion;
 
     fn make_card(reason: DelegationReason) -> PendingDelegationCard {
         PendingDelegationCard {
-            conversation_id: ConversationId::new(),
+            conversation_id: "c1".to_string(),
             plan_id: "plan-1".to_string(),
             task_number: 2,
             suggestion: DelegationSuggestion {
@@ -81,27 +58,31 @@ mod tests {
         }
     }
 
-    fn test_theme() -> Theme {
-        Theme::for_capability(ColorCapability::TrueColor)
+    fn rows(card: &PendingDelegationCard) -> Vec<String> {
+        lines(card, &Theme::dark())
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 
     #[test]
-    fn snapshot_delegation_card_keyword_match() {
-        let card = make_card(DelegationReason::DescriptionMatch { overlap_score: 3 });
-        let theme = test_theme();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 6));
-        render(buf.area, &mut buf, &card, &theme);
-        let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
-        insta::assert_snapshot!(text);
-    }
-
-    #[test]
-    fn snapshot_delegation_card_explicit_mention() {
-        let card = make_card(DelegationReason::ExplicitAgentMention);
-        let theme = test_theme();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 6));
-        render(buf.area, &mut buf, &card, &theme);
-        let text = buf.content.iter().map(|c| c.symbol()).collect::<String>();
-        insta::assert_snapshot!(text);
+    fn story21_6_the_rows_name_the_task_the_agent_and_the_reason() {
+        assert_eq!(
+            rows(&make_card(DelegationReason::DescriptionMatch {
+                overlap_score: 3
+            })),
+            [
+                "Delegate Task 2?",
+                "→ code-reviewer  (keyword match (score 3))"
+            ]
+        );
+        assert_eq!(
+            rows(&make_card(DelegationReason::ExplicitAgentMention))[1],
+            "→ code-reviewer  (explicit mention)"
+        );
+        assert_eq!(
+            rows(&make_card(DelegationReason::Heuristic))[1],
+            "→ code-reviewer  (heuristic)"
+        );
     }
 }

@@ -1,13 +1,15 @@
-//! Rows of the decision cards (Story 21.3 AC15-AC17, A8, A9, KG-1, KG-2).
+//! Rows of the decision cards (Story 21.3 AC15-AC17, A8, A9, KG-1, KG-2; 21.6 6-C).
 //!
-//! Each card owns the keys while it is the current context. The cards that 21-6 deletes
-//! keep their hand-written arms (FR-21-3-b); these rows are the truth they are checked
-//! against (K11) and the source of every rail and cue key (`render::rail`, `render::card_cue`).
-//! `Esc` and `Ctrl+C` never decide a card: the shared `Card` parent answers both with a
-//! cue (`Cue`); a card that owns a sub-frame back overrides it (`Back`).
+//! The cards that 21-6 moved onto the decision frame (question, skill trust, plan
+//! approval / card / deviation, skip cascade, delegation, spawn gate, cancel plan, agent
+//! kill) are children of `Context::Decision`: `Esc` defers, `Ctrl+C` backs, `Ctrl+Q` asks
+//! to quit, `c` copies and `PgUp`/`PgDn` scroll are the parent's rows. The cards 6-D has
+//! yet to move keep their hand-written arms (FR-21-3-b) under the shared `Card` parent;
+//! these rows are the truth they are checked against (K11) and the source of every rail
+//! and cue key (`render::rail`, `render::card_cue`). `Esc` and `Ctrl+C` never decide a card.
 //!
-//! A row with a label is a key the cue names; a row without one (scroll, edit and cursor
-//! keys) is not offered as a decision.
+//! A row with a label is a key the rail or cue names; a row without one (scroll, edit and
+//! cursor keys) is not offered as a decision.
 
 use super::model::{Binding, CommandId, Context, Key, bind};
 
@@ -20,8 +22,8 @@ pub enum CardCmd {
     Back,
     /// `Enter`: send the text (feedback, answer).
     Send,
-    /// `Backspace`: delete the last character of the field.
-    Erase,
+    /// `Enter` on a question whose answer field is closed: open the field.
+    Answer,
     /// `Ctrl+D`: skip the question (the old `Esc` effect, explicit).
     Skip,
     /// `y`: the card's affirmative answer.
@@ -44,9 +46,9 @@ pub enum CardCmd {
     CancelPlan,
     /// `s`: skip the task and its dependants.
     CascadeSkip,
-    /// `c`: continue anyway (skip-cascade).
+    /// `a`: continue anyway (skip-cascade).
     Continue,
-    /// `c`: cap the spawn at the threshold.
+    /// `t`: cap the spawn at the threshold.
     Cap,
     /// `Enter`: confirm the spawn gate.
     Confirm,
@@ -79,21 +81,24 @@ pub const ROWS: &[Binding] = &[
     // ── shared parent: Esc / Ctrl+C never decide ──
     b(Context::Card, &[Key::Esc], CardCmd::Cue, "").does(CUE),
     b(Context::Card, &[Key::Ctrl('c')], CardCmd::Cue, "").does(CUE),
-    // ── the frame-owned text field (permission feedback; both hosts) ──
-    b(Context::DecisionCompose, &[Key::Enter], CardCmd::Send, "Send").does("Send the text and decide with it"),
-    b(Context::DecisionCompose, &[Key::Esc], CardCmd::Back, "Back").does("Leave the field and return to the undecided request"),
-    b(Context::DecisionCompose, &[Key::Ctrl('c')], CardCmd::Back, "").does("Leave the field without deciding (back one frame)"),
-    // ── AskUserQuestion ──
-    k(Context::Question, &[Key::Enter], CardCmd::Send, "Send").does("Send the answer"),
+    // ── the frame-owned text field (permission feedback, the question answer; both hosts) ──
+    b(Context::DecisionCompose, &[Key::Enter], CardCmd::Send, "Send").te().does("Send the text and decide with it"),
+    b(Context::DecisionCompose, &[Key::Esc], CardCmd::Back, "Back").te().does("Leave the field and return to the undecided request"),
+    b(Context::DecisionCompose, &[Key::Ctrl('c')], CardCmd::Back, "").te().does("Leave the field without deciding (back one frame)"),
+    // ── AskUserQuestion: the answer field is open, then closed (Esc leaves it) ──
     k(Context::Question, &[Key::Ctrl('d')], CardCmd::Skip, "Skip question").does("Skip the question: the agent receives no answer"),
-    k(Context::Question, &[Key::Backspace], CardCmd::Erase, "").does("Delete the last character of the answer"),
+    k(Context::QuestionIdle, &[Key::Enter], CardCmd::Answer, "Answer").does("Open the answer field"),
+    k(Context::QuestionIdle, &[Key::Ctrl('d')], CardCmd::Skip, "Skip question").does("Skip the question: the agent receives no answer"),
     // ── skill trust ──
     k(Context::SkillTrust, &[Key::Char('y')], CardCmd::Yes, "Trust").does("Trust the skill and activate it"),
     k(Context::SkillTrust, &[Key::Char('n')], CardCmd::No, "Decline").does("Decline the skill"),
     k(Context::SkillTrust, &[Key::Char('i')], CardCmd::Inspect, "Inspect").does("Read the skill file before deciding"),
-    k(Context::SkillTrust, &[Key::Char('j')], CardCmd::Down, "").does("Scroll the chat down one line"),
-    k(Context::SkillTrust, &[Key::Char('k')], CardCmd::Up, "").does("Scroll the chat up one line"),
-    k(Context::SkillTrustInspect, &[Key::Esc], CardCmd::Back, "Back").does("Return to the skill trust card"),
+    k(Context::SkillTrustInspect, &[Key::Esc], CardCmd::Back, "Back").does("Return to the undecided skill trust request"),
+    k(Context::SkillTrustInspect, &[Key::Ctrl('c')], CardCmd::Back, "").does("Return to the undecided skill trust request (back one frame)"),
+    k(Context::SkillTrustInspect, &[Key::Up], CardCmd::Up, "").does("Scroll the skill file up one line"),
+    k(Context::SkillTrustInspect, &[Key::Char('k')], CardCmd::Up, "").does("Scroll the skill file up one line"),
+    k(Context::SkillTrustInspect, &[Key::Down], CardCmd::Down, "").does("Scroll the skill file down one line"),
+    k(Context::SkillTrustInspect, &[Key::Char('j')], CardCmd::Down, "").does("Scroll the skill file down one line"),
     // ── plan approval, plan card, plan deviation ──
     k(Context::PlanApproval, &[Key::Char('y')], CardCmd::Yes, "Approve").does("Approve the plan"),
     k(Context::PlanApproval, &[Key::Char('a')], CardCmd::Always, "Approve + auto-edit").does("Approve the plan and auto-approve its edits"),
@@ -104,17 +109,19 @@ pub const ROWS: &[Binding] = &[
     k(Context::PlanDecision, &[Key::Char('n')], CardCmd::No, "Reject").does("Reject the plan or the deviation"),
     // ── skip cascade, delegation, spawn gate ──
     k(Context::SkipCascade, &[Key::Char('s')], CardCmd::CascadeSkip, "Skip cascade").does("Skip the task and everything that depends on it"),
-    k(Context::SkipCascade, &[Key::Char('c')], CardCmd::Continue, "Continue anyway").does("Skip the task only and continue its dependants"),
+    k(Context::SkipCascade, &[Key::Char('a')], CardCmd::Continue, "Continue anyway").does("Skip the task only and continue its dependants"),
     k(Context::SkipCascade, &[Key::Char('n')], CardCmd::No, "Cancel skip").does("Keep the task"),
     k(Context::Delegation, &[Key::Char('d')], CardCmd::Delegate, "Delegate").does("Delegate the task to the suggested agent"),
     k(Context::Delegation, &[Key::Char('l')], CardCmd::RunLocal, "Run locally").does("Run the task in this session"),
     k(Context::Delegation, &[Key::Char('x')], CardCmd::CancelPlan, "Cancel plan").does("Cancel the plan at this task"),
     k(Context::SpawnGate, &[Key::Enter], CardCmd::Confirm, "Confirm").does("Confirm the spawn count"),
-    k(Context::SpawnGate, &[Key::Char('c')], CardCmd::Cap, "Cap").does("Cap the spawn at the threshold"),
+    k(Context::SpawnGate, &[Key::Char('t')], CardCmd::Cap, "Cap").does("Cap the spawn at the threshold"),
     k(Context::SpawnGate, &[Key::Char('n')], CardCmd::No, "Cancel").does("Cancel the spawn: nothing is spawned"),
     k(Context::SpawnGate, &[Key::Left], CardCmd::Left, "").does("Spawn one fewer"),
     k(Context::SpawnGate, &[Key::Right], CardCmd::Right, "").does("Spawn one more"),
     // ── the y / n confirmations ──
+    k(Context::DecisionConfirm, &[Key::Char('y')], CardCmd::Yes, "Confirm").does("Confirm the pending action"),
+    k(Context::DecisionConfirm, &[Key::Char('n')], CardCmd::No, "Decline").does("Decline: nothing is changed"),
     bind(Context::Confirm, &[Key::Char('y')], CommandId::Card(CardCmd::Yes), "Confirm").does("Confirm the pending action"),
     bind(Context::Confirm, &[Key::Char('n')], CommandId::Card(CardCmd::No), "Decline").does("Decline: nothing is changed"),
     k(Context::Forget, &[Key::Char('y')], CardCmd::Yes, "Forget").does("Forget the selected memories"),

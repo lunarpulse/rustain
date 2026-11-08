@@ -4,13 +4,17 @@ use super::keymap_support::press;
 use rustain::adapters::noop::NoOpApprovalPersistence;
 use rustain::adapters::tui::{
     app::InputAction,
+    decision_queue::{self, DecisionKind, DecisionSubject, SkillOrigin},
     keymap::Key,
+    notification_log::LogFacts,
+    notifications::NotificationStore,
     presentation::{self, Frame, Surface, reducer},
-    state::{SkillTrustState, TuiState},
+    state::TuiState,
 };
+use rustain::domain::clock::MockClock;
 use rustain::domain::models::{
-    ApprovalOutcome, FocusState, OverlayType, PermissionResolution, RequestId, SkillTrustResponse,
-    ToolRisk,
+    ApprovalOutcome, FocusState, NotificationsConfig, OverlayType, PermissionResolution, RequestId,
+    SkillTrustResponse, ToolRisk,
     palette::{PaletteAction, PaletteEntry, PaletteScope},
     tool_call::ApprovalSource,
     visual::ConfirmationType,
@@ -286,25 +290,38 @@ async fn surface_handoff_does_not_promote_a_card_in_the_transient_empty_stack() 
     }
 }
 
-fn trust(name: &str) -> (SkillTrustState, oneshot::Receiver<SkillTrustResponse>) {
-    let (response_tx, response) = oneshot::channel();
-    (
-        SkillTrustState {
-            skill_name: name.into(),
-            skill_file: std::path::PathBuf::from(format!("skills/{name}/SKILL.md")),
-            response_tx,
-            inspect_content: None,
-        },
-        response,
-    )
+/// A state whose notifications run on a `MockClock`: the inert window is passed by
+/// moving the clock, never by sleeping.
+fn mock_state() -> (TuiState, Arc<MockClock>) {
+    let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+    let mut state = TuiState::new(80, 24);
+    state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    (state, clock)
 }
 
-/// DF-182: the event loop's real trust payload and FIFO wait below Help, not
-/// just a fabricated focus enum. Its private producer calls raise_confirmation.
+/// The model-driven skill-trust producer the event loop's `SkillTrustPrompt` arm calls.
+fn trust(state: &mut TuiState, name: &str) -> oneshot::Receiver<SkillTrustResponse> {
+    let (response_tx, response) = oneshot::channel();
+    decision_queue::raise_model_skill_trust(
+        state,
+        name.into(),
+        std::path::PathBuf::from(format!("skills/{name}/SKILL.md")),
+        response_tx,
+    );
+    response
+}
+
+/// DF-182 (6-C): trust prompts that arrive while the user is typing wait below Help — the
+/// caller's frames and base are untouched — stay queued FIFO, and popping the last frame
+/// never opens one by surprise; the user opens the oldest through the Needs-you list.
+/// (Before 6-C the focus-only stage promoted the pending prompt as soon as the stack
+/// emptied; the queue never opens a waiting item without the user.)
 #[test]
-fn skill_trust_under_help_retains_caller_queue_and_promotes_after_pop() {
+fn skill_trust_under_help_retains_caller_queue_and_waits_after_pop() {
+    use crate::conformance_21_6_decision_queue::support::{facts, paint, ready};
     for continued in [false, true] {
-        let mut state = TuiState::new(80, 24);
+        let (mut state, clock) = mock_state();
         reducer::set_base(&mut state, FocusState::Chat);
         state.input_buffer = "untouched draft".into();
         state.cursor_position = 3;
@@ -325,13 +342,13 @@ fn skill_trust_under_help_retains_caller_queue_and_promotes_after_pop() {
         state.help_overlay.scroll_offset = 7;
         let retained = frames(&state);
         let caller = state.focus.clone();
-        let (first, mut first_response) = trust("first");
-        let (second, mut second_response) = trust("second");
-        state.pending_skill_trust = Some(first);
-        reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
-        state.skill_trust_queue.push_back(second);
+        // RU-6: recent typing keeps an arrival queued instead of interrupting Help.
+        state.last_printable_at = Some(state.notifications.now());
+        let mut first_response = trust(&mut state, "first");
+        let mut second_response = trust(&mut state, "second");
         assert_eq!(state.focus, caller);
         assert_eq!(frames(&state), retained);
+        assert_eq!(state.decisions.undecided(), 2);
         assert_eq!(press(&mut state, Key::Char('y')), InputAction::Consumed);
         assert!(matches!(
             first_response.try_recv(),
@@ -366,24 +383,30 @@ fn skill_trust_under_help_retains_caller_queue_and_promotes_after_pop() {
                 );
             }
         }
-        // Behavioral RED on the focus-only stage: popping the final frame must
-        // settle a still-pending trust prompt without another arrival event.
-        assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
-        let first = state.pending_skill_trust.as_ref().unwrap();
+        // Popping the final frame opens nothing: both prompts still wait, counted.
+        assert!(state.modal_stack.is_empty());
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(state.decisions.undecided(), 2);
+        // The user opens the oldest through Ctrl+X q and Enter.
+        decision_queue::open_waiting(&mut state, &LogFacts::default());
+        assert_eq!(press(&mut state, Key::Enter), InputAction::Consumed);
+        assert!(presentation::is_open(&state, Surface::Decision));
+        paint(&mut state, &facts("c1"), 80, 24);
+        ready(&mut state, &clock);
+        let first = state.decisions.items().next().unwrap();
+        let DecisionSubject::SkillTrust(first) = &first.subject else {
+            panic!("skill trust first")
+        };
         assert_eq!(first.skill_name, "first");
         assert_eq!(
             first.skill_file,
             std::path::PathBuf::from("skills/first/SKILL.md")
         );
-        assert!(!first.response_tx.is_closed());
-        assert_eq!(state.skill_trust_queue.len(), 1);
-        let second = state.skill_trust_queue.front().unwrap();
-        assert_eq!(second.skill_name, "second");
-        assert_eq!(
-            second.skill_file,
-            std::path::PathBuf::from("skills/second/SKILL.md")
-        );
-        assert!(!second.response_tx.is_closed());
+        match &first.origin {
+            SkillOrigin::Model { reply } => assert!(!reply.is_closed()),
+            other => panic!("model-driven trust, got {other:?}"),
+        }
+        assert_eq!(state.decisions.count(DecisionKind::SkillTrust), 2);
         assert!(matches!(
             first_response.try_recv(),
             Err(TryRecvError::Empty)
@@ -404,11 +427,12 @@ fn skill_trust_under_help_retains_caller_queue_and_promotes_after_pop() {
 
 #[test]
 fn empty_stack_skill_trust_producer_is_an_independent_focus_control() {
-    let mut state = TuiState::new(80, 24);
-    let (pending, mut response) = trust("uncovered");
-    state.pending_skill_trust = Some(pending);
-    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
-    assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
+    use crate::conformance_21_6_decision_queue::support::{facts, paint, ready};
+    let (mut state, clock) = mock_state();
+    let mut response = trust(&mut state, "uncovered");
+    assert!(presentation::is_open(&state, Surface::Decision));
+    paint(&mut state, &facts("c1"), 80, 24);
+    ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, Key::Char('n')),
         InputAction::SkillTrustDecline
@@ -417,23 +441,29 @@ fn empty_stack_skill_trust_producer_is_an_independent_focus_control() {
 }
 
 #[tokio::test]
-async fn queued_request_preserves_an_active_legacy_trust_owner() {
-    let mut state = TuiState::new(80, 24);
+async fn queued_request_preserves_an_active_trust_owner() {
+    use crate::conformance_21_6_decision_queue::support::{facts, paint, ready};
+    let (mut state, clock) = mock_state();
     let mut approvals = Approvals::new();
-    let (pending, mut trust_response) = trust("active-owner");
-    state.pending_skill_trust = Some(pending);
-    reducer::raise_confirmation(&mut state, ConfirmationType::SkillTrust);
+    let mut trust_response = trust(&mut state, "active-owner");
+    let open_kind =
+        |state: &TuiState| decision_queue::current(state, &facts("c1")).map(|item| item.kind);
+    assert_eq!(open_kind(&state), Some(DecisionKind::SkillTrust));
     let (first, mut first_response) = approvals.request(&mut state).await;
-    assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
+    assert_eq!(open_kind(&state), Some(DecisionKind::SkillTrust));
     let (second, mut second_response) = approvals.request(&mut state).await;
-    assert_eq!(state.focus, confirmation(ConfirmationType::SkillTrust));
+    assert_eq!(open_kind(&state), Some(DecisionKind::SkillTrust));
     assert!(rustain::adapters::tui::decision_queue::holds_request(
         &state, &first
     ));
     assert!(rustain::adapters::tui::decision_queue::holds_request(
         &state, &second
     ));
-    assert_eq!(state.decisions.len(), 2);
+    assert_eq!(
+        state.decisions.len(),
+        3,
+        "the trust prompt and two requests"
+    );
     assert!(
         approvals
             .runtime
@@ -453,6 +483,8 @@ async fn queued_request_preserves_an_active_legacy_trust_owner() {
         trust_response.try_recv(),
         Err(TryRecvError::Empty)
     ));
+    paint(&mut state, &facts("c1"), 80, 24);
+    ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, Key::Char('n')),
         InputAction::SkillTrustDecline
@@ -649,6 +681,7 @@ mod local_occlusion {
         h: TestHarness,
         tabs: TabManager,
         app: AppState,
+        clock: Arc<MockClock>,
         _events: tokio::sync::mpsc::UnboundedReceiver<rustain::domain::events::AppEvent>,
         _workspace: tempfile::TempDir,
     }
@@ -756,6 +789,12 @@ mod local_occlusion {
                 .unwrap();
             let (app, events) = app(workspace.path());
             let mut h = TestHarness::with_size(width, height);
+            // The 6-C kinds are scoped to conversation `c1` in their fixtures; the
+            // notification store runs on a `MockClock` so the inert window is a clock move.
+            h.conversation.id = "c1".into();
+            let clock = Arc::new(MockClock::new(std::time::Instant::now()));
+            h.state.notifications =
+                NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
             let mut tabs = TabManager::new(CancellationToken::new());
             tabs.active_tab_mut().conversation = h.conversation.clone();
             h.state.active_tab_id = tabs.active_tab_id();
@@ -770,9 +809,16 @@ mod local_occlusion {
                 h,
                 tabs,
                 app,
+                clock,
                 _events: events,
                 _workspace: workspace,
             }
+        }
+
+        /// The first paint started the inert clock: let the 500 ms window pass (no sleep).
+        fn ready(&mut self) {
+            decision_queue::note_painted(&mut self.h.state);
+            self.clock.advance(decision_queue::INERT_AFTER_PAINT);
         }
 
         fn draw(&mut self) -> String {
@@ -990,16 +1036,16 @@ mod local_occlusion {
         }
     }
 
-    // Payload constructors mirror the existing K11 producer-shaped fixtures.
-    // Only event-backed kinds may ARRIVE beneath an already-open frame.
+    // Payload constructors mirror the existing K11 producer-shaped fixtures. Only
+    // event-backed kinds may ARRIVE beneath an already-open frame.
+    //
+    // 21-6 slice 6-C moved the skill-trust, plan approval / card, delegation, spawn-gate
+    // and question cards into the decision queue. This matrix keeps the cards 6-D has yet
+    // to move; the moved kinds are covered pairwise by
+    // `queue_kinds_paint_only_the_oldest_item_and_decide_it_alone`.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Mixed {
         Apply,
-        Trust,
-        PlanApproval,
-        Plan,
-        Delegation,
-        Spawn,
         Consolidation,
         Forget,
         Export,
@@ -1007,16 +1053,10 @@ mod local_occlusion {
         Retract,
         Fork,
         Rewind,
-        Question,
     }
 
-    const MIXED: [Mixed; 14] = [
+    const MIXED: [Mixed; 8] = [
         Mixed::Apply,
-        Mixed::Trust,
-        Mixed::PlanApproval,
-        Mixed::Plan,
-        Mixed::Delegation,
-        Mixed::Spawn,
         Mixed::Consolidation,
         Mixed::Forget,
         Mixed::Export,
@@ -1024,98 +1064,19 @@ mod local_occlusion {
         Mixed::Retract,
         Mixed::Fork,
         Mixed::Rewind,
-        Mixed::Question,
     ];
-    const ASYNC: [Mixed; 7] = [
-        Mixed::Trust,
-        Mixed::PlanApproval,
-        Mixed::Plan,
-        Mixed::Delegation,
-        Mixed::Consolidation,
-        Mixed::Retract,
-        Mixed::Question,
-    ];
+    const ASYNC: [Mixed; 2] = [Mixed::Consolidation, Mixed::Retract];
 
-    fn seed_mixed(f: &mut Visit, kind: Mixed) -> Option<oneshot::Receiver<SkillTrustResponse>> {
+    fn seed_mixed(f: &mut Visit, kind: Mixed) {
         use crate::conformance_21_11_display_width::k5b_cards::{
             apply_pending, peer_pending, retract_pending,
         };
         use rustain::adapters::tui::state::*;
-        use rustain::domain::models::plan::{Plan, PlanStatus};
-        use rustain::domain::services::delegation_decider::{
-            DelegationReason, DelegationSuggestion,
-        };
         let state = &mut f.h.state;
         let confirmation = match kind {
             Mixed::Apply => {
                 state.pending_artifact_card = Some(apply_pending(vec!["mixed.rs".into()], false));
                 Some(ConfirmationType::ArtifactApply)
-            }
-            Mixed::Trust => {
-                let (pending, response) = trust("mixed-trust");
-                state.pending_skill_trust = Some(pending);
-                reducer::raise_confirmation(state, ConfirmationType::SkillTrust);
-                return Some(response);
-            }
-            Mixed::PlanApproval => {
-                state.pending_plan_approval = Some(PendingPlanApproval {
-                    conversation_id: "c1".into(),
-                    plan_path: "mixed-plan.md".into(),
-                    contents: "mixed plan approval body".into(),
-                    summary: "mixed approval".into(),
-                });
-                // Production PlanApprovalRequested preserves an apply owner.
-                state
-                    .pending_artifact_card
-                    .is_none()
-                    .then_some(ConfirmationType::PlanApproval)
-            }
-            Mixed::Plan => {
-                let conversation_id = f.h.conversation.id.clone();
-                let plan = Plan {
-                    id: "p1".into(),
-                    title: "mixed inline plan".into(),
-                    tasks: vec![],
-                    estimated_effort: None,
-                    status: PlanStatus::Pending,
-                    created_at: 0,
-                    resolved_at: None,
-                    host_message_id: None,
-                };
-                rustain::adapters::tui::handlers::plan_card::handle_plan_proposed(
-                    &mut f.h.conversation,
-                    state,
-                    &conversation_id,
-                    plan,
-                    rustain::domain::models::PermissionMode::Normal,
-                    None,
-                );
-                None
-            }
-            Mixed::Delegation => {
-                state.pending_delegation_card = Some(PendingDelegationCard {
-                    conversation_id: "c1".into(),
-                    plan_id: "p1".into(),
-                    task_number: 1,
-                    suggestion: DelegationSuggestion {
-                        task_number: 1,
-                        agent_name: "mixed-reviewer".into(),
-                        reason: DelegationReason::ExplicitAgentMention,
-                        auto_proceed: false,
-                    },
-                });
-                reducer::take_chat_focus_for_card(state, true);
-                None
-            }
-            Mixed::Spawn => {
-                state.pending_spawn_gate = Some(PendingSpawnGate {
-                    spec: rustain::adapters::tui::fanout_spec::parse_fanout(Some("3 mixed"))
-                        .unwrap(),
-                    requested: 3,
-                    threshold: 2,
-                    adjusted: None,
-                });
-                None
             }
             Mixed::Consolidation => {
                 state.pending_consolidation_card = Some(PendingConsolidationCard {
@@ -1160,51 +1121,28 @@ mod local_occlusion {
                 });
                 Some(ConfirmationType::Rewind)
             }
-            Mixed::Question => {
-                state.ask_user_question = Some(
-                    rustain::adapters::tui::widgets::ask_user_question::AskUserQuestionState {
-                        tool_use_id: "mixed-question".into(),
-                        question: "mixed question body".into(),
-                        input_buffer: String::new(),
-                        cursor_position: 0,
-                        submitted_answer: None,
-                    },
-                );
-                Some(ConfirmationType::Question)
-            }
         };
         if let Some(kind) = confirmation {
             reducer::raise_confirmation(state, kind);
         }
-        None
     }
 
     fn selected_mixed(state: &TuiState) -> Mixed {
         match &state.focus {
             FocusState::Overlay(OverlayType::Confirmation(kind)) => match kind {
                 ConfirmationType::ArtifactApply => Mixed::Apply,
-                ConfirmationType::SkillTrust => Mixed::Trust,
-                ConfirmationType::PlanApproval => Mixed::PlanApproval,
                 ConfirmationType::ExportOverwrite(_) => Mixed::Export,
                 ConfirmationType::PeerAdd => Mixed::Peer,
                 ConfirmationType::TeamRetract => Mixed::Retract,
                 ConfirmationType::Fork => Mixed::Fork,
                 ConfirmationType::Rewind => Mixed::Rewind,
-                ConfirmationType::Question => Mixed::Question,
-                other => panic!("unexpected mixed confirmation {other:?}"),
             },
             FocusState::Chat => {
                 if state.pending_forget_card.is_some() {
                     Mixed::Forget
-                } else if state.pending_consolidation_card.is_some() {
-                    Mixed::Consolidation
-                } else if state.pending_delegation_card.is_some() {
-                    Mixed::Delegation
-                } else if state.pending_spawn_gate.is_some() {
-                    Mixed::Spawn
                 } else {
-                    assert!(state.pending_plan_card.is_some());
-                    Mixed::Plan
+                    assert!(state.pending_consolidation_card.is_some());
+                    Mixed::Consolidation
                 }
             }
             other => panic!("mixed fixture lost its owner: {other:?}"),
@@ -1280,7 +1218,6 @@ mod local_occlusion {
                         continue;
                     }
                     let mut f = Visit::new(130, 40).await;
-                    let mut responses = Vec::new();
                     // Log/Help cannot be opened FROM an overlay card. Their
                     // genuine mixed case is two asynchronous arrivals below it.
                     if surface != Surface::QuitConfirm {
@@ -1289,13 +1226,13 @@ mod local_occlusion {
                         }
                         assert!(open_mixed_door(&mut f.h.state, surface));
                     }
-                    responses.extend(seed_mixed(&mut f, first));
+                    seed_mixed(&mut f, first);
                     if surface == Surface::QuitConfirm && !open_mixed_door(&mut f.h.state, surface)
                     {
                         continue;
                     }
                     let retained = f.h.state.focus.clone();
-                    responses.extend(seed_mixed(&mut f, second));
+                    seed_mixed(&mut f, second);
                     assert_eq!(f.h.state.focus, retained, "{first:?} -> {second:?}");
                     assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
                     let selected = selected_mixed(&f.h.state);
@@ -1305,7 +1242,7 @@ mod local_occlusion {
                     }
                     f.draw();
                     let mut solo = Visit::new(130, 40).await;
-                    let _solo_response = seed_mixed(&mut solo, selected);
+                    seed_mixed(&mut solo, selected);
                     solo.draw();
                     assert!(
                         !offered_rails(&solo).is_empty(),
@@ -1318,41 +1255,23 @@ mod local_occlusion {
                     );
                     // A raw decision key has the same meaning as the solo paint,
                     // without running any effect for the deferred operation.
-                    let key = Key::Char(if selected == Mixed::Delegation {
-                        'd'
-                    } else {
-                        'y'
-                    });
+                    let key = Key::Char('y');
                     assert_eq!(press(&mut f.h.state, key), press(&mut solo.h.state, key));
-                    for response in &mut responses {
-                        assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-                    }
                     reached[surface_index] += 1;
                 }
             }
         }
-        // Seven legacy Quit doors stay closed (including Forget's special-key
-        // consumer): 7*7-5 distinct pairs; Log/Help admit 7*6 async pairs each.
-        assert_eq!(
-            reached,
-            [44, 42, 42],
-            "all reachable ordered pairs must run"
-        );
+        // Four legacy Quit doors stay closed (Forget's special-key consumer, Export, Fork,
+        // Rewind): 4 open first cards x 2 async seconds - 2 equal pairs; Log/Help admit
+        // the 2 ordered pairs of the 2 async cards each.
+        assert_eq!(reached, [6, 2, 2], "all reachable ordered pairs must run");
     }
 
     #[tokio::test]
     async fn c_r1_legacy_non_openable_doors_remain_closed() {
-        for kind in [
-            Mixed::Trust,
-            Mixed::Spawn,
-            Mixed::Forget,
-            Mixed::Export,
-            Mixed::Fork,
-            Mixed::Rewind,
-            Mixed::Question,
-        ] {
+        for kind in [Mixed::Forget, Mixed::Export, Mixed::Fork, Mixed::Rewind] {
             let mut f = Visit::new(80, 24).await;
-            let _response = seed_mixed(&mut f, kind);
+            seed_mixed(&mut f, kind);
             let focus = f.h.state.focus.clone();
             assert!(
                 !open_mixed_door(&mut f.h.state, Surface::QuitConfirm),
@@ -1362,7 +1281,10 @@ mod local_occlusion {
             assert!(!open_mixed_door(&mut f.h.state, Surface::Help), "{kind:?}");
             assert_eq!(f.h.state.focus, focus);
         }
-        // Permission is now a stack frame, not a legacy non-openable card.
+        // Permission is now a stack frame, not a legacy non-openable card; since 6-C so is
+        // every question / trust / plan / delegation / spawn-gate / kill card: `Ctrl+Q`
+        // requests quit from their frame (see
+        // `queue_kinds_request_quit_from_their_frame_unlike_the_legacy_cards`).
     }
 
     #[tokio::test]
@@ -1377,14 +1299,14 @@ mod local_occlusion {
                 assert!(open_mixed_door(&mut f.h.state, surface));
                 let mut approvals = Approvals::new();
                 let (id, mut response) = approvals.request(&mut f.h.state).await;
-                let mut trust_response = seed_mixed(&mut f, kind);
+                seed_mixed(&mut f, kind);
                 assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
                 f.draw();
                 assert_queued(&f.h.state);
                 assert!(decision_queue::holds_request(&f.h.state, &id));
                 let mut solo = Visit::new(130, 40).await;
                 let kind = selected_mixed(&f.h.state);
-                let _response = seed_mixed(&mut solo, kind);
+                seed_mixed(&mut solo, kind);
                 solo.draw();
                 let actual = offered_rails(&f);
                 let expected = offered_rails(&solo);
@@ -1407,92 +1329,194 @@ mod local_occlusion {
                     }
                 }
                 assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-                if let Some(response) = &mut trust_response {
-                    assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-                }
             }
+        }
+    }
+
+    /// 6-C: every ordered pair of the moved kinds (the first item of any kind, a second
+    /// automatic arrival of any automatic kind): ONE frame for two items, painted rail ==
+    /// the solo rail of the OLDEST, its deciding key means what it means solo, and the
+    /// other item is untouched and still counted.
+    #[tokio::test]
+    async fn queue_kinds_paint_only_the_oldest_item_and_decide_it_alone() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6C, PLAIN, deciding, press as frame_press, raise, raise_second_in,
+        };
+        // Requested kinds (user-started) open at once; only automatic arrivals queue behind.
+        let automatic = [
+            DecisionKind::Question,
+            DecisionKind::SkillTrust,
+            DecisionKind::PlanApproval,
+            DecisionKind::PlanCard,
+            DecisionKind::PlanDeviation,
+            DecisionKind::Delegation,
+        ];
+        let mut reached = 0;
+        for first in ALL_6C {
+            let mut solo = Visit::new(130, 40).await;
+            let _solo_hold = raise(&mut solo.h.state, first, PLAIN);
+            solo.draw();
+            let solo_rails = offered_rails(&solo);
+            assert!(
+                !solo_rails.is_empty(),
+                "solo {first:?} genuinely offers keys"
+            );
+            solo.ready();
+            let solo_action = frame_press(&mut solo.h.state, deciding(first));
+            for second in automatic {
+                let mut f = Visit::new(130, 40).await;
+                let _first_hold = raise(&mut f.h.state, first, PLAIN);
+                // Both receivers stay alive: a dropped question receiver is a gone turn (stale).
+                let _second_hold = if second == first {
+                    raise_second_in(&mut f.h.state, second, "c1")
+                } else {
+                    raise(&mut f.h.state, second, PLAIN).1
+                };
+                let at = format!("{first:?} -> {second:?}");
+                assert_eq!(f.h.state.decisions.undecided(), 2, "{at}");
+                assert_eq!(
+                    f.h.state
+                        .modal_stack
+                        .iter()
+                        .filter(|frame| frame.surface == Surface::Decision)
+                        .count(),
+                    1,
+                    "{at}: one frame for two items"
+                );
+                f.draw();
+                assert_eq!(offered_rails(&f), solo_rails, "{at}");
+                f.ready();
+                assert_eq!(
+                    frame_press(&mut f.h.state, deciding(first)),
+                    solo_action,
+                    "{at}"
+                );
+                assert!(
+                    f.h.state.decisions.holds(second),
+                    "{at}: the other item waits"
+                );
+                reached += 1;
+            }
+        }
+        assert_eq!(reached, 60, "every ordered pair ran");
+    }
+
+    /// 6-C: the legacy overlay cards swallow `Ctrl+Q` (DF-21-3-LOCAL-CARD-CTRLQ); the moved
+    /// kinds are frames, whose parent row requests quit and leaves the item queued.
+    #[test]
+    fn queue_kinds_request_quit_from_their_frame_unlike_the_legacy_cards() {
+        use crate::conformance_21_6_decision_queue::raisers::{ALL_6C, PLAIN, open_ready};
+        use crate::conformance_21_6_decision_queue::support::{facts, route};
+        use rustain::adapters::tui::presentation::RouteEffect;
+        use rustain::domain::events::{DomainInputEvent, DomainKey};
+        for kind in ALL_6C {
+            let (mut state, _clock, _hold) = open_ready(kind, PLAIN);
+            assert_eq!(
+                route(
+                    &mut state,
+                    &DomainInputEvent::SpecialKey(DomainKey::CtrlQ),
+                    &facts("c1")
+                ),
+                Some(RouteEffect::QuitRequest),
+                "{kind:?}"
+            );
+            assert!(
+                state.decisions.holds(kind),
+                "{kind:?}: quitting never decides"
+            );
         }
     }
 
     #[tokio::test]
     async fn c_r1_agent_kill_is_retained_without_painting_over_the_promoted_card() {
         use super::super::keymap_support::decode;
+        use crate::conformance_21_6_decision_queue::raisers::press as frame_press;
         use rustain::adapters::tui::agent_inspector_keys::{self, InspectorOutcome};
         use rustain::domain::models::visual::PanelType;
         use rustain::domain::models::{AgentId, AgentRowView, NodeState, OwnershipKind};
-        for surface in [
-            Surface::QuitConfirm,
-            Surface::NotificationLog,
-            Surface::Help,
-        ] {
-            let mut f = Visit::new(130, 40).await;
-            let id = AgentId::parse("spoke-1").unwrap();
-            f.h.state.sidebar_visible = true;
-            f.h.state.sidebar_panel = Some(PanelType::Agents);
-            reducer::set_base(
+        let mut f = Visit::new(130, 40).await;
+        let id = AgentId::parse("spoke-1").unwrap();
+        f.h.state.sidebar_visible = true;
+        f.h.state.sidebar_panel = Some(PanelType::Agents);
+        reducer::set_base(
+            &mut f.h.state,
+            FocusState::Sidebar {
+                panel: PanelType::Agents,
+                selected: 0,
+            },
+        );
+        f.h.state.agent_panel_state.cached_entries = vec![AgentRowView {
+            isolated: false,
+            agent_id: id.clone(),
+            parent_id: AgentId::root(),
+            subagent_type: "mixed-kill-agent".into(),
+            spawned_at: 0,
+            depth: 1,
+            current_status: NodeState::Running,
+            ownership: OwnershipKind::Owned,
+            effective_model: String::new(),
+            tools_summary: String::new(),
+            tokens_in: 0,
+            tokens_out: 0,
+            turns: 0,
+            wait_reason: None,
+        }];
+        f.h.state.agent_panel_state.drill_down_agent = Some(id.clone());
+        let conversation_id = f.h.conversation.id.clone();
+        assert!(matches!(
+            agent_inspector_keys::on_key(
                 &mut f.h.state,
-                FocusState::Sidebar {
-                    panel: PanelType::Agents,
-                    selected: 0,
-                },
-            );
-            f.h.state.agent_panel_state.cached_entries = vec![AgentRowView {
-                isolated: false,
-                agent_id: id.clone(),
-                parent_id: AgentId::root(),
-                subagent_type: "mixed-kill-agent".into(),
-                spawned_at: 0,
-                depth: 1,
-                current_status: NodeState::Running,
-                ownership: OwnershipKind::Owned,
-                effective_model: String::new(),
-                tools_summary: String::new(),
-                tokens_in: 0,
-                tokens_out: 0,
-                turns: 0,
-                wait_reason: None,
-            }];
-            f.h.state.agent_panel_state.drill_down_agent = Some(id.clone());
-            assert!(matches!(
-                agent_inspector_keys::on_key(
-                    &mut f.h.state,
-                    &decode(Key::Char('x')).unwrap(),
-                    false,
-                ),
-                InspectorOutcome::Consumed
-            ));
-            assert!(f.draw().contains("Kill mixed-kill-agent and its subtree?"));
-            assert!(open_mixed_door(&mut f.h.state, surface));
-            let mut response = seed_mixed(&mut f, Mixed::Trust).unwrap();
-            assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-            let screen = f.draw();
-            assert!(screen.contains("mixed-trust"), "{screen}");
-            assert!(
-                !screen.contains("Kill mixed-kill-agent and its subtree?"),
-                "{screen}"
-            );
-            assert_eq!(
-                f.h.state.agent_panel_state.pending_kill_confirm.as_ref(),
-                Some(&id)
-            );
-            assert!(matches!(
-                agent_inspector_keys::on_key(
-                    &mut f.h.state,
-                    &decode(Key::Char('y')).unwrap(),
-                    false,
-                ),
-                InspectorOutcome::PassThrough
-            ));
-            assert_eq!(
-                press(&mut f.h.state, Key::Char('y')),
-                InputAction::SkillTrustAccept
-            );
-            assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
-        }
+                &decode(Key::Char('x')).unwrap(),
+                false,
+                &conversation_id,
+            ),
+            InspectorOutcome::Consumed
+        ));
+        // The kill confirmation is a decision frame naming the agent.
+        assert!(f.draw().contains("mixed-kill-agent"));
+        assert!(presentation::is_open(&f.h.state, Surface::Decision));
+        // A trust prompt arrives while the kill frame is open: it waits behind it.
+        let mut response = trust(&mut f.h.state, "mixed-trust");
+        assert_eq!(f.h.state.decisions.undecided(), 2);
+        let screen = f.draw();
+        assert!(screen.contains("mixed-kill-agent"), "{screen}");
+        assert!(!screen.contains("mixed-trust"), "{screen}");
+        // The user sets the kill aside: it stays retained and counted, is not painted, and
+        // the waiting trust prompt is NOT opened by surprise.
+        f.ready();
+        assert_eq!(frame_press(&mut f.h.state, Key::Esc), InputAction::Consumed);
+        let screen = f.draw();
+        assert!(!screen.contains("and its subtree?"), "{screen}");
+        assert!(!screen.contains("mixed-trust"), "{screen}");
+        assert!(f.h.state.decisions.holds(DecisionKind::AgentKill));
+        // The user opens the trust prompt through the list: it paints, the kill does not.
+        decision_queue::open_waiting(&mut f.h.state, &LogFacts::default());
+        assert_eq!(press(&mut f.h.state, Key::Enter), InputAction::Consumed);
+        let screen = f.draw();
+        assert!(screen.contains("mixed-trust"), "{screen}");
+        assert!(!screen.contains("and its subtree?"), "{screen}");
+        assert!(f.h.state.decisions.holds(DecisionKind::AgentKill));
+        assert!(matches!(
+            agent_inspector_keys::on_key(
+                &mut f.h.state,
+                &decode(Key::Char('y')).unwrap(),
+                false,
+                &conversation_id,
+            ),
+            InspectorOutcome::PassThrough
+        ));
+        f.ready();
+        assert_eq!(
+            frame_press(&mut f.h.state, Key::Char('y')),
+            InputAction::SkillTrustAccept
+        );
+        assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
+        assert!(f.h.state.decisions.holds(DecisionKind::AgentKill));
     }
 
     #[tokio::test]
     async fn c_r1_actual_artifact_quit_trust_executes_only_the_visible_apply_once() {
+        use crate::conformance_21_6_decision_queue::raisers::press as frame_press;
         use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
         use rustain::adapters::{artifact::FileSystemArtifactStore, merge_back::GitPatchApplier};
         use rustain::domain::models::{
@@ -1560,12 +1584,11 @@ mod local_occlusion {
         assert!(f.h.state.pending_artifact_card.is_some());
         assert!(f.draw().contains("[y] Apply"));
         open_quit(&mut f.h.state);
-        let (pending, mut response) = trust("deferred-real-trust");
-        f.h.state.pending_skill_trust = Some(pending);
-        reducer::raise_confirmation(&mut f.h.state, ConfirmationType::SkillTrust);
+        // The trust prompt and a permission arrive under the quit frame: both queue.
+        let mut response = trust(&mut f.h.state, "deferred-real-trust");
         let mut approvals = Approvals::new();
         let (_, mut permission_response) = approvals.request(&mut f.h.state).await;
-        assert_eq!(f.h.state.decisions.len(), 1);
+        assert_eq!(f.h.state.decisions.len(), 2);
         assert_eq!(press(&mut f.h.state, Key::Char('n')), InputAction::Consumed);
         let screen = f.draw();
         assert!(screen.contains("[y] Apply"), "{screen}");
@@ -1592,20 +1615,30 @@ mod local_occlusion {
             resolve_apply_card(&mut f.h.state, true).is_none(),
             "spent apply cannot repeat"
         );
-        assert_eq!(f.h.state.focus, confirmation(ConfirmationType::SkillTrust));
+        // The settled apply card never opens the queued trust prompt by surprise; the user
+        // opens the oldest waiting decision through the list.
+        assert!(!presentation::is_open(&f.h.state, Surface::Decision));
+        assert_eq!(f.h.state.decisions.undecided(), 2);
+        decision_queue::open_waiting(&mut f.h.state, &LogFacts::default());
+        assert_eq!(press(&mut f.h.state, Key::Enter), InputAction::Consumed);
         assert!(f.draw().contains("deferred-real-trust"));
+        f.ready();
+        let waiting =
+            f.h.state
+                .decisions
+                .items()
+                .find_map(|item| match &item.subject {
+                    DecisionSubject::SkillTrust(payload) => Some((**payload).clone()),
+                    _ => None,
+                })
+                .expect("the trust prompt is still queued");
         assert_eq!(
-            press(&mut f.h.state, Key::Char('y')),
+            frame_press(&mut f.h.state, Key::Char('y')),
             InputAction::SkillTrustAccept
         );
-        f.h.state
-            .pending_skill_trust
-            .take()
-            .unwrap()
-            .response_tx
-            .send(SkillTrustResponse::Accepted)
-            .unwrap();
-        reducer::advance_skill_trust_queue(&mut f.h.state);
+        // The event-loop arm hands the answer to the waiting turn, exactly once.
+        assert!(waiting.reply_model(SkillTrustResponse::Accepted));
+        assert!(!waiting.reply_model(SkillTrustResponse::Accepted));
         assert_eq!(response.try_recv().unwrap(), SkillTrustResponse::Accepted);
         assert_ne!(
             press(&mut f.h.state, Key::Char('y')),

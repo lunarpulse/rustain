@@ -1,51 +1,38 @@
-//! Task skip cascade card — Story 6.4.
-//! Key bindings: [s] Skip them too / [c] Continue anyway / [n] Cancel skip.
+//! Task skip cascade body — Story 6.4: the row of the `Decision: Skip cascade` frame
+//! (Story 21.6 6-C). Keys: the frame's rail (`[s] Skip cascade  [a] Continue anyway
+//! [n] Cancel skip`).
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::SkipCascadePending;
+use crate::adapters::tui::decision_queue::SkipCascadePending;
 
-pub fn render(area: Rect, buf: &mut Buffer, pending: &SkipCascadePending) {
-    if area.width < 30 || area.height < 3 {
-        return;
-    }
-    let style = Style::default();
-    let count = pending.downstream.len();
-    buf.set_string(area.x, area.y, "┌─ Skip cascade", style);
-    if area.height > 1 {
-        buf.set_string(
-            area.x,
-            area.y + 1,
-            format!(
-                "│ Task {} skipped — {} task(s) depend on it.",
-                pending.source_task, count
-            ),
-            style,
-        );
-    }
-    if area.height > 2 {
-        buf.set_string(
-            area.x,
-            area.y + 2,
-            format!(
-                "│ {} Skip them too  {} Continue anyway  {} Cancel skip",
-                rail(Context::SkipCascade, CardCmd::CascadeSkip),
-                rail(Context::SkipCascade, CardCmd::Continue),
-                rail(Context::SkipCascade, CardCmd::No)
-            ),
-            style,
-        );
-    }
-    if area.height > 3 {
-        buf.set_string(area.x, area.y + 3, "└────────────────────", style);
-    }
+/// What skipping the task leaves depending on it.
+pub fn lines(pending: &SkipCascadePending) -> Vec<Line<'static>> {
+    vec![Line::from(format!(
+        "Task {} skipped — {} task(s) depend on it.",
+        pending.source_task,
+        pending.downstream.len()
+    ))]
 }
 
-pub fn desired_height() -> u16 {
-    5
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::plan::PlanTaskStatus;
+
+    #[test]
+    fn story21_6_the_row_names_the_task_and_its_dependants() {
+        let pending = SkipCascadePending {
+            plan_id: "p".into(),
+            source_task: 2,
+            source_prior_status: PlanTaskStatus::Pending,
+            source_prior_error: None,
+            downstream: vec![3, 4, 5],
+        };
+        let rows: Vec<String> = lines(&pending)
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rows, ["Task 2 skipped — 3 task(s) depend on it."]);
+    }
 }

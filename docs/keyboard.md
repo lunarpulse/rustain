@@ -5,7 +5,7 @@
 
 Every key listed here comes from the keymap registry that also drives the keys, the `Ctrl+X` menu, the help overlay, the palette and the status row.
 `Ctrl+X` opens an untimed menu; press a follow-up key, or `Esc` to cancel. A follow-up with no binding answers with a notice instead of doing nothing.
-`Esc` and `Ctrl+C` never decide a decision card: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.
+On a decision frame `Esc` sets the decision aside (it stays queued and counted) and `Ctrl+C` goes back one frame; `c` copies the decision's text. None of them decides. On the decision cards that are not frames yet, `Esc` and `Ctrl+C` never decide: they post one reminder of the keys that do and the card stays. Inline cards answer only in Chat focus, so typing in the composer never answers them. Blocking-card arrivals take Chat focus only from an empty Input; drafts and overlays keep focus. Transcript plan arrivals never take focus. Closing an attached overlay reconciles a pending approval, consent or consolidation card with an empty Input. An attached approval hidden by a draft remains counted in the status row; open the indicated decision route for guidance, clear the draft, then enter Chat to answer. A draft still hides that approval even in Chat.
 The attached client starts in Input in both writer and read-only modes. Its shared composer supports caret motions and readline editing, including Ctrl+A, Ctrl+E and Ctrl+K; read-only mode refuses submission, not local typing or local slash commands.
 Reach: *portable* keys work in every terminal; *extended keyboard* keys need a keyboard protocol most terminals lack; *Alt (meta)* keys depend on the terminal's Alt handling. Each non-portable key names a portable alternative.
 
@@ -417,14 +417,12 @@ Also inherits: Sidebar.
 |---|---|---|---|---|
 | `p` | Pause the open agent, or resume it when suspended | local | portable |  |
 | `x` | Kill the open agent and its subtree (asks to confirm) | local | portable |  |
-| `y` | Confirm the pending kill (only while the confirmation is shown) | local | portable |  |
-| `n` | Cancel the pending kill (only while the confirmation is shown) | local | portable |  |
 | `m` | Change the agent's model (a notice names the model selector) | local | portable |  |
 | `t` | Update the agent's tools (a notice: not available from the inspector yet) | local | portable |  |
 | `c` | Open the agent's output in a read-only conversation tab | local | portable |  |
 | `j` | Scroll the inspector down one line | local | portable |  |
 | `k` | Scroll the inspector up one line | local | portable |  |
-| `Esc` | Close the inspector and return to the Agents list (with the kill confirmation shown, Esc and Ctrl+C post a cue naming y and n instead) | local | portable |  |
+| `Esc` | Close the inspector and return to the Agents list | local | portable |  |
 
 ## A2A log
 
@@ -657,6 +655,7 @@ Also inherits: Caret text field.
 | `k` | Compact the conversation (a context warning) | local, attached | portable |  |
 | `PgUp` | Scroll the decision body up | local, attached | portable |  |
 | `PgDn` | Scroll the decision body down | local, attached | portable |  |
+| `c` | Copy the decision's text (every decision frame; not while a text field is open) | local, attached | portable |  |
 
 ## Needs-you list
 
@@ -732,35 +731,47 @@ Also inherits: Caret text field.
 
 ## Question
 
-Also inherits: Decision cards (shared), Append-only text field.
+Also inherits: Decision field.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Enter` | Send the answer | local | portable |  |
 | `Ctrl+D` | Skip the question: the agent receives no answer | local | portable |  |
-| `Backspace` | Delete the last character of the answer | local | portable |  |
+
+## Question (field closed)
+
+Also inherits: Decisions.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `Enter` | Open the answer field | local | portable |  |
+| `Ctrl+D` | Skip the question: the agent receives no answer | local | portable |  |
 
 ## Skill trust
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `y` | Trust the skill and activate it | local | portable |  |
 | `n` | Decline the skill | local | portable |  |
 | `i` | Read the skill file before deciding | local | portable |  |
-| `j` | Scroll the chat down one line | local | portable |  |
-| `k` | Scroll the chat up one line | local | portable |  |
 
 ## Skill trust (inspect)
 
+Also inherits: Decisions.
+
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `Esc` | Return to the skill trust card | local | portable |  |
+| `Esc` | Return to the undecided skill trust request | local | portable |  |
+| `Ctrl+C` | Return to the undecided skill trust request (back one frame) | local | portable |  |
+| `Up` | Scroll the skill file up one line | local | portable |  |
+| `k` | Scroll the skill file up one line | local | portable |  |
+| `Down` | Scroll the skill file down one line | local | portable |  |
+| `j` | Scroll the skill file down one line | local | portable |  |
 
 ## Plan approval
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -771,7 +782,7 @@ Also inherits: Decision cards (shared).
 
 ## Plan card
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -781,17 +792,17 @@ Also inherits: Decision cards (shared).
 
 ## Skip cascade
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `s` | Skip the task and everything that depends on it | local | portable |  |
-| `c` | Skip the task only and continue its dependants | local | portable |  |
+| `a` | Skip the task only and continue its dependants | local | portable |  |
 | `n` | Keep the task | local | portable |  |
 
 ## Delegation
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -801,12 +812,12 @@ Also inherits: Decision cards (shared).
 
 ## Spawn gate
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `Enter` | Confirm the spawn count | local | portable |  |
-| `c` | Cap the spawn at the threshold | local | portable |  |
+| `t` | Cap the spawn at the threshold | local | portable |  |
 | `n` | Cancel the spawn: nothing is spawned | local | portable |  |
 | `Left` | Spawn one fewer | local | portable |  |
 | `Right` | Spawn one more | local | portable |  |
@@ -819,6 +830,15 @@ Also inherits: Decision cards (shared).
 |---|---|---|---|---|
 | `y` | Confirm the pending action | local, attached | portable |  |
 | `n` | Decline: nothing is changed | local, attached | portable |  |
+
+## Confirmation
+
+Also inherits: Decisions.
+
+| Keys | Does | Hosts | Reach | Notes |
+|---|---|---|---|---|
+| `y` | Confirm the pending action | local | portable |  |
+| `n` | Decline: nothing is changed | local | portable |  |
 
 ## Forget
 

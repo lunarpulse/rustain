@@ -3,14 +3,18 @@
 //! for the open inspector) from a real decoded key, with the outcome and the salient state.
 
 use rustain::adapters::tui::agent_inspector_keys::{InspectorOutcome, on_key};
-use rustain::adapters::tui::keymap::table_inspector::InspectorCmd;
+use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::{self, DecisionEffect, DecisionKind, DecisionSubject};
 use rustain::adapters::tui::keymap::{
-    CommandId, Context, Host, Key, Resolved, render, resolve, resolve::rows_of,
+    CommandId, Context, Host, Key, Resolved, resolve, resolve::rows_of,
 };
-use rustain::adapters::tui::notifications::NoticeSource;
+use rustain::adapters::tui::notifications::NotificationStore;
 use rustain::adapters::tui::state::TuiState;
+use rustain::domain::clock::MockClock;
+use rustain::domain::models::NotificationsConfig;
 use rustain::domain::models::visual::PanelType;
 use rustain::domain::models::{AgentId, AgentRowView, FocusState, NodeState, OwnershipKind};
+use std::sync::Arc;
 
 use super::support::{decode, fresh, press as local_press};
 
@@ -59,7 +63,7 @@ fn salient(state: &TuiState) -> String {
         if matches!(state.focus, FocusState::Chat) { "chat" } else { "sidebar" },
         panel.drill_down_agent.is_some(),
         panel.inspector_scroll_offset,
-        panel.pending_kill_confirm.is_some(),
+        state.decisions.holds(DecisionKind::AgentKill),
     )
 }
 
@@ -72,7 +76,6 @@ fn at(open: bool, scroll: u16, kill: bool) -> String {
 fn name(outcome: &InspectorOutcome) -> String {
     match outcome {
         InspectorOutcome::SendOp { agent_id, op } => format!("SendOp({}, {op:?})", agent_id.as_str()),
-        InspectorOutcome::ConfirmKill(id) => format!("ConfirmKill({})", id.as_str()),
         InspectorOutcome::OpenConversation(conv) => {
             format!("OpenConversation({}, {}, {:?})", conv.title, conv.messages[0].content, conv.session_id)
         }
@@ -83,7 +86,7 @@ fn name(outcome: &InspectorOutcome) -> String {
 /// Press `key` through the adapter: `"{outcome} | {salient}"`.
 fn press(state: &mut TuiState, key: Key, read_only: bool) -> String {
     let event = decode(key).expect("the key decodes");
-    let outcome = on_key(state, &event, read_only);
+    let outcome = on_key(state, &event, read_only, "c1");
     format!("{} | {}", name(&outcome), salient(state))
 }
 
@@ -100,8 +103,6 @@ fn k9_agent_inspector_every_row_acts_by_value() {
     let witnesses = [
         (Key::Char('p'), same("SendOp(spoke-1, Pause)")),
         (Key::Char('x'), format!("Consumed | {}", at(true, 3, true))),
-        (Key::Char('y'), same("PassThrough")),
-        (Key::Char('n'), same("PassThrough")),
         (Key::Char('m'), same("ModelNotice")),
         (Key::Char('t'), same("ToolsNotice")),
         (Key::Char('c'), opened.to_string()),
@@ -119,39 +120,64 @@ fn k9_agent_inspector_every_row_acts_by_value() {
     }
 }
 
-/// Regression caught: `y` / `Enter` / `n` ignore the pending kill, or a kill is confirmed for another agent.
+/// The kill confirmation is a decision frame (`Decision: Kill agent`): the inspector has no
+/// `y` / `n` rows of its own, so those keys pass through it; the frame's own keys decide
+/// exactly the agent it names, `Esc` / `Ctrl+C` defer it (no cue), and a read-only tab
+/// never raises one.
 #[test]
 #[rustfmt::skip]
-fn k9_agent_inspector_kill_confirmation_answers_only_while_pending() {
-    let pending = |id: &str| {
+fn k9_agent_inspector_kill_confirmation_is_a_frame_that_answers_only_its_own_agent() {
+    use crate::conformance_21_6_decision_queue::raisers::{press as frame_press, repaint_ready};
+    let clocked_open = || {
+        let clock = Arc::new(MockClock::new(std::time::Instant::now()));
         let mut state = open(NodeState::Running);
-        state.agent_panel_state.pending_kill_confirm = AgentId::parse(id).ok();
-        state
+        state.notifications = NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+        (state, clock)
     };
-    let confirm = format!("ConfirmKill(spoke-1) | {}", at(true, 3, true));
-    assert_eq!(pressed(pending("spoke-1"), Key::Char('y')), confirm);
-    // A real `Enter` never confirms a cascade kill: it is no inspector row and passes through.
-    assert_eq!(pressed(pending("spoke-1"), Key::Enter), format!("PassThrough | {}", at(true, 3, true)));
-    assert_eq!(pressed(pending("spoke-1"), Key::Char('n')), format!("Consumed | {}", at(true, 3, false)));
-    // Esc and Ctrl+C never answer the confirmation (A8): one cue names y / n, the confirmation
-    // and the inspector stay open.
-    let cue = render::cue(&[
-        (Context::SidebarAgentInspector, CommandId::Inspector(InspectorCmd::ConfirmKill)),
-        (Context::SidebarAgentInspector, CommandId::Inspector(InspectorCmd::CancelKill)),
-    ]);
-    assert!(cue.ends_with("[y] Confirm  [n] Cancel"), "{cue}");
-    let cued = format!(
-        "Consumed | sidebar open=true scroll=3 kill=true notices=[{:?}]",
-        format!("{}/Info/{cue}x1", NoticeSource::Approval.label())
-    );
-    for key in [Key::Esc, Key::Ctrl('c')] {
-        assert_eq!(pressed(pending("spoke-1"), key), cued, "{key:?}");
+    let target = |state: &TuiState| state.decisions.items().find_map(|item| match &item.subject {
+        DecisionSubject::AgentKill(payload) => Some(payload.agent_id.as_str().to_owned()),
+        _ => None,
+    });
+    // `x` raises the frame for the OPEN agent in the active conversation.
+    let (mut state, clock) = clocked_open();
+    assert_eq!(press(&mut state, Key::Char('x'), false), format!("Consumed | {}", at(true, 3, true)));
+    assert_eq!(target(&state).as_deref(), Some("spoke-1"));
+    assert_eq!(state.decisions.items().next().unwrap().conversation_id.as_deref(), Some("c1"));
+    // `y` / `n` / Enter are no inspector rows: they pass through (a real `Enter` never confirms a kill).
+    for key in [Key::Char('y'), Key::Enter, Key::Char('n')] {
+        assert_eq!(pressed(open(NodeState::Running), key), format!("PassThrough | {}", at(true, 3, false)), "{key:?}");
     }
+    // The frame decides: `y` confirms exactly this agent, once.
+    repaint_ready(&mut state, &clock);
+    assert_eq!(frame_press(&mut state, Key::Char('y')), InputAction::Decision(DecisionEffect::AgentKillConfirm));
+    assert!(!state.decisions.holds(DecisionKind::AgentKill));
+    // `n` declines, `Esc` and `Ctrl+C` defer (they never answer and post no cue).
+    let (mut declined, clock) = clocked_open();
+    press(&mut declined, Key::Char('x'), false);
+    repaint_ready(&mut declined, &clock);
+    assert_eq!(frame_press(&mut declined, Key::Char('n')), InputAction::Decision(DecisionEffect::AgentKillDecline));
+    assert!(!declined.decisions.holds(DecisionKind::AgentKill));
+    for key in [Key::Esc, Key::Ctrl('c')] {
+        let (mut deferred, clock) = clocked_open();
+        press(&mut deferred, Key::Char('x'), false);
+        repaint_ready(&mut deferred, &clock);
+        assert_eq!(frame_press(&mut deferred, key), InputAction::Consumed, "{key:?}");
+        assert!(deferred.decisions.holds(DecisionKind::AgentKill), "{key:?} never answers");
+        assert!(deferred.decisions.items().all(|item| item.deferred), "{key:?}");
+        assert_eq!(deferred.notifications.records().count(), 0, "{key:?}: no cue");
+    }
+    // A kill queued for another agent is answered only for that agent.
+    let (mut other, clock) = clocked_open();
+    decision_queue::raise_agent_kill(&mut other, "c1", AgentId::parse("spoke-2").unwrap(), "other".into());
+    assert_eq!(target(&other).as_deref(), Some("spoke-2"));
+    repaint_ready(&mut other, &clock);
+    assert_eq!(frame_press(&mut other, Key::Char('y')), InputAction::Decision(DecisionEffect::AgentKillConfirm));
     // With no confirmation pending Esc is still "back".
     assert_eq!(pressed(open(NodeState::Running), Key::Esc), format!("Consumed | {}", at(false, 0, false)));
-    for key in [Key::Char('y'), Key::Enter, Key::Char('n')] {
-        assert_eq!(pressed(pending("spoke-2"), key), format!("PassThrough | {}", at(true, 3, true)), "{key:?}");
-    }
+    // A read-only tab never raises the confirmation.
+    let (mut read_only, _clock) = clocked_open();
+    press(&mut read_only, Key::Char('x'), true);
+    assert!(!read_only.decisions.holds(DecisionKind::AgentKill));
 }
 
 /// Regression caught: `p` pauses a finished agent, resumes a running one, or stays silent about why it refused.
@@ -178,7 +204,7 @@ fn k9_agent_inspector_read_only_tab_warns_once_and_still_closes() {
         .filter(|key| *key != Key::Esc)
         .chain([Key::Char('z'), Key::Enter])
         .collect();
-    assert!(keys.len() >= 10, "every inspector row key is driven: {keys:?}");
+    assert!(keys.len() >= 9, "every inspector row key is driven: {keys:?}");
     for key in keys {
         let mut state = open(NodeState::Running);
         let expect = format!("PassThrough | sidebar open=true scroll=3 kill=false notices=[\"{READ_ONLY}\"]");
@@ -218,7 +244,7 @@ fn k9_agent_inspector_rowless_keys_and_a_closed_inspector_pass_through() {
             }
         }
         let mut probe = open(NodeState::Running);
-        assert!(matches!(on_key(&mut probe, &event, false), InspectorOutcome::PassThrough), "{key:?}");
+        assert!(matches!(on_key(&mut probe, &event, false, "c1"), InspectorOutcome::PassThrough), "{key:?}");
         assert_eq!(salient(&probe), before, "{key:?}");
     }
     let closed: [fn(&mut TuiState); 4] = [
@@ -233,7 +259,7 @@ fn k9_agent_inspector_rowless_keys_and_a_closed_inspector_pass_through() {
         let before = salient(&probe);
         for key in [Key::Char('x'), Key::Char('j'), Key::Char('k'), Key::Char('p'), Key::Char('y'), Key::Esc] {
             let event = decode(key).expect("the key decodes");
-            assert!(matches!(on_key(&mut probe, &event, false), InspectorOutcome::PassThrough), "{key:?}");
+            assert!(matches!(on_key(&mut probe, &event, false, "c1"), InspectorOutcome::PassThrough), "{key:?}");
             assert_eq!(salient(&probe), before, "{key:?}");
         }
     }

@@ -4,8 +4,9 @@
 //! keys never reach the Agents list rows. `agent_inspector_keys::on_key` resolves them
 //! here and `widgets::agent_inspector` paints its rails from the labels. Local only.
 //!
-//! * `y` / `n` answer a pending kill confirmation and are inert otherwise (a real `Enter` never
-//!   confirms a cascade kill: it keeps its old meaning, re-opening the entry).
+//! * `x` asks to kill the agent: the confirmation is a decision frame (`Decision: Kill agent`,
+//!   `Context::DecisionConfirm`), so the inspector has no confirm or cancel row of its own
+//!   (a real `Enter` never confirms a cascade kill: it keeps its old meaning, re-opening the entry).
 //! * A read-only tab blocks every command except `Esc`; its `j`/`k` fall through to the
 //!   Agents list (they move the selection, not the inspector).
 //! * Bare `c` is the named PC-14 exception owned by 21-7.
@@ -21,10 +22,6 @@ pub enum InspectorCmd {
     Pause,
     /// Ask to confirm killing the agent and its subtree.
     Kill,
-    /// Kill the agent and its subtree (only while the confirmation is shown).
-    ConfirmKill,
-    /// Dismiss the kill confirmation (only while it is shown).
-    CancelKill,
     /// Notice: change the model from the model selector.
     Model,
     /// Notice: updating tools is not available from the inspector yet.
@@ -51,12 +48,10 @@ const fn i(keys: &'static [Key], cmd: InspectorCmd, label: &'static str) -> Bind
 pub const ROWS: &[Binding] = &[
     i(&[Key::Char('p')], InspectorCmd::Pause, "Pause/Resume").does("Pause the open agent, or resume it when suspended"),
     i(&[Key::Char('x')], InspectorCmd::Kill, "Kill (cascade)").does("Kill the open agent and its subtree (asks to confirm)"),
-    i(&[Key::Char('y')], InspectorCmd::ConfirmKill, "Confirm").does("Confirm the pending kill (only while the confirmation is shown)"),
-    i(&[Key::Char('n')], InspectorCmd::CancelKill, "Cancel").does("Cancel the pending kill (only while the confirmation is shown)"),
     i(&[Key::Char('m')], InspectorCmd::Model, "Change model").does("Change the agent's model (a notice names the model selector)"),
     i(&[Key::Char('t')], InspectorCmd::Tools, "Update tools").does("Update the agent's tools (a notice: not available from the inspector yet)"),
     i(&[Key::Char('c')], InspectorCmd::Conversation, "Conversation tab").does("Open the agent's output in a read-only conversation tab"),
     i(&[Key::Char('j')], InspectorCmd::ScrollDown, "").does("Scroll the inspector down one line"),
     i(&[Key::Char('k')], InspectorCmd::ScrollUp, "").does("Scroll the inspector up one line"),
-    i(&[Key::Esc], InspectorCmd::Close, "Back").does("Close the inspector and return to the Agents list (with the kill confirmation shown, Esc and Ctrl+C post a cue naming y and n instead)"),
+    i(&[Key::Esc], InspectorCmd::Close, "Back").does("Close the inspector and return to the Agents list"),
 ];

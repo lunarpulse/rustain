@@ -314,16 +314,30 @@ def _exercise(binary, evidence, root, monkeypatch):
         _capture(tui, evidence, "04-plan-card", screen)
         _wait(tui, lambda s: "K5 plan tool completed" in s and "Ready" in s,
               "plan tool response completed")
-        # 21.2 AC10: plan y/e/n are Chat-focus keys (in Input they are text), so the
-        # operator moves to Chat first; the rejection itself is asserted unchanged.
-        tui.send("\x1b")
-        _wait(tui, lambda _s: tui._screen.cursor.hidden, "chat focus")
+        # 21.6 6-C: the pending plan card is a `Decision: Plan…` frame (the Stage row keeps the
+        # card without a rail). Frame keys are inert 500 ms after its first paint, so wait for a
+        # SETTLED frame with the full generated rail, then reject with the explicit key `n`.
+        rail = "[y] Approve  [e] Edit  [n] Reject  [Esc] Later"
+        framed = lambda s: "┌ Decision: Plan" in s and rail in s and CARD in s
+        screen = _wait(tui, lambda s: framed(s) or "Needs you (1) ^X q" in s, "plan decision frame or its chip")
+        if not framed(screen):
+            # RU-6: the plan arrived within a second of the typed prompt, so it waits as the chip.
+            listed = lambda s: "[Enter] Open  [Esc] Back  [Up/Down] Select" in s
+            tui.send("\x18q")
+            _wait(tui, listed, "Needs-you list")
+            deadline = time.monotonic() + 0.8
+            while time.monotonic() < deadline:
+                assert listed(tui.get_screen_text()), "list changed inside its inert window"
+            tui.send("\r")
+            screen = _wait(tui, framed, "plan decision frame")
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline:
+            assert framed(tui.get_screen_text()), "plan frame changed inside its inert window"
         tui.send("n")
         _wait(tui, lambda s: "rejected" in s.lower(), "plan rejection")
         _wait(tui, lambda s: "K5 rejection acknowledged" in s and "Ready" in s,
               "plan rejection response completed")
-        tui.send("i")
-        _wait(tui, lambda _s: not tui._screen.cursor.hidden, "input focus")
+        _wait(tui, lambda s: "┌ Decision:" not in s and not tui._screen.cursor.hidden, "input focus")
         _submit(tui, PROMPT_QUIT)
         screen = _wait(tui, lambda s: QUIT_PARTIAL in s, "quit held partial")
         _capture(tui, evidence, "05-quit-partial", screen)

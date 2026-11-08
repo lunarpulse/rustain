@@ -432,25 +432,45 @@ async fn k05_standalone_broadcast_lag_rescans_every_real_pending_request() {
 
 #[tokio::test]
 async fn k05_higher_plan_confirmation_keeps_arrival_queued() {
-    use rustain::adapters::tui::state::PendingPlanApproval;
-    use rustain::domain::models::OverlayType;
-    use rustain::domain::models::visual::ConfirmationType;
+    use rustain::adapters::tui::decision_queue::{PlanApprovalPayload, raise_plan_approval};
 
+    // 21-6 6-C: the plan approval is itself a queue item with its own frame, raised first
+    // (the 0 -> 1 arrival takes the frame); the permission arrives second and waits.
     let mut f = Fixture::new(64).await;
-    f.state.pending_plan_approval = Some(PendingPlanApproval {
-        conversation_id: "higher-plan".into(),
-        plan_path: "plan.md".into(),
-        contents: "An unrelated higher confirmation".into(),
-        summary: "Plan approval fixture".into(),
-    });
-    let plan_focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval));
-    f.state.focus = plan_focus.clone();
+    raise_plan_approval(
+        &mut f.state,
+        PlanApprovalPayload {
+            // An approval with no origin conversation is decidable in any tab (the harness
+            // keeps no tab list); a named origin is decidable only in that tab.
+            conversation_id: String::new(),
+            plan_path: "plan.md".into(),
+            contents: "An unrelated higher confirmation".into(),
+            summary: "Plan approval fixture".into(),
+        },
+    );
+    let top = f
+        .state
+        .modal_stack
+        .top()
+        .map(|frame| (frame.id, frame.surface));
+    assert_eq!(top.map(|(_, surface)| surface), Some(Surface::Decision));
     let input = json!({"command": "printf AFTER-PLAN-CANARY"});
     f.submit(vec![("Bash", input.clone())]).await;
     let (event, _) = f.wait_requested().await;
     let id = request_id(&event);
-    assert_eq!(f.state.focus, plan_focus);
-    assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
+    assert_eq!(
+        f.state
+            .modal_stack
+            .top()
+            .map(|frame| (frame.id, frame.surface)),
+        top,
+        "the arrival never takes the plan frame"
+    );
+    assert_eq!(
+        decision_queue::current(&f.state, &LogFacts::default()).map(|item| item.kind),
+        Some(DecisionKind::PlanApproval),
+        "the plan approval stays the open decision"
+    );
     assert_eq!(f.state.decisions.count(DecisionKind::Permission), 1);
     assert!(decision_queue::status_cue(decision_queue::waiting(&f.state)).is_some());
     assert!(f.state.notifications.visible().count() > 0);
@@ -470,9 +490,8 @@ async fn k05_higher_plan_confirmation_keeps_arrival_queued() {
             .is_some()
     );
     assert!(f.tools.executed.lock().is_empty());
-    // Dismissing the unrelated plan must not open a queued decision by surprise.
-    f.state.pending_plan_approval = None;
-    f.state.focus = FocusState::Input;
+    // Answering the plan must not open the queued permission by surprise.
+    assert_eq!(f.state.decisions.count(DecisionKind::PlanApproval), 0);
     decision_queue::settle(&mut f.state);
     assert!(decision_queue::current(&f.state, &LogFacts::default()).is_none());
     decision_queue::open_waiting(&mut f.state, &LogFacts::default());

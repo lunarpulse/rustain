@@ -78,8 +78,6 @@ pub enum InputAction {
     ClearAdapterOverride {
         port: crate::domain::models::PortDimension,
     },
-    /// AskUserQuestion: user submitted their answer.
-    SubmitQuestionAnswer(String),
     /// Execute a built-in command (e.g., "/new", "/export").
     /// `args` carries an optional trailing argument for commands that support
     /// one — e.g., `/export meeting-notes.md` → `args: Some("meeting-notes.md")`.
@@ -210,12 +208,6 @@ pub enum InputAction {
     TaskReorderCommit,
     /// Story 6.4: Cancel reorder (Esc).
     TaskReorderCancel,
-    /// Story 6.4: Skip cascade card response.
-    SkipCascadeAck(crate::adapters::tui::state::SkipCascadeChoice),
-    /// Story 6.4: Plan deviation card decision.
-    PlanDeviationDecided(String, crate::domain::models::plan::PlanDecision),
-    /// Story 6.4: Cancel plan confirm card response.
-    CancelPlanConfirm(bool),
     /// Open the selected conversation from sidebar.
     // Covers: FR107, AC4
     OpenSidebarConversation,
@@ -455,43 +447,36 @@ pub enum InputAction {
     DismissWave,
     /// Story 14.3a: confirm spawn gate (Enter in gate card).
     SpawnGateConfirm,
-    /// Story 14.3a: cap spawn gate at threshold (c key).
-    SpawnGateCap,
-    /// Story 14.3a: adjust spawn gate N left.
-    SpawnGateAdjustLeft,
-    /// Story 14.3a: adjust spawn gate N right.
-    SpawnGateAdjustRight,
 }
 
 impl InputAction {
     pub fn is_mutation(&self) -> bool {
+        // A decision answer carries its payload (a reply, an event): dropping it on a
+        // read-only tab would lose the answer after its item resolved (6B-01).
         matches!(
             self,
-            InputAction::SubmitMessage(_)
-                | InputAction::SubmitWithContext { .. }
-                | InputAction::PlanApproveNormal
-                | InputAction::PlanApproveAutoEdit
-                | InputAction::PlanReject
-                | InputAction::PlanCardApprove
-                | InputAction::PlanCardReject
+            InputAction::SubmitMessage(_) | InputAction::SubmitWithContext { .. }
         )
     }
 }
 
 pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
-    state.pending_plan_card.is_some()
-        || state.pending_delegation_card.is_some()
-        || state.pending_consolidation_card.is_some()
+    use crate::adapters::tui::decision_queue::DecisionKind as K;
+    state.pending_consolidation_card.is_some()
         || state.pending_forget_card.is_some()
-        || state.task_panel_state.pending_deviation.is_some()
-        || state.task_panel_state.cancel_plan_confirm.is_some()
-        || state.task_panel_state.skip_cascade_pending.is_some()
-        || state
-            .decisions
-            .holds(crate::adapters::tui::decision_queue::DecisionKind::Permission)
-        || state.pending_skill_trust.is_some()
-        || state.pending_plan_approval.is_some()
-        || state.pending_spawn_gate.is_some()
+        || [
+            K::Permission,
+            K::PlanCard,
+            K::PlanApproval,
+            K::PlanDeviation,
+            K::SkipCascade,
+            K::CancelPlan,
+            K::Delegation,
+            K::SkillTrust,
+            K::SpawnGate,
+        ]
+        .into_iter()
+        .any(|kind| state.decisions.holds(kind))
         || state
             .decisions
             .holds_undeferred(crate::adapters::tui::decision_queue::DecisionKind::LargeImage)
@@ -545,17 +530,35 @@ pub(crate) fn recipient_surface_ignores_raw_key(
         .is_some_and(|frame| frame.surface == Surface::Decision)
         && let Event::Key(key) = event
     {
+        use crate::adapters::tui::keymap::Context as C;
         let context = crate::adapters::tui::decision_queue::frame_context(state);
-        let deciding = match context {
-            crate::adapters::tui::keymap::Context::Permission => {
-                matches!(
-                    key.code,
-                    KeyCode::Char(
-                        'y' | 's' | 'a' | 'n' | 'f' | 'r' | 'Y' | 'S' | 'A' | 'N' | 'F' | 'R'
-                    )
-                )
-            }
-            crate::adapters::tui::keymap::Context::DecisionCompose => key.code == KeyCode::Enter,
+        // Only the deciding keys of a frame require a plain press: its letters, `Enter`
+        // (a field's Send, the idle question's Answer, the spawn gate's Confirm) and,
+        // for a question, `Ctrl+D` (Press only; it carries Ctrl by design).
+        let letters: &[char] = match context {
+            C::Permission => &['y', 's', 'a', 'n', 'f', 'r'],
+            C::SkillTrust => &['y', 'n', 'i'],
+            C::PlanApproval => &['y', 'a', 'n', 'e'],
+            C::PlanDecision => &['y', 'e', 'n'],
+            C::SkipCascade => &['s', 'a', 'n'],
+            C::Delegation => &['d', 'l', 'x'],
+            C::SpawnGate => &['t', 'n'],
+            C::DecisionConfirm => &['y', 'n'],
+            _ => &[],
+        };
+        let enter_decides = matches!(
+            context,
+            C::DecisionCompose | C::Question | C::QuestionIdle | C::SpawnGate
+        );
+        if matches!(context, C::Question | C::QuestionIdle)
+            && key.code == KeyCode::Char('d')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            return key.kind != KeyEventKind::Press;
+        }
+        let deciding = match key.code {
+            KeyCode::Char(c) => letters.contains(&c.to_ascii_lowercase()),
+            KeyCode::Enter => enter_decides,
             _ => false,
         };
         if deciding {
@@ -654,7 +657,7 @@ fn finish_input_boundary(
     crate::adapters::tui::decision_queue::settle(state);
     if surface_was_open
         && !crate::adapters::tui::decision_queue::card_focus_blocked(state)
-        && matches!(inline_card(state), Some(card) if !matches!(card, InlineCard::Plan | InlineCard::SkipCascade))
+        && inline_card(state).is_some()
     {
         reducer::take_chat_focus_for_card(state, true);
     }
@@ -717,13 +720,10 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
     state.pending_leader.is_none()
         && match state.modal_stack.top() {
             Some(frame) => frame.surface != Surface::QuitConfirm,
-            None => {
-                state.pending_spawn_gate.is_none()
-                    && !matches!(
-                        state.focus,
-                        FocusState::Overlay(OverlayType::Confirmation(_))
-                    )
-            }
+            None => !matches!(
+                state.focus,
+                FocusState::Overlay(OverlayType::Confirmation(_))
+            ),
         }
 }
 
@@ -1328,12 +1328,6 @@ pub(crate) fn dispatch_frame_key(
 pub(crate) enum InlineCard {
     Forget,
     Consolidation,
-    Delegation,
-    Spawn,
-    Deviation,
-    CancelPlan,
-    SkipCascade,
-    Plan,
 }
 
 pub(crate) fn inline_card(state: &TuiState) -> Option<InlineCard> {
@@ -1346,18 +1340,6 @@ pub(crate) fn inline_card(state: &TuiState) -> Option<InlineCard> {
         Some(InlineCard::Forget)
     } else if state.pending_consolidation_card.is_some() {
         Some(InlineCard::Consolidation)
-    } else if state.pending_delegation_card.is_some() {
-        Some(InlineCard::Delegation)
-    } else if state.pending_spawn_gate.is_some() {
-        Some(InlineCard::Spawn)
-    } else if state.task_panel_state.pending_deviation.is_some() {
-        Some(InlineCard::Deviation)
-    } else if state.task_panel_state.cancel_plan_confirm.is_some() {
-        Some(InlineCard::CancelPlan)
-    } else if state.task_panel_state.skip_cascade_pending.is_some() {
-        Some(InlineCard::SkipCascade)
-    } else if state.pending_plan_card.is_some() {
-        Some(InlineCard::Plan)
     } else {
         None
     }
@@ -1369,10 +1351,6 @@ fn card_context(state: &TuiState) -> Option<Context> {
     use ConfirmationType as C;
     if let FocusState::Overlay(OverlayType::Confirmation(card)) = &state.focus {
         return Some(match card {
-            C::SkillTrust => Context::SkillTrust,
-            C::SkillTrustInspect => Context::SkillTrustInspect,
-            C::Question => Context::Question,
-            C::PlanApproval => Context::PlanApproval,
             C::Fork | C::ArtifactApply | C::PeerAdd | C::TeamRetract => Context::Confirm,
             C::Rewind => Context::Rewind,
             C::ExportOverwrite(_) => Context::ExportOverwrite,
@@ -1389,12 +1367,8 @@ fn card_context(state: &TuiState) -> Option<Context> {
         return None;
     };
     Some(match card {
-        InlineCard::Spawn => Context::SpawnGate,
-        InlineCard::Plan | InlineCard::Deviation => Context::PlanDecision,
-        InlineCard::Delegation => Context::Delegation,
         InlineCard::Forget => Context::Forget,
-        InlineCard::Consolidation | InlineCard::CancelPlan => Context::Confirm,
-        InlineCard::SkipCascade => Context::SkipCascade,
+        InlineCard::Consolidation => Context::Confirm,
     })
 }
 
@@ -1424,10 +1398,6 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
             return (!back_first).then(|| card_cue(state, context));
         }
         return match (context, key) {
-            (Context::SpawnGate, DomainKey::Enter) => Some(InputAction::SpawnGateConfirm),
-            (Context::SpawnGate, DomainKey::Left) => Some(InputAction::SpawnGateAdjustLeft),
-            (Context::SpawnGate, DomainKey::Right) => Some(InputAction::SpawnGateAdjustRight),
-            (Context::SpawnGate, _) => Some(InputAction::Consumed),
             (Context::Forget, DomainKey::Up | DomainKey::Down) => {
                 if let Some(card) = state.pending_forget_card.as_mut() {
                     let last = card.candidates.len().saturating_sub(1);
@@ -1444,44 +1414,10 @@ fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction>
             _ => None,
         };
     }
-    let field_edit = matches!(Key::from_domain_key(key), Key::Ctrl('w' | 'u' | 'h'));
     Some(match (context, key) {
-        (Context::SkillTrustInspect, DomainKey::Esc) => {
-            state.skill_trust_inspect_mode = false;
-            reducer::raise_confirmation(state, ConfirmationType::SkillTrust);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
-        (Context::SkillTrustInspect, DomainKey::CtrlC) => InputAction::Consumed,
-        (Context::Question, DomainKey::Enter) => match state.ask_user_question.as_mut() {
-            Some(aq) if !aq.input_buffer.is_empty() => {
-                let answer = std::mem::take(&mut aq.input_buffer);
-                aq.submitted_answer = Some(answer.clone());
-                aq.cursor_position = 0;
-                state.needs_redraw = true;
-                InputAction::SubmitQuestionAnswer(answer)
-            }
-            _ => InputAction::Consumed,
-        },
-        (Context::Question, _) if key == DomainKey::Backspace || field_edit => {
-            if let Some(aq) = state.ask_user_question.as_mut() {
-                edit_field(&mut aq.input_buffer, key);
-                aq.cursor_position = aq.input_buffer.chars().count();
-                state.needs_redraw = true;
-            }
-            InputAction::Consumed
-        }
-        (Context::Question, DomainKey::CtrlD) => {
-            // Skip: dismiss and drop the oneshot sender so the turn gets a RecvError.
-            state.ask_user_question = None;
-            drop(state.question_response_tx.take());
-            reducer::set_base(state, FocusState::Input);
-            state.needs_redraw = true;
-            InputAction::Consumed
-        }
         _ if esc => card_cue(state, context),
-        // PlanApproval, ArtifactApply, PeerAdd and TeamRetract keep the quit request.
-        (Context::PlanApproval | Context::Confirm, DomainKey::CtrlQ)
+        // ArtifactApply, PeerAdd and TeamRetract keep the quit request.
+        (Context::Confirm, DomainKey::CtrlQ)
             if !matches!(
                 state.focus,
                 FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork))
@@ -1962,7 +1898,7 @@ fn edit_query(
 /// The borrowed paste seam edits only fields actually offered by this host.
 pub(crate) fn paste_query(state: &mut TuiState, text: &str, host: Host) -> Option<InputAction> {
     let context = focus_context(state)?;
-    if context == Context::DecisionCompose {
+    if matches!(context, Context::DecisionCompose | Context::Question) {
         // The frame's own field (never the composer): control characters become spaces.
         crate::adapters::tui::decision_queue::paste(state, text);
         state.needs_redraw = true;
@@ -2596,14 +2532,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
     {
         use InlineCard::*;
         let action = match (card, c) {
-            (Spawn, 'c') => Some(InputAction::SpawnGateCap),
-            (Spawn, 'n') => Some(InputAction::CloseWaveOverlay),
-            (Plan, 'y') => Some(InputAction::PlanCardApprove),
-            (Plan, 'e') => Some(InputAction::PlanCardEdit),
-            (Plan, 'n') => Some(InputAction::PlanCardReject),
-            (Delegation, 'd') => Some(InputAction::DelegateTask),
-            (Delegation, 'l') => Some(InputAction::RunTaskLocally),
-            (Delegation, 'x') => Some(InputAction::DelegationCardCancel),
             (Consolidation, 'y') => Some(InputAction::ConsolidateAcceptAll),
             (Consolidation, 'n') => Some(InputAction::ConsolidateDeclineAll),
             (Forget, 'y') => Some(InputAction::ForgetAcceptAll),
@@ -2611,29 +2539,7 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             (Forget, ' ') => Some(InputAction::ForgetToggleSelection),
             (Forget, 'j') => Some(InputAction::ForgetNavigateDown),
             (Forget, 'k') => Some(InputAction::ForgetNavigateUp),
-            (Deviation, 'y' | 'e' | 'n') => Some(InputAction::PlanDeviationDecided(
-                state
-                    .task_panel_state
-                    .pending_deviation
-                    .as_ref()
-                    .unwrap()
-                    .0
-                    .clone(),
-                match c {
-                    'y' => crate::domain::models::plan::PlanDecision::Approve,
-                    'e' => crate::domain::models::plan::PlanDecision::Edit,
-                    _ => crate::domain::models::plan::PlanDecision::Reject,
-                },
-            )),
-            (CancelPlan, 'y' | 'n') => Some(InputAction::CancelPlanConfirm(c == 'y')),
-            (SkipCascade, 's' | 'c' | 'n') => Some(InputAction::SkipCascadeAck(match c {
-                's' => crate::adapters::tui::state::SkipCascadeChoice::CascadeSkip,
-                'c' => crate::adapters::tui::state::SkipCascadeChoice::ContinueAnyway,
-                _ => crate::adapters::tui::state::SkipCascadeChoice::CancelSkip,
-            })),
-            (Spawn | Consolidation | Forget, _) => Some(InputAction::Consumed),
-            (Deviation | CancelPlan | SkipCascade, _) => Some(InputAction::Ignored),
-            _ => None,
+            (Consolidation | Forget, _) => Some(InputAction::Consumed),
         };
         if let Some(action) = action {
             return action;
@@ -2693,59 +2599,6 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
             'n' => InputAction::TeamRetractDecline,
             _ => InputAction::Consumed,
         };
-    }
-
-    // Skill trust prompt focus: y/n/i (Story 5-2 AC4)
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::SkillTrust)) {
-        match c {
-            'y' => return InputAction::SkillTrustAccept,
-            'n' => return InputAction::SkillTrustDecline,
-            'i' => return InputAction::SkillTrustInspect,
-            // AC6: chat-scroll preserved while the prompt is up. S16.8: migrated to InputActions.
-            'j' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollLineDown;
-            }
-            'k' => {
-                state.needs_redraw = true;
-                return InputAction::ScrollLineUp;
-            }
-            _ => return InputAction::Consumed,
-        }
-    }
-
-    // Skill trust inspect mode: all char keys consumed (read-only view)
-    if state.focus
-        == FocusState::Overlay(OverlayType::Confirmation(
-            ConfirmationType::SkillTrustInspect,
-        ))
-    {
-        return InputAction::Consumed;
-    }
-
-    // Plan approval card focus: y/a/n/e (Story 6-0d AC4)
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PlanApproval))
-    {
-        match c {
-            'y' => return InputAction::PlanApproveNormal,
-            'a' => return InputAction::PlanApproveAutoEdit,
-            'n' => return InputAction::PlanReject,
-            'e' => return InputAction::PlanRevise,
-            _ => return InputAction::Consumed,
-        }
-    }
-
-    // Inline PlanCard y/e/n in Chat is handled by the single interceptor above
-    // (Story 21.2 AC10: one owner; Input never resolves the plan).
-
-    // AskUserQuestion focus: type into question input buffer
-    if state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Question)) {
-        if let Some(ref mut aq) = state.ask_user_question {
-            aq.input_buffer.push(c);
-            aq.cursor_position += 1;
-            state.needs_redraw = true;
-        }
-        return InputAction::Consumed;
     }
 
     #[cfg(feature = "a2a")]
@@ -4632,11 +4485,6 @@ mod tests {
             // reaches the global site and quits. Their y/n/e verbs are char
             // keys; quitting abandons the card without performing it.
             Row {
-                label: "Confirmation(PlanApproval) (no special-key interceptor)",
-                setup: confirmation(ConfirmationType::PlanApproval),
-                expect: CtrlQRowExpectation::Quit,
-            },
-            Row {
                 label: "Confirmation(ArtifactApply) (no special-key interceptor)",
                 setup: confirmation(ConfirmationType::ArtifactApply),
                 expect: CtrlQRowExpectation::Quit,
@@ -4752,13 +4600,6 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Confirmation(Question))",
-                setup: confirmation(ConfirmationType::Question),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(Question): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
-            },
-            Row {
                 label: "Overlay(Confirmation(Fork))",
                 setup: confirmation(ConfirmationType::Fork),
                 expect: CtrlQRowExpectation::Skip(
@@ -4779,20 +4620,6 @@ mod tests {
                 ))),
                 expect: CtrlQRowExpectation::Skip(
                     "Confirmation(ExportOverwrite): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
-            },
-            Row {
-                label: "Overlay(Confirmation(SkillTrust))",
-                setup: confirmation(ConfirmationType::SkillTrust),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(SkillTrust): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
-            },
-            Row {
-                label: "Overlay(Confirmation(SkillTrustInspect))",
-                setup: confirmation(ConfirmationType::SkillTrustInspect),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(SkillTrustInspect): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
                 ),
             },
         ];
@@ -5820,44 +5647,39 @@ mod tests {
     }
 
     #[test]
-    fn spawn_gate_intercepts_keys_before_chat_handlers() {
+    fn story21_6_spawn_gate_keys_belong_to_the_frame_not_the_chat_handlers() {
+        use crate::adapters::tui::decision_queue::{
+            DecisionKind, PendingSpawnGate, raise_spawn_gate,
+        };
         let mut state = make_state();
         state.focus = FocusState::Chat;
-        state.pending_spawn_gate = Some(crate::adapters::tui::state::PendingSpawnGate {
-            spec: crate::adapters::tui::fanout_spec::parse_fanout(Some("3 test")).unwrap(),
-            requested: 3,
-            threshold: 2,
-            adjusted: None,
-        });
-
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress('c')),
-            InputAction::SpawnGateCap
+        raise_spawn_gate(
+            &mut state,
+            "c1",
+            PendingSpawnGate {
+                spec: crate::adapters::tui::fanout_spec::parse_fanout(Some("3 test")).unwrap(),
+                requested: 3,
+                threshold: 2,
+                adjusted: None,
+            },
         );
+        assert!(state.decisions.holds(DecisionKind::SpawnGate));
         assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Left)),
-            InputAction::SpawnGateAdjustLeft
+            state.modal_stack.top().map(|frame| frame.surface),
+            Some(Surface::Decision),
+            "a user-started gate takes the keyboard"
         );
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Right)),
-            InputAction::SpawnGateAdjustRight
-        );
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter)),
-            InputAction::SpawnGateConfirm
-        );
-        // R2: `n` declines the gate (it was the only card without a negative key).
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::KeyPress('n')),
-            InputAction::CloseWaveOverlay
-        );
-        // 3-C (A8): `Esc` no longer clears the gate (was `CloseWaveOverlay`): one cue, the
-        // gate stays pending.
-        assert_eq!(
-            handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
-            InputAction::Consumed
-        );
-        assert!(state.pending_spawn_gate.is_some());
+        // Nothing the old chat handlers answered (`c` cap, `n` close-wave) reaches them now,
+        // and the frame never reads a letter into the composer.
+        for c in ['c', 'n'] {
+            let action = handle_input(&mut state, &DomainInputEvent::KeyPress(c));
+            assert_ne!(action, InputAction::CloseWaveOverlay, "{c}");
+            assert_ne!(action, InputAction::SpawnGateConfirm, "{c}");
+        }
+        assert!(state.input_buffer.is_empty());
+        // `Esc` defers, never clears the gate.
+        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(state.decisions.holds(DecisionKind::SpawnGate));
     }
 
     /// 21-3 3-C (R4g): the local team-proposal rows by value; `Esc` / `Ctrl+C` only cue.
@@ -6558,8 +6380,8 @@ mod tests {
 #[cfg(test)]
 mod story21_2_shortcut_tests {
     use super::*;
+    use crate::adapters::tui::decision_queue::{DecisionKind, PlanCardPayload, raise_plan_card};
     use crate::adapters::tui::quit_confirm::{QuitFacts, QuitHost};
-    use crate::adapters::tui::state::PendingPlanCard;
     use crate::domain::models::plan::{Plan, PlanStatus};
 
     fn key(c: char) -> DomainInputEvent {
@@ -6568,29 +6390,34 @@ mod story21_2_shortcut_tests {
     fn special(k: DomainKey) -> DomainInputEvent {
         DomainInputEvent::SpecialKey(k)
     }
-    fn state_with_plan(focus: FocusState) -> TuiState {
-        let mut state = TuiState::new(80, 24);
-        state.focus = focus;
-        state.pending_plan_card = Some(PendingPlanCard {
-            conversation_id: "c1".into(),
-            plan_id: "p1".into(),
-            plan_snapshot: Plan {
-                id: "p1".into(),
-                title: "t".into(),
-                tasks: vec![],
-                estimated_effort: None,
-                status: PlanStatus::Pending,
-                created_at: 0,
-                resolved_at: None,
-                host_message_id: None,
+    fn plan_card(state: &mut TuiState) {
+        raise_plan_card(
+            state,
+            PlanCardPayload {
+                conversation_id: "c1".into(),
+                plan_id: "p1".into(),
+                plan_snapshot: Plan {
+                    id: "p1".into(),
+                    title: "t".into(),
+                    tasks: vec![],
+                    estimated_effort: None,
+                    status: PlanStatus::Pending,
+                    created_at: 0,
+                    resolved_at: None,
+                    host_message_id: None,
+                },
             },
-        });
-        state
+        );
     }
 
     #[test]
-    fn story21_2_input_plan_letters_are_text_and_chat_resolves_the_same_plan() {
-        let mut input = state_with_plan(FocusState::Input);
+    fn story21_6_plan_letters_are_text_in_input_and_never_resolve_the_plan_in_chat() {
+        // Typing protects the composer: the plan waits and the letters are text.
+        let mut input = TuiState::new(80, 24);
+        input.focus = FocusState::Input;
+        input.input_buffer = "a".into();
+        input.cursor_position = 1;
+        plan_card(&mut input);
         for c in ['y', 'e', 'n'] {
             let action = handle_input(&mut input, &key(c));
             assert!(
@@ -6603,22 +6430,28 @@ mod story21_2_shortcut_tests {
                 "Input `{c}` must not resolve the plan, got {action:?}"
             );
         }
-        assert_eq!(input.input_buffer, "yen", "letters typed at the cursor");
-        assert!(input.pending_plan_card.is_some(), "plan retained");
-        // Positive control: the same letters in Chat still resolve.
-        let mut chat = state_with_plan(FocusState::Chat);
-        assert_eq!(
-            handle_input(&mut chat, &key('y')),
-            InputAction::PlanCardApprove
+        assert_eq!(input.input_buffer, "ayen", "letters typed at the cursor");
+        assert!(
+            input.decisions.holds(DecisionKind::PlanCard),
+            "plan retained"
         );
-        assert_eq!(
-            handle_input(&mut chat, &key('e')),
-            InputAction::PlanCardEdit
-        );
-        assert_eq!(
-            handle_input(&mut chat, &key('n')),
-            InputAction::PlanCardReject
-        );
+        // The plan is answerable only through its frame: a bare Chat letter is no answer.
+        let mut chat = TuiState::new(80, 24);
+        chat.focus = FocusState::Chat;
+        plan_card(&mut chat);
+        for c in ['y', 'e', 'n'] {
+            let action = handle_input(&mut chat, &key(c));
+            assert!(
+                !matches!(
+                    action,
+                    InputAction::PlanCardApprove
+                        | InputAction::PlanCardEdit
+                        | InputAction::PlanCardReject
+                ),
+                "Chat `{c}` must not resolve the plan before the frame is ready, got {action:?}"
+            );
+        }
+        assert!(chat.decisions.holds(DecisionKind::PlanCard));
     }
 
     #[test]
@@ -6804,7 +6637,9 @@ mod story21_2_shortcut_tests {
 
     #[test]
     fn story21_2_quit_frame_owns_y_before_a_pending_plan_card() {
-        let mut state = state_with_plan(FocusState::Chat);
+        let mut state = TuiState::new(80, 24);
+        state.focus = FocusState::Chat;
+        plan_card(&mut state);
         let facts = QuitFacts {
             streams: 1,
             ..QuitFacts::idle(QuitHost::Local)
@@ -6813,7 +6648,7 @@ mod story21_2_shortcut_tests {
         // n cancels, restores the caller and leaves the plan untouched.
         assert_eq!(handle_input(&mut state, &key('n')), InputAction::Consumed);
         assert!(state.quit_confirm.is_none());
-        assert!(state.pending_plan_card.is_some());
+        assert!(state.decisions.holds(DecisionKind::PlanCard));
         // Re-raise: `y` is owned by S-QUIT only — never PlanCardApprove.
         crate::adapters::tui::quit_confirm::request(
             &mut state,
@@ -6826,7 +6661,10 @@ mod story21_2_shortcut_tests {
             handle_input(&mut state, &key('y')),
             InputAction::QuitConfirmed
         );
-        assert!(state.pending_plan_card.is_some(), "no card was resolved");
+        assert!(
+            state.decisions.holds(DecisionKind::PlanCard),
+            "no card was resolved"
+        );
     }
 
     /// R9c (21.3): the open leader owns the follow-up before any card, so
@@ -6838,22 +6676,26 @@ mod story21_2_shortcut_tests {
             ('n', InputAction::PlanCardReject),
             ('e', InputAction::PlanCardEdit),
         ] {
-            let mut state = state_with_plan(FocusState::Chat);
+            let mut state = TuiState::new(80, 24);
+            state.focus = FocusState::Chat;
             assert_eq!(
                 handle_input(&mut state, &special(DomainKey::CtrlX)),
                 InputAction::Consumed
             );
-            assert!(
-                state.pending_leader.is_some(),
-                "the leader opens over the card"
-            );
+            assert!(state.pending_leader.is_some(), "the leader opens first");
+            // The plan arrives under the open leader: it waits, the leader keeps the keys.
+            plan_card(&mut state);
+            assert!(state.pending_leader.is_some(), "the leader stays open");
             let action = handle_input(&mut state, &key(follow_up));
             assert_ne!(action, forbidden, "{follow_up}");
             assert!(
                 state.pending_leader.is_none(),
                 "{follow_up}: the leader closed"
             );
-            assert!(state.pending_plan_card.is_some(), "{follow_up}: plan kept");
+            assert!(
+                state.decisions.holds(DecisionKind::PlanCard),
+                "{follow_up}: plan kept"
+            );
         }
     }
 }

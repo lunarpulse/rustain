@@ -3,7 +3,8 @@
 //! The plan remains conversation data, but its display host is not a turn or
 //! model history. Resolution and editor dispatch remain in the event loop.
 
-use crate::adapters::tui::state::{PendingPlanCard, TuiState};
+use crate::adapters::tui::decision_queue::{self, DecisionSubject, PlanCardPayload};
+use crate::adapters::tui::state::TuiState;
 use crate::domain::events::AppEvent;
 use crate::domain::models::plan::{Plan, PlanStatus};
 use crate::domain::models::{
@@ -69,18 +70,23 @@ pub fn handle_plan_proposed(
         ))
     } else {
         conversation.plans.insert(plan_id.clone(), plan.clone());
-        if let Some(old_pending) = &state.pending_plan_card {
-            if let Some(old_plan) = conversation.plans.get_mut(&old_pending.plan_id) {
-                tracing::warn!("Superseding pending plan card: {}", old_pending.plan_id);
+        if let Some(old_id) = pending_plan_id(&state.decisions, &conversation.id).map(str::to_owned)
+        {
+            if let Some(old_plan) = conversation.plans.get_mut(&old_id) {
+                tracing::warn!("Superseding pending plan card: {}", old_id);
                 old_plan.status = PlanStatus::Rejected;
                 old_plan.resolved_at = Some(crate::domain::models::session_meta::now_unix());
             }
+            decision_queue::withdraw_plan_card(state, &old_id);
         }
-        state.pending_plan_card = Some(PendingPlanCard {
-            conversation_id: conversation.id.clone(),
-            plan_id,
-            plan_snapshot: plan,
-        });
+        decision_queue::raise_plan_card(
+            state,
+            PlanCardPayload {
+                conversation_id: conversation.id.clone(),
+                plan_id,
+                plan_snapshot: plan,
+            },
+        );
         None
     };
     state.needs_redraw = true;
@@ -124,19 +130,42 @@ pub fn handle_plan_edit_completed(
             stored.estimated_effort = edited.estimated_effort;
         }
         stored.status = PlanStatus::Pending;
-        state.pending_plan_card = Some(PendingPlanCard {
-            conversation_id: conversation.id.clone(),
-            plan_id: plan_id.to_owned(),
-            plan_snapshot: stored.clone(),
-        });
+        decision_queue::raise_plan_card(
+            state,
+            PlanCardPayload {
+                conversation_id: conversation.id.clone(),
+                plan_id: plan_id.to_owned(),
+                plan_snapshot: stored.clone(),
+            },
+        );
     }
     state.needs_redraw = true;
+}
+
+/// The plan whose LIVE card this conversation holds, if any (a new proposal supersedes
+/// it; the Stage row of that plan paints the pending marker). A superseded card kept
+/// stale behind an open frame is not pending.
+pub fn pending_plan_id<'a>(
+    decisions: &'a decision_queue::DecisionQueue,
+    conversation_id: &str,
+) -> Option<&'a str> {
+    decisions.items().find_map(|item| match &item.subject {
+        DecisionSubject::PlanCard(card)
+            if card.conversation_id == conversation_id && !item.is_stale() =>
+        {
+            Some(card.plan_id.as_str())
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::tui::app::{InputAction, handle_input};
+    use crate::adapters::tui::decision_queue::{
+        DecisionKind, plan_card_pending, plan_card_snapshot,
+    };
     use crate::domain::events::DomainInputEvent;
     use crate::domain::models::{StopReason, StreamChunk};
     use crate::domain::services::reducer::{reduce, test_reducer_state};
@@ -162,6 +191,15 @@ mod tests {
             content_blocks: vec![ContentBlockType::Text],
             ..Default::default()
         }
+    }
+    fn pending_id(state: &TuiState) -> Option<String> {
+        state
+            .decisions
+            .items()
+            .find_map(|item| match &item.subject {
+                DecisionSubject::PlanCard(card) => Some(card.plan_id.clone()),
+                _ => None,
+            })
     }
 
     fn painted(conversation: &Conversation, state: &TuiState) -> String {
@@ -195,7 +233,7 @@ mod tests {
                     None,
                     &[],
                     &[],
-                    state.pending_plan_card.as_ref(),
+                    pending_id(state).as_deref(),
                     None,
                     None,
                     Default::default(),
@@ -311,18 +349,20 @@ mod tests {
                     .iter()
                     .any(|message| message.id == host && message.is_ephemeral_display())
             );
-            assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "p");
+            assert!(plan_card_pending(&state, "p"));
             assert!(painted(&conversation, &state).contains("plan p"));
-            // Story 21.2 AC10: plan keys belong to Chat focus (was: default Input focus).
+            // Story 21.6: y/n/e belong to the plan's decision frame, never to Chat.
             state.focus = crate::domain::models::FocusState::Chat;
-            for (key, action) in [
-                ('y', InputAction::PlanCardApprove),
-                ('n', InputAction::PlanCardReject),
-                ('e', InputAction::PlanCardEdit),
-            ] {
-                assert_eq!(
-                    handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
-                    action
+            for key in ['y', 'n', 'e'] {
+                let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
+                assert!(
+                    !matches!(
+                        action,
+                        InputAction::PlanCardApprove
+                            | InputAction::PlanCardReject
+                            | InputAction::PlanCardEdit
+                    ),
+                    "{key}: {action:?}"
                 );
             }
         }
@@ -355,16 +395,21 @@ mod tests {
                 handle_plan_edit_completed(&mut conversation, &mut state, "unseen", None);
             }
             assert!(!painted(&conversation, &state).contains("plan unseen"));
-            assert_eq!(state.focus, FocusState::Input, "edited={edited}");
+            // Story 21.6: the plan is a queue item, so its arrival is the queue's call
+            // (RU-6); what it must never do is scroll the reader or answer the plan.
+            assert!(plan_card_pending(&state, "unseen"), "edited={edited}");
             for key in ['y', 'n'] {
-                assert_eq!(
-                    handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
-                    InputAction::Consumed
+                let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
+                assert!(
+                    !matches!(
+                        action,
+                        InputAction::PlanCardApprove | InputAction::PlanCardReject
+                    ),
+                    "{key}: {action:?}"
                 );
             }
-            assert_eq!(state.input_buffer, "yn");
             assert_eq!(conversation.plans["unseen"].status, PlanStatus::Pending);
-            assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "unseen");
+            assert!(plan_card_pending(&state, "unseen"));
             assert_eq!(state.scroll_offset(), 100);
             assert!(!state.auto_scroll());
         }
@@ -400,9 +445,35 @@ mod tests {
             conversation.plans["old"].host_message_id,
             conversation.plans["new"].host_message_id
         );
-        assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "new");
+        assert!(plan_card_pending(&state, "new"));
+        assert!(!plan_card_pending(&state, "old"));
+        // The superseded card was open as a frame: it turns stale (Close removes it).
+        assert_eq!(state.decisions.count_live(DecisionKind::PlanCard), 1);
         conversation.rebuild_messages_mirror();
         assert_eq!(conversation.messages.len(), 2);
+        // A third proposal while the first frame is still open (kept stale): the live
+        // plan is superseded, never the retained stale one.
+        handle_plan_proposed(
+            &mut conversation,
+            &mut state,
+            "c",
+            plan("third"),
+            PermissionMode::Normal,
+            None,
+        );
+        assert_eq!(conversation.plans["new"].status, PlanStatus::Rejected);
+        assert_eq!(conversation.plans["third"].status, PlanStatus::Pending);
+        assert_eq!(state.decisions.count_live(DecisionKind::PlanCard), 1);
+        assert!(plan_card_pending(&state, "third"));
+        assert!(!plan_card_pending(&state, "new"));
+        assert!(
+            state
+                .decisions
+                .items()
+                .any(|item| item.source == "old" && item.is_stale()),
+            "the open first frame stays, Close-only"
+        );
+        assert_eq!(pending_plan_id(&state.decisions, "c"), Some("third"));
     }
 
     #[test]
@@ -437,7 +508,7 @@ mod tests {
         );
         assert_eq!(conversation.plans["auto"].status, PlanStatus::Executing);
         assert!(conversation.plans["auto"].resolved_at.is_some());
-        assert_eq!(state.pending_plan_card.as_ref().unwrap().plan_id, "pending");
+        assert!(plan_card_pending(&state, "pending"));
         assert_eq!(conversation.plans["pending"].status, PlanStatus::Pending);
     }
 
@@ -462,16 +533,16 @@ mod tests {
         );
         assert!(conversation.messages.is_empty());
         assert!(conversation.plans.is_empty());
-        assert!(state.pending_plan_card.is_none());
+        assert_eq!(state.decisions.count(DecisionKind::PlanCard), 0);
         assert!(!state.needs_redraw);
     }
     #[test]
     fn decisions_and_edit_completion_change_only_the_selected_plan_and_keep_host() {
         use crate::domain::models::plan::PlanDecision;
-        for (key, decision, expected) in [
-            ('y', PlanDecision::Approve, PlanStatus::Executing),
-            ('n', PlanDecision::Reject, PlanStatus::Rejected),
-            ('e', PlanDecision::Edit, PlanStatus::Editing),
+        for (decision, expected) in [
+            (PlanDecision::Approve, PlanStatus::Executing),
+            (PlanDecision::Reject, PlanStatus::Rejected),
+            (PlanDecision::Edit, PlanStatus::Editing),
         ] {
             let mut conversation = Conversation {
                 id: "c".into(),
@@ -487,17 +558,10 @@ mod tests {
                 PermissionMode::Normal,
                 None,
             );
-            // Story 21.2 AC10: y/e/n resolve the plan from Chat only; in Input they
-            // are literal text (old assertion: resolved from the default Input focus).
-            state.focus = crate::domain::models::FocusState::Chat;
+            // Story 21.6: the plan is answerable only through its decision frame; the
+            // card is raised (and stays raised) until that frame resolves it.
             let host = conversation.plans["selected"].host_message_id.clone();
-            let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
-            assert!(matches!(
-                (action, &decision),
-                (InputAction::PlanCardApprove, PlanDecision::Approve)
-                    | (InputAction::PlanCardReject, PlanDecision::Reject)
-                    | (InputAction::PlanCardEdit, PlanDecision::Edit)
-            ));
+            assert!(plan_card_pending(&state, "selected"));
             handle_plan_decision(&mut conversation, "selected", &decision);
             assert_eq!(conversation.plans["selected"].status, expected);
             assert_eq!(conversation.plans["control"].status, PlanStatus::Pending);
@@ -508,17 +572,9 @@ mod tests {
                 handle_plan_edit_completed(&mut conversation, &mut state, "selected", Some(edited));
                 assert_eq!(conversation.plans["selected"].title, "edited title");
                 assert_eq!(conversation.plans["selected"].status, PlanStatus::Pending);
+                assert!(plan_card_pending(&state, "selected"));
                 assert_eq!(
-                    state.pending_plan_card.as_ref().unwrap().plan_id,
-                    "selected"
-                );
-                assert_eq!(
-                    state
-                        .pending_plan_card
-                        .as_ref()
-                        .unwrap()
-                        .plan_snapshot
-                        .title,
+                    plan_card_snapshot(&state, "selected").unwrap().title,
                     "edited title"
                 );
                 handle_plan_decision(&mut conversation, "selected", &PlanDecision::Edit);

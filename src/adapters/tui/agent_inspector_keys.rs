@@ -26,8 +26,6 @@ pub enum InspectorOutcome {
     Consumed,
     /// `p` on a running or suspended agent: refresh the cache, then send `op`.
     SendOp { agent_id: AgentId, op: Op },
-    /// `y` with the kill confirmation shown: cascade-kill the agent.
-    ConfirmKill(AgentId),
     /// `m`: post the "use the model selector" notice.
     ModelNotice,
     /// `t`: post the "not available yet" notice.
@@ -41,7 +39,6 @@ pub(crate) fn close(state: &mut TuiState) {
     let panel = &mut state.agent_panel_state;
     panel.drill_down_agent = None;
     panel.inspector_scroll_offset = 0;
-    panel.pending_kill_confirm = None;
     state.needs_redraw = true;
 }
 
@@ -119,6 +116,7 @@ pub fn on_key(
     state: &mut TuiState,
     event: &DomainInputEvent,
     read_only_tab: bool,
+    conversation_id: &str,
 ) -> InspectorOutcome {
     if !(state.sidebar_visible
         && matches!(state.focus, FocusState::Sidebar { .. })
@@ -139,16 +137,6 @@ pub fn on_key(
         state.needs_redraw = true;
         return InspectorOutcome::PassThrough;
     }
-    // With the kill confirmation shown, `Esc` and `Ctrl+C` never answer it (A8): one cue
-    // names the keys that do and the confirmation stays open.
-    let kill_pending = state.agent_panel_state.pending_kill_confirm.as_ref() == Some(&agent_id);
-    if kill_pending && matches!(Key::from_domain(event), Some(Key::Esc | Key::Ctrl('c'))) {
-        let answers = [InspectorCmd::ConfirmKill, InspectorCmd::CancelKill]
-            .map(|cmd| (Context::SidebarAgentInspector, CommandId::Inspector(cmd)));
-        notifications::info(state, NoticeSource::Approval, keymap::render::cue(&answers));
-        state.needs_redraw = true;
-        return InspectorOutcome::Consumed;
-    }
     let Some(cmd) = cmd else {
         return InspectorOutcome::PassThrough;
     };
@@ -157,18 +145,24 @@ pub fn on_key(
         InspectorCmd::ScrollDown => scroll(state, true),
         InspectorCmd::ScrollUp => scroll(state, false),
         InspectorCmd::Kill => {
-            state.agent_panel_state.pending_kill_confirm = Some(agent_id);
+            // The confirmation is a decision-queue frame (Requested arrival): its own
+            // keys answer it, `Esc` defers it.
+            let label = state
+                .agent_panel_state
+                .cached_entries
+                .iter()
+                .find(|e| e.agent_id == agent_id)
+                .map_or_else(
+                    || agent_id.as_str().to_string(),
+                    |e| e.subagent_type.clone(),
+                );
+            crate::adapters::tui::decision_queue::raise_agent_kill(
+                state,
+                conversation_id,
+                agent_id,
+                label,
+            );
             state.needs_redraw = true;
-        }
-        InspectorCmd::ConfirmKill if kill_pending => {
-            return InspectorOutcome::ConfirmKill(agent_id);
-        }
-        InspectorCmd::CancelKill if kill_pending => {
-            state.agent_panel_state.pending_kill_confirm = None;
-            state.needs_redraw = true;
-        }
-        InspectorCmd::ConfirmKill | InspectorCmd::CancelKill => {
-            return InspectorOutcome::PassThrough;
         }
         InspectorCmd::Model => {
             state.needs_redraw = true;
