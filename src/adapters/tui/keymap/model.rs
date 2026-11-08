@@ -420,10 +420,8 @@ pub enum Context {
     SkipCascade,
     Delegation,
     SpawnGate,
-    /// The `y` / `n` confirmations of the cards that still own their keys: fork, artifact
-    /// apply, `/peer add`, `/team retract`, consolidation, the attached retract confirmation.
-    Confirm,
-    /// The `y` / `n` confirmations that are decision frames: cancel plan, agent kill.
+    /// The `y` / `n` confirmations that are decision frames: cancel plan, agent kill, fork,
+    /// artifact apply and resolve, `/peer add`, `/team retract`, consolidation (both hosts).
     DecisionConfirm,
     Forget,
     Rewind,
@@ -434,7 +432,7 @@ pub enum Context {
 }
 
 impl Context {
-    pub const ALL: [Context; 61] = [
+    pub const ALL: [Context; 60] = [
         Context::Global,
         Context::Leader,
         Context::TextEntry,
@@ -489,7 +487,6 @@ impl Context {
         Context::SkipCascade,
         Context::Delegation,
         Context::SpawnGate,
-        Context::Confirm,
         Context::DecisionConfirm,
         Context::Forget,
         Context::Rewind,
@@ -555,7 +552,6 @@ impl Context {
             Context::SkipCascade => "Skip cascade",
             Context::Delegation => "Delegation",
             Context::SpawnGate => "Spawn gate",
-            Context::Confirm => "Confirmation card",
             Context::DecisionConfirm => "Confirmation",
             Context::Forget => "Forget",
             Context::Rewind => "Rewind",
@@ -599,16 +595,15 @@ impl Context {
             | Context::SkipCascade
             | Context::Delegation
             | Context::SpawnGate
-            | Context::DecisionConfirm => &[Context::Decision],
+            | Context::DecisionConfirm
+            | Context::Forget
+            | Context::Rewind
+            | Context::ExportOverwrite => &[Context::Decision],
             Context::MarkdownBody => &[Context::InspectorBody],
             Context::BlockViewer => &[Context::MarkdownBody],
             Context::ToolInspector => &[Context::MarkdownBody],
-            // The decision cards that still own every key: the shared cue rows only (A8).
-            Context::Confirm
-            | Context::Forget
-            | Context::Rewind
-            | Context::ExportOverwrite
-            | Context::TeamProposal => &[Context::Card],
+            // The team proposal still owns every key: the shared cue rows only (A8, 6-E).
+            Context::TeamProposal => &[Context::Card],
             Context::DecisionCompose => &[Context::CaretField],
             // The answer field is a decision field plus its own `Ctrl+D` skip.
             Context::Question => &[Context::DecisionCompose],

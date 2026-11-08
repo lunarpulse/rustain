@@ -17,10 +17,13 @@ use rustain::adapters::noop::{
     NoOpApprovalPersistence, NoOpMemory, NoOpPersona, NoOpSecurity, NoOpToolSet, NoOpUsageLedger,
 };
 use rustain::adapters::rap::IdentityKeyStore;
-use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
-use rustain::adapters::tui::handlers::team_command::{
-    open_team_retract_card, resolve_team_retract_card,
-};
+use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
+use rustain::adapters::tui::decision_queue::{self, DecisionSubject};
+use rustain::adapters::tui::handlers::team_command::open_team_retract_card;
+use rustain::adapters::tui::keymap::Host as KeyHost;
+use rustain::adapters::tui::notification_log::LogFacts;
+use rustain::adapters::tui::notifications::NotificationStore;
+use rustain::adapters::tui::presentation::{self, RouteEffect};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::errors::ProviderError;
 use rustain::domain::events::{AppEvent, DomainInputEvent};
@@ -38,7 +41,7 @@ use rustain::domain::services::approval_runtime::ApprovalRuntime;
 use rustain::domain::services::send_action_ledger::{SendActionView, fold_send_actions};
 use rustain::infrastructure::runtime::app_state::AppState;
 use rustain::infrastructure::runtime::transparency_bridge::{
-    team_command, team_retract_dispatch, team_send_settled,
+    resolve_team_retract, team_command, team_send_settled,
 };
 use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
 use tokio_util::sync::CancellationToken;
@@ -506,6 +509,10 @@ impl Sender {
     }
 
     pub(crate) async fn raise_retract_card(&mut self, state: &mut TuiState, line: &str) {
+        state.notifications = NotificationStore::from_config(
+            &rustain::domain::models::NotificationsConfig::default(),
+            self.clock.clone(),
+        );
         self.command(state, line).await;
         let preview = tokio::time::timeout(SETTLE, async {
             loop {
@@ -521,40 +528,49 @@ impl Sender {
         open_team_retract_card(state, "conv", preview);
     }
 
-    pub(crate) async fn confirm_retract(&self, state: &mut TuiState) -> Option<String> {
-        if handle_input(state, &DomainInputEvent::KeyPress('y')) != InputAction::TeamRetractConfirm
-        {
-            return None;
-        }
-        let pending = resolve_team_retract_card(state, true)?;
-        Some(
-            team_retract_dispatch(
-                self.runtime(),
-                &pending.peer,
-                &pending.item_id,
-                pending.task,
-            )
+    pub(crate) async fn confirm_retract(&mut self, state: &mut TuiState) -> Option<String> {
+        self.confirm_retract_with_board(state)
             .await
-            .message,
-        )
+            .map(|answer| answer.0)
     }
     pub(crate) async fn confirm_retract_with_board(
-        &self,
+        &mut self,
         state: &mut TuiState,
     ) -> Option<(String, Option<String>)> {
-        if handle_input(state, &DomainInputEvent::KeyPress('y')) != InputAction::TeamRetractConfirm
+        decision_queue::note_painted(state);
+        self.clock.advance(decision_queue::INERT_AFTER_PAINT);
+        let facts = LogFacts {
+            active_conversation_id: Some("conv".to_owned()),
+            ..Default::default()
+        };
+        if presentation::route(
+            state,
+            &DomainInputEvent::KeyPress('y'),
+            KeyHost::Local,
+            &facts,
+        ) != Some(RouteEffect::Action(InputAction::TeamRetractConfirm))
         {
             return None;
         }
-        let pending = resolve_team_retract_card(state, true)?;
-        let result = team_retract_dispatch(
-            self.runtime(),
-            &pending.peer,
-            &pending.item_id,
-            pending.task,
+        let Some(DecisionSubject::TeamRetract(pending)) = state.decisions.take_resolved() else {
+            panic!("confirmed retract must hand off its queued payload");
+        };
+        resolve_team_retract(state, Some(*pending), true, &self.app_state).await;
+        Some(
+            tokio::time::timeout(SETTLE, async {
+                loop {
+                    match self.domain_rx.recv().await {
+                        Some(AppEvent::TeamRetractAnswered { message, board, .. }) => {
+                            break (message, board);
+                        }
+                        Some(_) => {}
+                        None => panic!("domain channel closed before retract answer"),
+                    }
+                }
+            })
+            .await
+            .expect("retract answer published"),
         )
-        .await;
-        Some((result.message, result.board))
     }
 
     pub(crate) async fn rows(&self) -> Vec<JournalEntry> {

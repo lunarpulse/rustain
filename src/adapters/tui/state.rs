@@ -20,9 +20,6 @@ use crate::domain::services::search::SearchMatch;
 use super::color_detect::ColorCapability;
 use super::theme::Theme;
 
-mod attached_presentation;
-pub(crate) use attached_presentation::*;
-
 mod login_overlay;
 pub use login_overlay::*;
 
@@ -77,135 +74,6 @@ pub struct LogAwarenessView {
     pub reset_revision: u64,
     /// Visits actually presented by a completed draw, awaiting persistence.
     pub presented: Vec<crate::domain::models::LogVisitCandidate>,
-}
-
-/// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
-/// Reuses the plan-card / delegation-card grammar — a list of proposed durable
-/// facts, each paired with its selection flag (`true` = will be promoted on
-/// confirm). Nothing is written until the user resolves the card.
-#[derive(Debug, Clone)]
-pub struct PendingConsolidationCard {
-    pub conversation_id: crate::domain::models::tab::ConversationId,
-    pub proposals: Vec<(crate::domain::models::MemoryFact, bool)>,
-}
-
-/// Story 11.4a (AC-R0): pending `/memory forget` disambiguation/confirm card.
-/// Reuses the consolidation-card grammar — a list of the fuzzy-matched entries
-/// to permanently remove, each carrying its stable `u64` content key (the
-/// tombstone identity) and a selection flag. The card DOUBLES as the scoped
-/// "what's in memory" view (no `/memory show` exists). Nothing is purged until
-/// the user confirms; on confirm a durable `RedactionRecord` is written per key.
-///
-/// Per-row toggle: Space flips the selection of the focused row; ↑/↓ (or j/k)
-/// move focus; `y` forgets all SELECTED rows, `n` cancels.
-#[derive(Debug, Clone)]
-pub struct PendingForgetCard {
-    pub conversation_id: crate::domain::models::tab::ConversationId,
-    /// `(stable u64 content key, matched entry, selected)`.
-    pub candidates: Vec<(u64, crate::domain::models::MemoryEntry, bool)>,
-    /// Index of the row that currently has keyboard focus (0-based).
-    pub focused_index: usize,
-}
-
-/// What a [`PendingArtifactCard`] is asking the operator to confirm.
-///
-/// ⛔ **The mode parameterises CONTENT, never dispatch.** Both modes use the
-/// same two keys, the same `ConfirmationType`, the same card slot, the same
-/// render branch and the same `InputAction`s — that is what keeps the operator
-/// resolution verb out of `event_loop.rs`'s line budget entirely (Story
-/// 18.3a-f, ruling A7). `apply_card::bindings_for` carries a compile-time
-/// assertion that the key→choice mapping is identical across modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactCardMode {
-    /// `/artifact apply <id>` — a confirmed **workspace write**.
-    Apply,
-    /// `/artifact resolve <id> present|absent` — a confirmed durable record of
-    /// what the operator reports they saw. ⛔ Performs no workspace write, and
-    /// the card must say so before `y`.
-    Resolve(crate::domain::models::OperatorApplyFinding),
-}
-
-/// Confirmed decision card for `/artifact apply` and `/artifact resolve`.
-///
-/// ⚠ **The rename is deliberately partial** (Story 18.3a-f, ruling P3). The
-/// type and this field are mode-neutral because neither is pinned by any test
-/// and a rename moves no line count, so it is free. `InputAction::ApplyCardAccept`,
-/// `InputAction::ApplyCardDecline` and `render_apply_card_lines` keep their
-/// apply-flavoured names because `conformance_18_3a_d_apply.rs` pins all three
-/// by name inside `event_loop.rs` — and churning a pinned ratchet for cosmetics
-/// is how ratchets die by a thousand justifications. ⛔ Do not "fix" the
-/// asymmetry.
-#[derive(Debug, Clone)]
-pub struct PendingArtifactCard {
-    pub conversation_id: crate::domain::models::tab::ConversationId,
-    pub artifact: crate::domain::models::ArtifactRef,
-    pub files: Vec<String>,
-    pub workspace: std::path::PathBuf,
-    pub prior_focus: crate::domain::models::FocusState,
-    pub predates_apply_records: bool,
-    pub mode: ArtifactCardMode,
-}
-
-/// A `/peer add` awaiting the operator's confirm (Story 18.4b, AC3).
-///
-/// # Why this is its own slot and not the apply card's
-///
-/// The apply card's key table is single-sourced and consulted **mode-blind**
-/// (`apply_card::choice_for_key` always reads `APPLY_CARD_BINDINGS`), so
-/// borrowing it would give any peer surface an unpainted `y` that resolves. For
-/// a pin that is a single-keystroke rebind, which is precisely what the
-/// key-mismatch alarm exists to forbid — so this prompt has its own slot, its
-/// own [`crate::domain::models::visual::ConfirmationType::PeerAdd`] focus, and
-/// its own two input actions. ⛔ Nothing here routes through `choice_for_key`.
-///
-/// The alarm itself has **no** slot at all: it is a never-truncated
-/// `FeedbackLevel::Error` block and binds no key.
-#[derive(Debug, Clone)]
-pub struct PendingPeerAdd {
-    pub conversation_id: String,
-    /// The alias the operator typed. ⛔ Never a name the ticket suggested.
-    pub alias: String,
-    pub ticket: crate::domain::models::PeerTicket,
-    /// Derived once, through the one identity derivation, before the card is
-    /// shown — so the fingerprint on screen is the one that gets pinned.
-    pub peer_id: crate::domain::models::PeerId,
-    /// The rendered card body, built by the shared copy module so the CLI and
-    /// TUI confirms cannot diverge.
-    pub card: String,
-    /// The ticket's claimed reach, **already filtered** (Story 18.4d, D15).
-    ///
-    /// Filtered before the card is raised, so the operator is shown addresses
-    /// this host would actually dial and a hostile bundle never reaches a
-    /// keypress. `None` is the honest empty case.
-    pub reach: Option<crate::domain::ports::PeerAddress>,
-    /// `true` when this card is a reach-only refresh of an already-pinned key.
-    ///
-    /// The resolution path then writes **only** the address: no pin, no
-    /// admission record, and no first-contact trust decision is re-run.
-    pub reach_refresh: bool,
-    pub prior_focus: crate::domain::models::FocusState,
-}
-
-/// The `/team retract` decision card awaiting `[y]`/`[n]` (Story 19.16f `AC4`).
-///
-/// Raised only by the preview-ready event, from a confirm-time read of the
-/// peer's own list — ⛔ never from a cached board render. `armed == false`
-/// (the read did not resolve, or the item is already removed on the peer's
-/// host) means `y` dispatches nothing; `n`/`Esc` always cancel, and
-/// cancelling is free — nothing was sent.
-#[derive(Debug, Clone)]
-pub struct PendingTeamRetract {
-    pub conversation_id: String,
-    /// The roster alias.
-    pub peer: String,
-    /// The id the operator typed.
-    pub item_id: String,
-    /// The item's task as the peer listed it — the sender's ledger rows carry it.
-    pub task: Option<String>,
-    /// The rendered card body.
-    pub card: String,
-    pub armed: bool,
-    pub prior_focus: crate::domain::models::FocusState,
 }
 
 /// Explicit native recipient focus target; arrivals never change this identity.
@@ -314,27 +182,6 @@ pub enum Direction {
     Down,
     Left,
     Right,
-}
-
-/// A single file entry in the rewind confirmation preview.
-#[derive(Debug, Clone)]
-pub struct RevertPreviewItem {
-    /// Workspace-relative path for display (falls back to absolute if outside workspace).
-    pub display_path: String,
-    /// Whether the file has been externally modified since the snapshot was taken.
-    pub conflict: bool,
-}
-
-/// Pre-flight preview data for the rewind confirmation card.
-/// Built by `event_loop.rs::build_rewind_preview` without mutating any state.
-#[derive(Debug, Clone)]
-pub struct RewindPreview {
-    /// The message index the conversation will be truncated to (inclusive).
-    pub target_message_index: usize,
-    /// How many messages come after target_message_index (will be removed).
-    pub messages_to_remove: usize,
-    /// Files that would be reverted, with conflict flags.
-    pub files_to_revert: Vec<RevertPreviewItem>,
 }
 
 /// Four-axis key for turn height cache entries.
@@ -2407,10 +2254,6 @@ impl WaveViewState {
 pub struct TuiState {
     pub active_tab_id: TabId,
     pub focus: FocusState,
-    /// Attached UI data; socket senders and request correlation stay in the runtime.
-    pub(crate) attached: AttachedPresentation,
-    /// Arrival-only provenance; explicit focus changes relinquish the borrow.
-    pub card_focus_borrowed_from: Option<FocusState>,
     pub recipient_surface: Option<RecipientSurface>,
     pub pinned_peer_compose: Option<PinnedPeerCompose>,
     pub recipient_actions: BTreeMap<
@@ -2670,17 +2513,6 @@ pub struct TuiState {
     /// `"tasks"` (default) or `"none"`. Read by the `PlanExecutionStarted`
     /// event arm to decide whether to auto-open the Tasks panel.
     pub auto_open_on_task_plan: String,
-    /// Message index selected for fork (set when user presses `f`, cleared on confirm/cancel).
-    /// Story 4-3a, AC1.
-    pub pending_fork_index: Option<usize>,
-    /// Message index selected for rewind (set when user presses `R`, cleared on confirm/cancel).
-    /// Mirrors pending_fork_index — both are session-level overlay state.
-    /// Story 4-3b, AC1.
-    pub pending_rewind_index: Option<usize>,
-    /// Pre-computed preview data for the rewind confirmation card.
-    /// Populated when pending_rewind_index is set; cleared on confirm/cancel.
-    /// Story 4-3b, AC1.
-    pub rewind_preview: Option<RewindPreview>,
     /// Currently selected row in the bookmark list panel (AC10). `0` when
     /// the panel is closed.
     // Covers: Story 4-4 AC10
@@ -2697,14 +2529,6 @@ pub struct TuiState {
     /// discard it without restoring into another conversation or tab.
     // Covers: Story 4-4 AC10 amendment
     pub bookmark_undo_buffer: Option<BookmarkUndo>,
-    /// Pending export overwrite confirmation — set when `/export <name>` is
-    /// invoked on a path that already exists. Carries the resolved target
-    /// `PathBuf` and the *pre-rendered* markdown content captured at the
-    /// moment of confirmation (so the overlay's `y` press writes a stable
-    /// snapshot even if the conversation mutates in the background).
-    /// Cleared on confirm / cancel / Esc.
-    // Covers: Story 4-4 AC12
-    pub pending_export: Option<(std::path::PathBuf, String)>,
     /// Skill registry — populated by background discovery task (Story 5-1 AC6).
     /// Shared via Arc<tokio::sync::RwLock> between TuiState and SkillActivator
     /// so autocomplete and tool-dispatch see the same catalog (DF-159, Story 16-0 AC1).
@@ -2720,21 +2544,6 @@ pub struct TuiState {
     /// Set by `submit_message` when registry is not yet discovered;
     /// consumed by `AgentsDiscovered` handler in the event loop.
     pub pending_agent_activation: Option<(String, Option<String>)>,
-    /// Story 11.2a: pending memory-consolidation review card awaiting user y/n.
-    pub pending_consolidation_card: Option<PendingConsolidationCard>,
-    /// Story 11.4a: pending `/memory forget` confirm card awaiting user y/n.
-    pub pending_forget_card: Option<PendingForgetCard>,
-    /// Story 18.3a-e / 18.3a-f: pending confirmed artifact decision — a patch
-    /// apply, or an operator's report about an indeterminate one. ⛔ One slot,
-    /// deliberately: a second card type would duplicate the render branch, both
-    /// focus-deferral guards and `surface_deferred_modal`.
-    pub pending_artifact_card: Option<PendingArtifactCard>,
-    /// Story 18.4b (AC3): a `/peer add` awaiting the operator's confirm. Its own
-    /// slot on purpose — see [`PendingPeerAdd`] for why the apply card's
-    /// mode-blind key table must not be borrowed for a pin.
-    pub pending_peer_add: Option<PendingPeerAdd>,
-    /// Story 19.16f `AC4`: the cross-host retract decision card, if raised.
-    pub pending_team_retract: Option<PendingTeamRetract>,
     /// Runtime snapshots are keyed by conversation, never by a mutable toolset binding.
     pub pending_team_proposals:
         BTreeMap<String, std::sync::Arc<crate::domain::models::TeamProposal>>,
@@ -3011,8 +2820,6 @@ impl TuiState {
         Self {
             active_tab_id: 0,
             focus: super::presentation::reducer::initial_base(),
-            attached: AttachedPresentation::default(),
-            card_focus_borrowed_from: None,
             recipient_surface: None,
             pinned_peer_compose: None,
             recipient_actions: BTreeMap::new(),
@@ -3112,14 +2919,10 @@ impl TuiState {
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
             auto_open_on_task_plan: "tasks".to_string(),
-            pending_fork_index: None,
-            pending_rewind_index: None,
-            rewind_preview: None,
             bookmark_list_selected: 0,
             bookmark_list_count: 0,
             bookmark_owning_tab: None,
             bookmark_undo_buffer: None,
-            pending_export: None,
             skill_registry: Arc::new(tokio::sync::RwLock::new(SkillRegistry::new())),
             skill_name_cache: HashSet::new(),
             active_skill_count: 0,
@@ -3127,11 +2930,6 @@ impl TuiState {
             agent_suggestions: Vec::new(),
             active_agent_name: None,
             pending_agent_activation: None,
-            pending_consolidation_card: None,
-            pending_forget_card: None,
-            pending_artifact_card: None,
-            pending_peer_add: None,
-            pending_team_retract: None,
             pending_team_proposals: BTreeMap::new(),
             team_proposal_conversation_id: None,
             team_proposal_visible: None,

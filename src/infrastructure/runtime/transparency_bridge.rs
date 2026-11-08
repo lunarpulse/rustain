@@ -1200,14 +1200,6 @@ pub async fn team_retract_preview(
 
     let alias = retract_alias(peer);
     let shown_item = sanitize_disclosable(item, MAX_PEER_ID_BYTES);
-    let confirm_key = |command: crate::adapters::tui::keymap::table_card::CardCmd| {
-        crate::adapters::tui::keymap::render::rail(
-            crate::adapters::tui::keymap::Context::Confirm,
-            command,
-        )
-    };
-    let confirm_yes = confirm_key(crate::adapters::tui::keymap::table_card::CardCmd::Yes);
-    let confirm_no = confirm_key(crate::adapters::tui::keymap::table_card::CardCmd::No);
     // Story 19.18d `A13` — the co-holder sentence is omitted only when the
     // host's list answered `principalBound: true`; an unverified read keeps it.
     let (rows, armed, key_line, task, principal_bound) = match preview_item_retract(
@@ -1236,9 +1228,7 @@ pub async fn team_retract_preview(
                 (
                     rows,
                     false,
-                    format!(
-                        "Already removed on {alias}'s host — nothing to mark.  {confirm_no} Cancel"
-                    ),
+                    format!("Already removed on {alias}'s host — nothing to mark."),
                     found.task,
                     principal_bound,
                 )
@@ -1246,7 +1236,7 @@ pub async fn team_retract_preview(
                 (
                     rows,
                     true,
-                    format!("Awaiting your decision.  {confirm_yes} Retract  {confirm_no} Cancel"),
+                    "Awaiting your decision.".to_owned(),
                     found.task,
                     principal_bound,
                 )
@@ -1254,11 +1244,17 @@ pub async fn team_retract_preview(
         }
         RetractPreview::NotFound => {
             return TeamRetractPreview::Answer(format!(
-                "{alias}'s host has no item {shown_item} this host can address. Nothing was marked."
+                "{}'s host has no item {} this host can address. Nothing was marked.",
+                retract_alias(peer),
+                sanitize_disclosable(item, MAX_PEER_ID_BYTES)
             ));
         }
         RetractPreview::NotSent(not_sent) => {
-            return TeamRetractPreview::Answer(retract_not_sent_sentence(&alias, peer, &not_sent));
+            return TeamRetractPreview::Answer(retract_not_sent_sentence(
+                &retract_alias(peer),
+                peer,
+                &not_sent,
+            ));
         }
         // Owner ruling: an unverified state DISARMS `[y]`. The card still
         // renders and names the cause in its own words; ⛔ no retry key, ⛔ no
@@ -1269,7 +1265,7 @@ pub async fn team_retract_preview(
                 retract_read_failure_cause(&alias, &refusal)
             ),
             false,
-            format!("Cannot verify on {alias}'s host.  {confirm_no} Cancel"),
+            format!("Cannot verify on {alias}'s host."),
             None,
             false,
         ),
@@ -1392,18 +1388,25 @@ pub async fn team_retract_dispatch(
     TeamRetractAnswer { message, board }
 }
 
-/// The `TeamRetractConfirm`/`TeamRetractDecline` arm (Story 19.16f `AC4`,
-/// `AC10(b)`). Accepting takes the slot, restores focus and shows
-/// `  sending…` **before** the spawn; a second `y` finds no slot. Declining
-/// sends nothing and changes no block.
-pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app_state: &AppState) {
+/// Resolve the captured retract payload; declining or a disarmed card sends nothing.
+pub async fn resolve_team_retract(
+    state: &mut TuiState,
+    payload: Option<crate::adapters::tui::decision_queue::TeamRetractPayload>,
+    accept: bool,
+    app_state: &AppState,
+) {
     use crate::adapters::tui::handlers::team_command as handler;
 
-    let Some(pending) = handler::resolve_team_retract_card(state, accept) else {
+    let Some(pending) = payload.filter(|pending| accept && pending.armed) else {
         return;
     };
     #[cfg(feature = "a2a")]
     {
+        let crate::adapters::tui::decision_queue::RetractTarget::Item { peer, item } =
+            pending.target
+        else {
+            return;
+        };
         let Some(runtime) = app_state.a2a_send.clone() else {
             return handler::show_team_retract(
                 state,
@@ -1419,7 +1422,7 @@ pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app
             let answer = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => return,
-                answer = team_retract_dispatch(&runtime, &pending.peer, &pending.item_id, pending.task) => answer,
+                answer = team_retract_dispatch(&runtime, &peer, &item, pending.task) => answer,
             };
             let _ = event_bus.emit_domain(crate::domain::events::AppEvent::TeamRetractAnswered {
                 conversation_id: pending.conversation_id,
@@ -1429,7 +1432,7 @@ pub(crate) async fn resolve_team_retract(state: &mut TuiState, accept: bool, app
         });
     }
     #[cfg(not(feature = "a2a"))]
-    let _ = (pending, app_state);
+    let _ = (pending, app_state, state);
 }
 
 /// Story 19.17: settle only the addressed action's row on its issuing tab.
@@ -1500,9 +1503,7 @@ pub(crate) fn settle_team_send_row(
     redraw
 }
 
-/// The `TeamRetractPreviewReady` arm. The card is raised on the active tab
-/// whichever tab issued the command: it is self-describing (host, item) and
-/// cancelling it is free. A sentence answer follows the board's tab routing.
+/// Route a retract preview to its originating conversation.
 pub(crate) fn team_retract_preview_ready(
     active_conversation_id: String,
     state: &mut TuiState,
@@ -1517,11 +1518,9 @@ pub(crate) fn team_retract_preview_ready(
         TeamRetractPreview::Answer(message) if conversation_id != active_conversation_id => {
             store_team_retract_in_background(state, tab_manager, &conversation_id, message);
         }
-        TeamRetractPreview::Card(card) => open_team_retract_card(
-            state,
-            &active_conversation_id,
-            TeamRetractPreview::Card(card),
-        ),
+        TeamRetractPreview::Card(card) => {
+            open_team_retract_card(state, &conversation_id, TeamRetractPreview::Card(card))
+        }
         preview => open_team_retract_card(state, &conversation_id, preview),
     }
 }
@@ -2229,7 +2228,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_tab_retract_outcome_replaces_the_card_host_blocks_sending_state() {
+    fn cross_tab_retract_outcome_stays_with_the_originating_conversation() {
         use crate::adapters::tui::handlers::team_command::{
             TEAM_RETRACT_BLOCK_ID, TEAM_RETRACT_SENDING, show_team_retract,
         };
@@ -2245,7 +2244,7 @@ mod tests {
             card_host.clone(),
             &mut state,
             &mut tabs,
-            origin,
+            origin.clone(),
             TeamRetractPreview::Card(TeamRetractCard {
                 peer: "jun-dev".to_owned(),
                 item_id: "ri_x".to_owned(),
@@ -2255,16 +2254,20 @@ mod tests {
             }),
         );
         let outcome_owner = state
-            .pending_team_retract
-            .as_ref()
-            .expect("the active tab hosts the card")
-            .conversation_id
-            .clone();
-        assert_eq!(outcome_owner, card_host);
+            .decisions
+            .items()
+            .find_map(|item| match &item.subject {
+                crate::adapters::tui::decision_queue::DecisionSubject::TeamRetract(payload) => {
+                    Some(payload.conversation_id.clone())
+                }
+                _ => None,
+            })
+            .expect("the originating tab owns the decision");
+        assert_eq!(outcome_owner, origin);
 
         show_team_retract(&mut state, TEAM_RETRACT_SENDING.to_owned());
         super::team_retract_answered(
-            card_host,
+            origin,
             &mut state,
             &mut tabs,
             outcome_owner,
@@ -3626,15 +3629,20 @@ mod credential_tests {
     // loopback fixture. Every other outcome is proven against the REAL server
     // in `tests/conformance_19_16f_retract_surface.rs`.
 
-    fn retract_card(peer: &str, armed: bool) -> crate::adapters::tui::state::PendingTeamRetract {
-        crate::adapters::tui::state::PendingTeamRetract {
+    fn retract_card(
+        peer: &str,
+        armed: bool,
+    ) -> crate::adapters::tui::decision_queue::TeamRetractPayload {
+        crate::adapters::tui::decision_queue::TeamRetractPayload {
             conversation_id: "conv".to_owned(),
-            peer: peer.to_owned(),
-            item_id: "ri_x".to_owned(),
+            target: crate::adapters::tui::decision_queue::RetractTarget::Item {
+                peer: peer.to_owned(),
+                item: "ri_x".to_owned(),
+            },
             task: Some("task-x".to_owned()),
             card: "Retract on scripted's host".to_owned(),
             armed,
-            prior_focus: crate::domain::models::FocusState::Chat,
+            request: None,
         }
     }
 
@@ -3766,12 +3774,13 @@ mod credential_tests {
         app_state.a2a_send = Some(harness.egress.runtime().clone());
 
         let mut state = crate::adapters::tui::state::TuiState::new(120, 40);
-        state.pending_team_retract = Some(retract_card("scripted", true));
-        super::resolve_team_retract(&mut state, true, &app_state).await;
-        assert!(
-            state.pending_team_retract.is_none(),
-            "the slot is taken: a second `y` finds nothing to confirm"
-        );
+        super::resolve_team_retract(
+            &mut state,
+            Some(retract_card("scripted", true)),
+            true,
+            &app_state,
+        )
+        .await;
         assert_eq!(
             state.feedback_blocks[TEAM_RETRACT_BLOCK_ID].message,
             TEAM_RETRACT_SENDING

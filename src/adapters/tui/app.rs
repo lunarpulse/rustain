@@ -18,7 +18,6 @@ use crate::domain::events::{DomainInputEvent, DomainKey};
 use crate::domain::models::FocusState;
 use crate::domain::models::autocomplete::AutocompleteKind;
 use crate::domain::models::palette::PaletteAction;
-use crate::domain::models::visual::{ConfirmationType, OverlayType};
 use crate::domain::services::slash_command::parse_slash_command;
 
 /// Action returned by handle_input to tell the event loop what to do.
@@ -133,12 +132,6 @@ pub enum InputAction {
     ForgetAcceptAll,
     /// Story 11.4a: `/memory forget` card — user pressed n/Esc (cancel).
     ForgetDeclineAll,
-    /// Story 11.4a: `/memory forget` card — user pressed Space (toggle focused row).
-    ForgetToggleSelection,
-    /// Story 11.4a: `/memory forget` card — user pressed ↑/k (move focus up).
-    ForgetNavigateUp,
-    /// Story 11.4a: `/memory forget` card — user pressed ↓/j (move focus down).
-    ForgetNavigateDown,
     /// Story 18.3a-e: confirm the pending patch apply.
     ApplyCardAccept,
     /// Story 18.3a-e: decline the pending patch apply.
@@ -462,25 +455,31 @@ impl InputAction {
 
 pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
     use crate::adapters::tui::decision_queue::DecisionKind as K;
-    state.pending_consolidation_card.is_some()
-        || state.pending_forget_card.is_some()
-        || [
-            K::Permission,
-            K::PlanCard,
-            K::PlanApproval,
-            K::PlanDeviation,
-            K::SkipCascade,
-            K::CancelPlan,
-            K::Delegation,
-            K::SkillTrust,
-            K::SpawnGate,
-        ]
-        .into_iter()
-        .any(|kind| state.decisions.holds(kind))
+    [
+        K::Permission,
+        K::PlanCard,
+        K::PlanApproval,
+        K::PlanDeviation,
+        K::SkipCascade,
+        K::CancelPlan,
+        K::Delegation,
+        K::SkillTrust,
+        K::SpawnGate,
+        K::Consolidation,
+        K::Forget,
+        K::ArtifactApply,
+        K::ArtifactResolve,
+        K::PeerAdd,
+        K::TeamRetract,
+        K::Fork,
+        K::Rewind,
+        K::ExportOverwrite,
+    ]
+    .into_iter()
+    .any(|kind| state.decisions.presenting(kind))
         || state
             .decisions
             .holds_undeferred(crate::adapters::tui::decision_queue::DecisionKind::LargeImage)
-        || matches!(state.focus, FocusState::Overlay(_))
 }
 
 pub(crate) fn recipient_higher_confirmation_active(state: &TuiState) -> bool {
@@ -544,6 +543,8 @@ pub(crate) fn recipient_surface_ignores_raw_key(
             C::Delegation => &['d', 'l', 'x'],
             C::SpawnGate => &['t', 'n'],
             C::DecisionConfirm => &['y', 'n'],
+            C::Forget | C::ExportOverwrite => &['y', 'n'],
+            C::Rewind => &['y', 'f', 'n'],
             _ => &[],
         };
         let enter_decides = matches!(
@@ -606,7 +607,6 @@ pub fn handle_operator_input(
 /// never acquire stack authority.
 pub(crate) fn advance_deferred_permission(state: &mut TuiState) {
     if reducer::settle_login(state) {
-        reducer::settle_legacy(state);
         crate::adapters::tui::decision_queue::settle(state);
     }
 }
@@ -622,13 +622,12 @@ pub fn with_card_focus_reconcile<T>(
     state: &mut TuiState,
     dispatch: impl FnOnce(&mut TuiState) -> T,
 ) -> T {
-    let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
     );
     let action = dispatch(state);
-    finish_input_boundary(state, surface_was_open, owner_before);
+    finish_input_boundary(state, owner_before);
     action
 }
 
@@ -638,30 +637,17 @@ pub fn try_with_card_focus_reconcile<T>(
     state: &mut TuiState,
     dispatch: impl FnOnce(&mut TuiState) -> Option<T>,
 ) -> Option<T> {
-    let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
         state.pending_leader,
     );
     let action = dispatch(state)?;
-    finish_input_boundary(state, surface_was_open, owner_before);
+    finish_input_boundary(state, owner_before);
     Some(action)
 }
 
-fn finish_input_boundary(
-    state: &mut TuiState,
-    surface_was_open: bool,
-    owner_before: (Option<u64>, Option<Context>),
-) {
-    reducer::settle_legacy(state);
+fn finish_input_boundary(state: &mut TuiState, owner_before: (Option<u64>, Option<Context>)) {
     crate::adapters::tui::decision_queue::settle(state);
-    if surface_was_open
-        && !crate::adapters::tui::decision_queue::card_focus_blocked(state)
-        && inline_card(state).is_some()
-    {
-        reducer::take_chat_focus_for_card(state, true);
-    }
-    settle_local_card_focus(state);
     if owner_before
         != (
             state.modal_stack.top().map(|frame| frame.id),
@@ -678,11 +664,6 @@ fn finish_input_boundary(
             local_avail_ctx(state).stage_target,
         );
     }
-}
-
-/// The local key/event boundaries share the renderer/dispatcher's card selector.
-pub fn settle_local_card_focus(state: &mut TuiState) {
-    reducer::settle_borrowed_card_focus(state, inline_card(state).is_some());
 }
 
 fn handle_input_inner(state: &mut TuiState, event: &DomainInputEvent) -> InputAction {
@@ -720,10 +701,7 @@ pub(crate) fn ctrl_x_opens_leader(state: &TuiState) -> bool {
     state.pending_leader.is_none()
         && match state.modal_stack.top() {
             Some(frame) => frame.surface != Surface::QuitConfirm,
-            None => !matches!(
-                state.focus,
-                FocusState::Overlay(OverlayType::Confirmation(_))
-            ),
+            None => true,
         }
 }
 
@@ -1079,7 +1057,6 @@ pub(crate) fn focus_context(state: &TuiState) -> Option<Context> {
             PanelType::History => Context::SidebarHistory,
             _ => Context::Sidebar,
         },
-        FocusState::Overlay(_) => return None,
     })
 }
 
@@ -1323,110 +1300,12 @@ pub(crate) fn dispatch_frame_key(
     dispatch(state, context, key, host)
 }
 
-/// One priority for inline cue, dispatch and paint: the last covering card wins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InlineCard {
-    Forget,
-    Consolidation,
-}
-
-pub(crate) fn inline_card(state: &TuiState) -> Option<InlineCard> {
-    // A retained inline payload cannot advertise decisions over the selected
-    // legacy confirmation or sidebar owner; dispatch uses those same base slots.
-    if !matches!(state.focus, FocusState::Input | FocusState::Chat) {
-        return None;
-    }
-    if state.pending_forget_card.is_some() {
-        Some(InlineCard::Forget)
-    } else if state.pending_consolidation_card.is_some() {
-        Some(InlineCard::Consolidation)
-    } else {
-        None
-    }
-}
-
-/// The card whose keys are current (A8, AC17): an overlay card owns them wherever the
-/// terminal is; an inline card only in Chat focus, so typing in Input is text.
-fn card_context(state: &TuiState) -> Option<Context> {
-    use ConfirmationType as C;
-    if let FocusState::Overlay(OverlayType::Confirmation(card)) = &state.focus {
-        return Some(match card {
-            C::Fork | C::ArtifactApply | C::PeerAdd | C::TeamRetract => Context::Confirm,
-            C::Rewind => Context::Rewind,
-            C::ExportOverwrite(_) => Context::ExportOverwrite,
-        });
-    }
-    if state.focus != FocusState::Chat {
-        return None;
-    }
-    let Some(card) = inline_card(state) else {
-        #[cfg(feature = "a2a")]
-        if state.input_buffer.is_empty() && visible_team_proposal(state).is_some() {
-            return Some(Context::TeamProposal);
-        }
-        return None;
-    };
-    Some(match card {
-        InlineCard::Forget => Context::Forget,
-        InlineCard::Consolidation => Context::Confirm,
-    })
-}
-
-/// The one cue `Esc` and `Ctrl+C` post on a card instead of deciding it (A8): the keys that do.
-fn card_cue(state: &mut TuiState, context: Context) -> InputAction {
-    crate::adapters::tui::notifications::info(
-        state,
-        crate::adapters::tui::notifications::NoticeSource::Approval,
-        crate::adapters::tui::keymap::render::card_cue(context, Host::Local),
-    );
-    state.needs_redraw = true;
-    InputAction::Consumed
-}
-
-/// Special keys of the decision cards. `None`: no card owns the keys, or an inline card
-/// leaves the key to Chat.
-fn card_special_key(state: &mut TuiState, key: DomainKey) -> Option<InputAction> {
-    let context = card_context(state)?;
-    let esc = matches!(key, DomainKey::Esc | DomainKey::CtrlC);
-    if !matches!(state.focus, FocusState::Overlay(_)) {
-        // Inline cards (Chat focus): the drill-down and the reorder go back first.
-        if esc {
-            let back_first = matches!(
-                focus_context(state),
-                Some(Context::ChatReorder | Context::ChatDrill)
-            );
-            return (!back_first).then(|| card_cue(state, context));
-        }
-        return match (context, key) {
-            (Context::Forget, DomainKey::Up | DomainKey::Down) => {
-                if let Some(card) = state.pending_forget_card.as_mut() {
-                    let last = card.candidates.len().saturating_sub(1);
-                    card.focused_index = if key == DomainKey::Up {
-                        card.focused_index.saturating_sub(1)
-                    } else {
-                        (card.focused_index + 1).min(last)
-                    };
-                }
-                state.needs_redraw = true;
-                Some(InputAction::Consumed)
-            }
-            (Context::Forget, _) => Some(InputAction::Ignored),
-            _ => None,
-        };
-    }
-    Some(match (context, key) {
-        _ if esc => card_cue(state, context),
-        // ArtifactApply, PeerAdd and TeamRetract keep the quit request.
-        (Context::Confirm, DomainKey::CtrlQ)
-            if !matches!(
-                state.focus,
-                FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork))
-            ) =>
-        {
-            return None;
-        }
-        _ => InputAction::Consumed,
-    })
+#[cfg(feature = "a2a")]
+fn proposal_context(state: &TuiState) -> Option<Context> {
+    (state.focus == FocusState::Chat
+        && state.input_buffer.is_empty()
+        && visible_team_proposal(state).is_some())
+    .then_some(Context::TeamProposal)
 }
 
 pub(crate) fn exec_input(state: &mut TuiState, cmd: InputCmd, key: Key) -> InputAction {
@@ -2527,78 +2406,10 @@ fn char_to_byte(s: &str, char_idx: usize) -> usize {
 }
 
 fn handle_char(state: &mut TuiState, c: char) -> InputAction {
-    if state.focus == FocusState::Chat
-        && let Some(card) = inline_card(state)
-    {
-        use InlineCard::*;
-        let action = match (card, c) {
-            (Consolidation, 'y') => Some(InputAction::ConsolidateAcceptAll),
-            (Consolidation, 'n') => Some(InputAction::ConsolidateDeclineAll),
-            (Forget, 'y') => Some(InputAction::ForgetAcceptAll),
-            (Forget, 'n') => Some(InputAction::ForgetDeclineAll),
-            (Forget, ' ') => Some(InputAction::ForgetToggleSelection),
-            (Forget, 'j') => Some(InputAction::ForgetNavigateDown),
-            (Forget, 'k') => Some(InputAction::ForgetNavigateUp),
-            (Consolidation | Forget, _) => Some(InputAction::Consumed),
-        };
-        if let Some(action) = action {
-            return action;
-        }
-    }
-
     // The palette, help, model selector, usage panel, profile switcher and reverse
     // search own the character keys (registry contexts, AC10).
     if let Some(context) = char_overlay_context(state) {
         return dispatch(state, context, Key::Char(c), Host::Local);
-    }
-
-    if state.pending_artifact_card.is_some()
-        && state.focus
-            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply))
-    {
-        return match crate::adapters::tui::widgets::apply_card::choice_for_key(c) {
-            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Accept) => {
-                InputAction::ApplyCardAccept
-            }
-            Some(crate::adapters::tui::widgets::apply_card::ApplyCardChoice::Decline) => {
-                InputAction::ApplyCardDecline
-            }
-            None => InputAction::Consumed,
-        };
-    }
-
-    // Story 18.4b (AC3): `/peer add` confirm key intercept.
-    //
-    // ⛔ Its own two-key match, NOT `apply_card::choice_for_key`: that function
-    // is single-sourced from `APPLY_CARD_BINDINGS` and called mode-blind, so
-    // routing a pin through it hands every future card an unpainted `y` that
-    // rebinds a key. Anything other than the two painted keys is consumed, so a
-    // stray keystroke never resolves the gate either way.
-    if state.pending_peer_add.is_some()
-        && state.focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
-    {
-        return match c {
-            'y' => InputAction::PeerAddConfirm,
-            'n' => InputAction::PeerAddDecline,
-            _ => InputAction::Consumed,
-        };
-    }
-
-    // Story 19.16f (AC4): `/team retract` confirm key intercept — the PeerAdd
-    // shape (slot AND focus, its own two keys, every other key consumed) plus
-    // the card's own `armed` flag. ⛔ On a disarmed card `y` is `Consumed`,
-    // never `Ignored` (which would fall through into the input buffer), and
-    // never the confirm: the confirm-time read did not verify the item, or it
-    // is already removed on the peer's host.
-    if let Some(pending) = state.pending_team_retract.as_ref()
-        && state.focus
-            == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
-    {
-        return match c {
-            'y' if pending.armed => InputAction::TeamRetractConfirm,
-            'n' => InputAction::TeamRetractDecline,
-            _ => InputAction::Consumed,
-        };
     }
 
     #[cfg(feature = "a2a")]
@@ -2632,30 +2443,9 @@ fn handle_char(state: &mut TuiState, c: char) -> InputAction {
         reducer::set_base(state, FocusState::Input);
     }
 
-    match state.focus {
-        // Fork / Rewind / Export-overwrite confirmations: cards, hand-written (FR-21-3-b).
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork)) => match c {
-            'y' => InputAction::ForkConfirm,
-            'n' => InputAction::ForkCancel,
-            _ => InputAction::Consumed,
-        },
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)) => match c {
-            'y' => InputAction::RewindConfirm,
-            'f' => InputAction::RewindForkInstead,
-            'n' => InputAction::RewindCancel,
-            _ => InputAction::Consumed,
-        },
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ExportOverwrite(_))) => {
-            match c {
-                'y' | 'Y' => InputAction::ConfirmExportOverwrite,
-                'n' | 'N' => InputAction::CancelExportOverwrite,
-                _ => InputAction::Consumed,
-            }
-        }
-        _ => match focus_context(state) {
-            Some(context) => dispatch(state, context, Key::Char(c), Host::Local),
-            None => InputAction::Ignored,
-        },
+    match focus_context(state) {
+        Some(context) => dispatch(state, context, Key::Char(c), Host::Local),
+        None => InputAction::Ignored,
     }
 }
 
@@ -2779,10 +2569,21 @@ fn handle_special_key(state: &mut TuiState, key: DomainKey) -> InputAction {
         state.needs_redraw = true;
     }
 
-    // The decision cards (A8, AC16, AC17): `Esc` / `Ctrl+C` never decide, every other key
-    // without a row is consumed.
-    if let Some(done) = card_special_key(state, key) {
-        return done;
+    #[cfg(feature = "a2a")]
+    if matches!(key, DomainKey::Esc | DomainKey::CtrlC)
+        && proposal_context(state).is_some()
+        && !matches!(
+            focus_context(state),
+            Some(Context::ChatReorder | Context::ChatDrill)
+        )
+    {
+        crate::adapters::tui::notifications::info(
+            state,
+            crate::adapters::tui::notifications::NoticeSource::Approval,
+            crate::adapters::tui::keymap::render::card_cue(Context::TeamProposal, Host::Local),
+        );
+        state.needs_redraw = true;
+        return InputAction::Consumed;
     }
 
     #[cfg(feature = "a2a")]
@@ -3724,6 +3525,20 @@ mod tests {
         TuiState::new(80, 24)
     }
 
+    fn route_conversation_decision(
+        state: &mut TuiState,
+        conversation_id: &str,
+        event: DomainInputEvent,
+    ) -> InputAction {
+        let facts = crate::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some(conversation_id.into()),
+            ..Default::default()
+        };
+        presentation::route(state, &event, Host::Local, &facts)
+            .expect("decision frame owns the key")
+            .into_action()
+    }
+
     fn story21_6_raw_permission() -> TuiState {
         use crate::adapters::tui::decision_queue::{
             self, PermissionInput, PermissionPayload, Responder,
@@ -3784,6 +3599,56 @@ mod tests {
             kind,
             state: KeyEventState::NONE,
         })
+    }
+
+    #[test]
+    fn story21_6_raw_new_decision_keys_require_plain_press() {
+        use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
+        for (kind, letters) in [
+            (DecisionKind::Forget, "yn"),
+            (DecisionKind::Rewind, "yfn"),
+            (DecisionKind::ExportOverwrite, "yYnN"),
+        ] {
+            let mut state = make_state();
+            decision_queue::raise(
+                &mut state,
+                DecisionDraft::new(kind, "raw guard"),
+                Arrival::Requested,
+            );
+            for c in letters.chars() {
+                for (modifiers, event_kind) in [
+                    (KeyModifiers::NONE, KeyEventKind::Repeat),
+                    (KeyModifiers::NONE, KeyEventKind::Release),
+                    (KeyModifiers::ALT, KeyEventKind::Press),
+                    (KeyModifiers::SHIFT, KeyEventKind::Press),
+                    (KeyModifiers::CONTROL, KeyEventKind::Press),
+                ] {
+                    assert!(
+                        recipient_surface_ignores_raw_key(
+                            &state,
+                            &story21_6_raw_key(KeyCode::Char(c), modifiers, event_kind)
+                        ),
+                        "{kind:?} {c:?} {modifiers:?} {event_kind:?}"
+                    );
+                }
+                assert!(!recipient_surface_ignores_raw_key(
+                    &state,
+                    &story21_6_raw_key(KeyCode::Char(c), KeyModifiers::NONE, KeyEventKind::Press)
+                ));
+            }
+            if kind == DecisionKind::Forget {
+                for c in [' ', 'j', 'k'] {
+                    assert!(!recipient_surface_ignores_raw_key(
+                        &state,
+                        &story21_6_raw_key(
+                            KeyCode::Char(c),
+                            KeyModifiers::NONE,
+                            KeyEventKind::Repeat
+                        )
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
@@ -4278,109 +4143,131 @@ mod tests {
         use crate::adapters::tui::state::{
             RecipientSurface, RecipientSurfaceAccess, RecipientSurfaceTarget,
         };
-        let mut state = make_state();
-        state.focus = FocusState::Chat;
-        state.recipient_surface = Some(RecipientSurface {
-            target: RecipientSurfaceTarget::Item(
-                crate::domain::models::ItemAddress::from_a2a_ingress(
-                    crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap(),
-                    crate::domain::models::ItemId::from_replay("review-opened"),
-                ),
+        for (key, consolidation_action, forget_action) in [
+            (
+                'y',
+                InputAction::ConsolidateAcceptAll,
+                InputAction::ForgetAcceptAll,
             ),
-            access: RecipientSurfaceAccess::ReadOnly,
-            can_toggle_target: false,
-            root_id: Some("review-root".into()),
-            first_non_pinned_ordinal: Some(3),
-            last_non_pinned_ordinal: Some(7),
-            omitted_before: 3,
-            omitted_after: 0,
-            node_id: None,
-            item_state: Some("received"),
-            context_available: false,
-            context_selected: false,
-            prior_focus: FocusState::Sidebar {
-                panel: crate::domain::models::visual::PanelType::History,
-                selected: 2,
-            },
-            scroll_offset: 11,
-            viewport_rows: 20,
-            content: "reader body".into(),
-            message_type: crate::domain::models::SemanticMessageType::Unknown,
-            verdict_offer: crate::domain::models::VerdictOffer::None,
-            cached_width: 0,
-            cached_lines: Vec::new(),
-            cached_header: Vec::new(),
-            cached_footer: Vec::new(),
-            cached_action_mask: 0,
-            results: Vec::new(),
-        });
-        state.pending_consolidation_card =
-            Some(crate::adapters::tui::state::PendingConsolidationCard {
-                conversation_id: "review-conversation".to_string(),
-                proposals: Vec::new(),
-            });
-        assert!(state.pending_forget_card.is_none());
-        for (key, expected) in [
-            ('y', InputAction::ConsolidateAcceptAll),
-            ('n', InputAction::ConsolidateDeclineAll),
+            (
+                'n',
+                InputAction::ConsolidateDeclineAll,
+                InputAction::ForgetDeclineAll,
+            ),
         ] {
-            let surface = state.recipient_surface.as_ref().unwrap();
-            let target = surface.target.clone();
-            let scroll = surface.scroll_offset;
-            let prior_focus = surface.prior_focus.clone();
-            let modified = crossterm::event::Event::Key(KeyEvent {
-                code: KeyCode::Char(key),
-                modifiers: KeyModifiers::ALT,
-                kind: KeyEventKind::Press,
-                state: KeyEventState::NONE,
+            let clock = std::sync::Arc::new(crate::domain::clock::MockClock::new(
+                std::time::Instant::now(),
+            ));
+            let mut state = make_state();
+            state.notifications =
+                crate::adapters::tui::notifications::NotificationStore::from_config(
+                    &crate::domain::models::NotificationsConfig::default(),
+                    clock.clone(),
+                );
+            state.focus = FocusState::Chat;
+            state.recipient_surface = Some(RecipientSurface {
+                target: RecipientSurfaceTarget::Item(
+                    crate::domain::models::ItemAddress::from_a2a_ingress(
+                        crate::domain::models::PeerId::from_public_key(&[91; 32]).unwrap(),
+                        crate::domain::models::ItemId::from_replay("review-opened"),
+                    ),
+                ),
+                access: RecipientSurfaceAccess::ReadOnly,
+                can_toggle_target: false,
+                root_id: Some("review-root".into()),
+                first_non_pinned_ordinal: Some(3),
+                last_non_pinned_ordinal: Some(7),
+                omitted_before: 3,
+                omitted_after: 0,
+                node_id: None,
+                item_state: Some("received"),
+                context_available: false,
+                context_selected: false,
+                prior_focus: FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::History,
+                    selected: 2,
+                },
+                scroll_offset: 11,
+                viewport_rows: 20,
+                content: "reader body".into(),
+                message_type: crate::domain::models::SemanticMessageType::Unknown,
+                verdict_offer: crate::domain::models::VerdictOffer::None,
+                cached_width: 0,
+                cached_lines: Vec::new(),
+                cached_header: Vec::new(),
+                cached_footer: Vec::new(),
+                cached_action_mask: 0,
+                results: Vec::new(),
             });
-            assert!(!recipient_surface_ignores_raw_key(&state, &modified));
-            let event = crossterm::event::Event::Key(KeyEvent {
-                code: KeyCode::Char(key),
-                modifiers: KeyModifiers::NONE,
-                kind: KeyEventKind::Press,
-                state: KeyEventState::NONE,
-            });
-            assert_eq!(
-                convert_crossterm_event(&event, &crate::domain::models::MouseConfig::default())
-                    .map(|input| handle_input(&mut state, &input)),
-                Some(expected),
-                "confirmation must own {key}"
+            let target = state.recipient_surface.as_ref().unwrap().target.clone();
+            use crate::adapters::tui::decision_queue::{
+                self, PendingConsolidationCard, PendingForgetCard,
+            };
+            decision_queue::raise_consolidation(
+                &mut state,
+                PendingConsolidationCard {
+                    conversation_id: "review-conversation".into(),
+                    proposals: Vec::new(),
+                },
             );
+            assert!(decision_queue::consolidation_pending(
+                &state,
+                "review-conversation"
+            ));
+            assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+            let modified =
+                story21_6_raw_key(KeyCode::Char(key), KeyModifiers::ALT, KeyEventKind::Press);
+            assert!(recipient_surface_ignores_raw_key(&state, &modified));
+            decision_queue::note_painted(&mut state);
+            clock.advance(decision_queue::INERT_AFTER_PAINT);
+            assert_eq!(
+                route_conversation_decision(
+                    &mut state,
+                    "review-conversation",
+                    DomainInputEvent::KeyPress(key)
+                ),
+                consolidation_action
+            );
+            assert!(!decision_queue::consolidation_pending(
+                &state,
+                "review-conversation"
+            ));
+            drop(state.decisions.take_resolved());
             let surface = state.recipient_surface.as_ref().unwrap();
             match (&surface.target, &target) {
                 (RecipientSurfaceTarget::Item(actual), RecipientSurfaceTarget::Item(expected)) => {
                     assert_eq!(actual, expected);
                 }
-                _ => panic!("confirmation changed the pinned reader target"),
+                _ => panic!("decision changed the pinned reader target"),
             }
-            assert_eq!(surface.scroll_offset, scroll);
-            assert_eq!(surface.prior_focus, prior_focus);
-        }
-        let _ = crate::adapters::tui::handlers::forget_command::handle_forget_command(
-            &mut state,
-            &"review".to_owned(),
-            "selected memory",
-            Some(Ok(vec![(
-                7,
-                crate::domain::models::MemoryEntry {
-                    timestamp: chrono::DateTime::parse_from_rfc3339("2026-10-09T00:00:00Z")
-                        .unwrap()
-                        .with_timezone(&chrono::Local),
-                    summary: "selected memory".to_owned(),
-                    context: None,
-                },
-            )])),
-        );
-        for (key, expected) in [
-            ('y', InputAction::ForgetAcceptAll),
-            ('n', InputAction::ForgetDeclineAll),
-        ] {
+            assert_eq!(surface.scroll_offset, 11);
             assert_eq!(
-                handle_input(&mut state, &DomainInputEvent::KeyPress(key)),
-                expected,
-                "native forget confirmation must retain precedence over consolidation and reader"
+                surface.prior_focus,
+                FocusState::Sidebar {
+                    panel: crate::domain::models::visual::PanelType::History,
+                    selected: 2,
+                }
             );
+            decision_queue::raise_forget(
+                &mut state,
+                PendingForgetCard {
+                    conversation_id: "review".into(),
+                    candidates: Vec::new(),
+                    focused_index: 0,
+                },
+            );
+            assert!(decision_queue::forget_pending(&state, "review"));
+            assert!(state.recipient_surface.is_some());
+            assert!(proposal_higher_confirmation_active(&state));
+            assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
+            decision_queue::note_painted(&mut state);
+            clock.advance(decision_queue::INERT_AFTER_PAINT);
+            assert_eq!(
+                route_conversation_decision(&mut state, "review", DomainInputEvent::KeyPress(key)),
+                forget_action
+            );
+            assert!(!decision_queue::forget_pending(&state, "review"));
+            assert_eq!(state.recipient_surface.as_ref().unwrap().scroll_offset, 11);
         }
     }
 
@@ -4409,9 +4296,12 @@ mod tests {
                 s.focus = FocusState::Sidebar { panel, selected: 0 };
             })
         }
-        fn confirmation(ct: ConfirmationType) -> Box<dyn Fn(&mut TuiState)> {
+        fn confirmation(
+            kind: crate::adapters::tui::decision_queue::DecisionKind,
+        ) -> Box<dyn Fn(&mut TuiState)> {
             Box::new(move |s| {
-                s.focus = FocusState::Overlay(OverlayType::Confirmation(ct.clone()));
+                use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft};
+                decision_queue::raise(s, DecisionDraft::new(kind, "ctrl-q"), Arrival::Requested);
             })
         }
 
@@ -4486,17 +4376,21 @@ mod tests {
             // keys; quitting abandons the card without performing it.
             Row {
                 label: "Confirmation(ArtifactApply) (no special-key interceptor)",
-                setup: confirmation(ConfirmationType::ArtifactApply),
+                setup: confirmation(
+                    crate::adapters::tui::decision_queue::DecisionKind::ArtifactApply,
+                ),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Confirmation(PeerAdd) (no special-key interceptor)",
-                setup: confirmation(ConfirmationType::PeerAdd),
+                setup: confirmation(crate::adapters::tui::decision_queue::DecisionKind::PeerAdd),
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
                 label: "Confirmation(TeamRetract) (Esc-only interceptor)",
-                setup: confirmation(ConfirmationType::TeamRetract),
+                setup: confirmation(
+                    crate::adapters::tui::decision_queue::DecisionKind::TeamRetract,
+                ),
                 expect: CtrlQRowExpectation::Quit,
             },
             // ── Overlays and cards that own the keyboard and consume the key (the
@@ -4600,27 +4494,21 @@ mod tests {
                 expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Confirmation(Fork))",
-                setup: confirmation(ConfirmationType::Fork),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(Fork): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
+                label: "Fork decision",
+                setup: confirmation(crate::adapters::tui::decision_queue::DecisionKind::Fork),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Confirmation(Rewind))",
-                setup: confirmation(ConfirmationType::Rewind),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(Rewind): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
-                ),
+                label: "Rewind decision",
+                setup: confirmation(crate::adapters::tui::decision_queue::DecisionKind::Rewind),
+                expect: CtrlQRowExpectation::Quit,
             },
             Row {
-                label: "Overlay(Confirmation(ExportOverwrite))",
-                setup: confirmation(ConfirmationType::ExportOverwrite(std::path::PathBuf::from(
-                    "/tmp/out.md",
-                ))),
-                expect: CtrlQRowExpectation::Skip(
-                    "Confirmation(ExportOverwrite): the card swallows Ctrl+Q (DF-21-3-LOCAL-CARD-CTRLQ)",
+                label: "Export overwrite decision",
+                setup: confirmation(
+                    crate::adapters::tui::decision_queue::DecisionKind::ExportOverwrite,
                 ),
+                expect: CtrlQRowExpectation::Quit,
             },
         ];
 
@@ -5682,6 +5570,107 @@ mod tests {
         assert!(state.decisions.holds(DecisionKind::SpawnGate));
     }
 
+    /// 6D-L1-03: background and stale queue members cannot own confirmation chrome.
+    #[test]
+    fn story21_6_only_live_here_confirmations_present() {
+        use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
+        let mut state = make_state();
+        let facts = crate::adapters::tui::notification_log::LogFacts {
+            active_conversation_id: Some("here".into()),
+            ..Default::default()
+        };
+        decision_queue::prune_closed(&mut state, &facts);
+        decision_queue::raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Forget, "elsewhere").conversation("elsewhere"),
+            Arrival::Requested,
+        );
+        assert!(state.decisions.holds(DecisionKind::Forget));
+        assert!(!state.decisions.presenting(DecisionKind::Forget));
+        assert!(!proposal_higher_confirmation_active(&state));
+        decision_queue::raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Forget, "here").conversation("here"),
+            Arrival::Requested,
+        );
+        assert!(state.decisions.presenting(DecisionKind::Forget));
+        decision_queue::withdraw_for(&mut state, DecisionKind::Forget, "here");
+        assert!(state.decisions.holds(DecisionKind::Forget));
+        assert!(!state.decisions.presenting(DecisionKind::Forget));
+        assert!(!proposal_higher_confirmation_active(&state));
+    }
+
+    /// 6D-L1-03: deferring Forget restores the proposal's actual paint and key route.
+    #[cfg(feature = "a2a")]
+    #[test]
+    fn story21_6_deferred_forget_restores_local_proposal() {
+        use crate::adapters::tui::{decision_queue, widgets::team_proposal_card};
+        use crate::domain::models::{SemanticMessageType, TeamProposal, TeamProposalDecision};
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        let mut state = make_state();
+        state.focus = FocusState::Chat;
+        let proposal = std::sync::Arc::new(TeamProposal {
+            id: "tp-deferred".into(),
+            conversation_id: "c".into(),
+            recipients: vec!["peer".into()],
+            message_type: SemanticMessageType::ArchitectureUpdate,
+            body: "proposal body".into(),
+        });
+        state.team_proposal_conversation_id = Some("c".into());
+        state
+            .pending_team_proposals
+            .insert("c".into(), proposal.clone());
+        state.team_proposal_visible = Some(proposal);
+        state.team_proposal_footer_visible = true;
+        let paint = |state: &TuiState| {
+            let area = Rect::new(0, 0, 80, 24);
+            let mut layout = crate::adapters::tui::layout::compute_layout(
+                area,
+                &state.theme,
+                &state.input_buffer,
+                1,
+                false,
+                crate::domain::models::visual::DensityMode::Focus,
+            )
+            .unwrap();
+            let card = team_proposal_card::frame(state)
+                .1
+                .prepare(&mut layout, area, &state.theme);
+            let mut buffer = Buffer::empty(area);
+            let visible = team_proposal_card::render(card, &mut buffer, &state.theme);
+            (visible.is_some(), buffer)
+        };
+        let (visible, before) = paint(&state);
+        assert!(visible);
+        decision_queue::raise_forget(
+            &mut state,
+            decision_queue::PendingForgetCard {
+                conversation_id: "c".into(),
+                candidates: Vec::new(),
+                focused_index: 0,
+            },
+        );
+        assert!(!paint(&state).0);
+        route_conversation_decision(
+            &mut state,
+            "c",
+            DomainInputEvent::SpecialKey(DomainKey::Esc),
+        );
+        assert!(state.decisions.holds(decision_queue::DecisionKind::Forget));
+        let (visible, after) = paint(&state);
+        assert!(visible);
+        assert_eq!(before, after);
+        assert_eq!(
+            handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
+            InputAction::TeamProposal {
+                conversation_id: "c".into(),
+                proposal_id: "tp-deferred".into(),
+                decision: Some(TeamProposalDecision::Send)
+            }
+        );
+    }
+
     /// 21-3 3-C (R4g): the local team-proposal rows by value; `Esc` / `Ctrl+C` only cue.
     #[cfg(feature = "a2a")]
     #[test]
@@ -6296,16 +6285,14 @@ mod tests {
             InputAction::ExportTransparency
         );
     }
-    /// ⚑ 18.3a-f: parameterised by mode. The whole point of the mode field is
-    /// that dispatch does **not** consult it — both card modes must produce the
-    /// same `InputAction`s from the same keys, or `choice_for_key`'s
-    /// single-sourcing is a lie.
+    /// Both artifact modes share the queue's y/n dispatch.
     #[test]
-    fn apply_card_keys_only_own_input_while_confirmation_focus_is_active() {
-        let make_card = |mode: crate::adapters::tui::state::ArtifactCardMode| {
+    fn apply_card_keys_only_own_input_while_decision_frame_is_active() {
+        use crate::adapters::tui::decision_queue::{self, ArtifactCardMode, PendingArtifactCard};
+        let make_card = |mode: ArtifactCardMode| {
             let hash =
                 crate::domain::models::ContentHash::parse_hex(&"e".repeat(64)).expect("hash");
-            crate::adapters::tui::state::PendingArtifactCard {
+            PendingArtifactCard {
                 conversation_id: "conversation".to_owned(),
                 artifact: crate::domain::models::EvidenceArtifact {
                     id: crate::domain::models::ArtifactId::from(hash),
@@ -6320,59 +6307,56 @@ mod tests {
                 },
                 files: vec!["src/lib.rs".to_owned()],
                 workspace: std::path::PathBuf::from("/workspace"),
-                prior_focus: FocusState::Input,
                 predates_apply_records: false,
                 mode,
             }
         };
-        let confirmation =
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
         for mode in [
-            crate::adapters::tui::state::ArtifactCardMode::Apply,
-            crate::adapters::tui::state::ArtifactCardMode::Resolve(
-                crate::domain::models::OperatorApplyFinding::Present,
-            ),
+            ArtifactCardMode::Apply,
+            ArtifactCardMode::Resolve(crate::domain::models::OperatorApplyFinding::Present),
         ] {
             for (key, expected) in [
                 ('y', InputAction::ApplyCardAccept),
                 ('n', InputAction::ApplyCardDecline),
                 ('x', InputAction::Consumed),
             ] {
+                let clock = std::sync::Arc::new(crate::domain::clock::MockClock::new(
+                    std::time::Instant::now(),
+                ));
                 let mut state = TuiState::new(80, 24);
-                state.pending_artifact_card = Some(make_card(mode));
-                state.focus = confirmation.clone();
-                assert_eq!(handle_char(&mut state, key), expected, "{mode:?}");
+                state.notifications =
+                    crate::adapters::tui::notifications::NotificationStore::from_config(
+                        &crate::domain::models::NotificationsConfig::default(),
+                        clock.clone(),
+                    );
+                decision_queue::raise_artifact(&mut state, make_card(mode));
+                decision_queue::note_painted(&mut state);
+                clock.advance(decision_queue::INERT_AFTER_PAINT);
+                assert_eq!(
+                    route_conversation_decision(
+                        &mut state,
+                        "conversation",
+                        DomainInputEvent::KeyPress(key)
+                    ),
+                    expected,
+                    "{mode:?}"
+                );
             }
-
-            let mut input_owner = TuiState::new(80, 24);
-            input_owner.pending_artifact_card = Some(make_card(mode));
-            input_owner.focus = FocusState::Input;
-            let _ = handle_char(&mut input_owner, 'n');
-            assert_eq!(input_owner.input_buffer, "n", "{mode:?}");
-            assert!(input_owner.pending_artifact_card.is_some(), "{mode:?}");
-
-            let mut modal = TuiState::new(80, 24);
-            modal.pending_artifact_card = Some(make_card(mode));
-            modal.focus = confirmation.clone();
-            // 3-C (A8): `Esc` no longer declines the card (was `ApplyCardDecline`).
+            let mut state = TuiState::new(80, 24);
+            decision_queue::raise_artifact(&mut state, make_card(mode));
             assert_eq!(
-                handle_input(&mut modal, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
-                InputAction::Consumed,
-                "{mode:?}"
-            );
-            assert!(modal.pending_artifact_card.is_some(), "{mode:?}");
-
-            let mut input_with_card = TuiState::new(80, 24);
-            input_with_card.pending_artifact_card = Some(make_card(mode));
-            input_with_card.focus = FocusState::Input;
-            assert_ne!(
-                handle_input(
-                    &mut input_with_card,
-                    &DomainInputEvent::SpecialKey(DomainKey::Esc),
+                route_conversation_decision(
+                    &mut state,
+                    "conversation",
+                    DomainInputEvent::SpecialKey(DomainKey::Esc)
                 ),
-                InputAction::ApplyCardDecline,
-                "{mode:?}"
+                InputAction::Consumed
             );
+            assert!(decision_queue::artifact_pending(&state, "conversation"));
+            assert_eq!(state.focus, FocusState::Input);
+            handle_input(&mut state, &DomainInputEvent::KeyPress('n'));
+            assert_eq!(state.input_buffer, "n", "{mode:?}");
+            assert!(decision_queue::artifact_pending(&state, "conversation"));
         }
     }
 }

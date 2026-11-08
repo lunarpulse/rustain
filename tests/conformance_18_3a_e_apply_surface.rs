@@ -3,6 +3,10 @@
 //! Behavioural tests in this target enter through production command/card seams. Source
 //! ratchets are secondary evidence only and always carry a positive control.
 
+#[allow(clippy::duplicate_mod)]
+#[path = "conformance_21_6_decision_queue/support.rs"]
+mod decision_support;
+
 use rustain::adapters::tui::handlers::artifact_command::{
     ArtifactCommandArgs, parse_artifact_command,
 };
@@ -263,28 +267,21 @@ fn the_production_bridge_has_one_apply_port_call_and_one_disposition_core() {
     );
 }
 
-fn pending_card(
-    prior_focus: rustain::domain::models::FocusState,
-) -> rustain::adapters::tui::state::PendingArtifactCard {
-    card_in_mode(
-        prior_focus,
-        rustain::adapters::tui::state::ArtifactCardMode::Apply,
-    )
+fn pending_card() -> rustain::adapters::tui::decision_queue::PendingArtifactCard {
+    card_in_mode(rustain::adapters::tui::decision_queue::ArtifactCardMode::Apply)
 }
 
 /// ⚠ 18.3a-f: the card became mode-discriminated. This file's assertions are
 /// the **apply** mode's; the resolve mode's live in
 /// `conformance_18_3a_f_resolution.rs`.
 fn card_in_mode(
-    prior_focus: rustain::domain::models::FocusState,
-    mode: rustain::adapters::tui::state::ArtifactCardMode,
-) -> rustain::adapters::tui::state::PendingArtifactCard {
-    rustain::adapters::tui::state::PendingArtifactCard {
+    mode: rustain::adapters::tui::decision_queue::ArtifactCardMode,
+) -> rustain::adapters::tui::decision_queue::PendingArtifactCard {
+    rustain::adapters::tui::decision_queue::PendingArtifactCard {
         conversation_id: "conversation".to_owned(),
         artifact: artifact('e'),
         files: vec!["src/lib.rs".to_owned(), "tests/apply.rs".to_owned()],
         workspace: std::path::PathBuf::from("/workspace"),
-        prior_focus,
         predates_apply_records: true,
         mode,
     }
@@ -292,47 +289,47 @@ fn card_in_mode(
 
 #[test]
 fn decline_clears_the_card_and_restores_prior_focus_without_an_effect() {
-    use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
+    use rustain::adapters::tui::app::InputAction;
+    use rustain::adapters::tui::decision_queue::{self, DecisionSubject};
+    use rustain::adapters::tui::presentation::RouteEffect;
     use rustain::domain::models::FocusState;
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 
-    let prior = FocusState::Input;
-    let mut state = rustain::adapters::tui::state::TuiState::new(80, 24);
-    state.pending_artifact_card = Some(pending_card(prior.clone()));
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply));
-    assert!(resolve_apply_card(&mut state, false).is_none());
-    assert!(state.pending_artifact_card.is_none());
-    assert_eq!(state.focus, prior);
+    let (mut state, clock) = decision_support::clocked(80, 24);
+    decision_queue::raise_artifact(&mut state, pending_card());
+    let facts = decision_support::facts("conversation");
+    decision_support::paint(&mut state, &facts, 80, 24);
+    decision_support::ready(&mut state, &clock);
+    assert_eq!(
+        decision_support::route(&mut state, &decision_support::key('n'), &facts),
+        Some(RouteEffect::Action(InputAction::ApplyCardDecline))
+    );
+    assert!(matches!(
+        state.decisions.take_resolved(),
+        Some(DecisionSubject::Artifact(_))
+    ));
+    assert!(!decision_queue::artifact_pending(&state, "conversation"));
+    assert_eq!(state.focus, FocusState::Input);
 }
 
 #[test]
 fn the_painted_card_names_impact_wedge_risk_and_its_dispatch_keys() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use rustain::adapters::tui::widgets::{apply_card, inline_card};
+    use rustain::adapters::tui::decision_queue;
+    use rustain::adapters::tui::widgets::apply_card;
 
-    let state = rustain::adapters::tui::state::TuiState::new(80, 24);
-    let card = pending_card(rustain::domain::models::FocusState::Input);
-    let area = Rect::new(0, 0, 80, 15);
-    let mut buffer = Buffer::empty(area);
-    let lines = apply_card::render_apply_card_lines(&card, &state.theme, area.width);
-    inline_card::render_bottom_anchored_decision_card(
-        &mut buffer,
-        lines,
-        state.theme.colors.accent,
-        area,
-    );
-    let rendered = (0..area.height)
-        .map(|y| {
-            (0..area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (mut state, _) = decision_support::clocked(80, 40);
+    let card = pending_card();
+    decision_queue::raise_artifact(&mut state, card.clone());
+    let rendered = decision_support::screen(&decision_support::paint(
+        &mut state,
+        &decision_support::facts("conversation"),
+        80,
+        40,
+    ));
     for needle in [
         "Producer: spoke-1",
-        "Files: src/lib.rs, tests/apply.rs",
+        "Files:",
+        "src/lib.rs",
+        "tests/apply.rs",
         "Workspace: /workspace",
         "predates apply records",
         "may already be in the working tree",

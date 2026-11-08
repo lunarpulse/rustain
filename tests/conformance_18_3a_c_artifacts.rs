@@ -11,6 +11,10 @@
 //! populated durable journals in Sidebar and Dashboard densities. Constructed
 //! renderer state alone cannot prove that composition path (`DF-CR-14-3a-1`).
 
+#[allow(clippy::duplicate_mod)]
+#[path = "conformance_21_6_decision_queue/support.rs"]
+mod decision_support;
+
 use rustain::domain::models::{
     AgentId, ArtifactId, ArtifactKind, ArtifactRef, CapabilityTokenId, ContentHash,
     EvidenceArtifact, HostBinding, JournalEntry, JournalRecord, OrchestrationRoom,
@@ -1401,10 +1405,9 @@ async fn the_verdict_command_reaches_the_journal_through_the_real_dispatch_path(
 
 #[tokio::test]
 async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effect_arm() {
-    use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
-    use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
-    use rustain::adapters::tui::state::TuiState;
-    use rustain::domain::events::DomainInputEvent;
+    use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
+    use rustain::adapters::tui::decision_queue::DecisionSubject;
+    use rustain::adapters::tui::presentation::RouteEffect;
 
     let harness = VerdictHarness::new().await;
     std::fs::write(harness.workspace.path().join("x"), "").expect("empty target");
@@ -1420,7 +1423,7 @@ async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effec
         Some(harness.recorder.clone()),
         executor,
     );
-    let mut state = TuiState::new(120, 40);
+    let (mut state, clock) = decision_support::clocked(120, 40);
     let before = harness.journal_lines();
 
     state.input_buffer = format!("/artifact apply {}", &patch.id.as_str()[..6]);
@@ -1437,7 +1440,15 @@ async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effec
     )
     .await;
 
-    let card = state.pending_artifact_card.as_ref().expect("decision card");
+    let DecisionSubject::Artifact(card) = &state
+        .decisions
+        .items()
+        .next()
+        .expect("decision card")
+        .subject
+    else {
+        panic!("artifact decision expected");
+    };
     assert!(
         card.files.iter().any(|path| path == "x"),
         "{:?}",
@@ -1455,15 +1466,20 @@ async fn apply_command_previews_without_mutation_then_accept_runs_the_real_effec
         "no apply record before accept"
     );
 
+    let facts = decision_support::facts("conv");
+    decision_support::paint(&mut state, &facts, 120, 40);
+    decision_support::ready(&mut state, &clock);
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-        InputAction::ApplyCardAccept
+        decision_support::route(&mut state, &decision_support::key('y'), &facts),
+        Some(RouteEffect::Action(InputAction::ApplyCardAccept))
     );
-    let card = resolve_apply_card(&mut state, true).expect("accepted card");
+    let Some(DecisionSubject::Artifact(card)) = state.decisions.take_resolved() else {
+        panic!("accepted artifact payload");
+    };
     rustain::infrastructure::runtime::artifact_bridge::apply_confirmed_card(
         &mut state,
         &app_state,
-        card,
+        *card,
         PermissionMode::Yolo,
     )
     .await;

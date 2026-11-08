@@ -31,6 +31,160 @@ pub const ALL_6C: [DecisionKind; 10] = [
     DecisionKind::AgentKill,
 ];
 
+/// Memory, artifact and user-started confirmation kinds added in 6-D.
+pub const ALL_6D: [DecisionKind; 9] = [
+    DecisionKind::TeamRetract,
+    DecisionKind::Consolidation,
+    DecisionKind::Forget,
+    DecisionKind::ArtifactApply,
+    DecisionKind::ArtifactResolve,
+    DecisionKind::PeerAdd,
+    DecisionKind::Fork,
+    DecisionKind::Rewind,
+    DecisionKind::ExportOverwrite,
+];
+
+pub fn facts_6d(conversation: &str) -> rustain::adapters::tui::notification_log::LogFacts {
+    rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: 4,
+        ..super::support::facts(conversation)
+    }
+}
+
+pub fn rewind_preview(text: &str) -> decision_queue::RewindPreview {
+    decision_queue::RewindPreview {
+        target_message_index: 1,
+        messages_to_remove: 2,
+        files_to_revert: vec![decision_queue::RevertPreviewItem {
+            display_path: text.into(),
+            conflict: false,
+        }],
+    }
+}
+
+fn artifact(
+    text: &str,
+    mode: decision_queue::ArtifactCardMode,
+) -> decision_queue::PendingArtifactCard {
+    use rustain::domain::models::{
+        ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, EvidenceArtifact, HostBinding,
+        ProvenanceTag, ReviewStatus,
+    };
+    let hash = |c: char| ContentHash::parse_hex(&c.to_string().repeat(64)).unwrap();
+    decision_queue::PendingArtifactCard {
+        conversation_id: "c1".into(),
+        artifact: EvidenceArtifact {
+            id: ArtifactId::from(hash('a')),
+            kind: ArtifactKind::Patch,
+            producer: AgentId::parse("spoke-1").unwrap(),
+            content_hash: hash('0'),
+            authority: CapabilityTokenId::default(),
+            provenance: vec![ProvenanceTag::UserOriginated],
+            depends_on: Vec::new(),
+            review: Some(ReviewStatus::Pending),
+            host: HostBinding::new("host-A", "workspace"),
+        },
+        files: vec![text.into()],
+        workspace: PathBuf::from("/workspace"),
+        predates_apply_records: false,
+        mode,
+    }
+}
+
+fn peer(text: &str) -> decision_queue::PendingPeerAdd {
+    use ed25519_dalek::SigningKey;
+    use rustain::domain::models::PeerTicket;
+    let ticket = PeerTicket::mint(
+        &SigningKey::from_bytes(&[7; 32]),
+        vec![],
+        4_102_444_800,
+        None,
+    )
+    .unwrap();
+    let peer_id = ticket.peer_id().unwrap();
+    decision_queue::PendingPeerAdd {
+        conversation_id: "c1".into(),
+        alias: text.into(),
+        ticket,
+        peer_id,
+        card: text.into(),
+        reach: None,
+        reach_refresh: false,
+    }
+}
+
+pub fn retract(text: &str, armed: bool) -> decision_queue::TeamRetractPayload {
+    decision_queue::TeamRetractPayload {
+        target: decision_queue::RetractTarget::Item {
+            peer: "peer".into(),
+            item: "item".into(),
+        },
+        conversation_id: "c1".into(),
+        task: None,
+        card: text.into(),
+        armed,
+        request: None,
+    }
+}
+
+pub fn raise_retract(state: &mut TuiState, text: &str, armed: bool) -> Raised {
+    #[cfg(feature = "a2a")]
+    {
+        use rustain::domain::events::{TeamRetractCard, TeamRetractPreview};
+        rustain::adapters::tui::handlers::team_command::open_team_retract_card(
+            state,
+            "c1",
+            TeamRetractPreview::Card(TeamRetractCard {
+                peer: "peer".into(),
+                item_id: "item".into(),
+                task: None,
+                body: text.into(),
+                armed,
+            }),
+        );
+        if rustain::adapters::tui::presentation::is_open(
+            state,
+            rustain::adapters::tui::presentation::Surface::Decision,
+        ) {
+            Raised::Focused
+        } else {
+            Raised::Waiting
+        }
+    }
+    #[cfg(not(feature = "a2a"))]
+    {
+        decision_queue::raise_team_retract(
+            state,
+            retract(text, armed),
+            decision_queue::Responder::Local,
+        )
+    }
+}
+
+/// Run the real export command against an existing file in the caller's temporary workspace.
+pub async fn raise_export_command(state: &mut TuiState, workspace: &std::path::Path) -> PathBuf {
+    use rustain::domain::models::{Conversation, SessionMeta};
+    let exports = workspace.join(".rustain/exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    let path = exports.join("notes.md");
+    std::fs::write(&path, "old").unwrap();
+    let conversation = Conversation {
+        id: "c1".into(),
+        title: "test".into(),
+        ..Default::default()
+    };
+    let meta = SessionMeta::from_conversation(&conversation);
+    rustain::adapters::tui::handlers::export::apply_export_command(
+        Some("notes.md"),
+        &conversation,
+        &meta,
+        workspace,
+        state,
+    )
+    .await;
+    path
+}
+
 /// What a producer handed to the runtime and the test keeps to observe the answer.
 pub enum Hold {
     None,
@@ -179,6 +333,93 @@ pub fn raise(state: &mut TuiState, kind: DecisionKind, text: &str) -> (Raised, H
             ),
             Hold::None,
         ),
+        DecisionKind::Consolidation => (
+            decision_queue::raise_consolidation(
+                state,
+                decision_queue::PendingConsolidationCard {
+                    conversation_id: "c1".into(),
+                    proposals: vec![(
+                        rustain::domain::models::MemoryFact {
+                            category: "Preferences".into(),
+                            fact: text.into(),
+                            detail: None,
+                        },
+                        true,
+                    )],
+                },
+            ),
+            Hold::None,
+        ),
+        DecisionKind::Forget => {
+            use rustain::adapters::tui::handlers::forget_command::handle_forget_command;
+            let entry = |summary: &str| rustain::domain::models::MemoryEntry {
+                timestamp: chrono::Local::now(),
+                summary: summary.into(),
+                context: None,
+            };
+            let events = handle_forget_command(
+                state,
+                &"c1".into(),
+                text,
+                Some(Ok(vec![(7, entry(text)), (9, entry("second"))])),
+            );
+            assert!(events.is_empty());
+            (
+                if rustain::adapters::tui::presentation::is_open(
+                    state,
+                    rustain::adapters::tui::presentation::Surface::Decision,
+                ) {
+                    Raised::Focused
+                } else {
+                    Raised::Waiting
+                },
+                Hold::None,
+            )
+        }
+        DecisionKind::ArtifactApply => (
+            decision_queue::raise_artifact(
+                state,
+                artifact(text, decision_queue::ArtifactCardMode::Apply),
+            ),
+            Hold::None,
+        ),
+        DecisionKind::ArtifactResolve => (
+            decision_queue::raise_artifact(
+                state,
+                artifact(
+                    text,
+                    decision_queue::ArtifactCardMode::Resolve(
+                        rustain::domain::models::OperatorApplyFinding::Present,
+                    ),
+                ),
+            ),
+            Hold::None,
+        ),
+        DecisionKind::PeerAdd => (
+            decision_queue::raise_peer_add(state, peer(text)),
+            Hold::None,
+        ),
+        DecisionKind::TeamRetract => (raise_retract(state, text, true), Hold::None),
+        DecisionKind::Fork => (
+            decision_queue::raise_fork(state, "c1", 1, text, 0),
+            Hold::None,
+        ),
+        DecisionKind::Rewind => (
+            decision_queue::raise_rewind(state, "c1", rewind_preview(text), 0),
+            Hold::None,
+        ),
+        DecisionKind::ExportOverwrite => (
+            decision_queue::raise_export_overwrite(
+                state,
+                decision_queue::ExportOverwritePayload {
+                    conversation_id: "c1".into(),
+                    target: PathBuf::from(text),
+                    content: text.into(),
+                    stamp: None,
+                },
+            ),
+            Hold::None,
+        ),
         other => panic!("{other:?} is not a 6-C kind"),
     }
 }
@@ -208,6 +449,15 @@ pub fn deciding_key(kind: DecisionKind) -> char {
         DecisionKind::Delegation => 'x',
         DecisionKind::SpawnGate => 'n',
         DecisionKind::AgentKill => 'n',
+        DecisionKind::Consolidation
+        | DecisionKind::Forget
+        | DecisionKind::ArtifactApply
+        | DecisionKind::ArtifactResolve
+        | DecisionKind::PeerAdd
+        | DecisionKind::TeamRetract
+        | DecisionKind::Fork
+        | DecisionKind::Rewind
+        | DecisionKind::ExportOverwrite => 'n',
         other => panic!("{other:?} is not a 6-C kind"),
     }
 }
@@ -336,7 +586,19 @@ pub fn open_ready(
 ) {
     let (mut state, clock) = super::support::clocked(80, 24);
     let (_raised, hold) = raise(&mut state, kind, text);
-    super::support::paint(&mut state, &super::support::facts("c1"), 80, 24);
+    if !rustain::adapters::tui::presentation::is_open(
+        &state,
+        rustain::adapters::tui::presentation::Surface::Decision,
+    ) {
+        let item = state.decisions.items().next().expect("queued fixture");
+        let key = decision_queue::DecisionKey {
+            kind: item.kind,
+            source: item.source.clone(),
+            conversation_id: item.conversation_id.clone(),
+        };
+        assert!(decision_queue::open(&mut state, &key));
+    }
+    super::support::paint(&mut state, &facts_6d("c1"), 80, 24);
     super::support::ready(&mut state, &clock);
     (state, clock, hold)
 }
@@ -353,7 +615,7 @@ pub fn press(
     let Some(event) = crate::conformance_21_3_keymap::support::decode(key) else {
         return InputAction::Ignored;
     };
-    match presentation::route(state, &event, Host::Local, &super::support::facts("c1")) {
+    match presentation::route(state, &event, Host::Local, &facts_6d("c1")) {
         Some(effect) => effect.into_action(),
         None => handle_input(state, &event),
     }
@@ -361,7 +623,7 @@ pub fn press(
 
 /// Paint the frame (the first paint starts the inert clock) and let the window pass.
 pub fn repaint_ready(state: &mut TuiState, clock: &rustain::domain::clock::MockClock) {
-    super::support::paint(state, &super::support::facts("c1"), 80, 24);
+    super::support::paint(state, &facts_6d("c1"), 80, 24);
     super::support::ready(state, clock);
 }
 

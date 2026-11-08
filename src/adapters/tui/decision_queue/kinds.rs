@@ -5,13 +5,17 @@
 //! context (a child of `Context::Decision`), so a key the rail paints is a key
 //! the handler honours (Story 21.3).
 
+use super::artifact::{PendingArtifactCard, PendingPeerAdd};
+use super::confirm::{ExportOverwritePayload, ForkPayload, RewindPayload};
 use super::delegation::{AgentKillPayload, PendingDelegationCard, PendingSpawnGate};
+use super::memory::{ConsolidationPayload, PendingForgetCard};
 use super::permission::{ConsentPayload, PermissionPayload};
 use super::plan::{
     CancelPlanPayload, PlanApprovalPayload, PlanCardPayload, PlanDeviationPayload,
     SkipCascadePayload,
 };
 use super::question::QuestionPayload;
+use super::retract::TeamRetractPayload;
 use super::skill_trust::SkillTrustPayload;
 use super::{DecisionItem, keys};
 use crate::adapters::tui::app::InputAction;
@@ -56,6 +60,24 @@ pub enum DecisionKind {
     SpawnGate,
     /// Killing an agent and its subtree waits for confirmation.
     AgentKill,
+    /// A memory consolidation waits for promote-all / decline (both hosts).
+    Consolidation,
+    /// `/memory forget` waits for the operator to choose what to purge.
+    Forget,
+    /// `/artifact apply` waits for its confirmed workspace write.
+    ArtifactApply,
+    /// `/artifact resolve` waits for its confirmed report.
+    ArtifactResolve,
+    /// `/peer add` waits for the pin confirm.
+    PeerAdd,
+    /// `/team retract` (or the auto-response retract) waits for confirm (both hosts).
+    TeamRetract,
+    /// A fork waits for confirm.
+    Fork,
+    /// A rewind waits for confirm.
+    Rewind,
+    /// An export whose target exists waits for the overwrite decision.
+    ExportOverwrite,
 }
 
 /// What `Esc` does on a kind (RU-5, LR-3, A7).
@@ -81,7 +103,17 @@ impl DecisionKind {
             Self::PlanApproval => Context::PlanApproval,
             Self::PlanCard | Self::PlanDeviation => Context::PlanDecision,
             Self::SkipCascade => Context::SkipCascade,
-            Self::CancelPlan | Self::AgentKill => Context::DecisionConfirm,
+            Self::CancelPlan
+            | Self::AgentKill
+            | Self::Consolidation
+            | Self::ArtifactApply
+            | Self::ArtifactResolve
+            | Self::PeerAdd
+            | Self::TeamRetract
+            | Self::Fork => Context::DecisionConfirm,
+            Self::Forget => Context::Forget,
+            Self::Rewind => Context::Rewind,
+            Self::ExportOverwrite => Context::ExportOverwrite,
             Self::Delegation => Context::Delegation,
             Self::SpawnGate => Context::SpawnGate,
             _ => Context::Decision,
@@ -110,6 +142,15 @@ impl DecisionKind {
             Self::Delegation => "Delegate task",
             Self::SpawnGate => "Spawn gate",
             Self::AgentKill => "Kill agent",
+            Self::Consolidation => "Memory consolidation",
+            Self::Forget => "Forget memory",
+            Self::ArtifactApply => "Apply artifact",
+            Self::ArtifactResolve => "Resolve artifact",
+            Self::PeerAdd => "Add peer",
+            Self::TeamRetract => "Retract",
+            Self::Fork => "Fork",
+            Self::Rewind => "Rewind",
+            Self::ExportOverwrite => "Export overwrite",
         }
     }
 
@@ -135,6 +176,15 @@ impl DecisionKind {
             Self::Delegation => "Decision: Delegate task",
             Self::SpawnGate => "Decision: Spawn gate",
             Self::AgentKill => "Decision: Kill agent",
+            Self::Consolidation => "Decision: Memory consolidation",
+            Self::Forget => "Decision: Forget memory",
+            Self::ArtifactApply => "Decision: Apply artifact",
+            Self::ArtifactResolve => "Decision: Resolve artifact",
+            Self::PeerAdd => "Decision: Add peer",
+            Self::TeamRetract => "Decision: Retract",
+            Self::Fork => "Decision: Fork",
+            Self::Rewind => "Decision: Rewind",
+            Self::ExportOverwrite => "Decision: Export overwrite",
         }
     }
 
@@ -319,6 +369,91 @@ impl DecisionKind {
                     (key(OverlayCmd::PaneEsc), "Later"),
                 ]
             }
+            Self::Consolidation => {
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                // The consolidation card kept its captured wording.
+                vec![
+                    (confirm(CardCmd::Yes), "promote all"),
+                    (confirm(CardCmd::No), "decline"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::Forget => {
+                let forget = |command: CardCmd| keymap::render::rail(Context::Forget, command);
+                vec![
+                    (
+                        keymap::render::rail_arrows(Context::Forget, CardCmd::Up, CardCmd::Down),
+                        "navigate",
+                    ),
+                    (forget(CardCmd::Toggle), "toggle"),
+                    (forget(CardCmd::Yes), "forget selected"),
+                    (forget(CardCmd::No), "cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::ArtifactApply | Self::ArtifactResolve => {
+                use crate::adapters::tui::widgets::apply_card::{
+                    APPLY_CARD_BINDINGS, RESOLVE_CARD_BINDINGS,
+                };
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                let labels = if matches!(self, Self::ArtifactApply) {
+                    &APPLY_CARD_BINDINGS
+                } else {
+                    &RESOLVE_CARD_BINDINGS
+                };
+                vec![
+                    (confirm(CardCmd::Yes), labels[0].label),
+                    (confirm(CardCmd::No), labels[1].label),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::PeerAdd => {
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                vec![
+                    (confirm(CardCmd::Yes), "Confirm and pin"),
+                    (confirm(CardCmd::No), "Cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::TeamRetract => {
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                vec![
+                    (confirm(CardCmd::Yes), "Retract"),
+                    (confirm(CardCmd::No), "Cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::Fork => {
+                let confirm =
+                    |command: CardCmd| keymap::render::rail(Context::DecisionConfirm, command);
+                vec![
+                    (confirm(CardCmd::Yes), "Fork"),
+                    (confirm(CardCmd::No), "Cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::Rewind => {
+                let rewind = |command: CardCmd| keymap::render::rail(Context::Rewind, command);
+                vec![
+                    (rewind(CardCmd::Yes), "Rewind"),
+                    (rewind(CardCmd::ForkInstead), "Fork instead"),
+                    (rewind(CardCmd::No), "Cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
+            Self::ExportOverwrite => {
+                let export =
+                    |command: CardCmd| keymap::render::rail(Context::ExportOverwrite, command);
+                vec![
+                    (export(CardCmd::Yes), "Overwrite"),
+                    (export(CardCmd::No), "Cancel"),
+                    (key(OverlayCmd::PaneEsc), "Later"),
+                ]
+            }
         }
     }
 }
@@ -360,7 +495,32 @@ pub fn rail_of(item: &DecisionItem) -> Vec<(String, &'static str)> {
                 "scroll",
             ),
         ],
-        _ => item.kind.rail(),
+        // A disarmed retract (the confirm-time read did not resolve, or the item is already
+        // removed) answers `[n]` only: `[y]` is never painted, never a confirm.
+        _ => match &item.subject {
+            DecisionSubject::TeamRetract(payload) if !payload.armed => item
+                .kind
+                .rail()
+                .into_iter()
+                .filter(|(_, label)| *label != "Retract")
+                .collect(),
+            DecisionSubject::PeerAdd(pending) if pending.reach_refresh => item
+                .kind
+                .rail()
+                .into_iter()
+                .map(|(key, label)| {
+                    (
+                        key,
+                        if label == "Confirm and pin" {
+                            "Update the address"
+                        } else {
+                            label
+                        },
+                    )
+                })
+                .collect(),
+            _ => item.kind.rail(),
+        },
     }
 }
 
@@ -435,6 +595,31 @@ pub enum DecisionEffect {
     SpawnGateCancel,
     AgentKillConfirm,
     AgentKillDecline,
+    /// Promote every proposal of the consolidation.
+    ConsolidationAccept,
+    /// Decline the consolidation: nothing is promoted.
+    ConsolidationDecline,
+    /// Forget the selected memories.
+    ForgetAccept,
+    /// Cancel the forget: nothing is purged.
+    ForgetDecline,
+    /// Apply the patch (or record the report).
+    ArtifactAccept,
+    /// Cancel the artifact decision.
+    ArtifactDecline,
+    /// Pin the peer.
+    PeerAddConfirm,
+    PeerAddDecline,
+    /// Mark the item retracted.
+    TeamRetractConfirm,
+    TeamRetractDecline,
+    ForkConfirm,
+    ForkCancel,
+    RewindConfirm,
+    RewindForkInstead,
+    RewindCancel,
+    ExportOverwriteConfirm,
+    ExportOverwriteCancel,
 }
 
 impl DecisionEffect {
@@ -470,6 +655,23 @@ impl DecisionEffect {
             Self::RunTaskLocally => InputAction::RunTaskLocally,
             Self::DelegationCardCancel => InputAction::DelegationCardCancel,
             Self::SpawnGateConfirm => InputAction::SpawnGateConfirm,
+            Self::ConsolidationAccept => InputAction::ConsolidateAcceptAll,
+            Self::ConsolidationDecline => InputAction::ConsolidateDeclineAll,
+            Self::ForgetAccept => InputAction::ForgetAcceptAll,
+            Self::ForgetDecline => InputAction::ForgetDeclineAll,
+            Self::ArtifactAccept => InputAction::ApplyCardAccept,
+            Self::ArtifactDecline => InputAction::ApplyCardDecline,
+            Self::PeerAddConfirm => InputAction::PeerAddConfirm,
+            Self::PeerAddDecline => InputAction::PeerAddDecline,
+            Self::TeamRetractConfirm => InputAction::TeamRetractConfirm,
+            Self::TeamRetractDecline => InputAction::TeamRetractDecline,
+            Self::ForkConfirm => InputAction::ForkConfirm,
+            Self::ForkCancel => InputAction::ForkCancel,
+            Self::RewindConfirm => InputAction::RewindConfirm,
+            Self::RewindForkInstead => InputAction::RewindForkInstead,
+            Self::RewindCancel => InputAction::RewindCancel,
+            Self::ExportOverwriteConfirm => InputAction::ConfirmExportOverwrite,
+            Self::ExportOverwriteCancel => InputAction::CancelExportOverwrite,
             other => InputAction::Decision(other),
         }
     }
@@ -503,6 +705,15 @@ pub enum DecisionSubject {
     Delegation(Box<PendingDelegationCard>),
     SpawnGate(Box<PendingSpawnGate>),
     AgentKill(Box<AgentKillPayload>),
+    Consolidation(Box<ConsolidationPayload>),
+    Forget(Box<PendingForgetCard>),
+    /// An apply or resolve confirm (the item's kind says which).
+    Artifact(Box<PendingArtifactCard>),
+    PeerAdd(Box<PendingPeerAdd>),
+    TeamRetract(Box<TeamRetractPayload>),
+    Fork(Box<ForkPayload>),
+    Rewind(Box<RewindPayload>),
+    ExportOverwrite(Box<ExportOverwritePayload>),
 }
 
 /// The copy a decision paints once its source settled elsewhere (A7).

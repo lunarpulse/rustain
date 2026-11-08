@@ -214,7 +214,12 @@ fn actual_enter_classifies_pre_slash_whitespace_without_confirming_retract() {
             expected,
             "input: {input:?}"
         );
-        assert!(state.pending_team_retract.is_none(), "input: {input:?}");
+        assert!(
+            !state
+                .decisions
+                .holds(rustain::adapters::tui::decision_queue::DecisionKind::TeamRetract),
+            "input: {input:?}"
+        );
         assert_eq!(state.focus, FocusState::Input, "input: {input:?}");
         assert!(state.feedback_blocks.is_empty(), "input: {input:?}");
         assert!(state.notifications.is_empty(), "input: {input:?}");

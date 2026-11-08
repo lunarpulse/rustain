@@ -82,6 +82,17 @@ fn raise_kind(state: &mut TuiState, kind: DecisionKind) {
         | DecisionKind::AgentKill => {
             unreachable!("the 6-C kinds are raised by their own producers (raisers.rs, k7, k8)")
         }
+        DecisionKind::Consolidation
+        | DecisionKind::Forget
+        | DecisionKind::ArtifactApply
+        | DecisionKind::ArtifactResolve
+        | DecisionKind::PeerAdd
+        | DecisionKind::TeamRetract
+        | DecisionKind::Fork
+        | DecisionKind::Rewind
+        | DecisionKind::ExportOverwrite => {
+            unreachable!("the 6-D kinds have their own producer fixtures")
+        }
     }
     assert!(presentation::consistent(state));
 }

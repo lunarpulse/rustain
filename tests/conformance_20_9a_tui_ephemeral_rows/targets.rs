@@ -65,17 +65,10 @@ async fn fork_and_rewind_target_durable_row_after_display_before_and_after_reloa
         serde_json::to_value(store.load_conversation("targets").await.unwrap().unwrap()).unwrap(),
         original
     );
-    state.pending_rewind_index = Some(2);
-    let (live_index, result) = handle_rewind_fork_instead(&store, &conversation, &mut state)
+    let result = handle_rewind_fork_instead(&store, &conversation, 2)
         .await
         .unwrap();
-    assert_eq!(live_index, 2);
-    assert!(state.pending_rewind_index.is_none());
-    let forked = store
-        .load_conversation(&result.unwrap())
-        .await
-        .unwrap()
-        .unwrap();
+    let forked = store.load_conversation(&result).await.unwrap().unwrap();
     assert_eq!(
         forked
             .messages

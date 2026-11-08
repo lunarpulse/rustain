@@ -38,5 +38,11 @@ mod k7_question;
 #[path = "conformance_21_6_decision_queue/k8_invariance.rs"]
 mod k8_invariance;
 
+#[path = "conformance_21_6_decision_queue/k9_confirm.rs"]
+mod k9_confirm;
+
+#[path = "conformance_21_6_decision_queue/k10_guards.rs"]
+mod k10_guards;
+
 #[path = "conformance_21_6_decision_queue/k16_patch.rs"]
 mod k16_patch;

@@ -15,13 +15,14 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use crate::conformance_21_6_decision_queue::support;
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::app::InputAction;
+use rustain::adapters::tui::decision_queue::{self, DecisionSubject, RewindPreview};
 use rustain::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
 use rustain::adapters::tui::state::{HeightCache, MessageHeightKey, TabRenderState, TuiState};
 use rustain::domain::models::checkpoint::{CheckpointId, RevertStatus};
 use rustain::domain::models::conversation::{ChatMessage, Conversation, generate_conversation_id};
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use rustain::domain::models::{FocusState, MessageRole, UserMessage};
 use rustain::domain::ports::StoragePort;
 
@@ -32,9 +33,27 @@ fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
 }
 
 fn make_state_in_rewind_overlay() -> TuiState {
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind));
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_rewind(
+        &mut state,
+        "active-conv-123",
+        RewindPreview {
+            target_message_index: 1,
+            messages_to_remove: 3,
+            files_to_revert: vec![],
+        },
+        0,
+    );
+    support::paint(&mut state, &rewind_facts(), 80, 24);
+    support::ready(&mut state, &clock);
     state
+}
+
+fn rewind_facts() -> rustain::adapters::tui::notification_log::LogFacts {
+    rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: 5,
+        ..support::facts("active-conv-123")
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -293,16 +312,158 @@ fn test_e2e_rewind_fork_instead_key() {
     // Given: rewind overlay active
     let mut state = make_state_in_rewind_overlay();
 
-    // When: I press 'f'
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('f');
-    let action = handle_input(&mut state, &event);
-
-    // Then: RewindForkInstead returned
     assert_eq!(
-        action,
-        InputAction::RewindForkInstead,
-        "'f' in Rewind overlay should return RewindForkInstead"
+        support::route(&mut state, &support::key('f'), &rewind_facts())
+            .unwrap()
+            .into_action(),
+        InputAction::RewindForkInstead
+    );
+    assert!(
+        matches!(state.decisions.take_resolved(), Some(DecisionSubject::Rewind(p))
+        if p.conversation_id == "active-conv-123" && p.preview.target_message_index == 1)
+    );
+    assert!(!decision_queue::rewind_pending(&state, "active-conv-123"));
+}
+
+#[tokio::test]
+async fn test_rewind_decision_confirm_and_cancel_effects() {
+    let tmp = TempDir::new().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let conv = make_conversation_5_messages();
+    storage.save_conversation(&conv).await.unwrap();
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&conv.id)
+    };
+    for key in ['n', 'y'] {
+        let (mut state, clock) = support::clocked(80, 24);
+        decision_queue::raise_rewind(
+            &mut state,
+            &conv.id,
+            RewindPreview {
+                target_message_index: 1,
+                messages_to_remove: 3,
+                files_to_revert: vec![],
+            },
+            decision_queue::message_target_fingerprint(&conv.messages[1]),
+        );
+        support::paint(&mut state, &facts, 80, 24);
+        support::ready(&mut state, &clock);
+        assert_eq!(
+            support::route(&mut state, &support::key(key), &facts)
+                .unwrap()
+                .into_action(),
+            if key == 'y' {
+                InputAction::RewindConfirm
+            } else {
+                InputAction::RewindCancel
+            }
+        );
+        let Some(DecisionSubject::Rewind(payload)) = state.decisions.take_resolved() else {
+            panic!("rewind decision payload");
+        };
+        if key == 'y' {
+            let outcome =
+                rustain::adapters::tui::handlers::transcript_target::handle_rewind_confirm(
+                    &storage,
+                    &conv,
+                    payload.preview.target_message_index,
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.conversation.messages.len(), 2);
+        }
+        let saved = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+        assert_eq!(saved.messages.len(), if key == 'n' { 5 } else { 2 });
+    }
+}
+
+/// 6D-L1-01: a deferred fork of a removed message must not revive after regrowth.
+#[tokio::test]
+async fn rewind_retires_deferred_fork_before_regrowth() {
+    let tmp = TempDir::new().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let conv = make_conversation_5_messages();
+    storage.save_conversation(&conv).await.unwrap();
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&conv.id)
+    };
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_fork(
+        &mut state,
+        &conv.id,
+        3,
+        &conv.messages[3].content,
+        decision_queue::message_target_fingerprint(&conv.messages[3]),
+    );
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    support::route(
+        &mut state,
+        &support::special(rustain::domain::events::DomainKey::Esc),
+        &facts,
+    );
+    assert!(decision_queue::fork_pending(&state, &conv.id));
+    decision_queue::raise_rewind(
+        &mut state,
+        &conv.id,
+        RewindPreview {
+            target_message_index: 0,
+            messages_to_remove: 4,
+            files_to_revert: vec![],
+        },
+        decision_queue::message_target_fingerprint(&conv.messages[0]),
+    );
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    assert_eq!(
+        support::route(&mut state, &support::key('y'), &facts)
+            .unwrap()
+            .into_action(),
+        InputAction::RewindConfirm
+    );
+    let Some(DecisionSubject::Rewind(payload)) = state.decisions.take_resolved() else {
+        panic!("rewind payload")
+    };
+    rustain::adapters::tui::handlers::transcript_target::verify_target(
+        &conv,
+        payload.preview.target_message_index,
+        payload.target_hash,
+    )
+    .unwrap();
+    let mut regrown = rustain::adapters::tui::handlers::transcript_target::handle_rewind_confirm(
+        &storage,
+        &conv,
+        payload.preview.target_message_index,
+    )
+    .await
+    .unwrap()
+    .conversation;
+    decision_queue::retire_message_targets(&mut state, &conv.id, regrown.messages.len());
+    for n in 0..3 {
+        regrown
+            .messages
+            .push(make_message(MessageRole::User, &format!("new {n}")));
+    }
+    storage.save_conversation(&regrown).await.unwrap();
+    let regrown_facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: regrown.messages.len(),
+        ..support::facts(&conv.id)
+    };
+    assert!(!decision_queue::fork_pending(&state, &conv.id));
+    support::route(&mut state, &support::key('y'), &regrown_facts);
+    assert!(state.decisions.take_resolved().is_none());
+    assert_eq!(storage.list_conversations().await.unwrap().len(), 1);
+    assert_eq!(
+        storage
+            .load_conversation(&conv.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .messages
+            .len(),
+        4
     );
 }
 
@@ -315,11 +476,39 @@ async fn test_e2e_rewind_fork_instead_creates_new_tab() {
     let source_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
 
-    // When: fork instead of rewind at message index 2 (via fork_at_checkpoint)
-    let fork_id = storage
-        .fork_at_checkpoint(&source_id, CheckpointId(2))
-        .await
-        .unwrap();
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_rewind(
+        &mut state,
+        &source_id,
+        RewindPreview {
+            target_message_index: 2,
+            messages_to_remove: 2,
+            files_to_revert: vec![],
+        },
+        decision_queue::message_target_fingerprint(&conv.messages[2]),
+    );
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&source_id)
+    };
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    assert_eq!(
+        support::route(&mut state, &support::key('f'), &facts)
+            .unwrap()
+            .into_action(),
+        InputAction::RewindForkInstead
+    );
+    let Some(DecisionSubject::Rewind(payload)) = state.decisions.take_resolved() else {
+        panic!("rewind fork payload");
+    };
+    let fork_id = rustain::adapters::tui::handlers::transcript_target::handle_rewind_fork_instead(
+        &storage,
+        &conv,
+        payload.preview.target_message_index,
+    )
+    .await
+    .unwrap();
 
     // Then: a new conversation exists (fork)
     assert_ne!(fork_id, source_id, "Fork must have a different ID");
@@ -829,12 +1018,7 @@ fn test_e2e_rewind_queues_permission_request_when_overlay_active() {
     // Given: rewind overlay is active
     let mut state = make_state_in_rewind_overlay();
 
-    // Then: focus is Overlay(Confirmation(Rewind))
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)),
-        "State should be in Rewind overlay"
-    );
+    assert!(decision_queue::rewind_pending(&state, "active-conv-123"));
     // No permission item is held in this fresh rewind fixture.
     assert!(
         !state
@@ -864,11 +1048,8 @@ fn test_e2e_rewind_queues_permission_request_when_overlay_active() {
     );
     assert!(decision_queue::holds_request(&state, &id));
     assert_eq!(state.decisions.count(DecisionKind::Permission), 1);
-    assert_eq!(
-        state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
-    );
-    assert!(!rustain::adapters::tui::presentation::is_open(
+    assert!(decision_queue::rewind_pending(&state, "active-conv-123"));
+    assert!(rustain::adapters::tui::presentation::is_open(
         &state,
         rustain::adapters::tui::presentation::Surface::Decision
     ));
@@ -876,44 +1057,26 @@ fn test_e2e_rewind_queues_permission_request_when_overlay_active() {
 
 #[test]
 fn test_e2e_rewind_other_tab_permission_unaffected() {
-    // Given: rewind overlay active on "tab A"
-    let state = make_state_in_rewind_overlay();
-
-    // A permission request for a DIFFERENT tab (different conversation_id) should
-    // NOT be affected by the Rewind overlay guard.
-    // The guard in event_loop only fires when the permission is for the ACTIVE tab's conversation.
-    // For other tabs, existing per-tab routing (4-1) handles it normally.
-
-    // We verify: the DF-018 guard condition checks conversation_id equality
-    let active_conv_id = "active-conv-123";
-    let other_conv_id = "other-conv-456";
-    let permission_conv_id = "other-conv-456";
-
-    // Rewind guard: only fires if permission_conv_id == active_conv_id
-    let should_drop = permission_conv_id == active_conv_id
-        && matches!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
-        );
-    assert!(
-        !should_drop,
-        "Permission for different tab should NOT be dropped by rewind guard"
+    use rustain::adapters::tui::decision_queue::{PermissionInput, PermissionPayload, Responder};
+    use rustain::domain::models::{ApprovalSource, ToolRisk};
+    let mut state = make_state_in_rewind_overlay();
+    let id = rustain::domain::models::tool_call::RequestId::new();
+    decision_queue::raise_permission(
+        &mut state,
+        PermissionPayload::new(
+            id.clone(),
+            ApprovalSource::ForegroundTurn {
+                conversation_id: "other-conv-456".into(),
+            },
+            "Bash".into(),
+            ToolRisk::Elevated,
+            PermissionInput::Ready(std::sync::Arc::new(serde_json::json!({"command": "true"}))),
+        ),
+        Responder::Local,
     );
-
-    // And permission for active tab would be dropped
-    let permission_for_active = active_conv_id;
-    let should_drop_active = permission_for_active == active_conv_id
-        && matches!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind))
-        );
-    assert!(
-        should_drop_active,
-        "Permission for active tab with rewind overlay should be dropped"
-    );
-
-    // Suppress unused variable lint
-    let _ = other_conv_id;
+    assert!(decision_queue::holds_request(&state, &id));
+    assert!(decision_queue::rewind_pending(&state, "active-conv-123"));
+    assert!(!decision_queue::rewind_pending(&state, "other-conv-456"));
 }
 
 // ── AC7: DF-005 — HeightCache Survives Message Truncation ────────────────────

@@ -12,7 +12,6 @@
 //! a `HandlerOutcome`, so the counter stays untouched — the same choice
 //! `handlers/room_command.rs` made.
 
-use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::widgets::artifacts_panel::{
     apply_state_suffix, decision_suffix, id_prefix, kind_label, review_state_label,
@@ -391,20 +390,6 @@ pub(crate) fn show_artifact_message(state: &mut TuiState, message: String) {
         message,
     );
     state.needs_redraw = true;
-}
-
-/// Resolve the decision card and restore the focus that owned the command.
-///
-/// Decline consumes the card and returns `None`; accept returns the captured
-/// card for the event-loop effect arm.
-pub fn resolve_apply_card(
-    state: &mut TuiState,
-    accept: bool,
-) -> Option<crate::adapters::tui::state::PendingArtifactCard> {
-    let card = state.pending_artifact_card.take()?;
-    reducer::set_base(state, card.prior_focus.clone());
-    state.needs_redraw = true;
-    accept.then_some(card)
 }
 
 #[must_use]

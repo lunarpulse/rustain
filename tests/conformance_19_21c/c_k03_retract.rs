@@ -90,6 +90,13 @@ async fn k03_retract_exact_card_single_post_and_remembered_board_without_list() 
     let TeamRetractPreview::Card(expected) = expected else {
         panic!("oracle card")
     };
+    assert!(
+        expected.body.contains("Awaiting your decision.")
+            && !expected.body.contains("[y]")
+            && !expected.body.contains("[n]"),
+        "the preview carries a body, not the decision frame's key rail: {}",
+        expected.body
+    );
     assert_eq!(
         actual,
         TeamRetractPreviewView::Card {

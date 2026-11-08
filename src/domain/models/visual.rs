@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 /// Border style variants for content blocks.
 /// Mapped to ratatui `BorderType` + optional custom line sets in the theme layer.
@@ -115,10 +114,7 @@ pub enum PanelType {
     /// Story 18.2 (AC5) — `Ctrl+X, L`. Chronological A2A transparency rows
     /// folded from the durable room journal.
     ///
-    /// Deliberately a `PanelType` and not an `OverlayType`: every persistent
-    /// view lives in the sidebar slot, and `PanelType` is matched exhaustively
-    /// in the render dispatch, so a missed site fails to compile.
-    /// `OverlayType` has `_` arms everywhere and would silently do nothing.
+    /// Every persistent view lives in the sidebar slot.
     TransparencyLog,
     /// Story 18.3a (AC1) — `Ctrl+X, R`. The durable orchestration room,
     /// folded from the one journal via `OrchestrationRoom::project_for_host`.
@@ -143,39 +139,6 @@ pub enum DeleteConfirmTarget {
     Single { id: String, title: String },
     /// Delete all conversations with the count for display.
     Bulk { count: usize },
-}
-
-/// Types of confirmation dialogs.
-/// Note: Not Copy because `ExportOverwrite` contains path data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfirmationType {
-    /// Fork confirmation card (Story 4-3a, AC1).
-    Fork,
-    /// Rewind confirmation card (Story 4-3b, AC1).
-    Rewind,
-    /// Export overwrite confirmation (Story 4-4 AC12) —
-    /// shown only in explicit-path mode when the target file already exists.
-    ExportOverwrite(PathBuf),
-    /// Confirm `/artifact apply`: an irreversible workspace write.
-    ArtifactApply,
-    /// Confirm `/peer add`: pin a key into the transport allowlist
-    /// (Story 18.4b, AC3). ⛔ Deliberately NOT `ArtifactApply` and ⛔ not routed
-    /// through the apply card's key table, which is consulted mode-blind and
-    /// would hand this surface an unpainted `y` that rebinds a pin.
-    PeerAdd,
-    /// Confirm `/team retract`: mark one item on a peer's host as retracted
-    /// by its sender (Story 19.16f `AC4`). ⛔ Wired by hand in BOTH key paths
-    /// (`handle_char`, `handle_special_key`): no exhaustive `match` over this
-    /// enum exists, so an unwired variant is zero compile errors and the
-    /// overlay wildcard would swallow every key (`DF-154`, `DF-181`).
-    TeamRetract,
-}
-
-/// Overlay types for modal focus targets.
-/// Note: Not Copy because Confirmation contains non-Copy data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OverlayType {
-    Confirmation(ConfirmationType),
 }
 
 /// Non-color semantic symbols so information conveys without color (UX-DR32, NFR34).

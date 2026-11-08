@@ -13,10 +13,7 @@ use crate::adapters::tui::{
     quit_confirm::{self, QuitKeyOutcome},
     state::TuiState,
 };
-use crate::domain::{
-    events::DomainInputEvent,
-    models::{FocusState, visual::OverlayType},
-};
+use crate::domain::events::DomainInputEvent;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteEffect {

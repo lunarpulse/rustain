@@ -259,6 +259,9 @@ pub(crate) fn paste(state: &mut TuiState, text: &str) -> bool {
 /// and run its command against the item's kind; a command the kind does not offer is
 /// swallowed.
 fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> PaneOutcome {
+    // A fork or rewind whose message the conversation no longer reaches is stale: its only
+    // key is Close, so a stale target never forks or rewinds anything (A7, K9).
+    refresh_targets(state, facts);
     state.needs_redraw = true;
     let Some(item) = current(state, facts) else {
         presentation::reducer::close(state, Surface::Decision);
@@ -278,6 +281,8 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
     let in_field = field_open(item);
     let reviewing = matches!(&item.subject, DecisionSubject::Permission(p) if p.reviewing);
     let conversation_id = item.conversation_id.clone();
+    let retract_armed =
+        !matches!(&item.subject, DecisionSubject::TeamRetract(payload) if !payload.armed);
     let context = context_of(item);
     let inspecting = context == Context::SkillTrustInspect;
     let command = match keymap::resolve(context, host, &[key]) {
@@ -421,6 +426,42 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
             Some(DecisionEffect::SpawnGateConfirm)
         }
         (DecisionKind::SpawnGate, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::SpawnGateCancel),
+        (DecisionKind::Consolidation, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::ConsolidationAccept)
+        }
+        (DecisionKind::Consolidation, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::ConsolidationDecline)
+        }
+        (DecisionKind::Forget, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::ForgetAccept),
+        (DecisionKind::Forget, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::ForgetDecline),
+        (DecisionKind::ArtifactApply | DecisionKind::ArtifactResolve, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::ArtifactAccept)
+        }
+        (DecisionKind::ArtifactApply | DecisionKind::ArtifactResolve, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::ArtifactDecline)
+        }
+        (DecisionKind::PeerAdd, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::PeerAddConfirm),
+        (DecisionKind::PeerAdd, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::PeerAddDecline),
+        // A disarmed retract consumes `y`: it is never painted and never a confirm.
+        (DecisionKind::TeamRetract, Cmd::Card(CardCmd::Yes)) if retract_armed => {
+            Some(DecisionEffect::TeamRetractConfirm)
+        }
+        (DecisionKind::TeamRetract, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::TeamRetractDecline)
+        }
+        (DecisionKind::Fork, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::ForkConfirm),
+        (DecisionKind::Fork, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::ForkCancel),
+        (DecisionKind::Rewind, Cmd::Card(CardCmd::Yes)) => Some(DecisionEffect::RewindConfirm),
+        (DecisionKind::Rewind, Cmd::Card(CardCmd::ForkInstead)) => {
+            Some(DecisionEffect::RewindForkInstead)
+        }
+        (DecisionKind::Rewind, Cmd::Card(CardCmd::No)) => Some(DecisionEffect::RewindCancel),
+        (DecisionKind::ExportOverwrite, Cmd::Card(CardCmd::Yes)) => {
+            Some(DecisionEffect::ExportOverwriteConfirm)
+        }
+        (DecisionKind::ExportOverwrite, Cmd::Card(CardCmd::No)) => {
+            Some(DecisionEffect::ExportOverwriteCancel)
+        }
         (kind, Cmd::Esc) => match kind.esc() {
             EscPolicy::Resolve(effect) => Some(effect),
             EscPolicy::Defer => {
@@ -434,6 +475,31 @@ fn execute(state: &mut TuiState, key: Key, facts: &LogFacts, host: Host) -> Pane
         return resolve(state, facts, &item_key, effect);
     }
     match (kind, command) {
+        // The per-row selection of `/memory forget` lives inside its frame.
+        (
+            DecisionKind::Forget,
+            Cmd::Card(card @ (CardCmd::Toggle | CardCmd::Up | CardCmd::Down)),
+        ) => {
+            if let Some(DecisionSubject::Forget(forget)) =
+                state.decisions.item_mut(&item_key).map(|i| &mut i.subject)
+            {
+                match card {
+                    CardCmd::Toggle => forget.toggle_focused(),
+                    CardCmd::Up => forget.move_focus(false),
+                    _ => forget.move_focus(true),
+                }
+            }
+            *state.decisions.body_layout.get_mut() = None;
+            if let Some(item) = state.decisions.item(&item_key)
+                && let Some(row) = decision_frame::forget_focus_row(
+                    item,
+                    state,
+                    decision_frame::inner_width(state.terminal_width),
+                )
+            {
+                state.decisions.scroll = row;
+            }
+        }
         (DecisionKind::ContextWarning, Cmd::No) => {
             // "Start fresh" asks about the carried summary first (RU-21: never `c`).
             state.decisions.remove(&item_key);
@@ -643,4 +709,20 @@ fn defer_current(state: &mut TuiState, key: &DecisionKey) {
 fn close_stale(state: &mut TuiState, key: &DecisionKey) {
     state.decisions.remove(key);
     presentation::reducer::close(state, Surface::Decision);
+}
+
+/// Mark the focused fork or rewind stale once its message is out of reach of the
+/// conversation it was started in: such an item can only be closed (A7).
+fn refresh_targets(state: &mut TuiState, facts: &LogFacts) {
+    let Some(key) = focused_key(state) else {
+        return;
+    };
+    let gone = state.decisions.item(&key).is_some_and(|item| {
+        !item.is_stale()
+            && item.conversation_id.as_deref() == facts.active_conversation_id.as_deref()
+            && super::confirm::target_gone(item, facts)
+    });
+    if gone && let Some(item) = state.decisions.item_mut(&key) {
+        item.validity = super::Validity::Stale(super::NO_LONGER_PENDING);
+    }
 }

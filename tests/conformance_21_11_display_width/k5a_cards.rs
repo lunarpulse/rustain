@@ -19,12 +19,10 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use rustain::adapters::tui::state::{RevertPreviewItem, RewindPreview};
+use rustain::adapters::tui::decision_queue::{self, RevertPreviewItem, RewindPreview};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::ask_user_question::question_lines;
-use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
 use rustain::adapters::tui::widgets::plan_card::render_plan_card_lines;
-use rustain::adapters::tui::widgets::rewind_confirm::render_rewind_confirmation_lines;
 use rustain::adapters::tui::widgets::{adapter_status_panel, agent_panel, task_panel};
 use rustain::domain::models::plan::{
     DelegationInfo, Plan, PlanStatus, PlanSubTask, PlanTask, PlanTaskStatus,
@@ -544,68 +542,59 @@ fn k5a_ask_mixed_answer_places_the_right_border() {
 // ───────────────────────── fork confirmation ─────────────────────────
 
 fn fork_buffer(preview: &str, index: usize, width: u16) -> Buffer {
-    let lines = render_fork_confirmation_lines(preview, index, width, &Theme::dark());
-    paint_lines(lines, width)
+    super::k5b_cards::paint_decision(width, "c1", |state| {
+        decision_queue::raise_fork(state, "c1", index, preview, 0);
+    })
 }
 
 #[test]
 fn k5a_fork_preview_budget_exact_fit_and_over() {
-    // Preview cells after `Message 1: "` and the closing quote, capped at 50.
-    for (width, budget) in [(60u16, 43usize), (80, 50), (130, 50)] {
+    // The borderless builder caps previews at 50 cells; the frame wraps the
+    // resulting row instead of reducing the cap at narrower terminal widths.
+    for width in [60u16, 80, 130] {
         for (unit, cells) in UNITS {
-            let exact = unit.repeat(budget / cells);
+            let exact = unit.repeat(50 / cells);
             let buf = fork_buffer(&exact, 0, width);
-            assert_right_border(&buf, "║");
-            assert_eq!(
-                interior(&buf, 2),
-                format!("Message 1: \"{exact}\""),
-                "width {width}"
+            let body = super::k5b_cards::compact(&buf);
+            assert!(
+                body.contains(&format!("Message1:\"{exact}\"")),
+                "{width}: {body}"
             );
-
-            let over = unit.repeat(budget / cells + 1);
+            let over = unit.repeat(50 / cells + 1);
             let buf = fork_buffer(&over, 0, width);
-            assert_right_border(&buf, "║");
-            let kept = unit.repeat((budget - 1) / cells);
-            assert_eq!(
-                interior(&buf, 2),
-                format!("Message 1: \"{kept}…\""),
-                "width {width}"
+            let body = super::k5b_cards::compact(&buf);
+            let kept = unit.repeat(49 / cells);
+            assert!(
+                body.contains(&format!("Message1:\"{kept}…\"")),
+                "{width}: {body}"
+            );
+            assert!(body.contains("Fork") && body.contains("Cancel"), "{body}");
+            assert!(
+                body.contains("Anewtabwillbecreatedwithmessagesuptothispoint."),
+                "{body}"
             );
         }
-        // G at the cut: dropped whole when it straddles, kept when it fits.
-        let straddle = format!("{}{G}xx", "x".repeat(budget - 2));
-        let buf = fork_buffer(&straddle, 0, width);
-        assert_right_border(&buf, "║");
-        assert_eq!(
-            interior(&buf, 2),
-            format!("Message 1: \"{}…\"", "x".repeat(budget - 2))
-        );
-        let on_cut = format!("{}{G}xx", "x".repeat(budget - 3));
-        let buf = fork_buffer(&on_cut, 0, width);
-        assert_right_border(&buf, "║");
-        assert_eq!(
-            interior(&buf, 2),
-            format!("Message 1: \"{}{G}…\"", "x".repeat(budget - 3))
-        );
+        for (input, expected) in [
+            (
+                format!("{}{G}xx", "x".repeat(49)),
+                format!("{}…", "x".repeat(49)),
+            ),
+            // A two-cell grapheme that would end at cell 50 does not fit beside the marker.
+            (
+                format!("{}{G}xx", "x".repeat(48)),
+                format!("{}…", "x".repeat(48)),
+            ),
+            ("a".repeat(200), format!("{}…", "a".repeat(49))),
+        ] {
+            let buf = fork_buffer(&input, 8, width);
+            let body = super::k5b_cards::compact(&buf);
+            assert!(
+                body.contains(&format!("Message9:\"{expected}\"")),
+                "{width}: {body}"
+            );
+        }
     }
-    // ASCII control: a long preview used to overflow the label by three cells.
-    for width in [60u16, 80, 130] {
-        let buf = fork_buffer(&"a".repeat(200), 8, width);
-        assert_right_border(&buf, "║");
-        let budget = if width == 60 { 43 } else { 50 };
-        assert_eq!(
-            interior(&buf, 2),
-            format!("Message 9: \"{}…\"", "a".repeat(budget - 1))
-        );
-    }
-    // Width 38 (inner 34, exactly the title) wraps the info sentence.
-    let buf = fork_buffer("hi", 0, 38);
-    assert_right_border(&buf, "║");
-    assert_eq!(interior(&buf, 3), "A new tab will be created with");
-    assert_eq!(interior(&buf, 4), "messages up to this point.");
 }
-
-// ───────────────────────── rewind confirmation ─────────────────────────
 
 fn rewind_buffer(path: &str, conflict: bool, width: u16) -> Buffer {
     let preview = RewindPreview {
@@ -616,51 +605,61 @@ fn rewind_buffer(path: &str, conflict: bool, width: u16) -> Buffer {
             conflict,
         }],
     };
-    paint_lines(
-        render_rewind_confirmation_lines(&preview, width, &Theme::dark()),
-        width,
-    )
-}
-
-/// Content of a `│ … │` panel row.
-fn panel_content(buffer: &Buffer, y: u16) -> String {
-    let inner = interior(buffer, y);
-    inner
-        .strip_prefix('│')
-        .and_then(|s| s.strip_suffix('│'))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| panic!("row {y} is not a panel row: {inner:?}"))
+    super::k5b_cards::paint_decision(width, "c1", |state| {
+        decision_queue::raise_rewind(state, "c1", preview, 0);
+    })
 }
 
 #[test]
 fn k5a_rewind_path_budget_exact_fit_and_over_at_60_80_130() {
-    // Panel content is width - 7 cells; `• `/`⚠ ` take two, the conflict
-    // suffix ` (modified externally)` twenty-two more.
-    for (width, plain, conflict_budget) in [(60u16, 51usize, 29usize), (80, 71, 49), (130, 121, 99)]
-    {
+    // The builder caps a file row at 53 cells, including marker and suffix.
+    for width in [60u16, 80, 130] {
         for (unit, cells) in UNITS {
-            for (conflict, budget) in [(false, plain), (true, conflict_budget)] {
-                let (prefix, suffix) = if conflict {
-                    ("⚠ ", " (modified externally)")
-                } else {
-                    ("• ", "")
-                };
+            for (conflict, budget, prefix, suffix) in [
+                (false, 51usize, "• ", ""),
+                (true, 29usize, "⚠ ", " (modified externally)"),
+            ] {
                 let exact = unit.repeat(budget / cells);
                 let buf = rewind_buffer(&exact, conflict, width);
-                assert_right_border(&buf, "║");
-                assert_eq!(panel_content(&buf, 6), format!("{prefix}{exact}{suffix}"));
-
+                let body = super::k5b_cards::compact(&buf);
+                let expected: String = format!("{prefix}{exact}{suffix}")
+                    .split_whitespace()
+                    .collect();
+                assert!(body.contains(&expected), "{width}: {body}");
                 let over = unit.repeat(budget / cells + 1);
                 let buf = rewind_buffer(&over, conflict, width);
-                assert_right_border(&buf, "║");
+                let body = super::k5b_cards::compact(&buf);
                 let kept = unit.repeat((budget - 1) / cells);
-                assert_eq!(panel_content(&buf, 6), format!("{prefix}{kept}…{suffix}"));
+                let expected: String = format!("{prefix}{kept}…{suffix}")
+                    .split_whitespace()
+                    .collect();
+                assert!(body.contains(&expected), "{width}: {body}");
+                assert!(
+                    body.contains("Rewind")
+                        && body.contains("Forkinstead")
+                        && body.contains("Cancel"),
+                    "{body}"
+                );
+                if conflict {
+                    assert!(body.contains("Allfilesmodifiedexternally"), "{body}");
+                }
             }
         }
-        // Story vector below: C×30 path against a 51-cell budget at width 60.
+        for (path, expected) in [
+            (
+                format!("{}{G}xx", "x".repeat(49)),
+                format!("•{}…", "x".repeat(49)),
+            ),
+            (
+                format!("{}{G}xx", "x".repeat(48)),
+                format!("•{}{G}…", "x".repeat(48)),
+            ),
+            (C.repeat(30), format!("•{}…", C.repeat(25))),
+        ] {
+            let body = super::k5b_cards::compact(&rewind_buffer(&path, false, width));
+            assert!(body.contains(&expected), "{width}: {body}");
+        }
     }
-    let buf = rewind_buffer(&C.repeat(30), false, 60);
-    assert_eq!(panel_content(&buf, 6), format!("• {}…", C.repeat(25)));
 }
 
 // ───────────────────────── task panel ─────────────────────────

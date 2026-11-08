@@ -2,16 +2,10 @@
 //!
 //! Covers the consolidation/forget/peer-add/retract/apply/skill-trust cards,
 //! the tool block, usage panel, result row and the team send table/thread
-//! label columns. Every test enters through the public renderer the production
-//! draw path uses, paints into a real `Buffer`, and reads the cells back.
-//! Expected values are written from the C/G/A fixtures and from independent
-//! properties of the painted rows (spanning the pane, keeping both borders,
-//! whole clusters, maximal prefix of the source line), never from the
-//! production clipping formulas.
-//!
-//! Each case has an ASCII positive control and an exact-fit / fit-minus-one
-//! boundary at the real content budget (pane width minus the border and the
-//! row's own prefix/suffix).
+//! label columns. Decision cases raise queue items and paint the production
+//! frame into a real `Buffer`; the other cases use their production renderers.
+//! C/G/A fixtures exercise exact and over-boundary inputs, whole clusters,
+//! wrapped facts and reachable action rails at 60, 80 and 130 cells.
 //!
 //! `config::short_reason` is private and the reload handler's context
 //! (`ReloadContext`, `ComposeContext`) is assembled from crate internals, so
@@ -23,89 +17,99 @@ use super::support::*;
 
 use ed25519_dalek::SigningKey;
 use ratatui::buffer::Buffer;
-use ratatui::text::Line;
+use ratatui::layout::Rect;
 use ratatui::widgets::{Paragraph, Widget};
 use rustain::adapters::cli::peer::rows::confirm_card_text;
-use rustain::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
-use rustain::adapters::tui::state::{
-    ArtifactCardMode, PendingArtifactCard, PendingConsolidationCard, PendingForgetCard,
-    PendingPeerAdd, PendingTeamRetract, TurnUsageRow, UsagePanelState,
+use rustain::adapters::tui::decision_queue::{
+    self, ArtifactCardMode, PendingArtifactCard, PendingConsolidationCard, PendingForgetCard,
+    PendingPeerAdd, Responder, RetractTarget, TeamRetractPayload,
 };
+use rustain::adapters::tui::handlers::team_command::{TeamSendRow, render_team_send_rows};
+use rustain::adapters::tui::state::{TuiState, TurnUsageRow, UsagePanelState};
 use rustain::adapters::tui::theme::Theme;
 use rustain::adapters::tui::widgets::result_row::{ResultRowSnapshot, render_result_row};
 use rustain::adapters::tui::widgets::tool_block::render_tool_block_lines;
-use rustain::adapters::tui::widgets::{
-    apply_card, consolidation_card, forget_card, inline_card, peer_add_prompt, skill_trust_prompt,
-    team_retract_prompt, usage_panel,
-};
+use rustain::adapters::tui::widgets::{decision_frame, skill_trust_prompt, usage_panel};
 use rustain::domain::clock::MockClock;
 use rustain::domain::models::orchestration::SpokeResult;
 use rustain::domain::models::{
     AgentId, ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, EvidenceArtifact,
-    FocusState, HostBinding, MemoryEntry, MemoryFact, PeerTicket, ProvenanceTag, RecipientOutcome,
+    HostBinding, MemoryEntry, MemoryFact, PeerTicket, ProvenanceTag, RecipientOutcome,
     ReviewStatus, SemanticMessageType, ToolCallInfo, ToolResultInfo, WriteDiffState,
 };
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const WIDTHS: [u16; 3] = [60, 80, 130];
 
-/// Paint `lines` as the real bottom-anchored inline card (single or double
-/// border) filling a `width`-wide pane exactly as tall as the card.
-fn paint_card(width: u16, lines: Vec<Line<'_>>, decision: bool) -> Painted {
-    let theme = Theme::dark();
-    let height = lines.len() as u16 + 2;
-    paint(width, height, |f| {
-        let area = f.area();
-        if decision {
-            inline_card::render_bottom_anchored_decision_card(
-                f.buffer_mut(),
-                lines,
-                theme.colors.accent,
-                area,
-            );
-        } else {
-            inline_card::render_bottom_anchored_card(
-                f.buffer_mut(),
-                lines,
-                theme.colors.accent,
-                area,
-            );
-        }
-    })
+/// Paint a raised item through the production decision frame, with enough height to
+/// exercise wrapped bodies without hiding the rail behind the scroll viewport.
+pub(crate) fn paint_decision(
+    width: u16,
+    conversation: &str,
+    raise: impl FnOnce(&mut TuiState),
+) -> Buffer {
+    paint_decision_in_area(width, conversation, Rect::new(0, 0, width, 100), raise)
 }
 
-/// Row `y` between the two border glyphs (left `l`, right `r`), checked to
-/// span exactly `width` cells; trailing blanks removed.
-fn between(p: &Painted, y: u16, width: u16, l: char, r: char) -> String {
-    assert_eq!(row_cells(&p.buffer, y), width as usize, "row {y} width");
-    let text: String = glyphs(&p.buffer, y).concat();
-    text.strip_prefix(l)
-        .and_then(|t| t.strip_suffix(r))
-        .unwrap_or_else(|| panic!("row {y} lost its borders: {text:?}"))
-        .trim_end()
-        .to_string()
-}
-
-/// The painted `inner` row must be the longest whole-grapheme prefix of the
-/// source `line` that fits `budget` cells (or the whole line when it fits).
-fn assert_maximal_prefix(inner: &str, line: &str, budget: usize) {
-    let want = line.trim_end();
-    assert!(
-        want.starts_with(inner),
-        "{inner:?} is not a prefix of {want:?}"
-    );
-    if want.width() <= budget {
-        assert_eq!(inner, want);
-    } else {
-        let used = inner.width();
-        assert!(used <= budget, "{inner:?} overflows {budget}");
-        let next = want[inner.len()..].graphemes(true).next().unwrap_or("");
-        assert!(
-            used + next.width() > budget || next.chars().all(char::is_whitespace),
-            "{inner:?} is not maximal in {want:?} at {budget}"
+fn paint_decision_in_area(
+    width: u16,
+    conversation: &str,
+    area: Rect,
+    raise: impl FnOnce(&mut TuiState),
+) -> Buffer {
+    let mut state = TuiState::new(width, 100);
+    let facts = crate::conformance_21_6_decision_queue::support::facts(conversation);
+    decision_queue::prune_closed(&mut state, &facts);
+    raise(&mut state);
+    let item = state.decisions.items().next().expect("raised item");
+    let key = decision_queue::DecisionKey {
+        kind: item.kind,
+        source: item.source.clone(),
+        conversation_id: item.conversation_id.clone(),
+    };
+    if rustain::adapters::tui::decision_queue::current(
+        &state,
+        &crate::conformance_21_6_decision_queue::support::facts(conversation),
+    )
+    .is_none()
+    {
+        assert!(decision_queue::open(&mut state, &key));
+    }
+    let facts = crate::conformance_21_6_decision_queue::support::facts(conversation);
+    let p = paint(width, 100, |frame| {
+        assert!(decision_frame::render(
+            frame,
+            area,
+            &state,
+            &facts,
+            &Theme::dark(),
+            "Decision",
+            None,
+        ));
+    });
+    for y in 0..100 {
+        assert!(UnicodeWidthStr::width(row_text(&p.buffer, y).as_str()) <= usize::from(width));
+        assert_eq!(
+            row_cells(&p.buffer, y),
+            usize::from(width),
+            "row {y} at {width}"
         );
     }
+    assert_whole_clusters(&p.buffer);
+    assert_no_partial_family(&screen(&p.buffer));
+    p.buffer
+}
+
+/// Frame text without wrapping whitespace, for checking that long words survive.
+pub(crate) fn compact(buffer: &Buffer) -> String {
+    (1..buffer.area.height - 1)
+        .map(|y| {
+            let row = glyphs(buffer, y);
+            row[1..row.len() - 1].concat()
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect()
 }
 
 /// Display column (cell x) where `needle` starts on row `y`, read from the
@@ -147,83 +151,53 @@ fn consolidation_card_with(
 
 #[test]
 fn k5b_consolidation_fact_and_detail_fit_their_cells_at_60_80_130() {
-    let a = |n: usize| "a".repeat(n);
     for width in WIDTHS {
-        // 2 border + 6 marker + 11 cells of "## Build — ".
-        let b = width as usize - 19;
-        let facts: Vec<(String, String)> = vec![
-            (a(b), a(b)),
-            (a(b + 1), format!("{}…", a(b - 1))),
-            (C.repeat(b), format!("{}…", C.repeat((b - 1) / 2))),
-            (format!("{}{G}", a(b - 2)), format!("{}{G}", a(b - 2))),
-            (format!("{}{G}z", a(b - 2)), format!("{}…", a(b - 2))),
-            (format!("{}{A}bbb", a(b - 2)), format!("{}{A}…", a(b - 2))),
-        ];
-        for (fact, want) in facts {
-            let card = consolidation_card_with("Build", &fact, None);
-            let lines =
-                consolidation_card::render_consolidation_card_lines(&card, &Theme::dark(), width);
-            let p = paint_card(width, lines, false);
-            let body = between(&p, 3, width, '│', '│');
-            assert_eq!(
-                body.strip_prefix("  [x] ## Build — "),
-                Some(want.as_str()),
-                "width {width} fact {fact:?}"
+        for text in [
+            "a".repeat(usize::from(width) - 2),
+            "a".repeat(usize::from(width) - 1),
+            C.repeat(usize::from(width)),
+            format!("{}{G}{A}tail", "a".repeat(usize::from(width) - 4)),
+        ] {
+            let card = consolidation_card_with("Build", &text, Some(&text));
+            let buf = paint_decision(width, "c1", |state| {
+                decision_queue::raise_consolidation(state, card);
+            });
+            let flat = compact(&buf);
+            assert!(
+                flat.contains(&format!("[x]##Build—{text}")),
+                "{width}: {flat}"
             );
-            assert_whole_clusters(&p.buffer);
-        }
-        // Detail rows sit behind an 8-cell indent.
-        let d = width as usize - 10;
-        let details: Vec<(String, String)> = vec![
-            (a(d), a(d)),
-            (C.repeat(d / 2 + 1), format!("{}…", C.repeat(d / 2 - 1))),
-            (format!("{}{G}z", a(d - 2)), format!("{}…", a(d - 2))),
-        ];
-        for (detail, want) in details {
-            let card = consolidation_card_with("Build", "f", Some(&detail));
-            let lines =
-                consolidation_card::render_consolidation_card_lines(&card, &Theme::dark(), width);
-            let p = paint_card(width, lines, false);
-            let body = between(&p, 4, width, '│', '│');
-            assert_eq!(
-                body.strip_prefix("        "),
-                Some(want.as_str()),
-                "width {width}"
-            );
-            assert_whole_clusters(&p.buffer);
+            assert!(flat.matches(&text).count() >= 2, "{width}: {flat}");
+            for label in ["promote", "decline"] {
+                assert!(flat.to_lowercase().contains(label), "{width}: {flat}");
+            }
         }
     }
 }
 
 #[test]
-fn k5b_consolidation_long_category_shrinks_the_excerpt_budget() {
+fn k5b_consolidation_long_category_and_fact_wrap_without_loss() {
     let category = format!("{}{G}{A}", C.repeat(20));
-    let card = consolidation_card_with(&category, &"a".repeat(10), None);
-    let lines = consolidation_card::render_consolidation_card_lines(&card, &Theme::dark(), 60);
-    let p = paint_card(60, lines, false);
-    let body = between(&p, 3, 60, '│', '│');
-    // 58 content - 6 marker - 49 prefix cells leave three cells for the fact.
-    assert_eq!(body, format!("  [x] ## {category} — aa…"));
-    assert_whole_clusters(&p.buffer);
+    for width in WIDTHS {
+        let card = consolidation_card_with(&category, "abcdefghij", None);
+        let buf = paint_decision(width, "c1", |state| {
+            decision_queue::raise_consolidation(state, card);
+        });
+        assert!(compact(&buf).contains(&format!("##{category}—abcdefghij")));
+    }
 }
 
 #[test]
-fn k5b_forget_summary_leaves_room_for_the_key_suffix_at_60_80_130() {
-    let m = |n: usize| "m".repeat(n);
+fn k5b_forget_summary_and_key_remain_reachable_at_60_80_130() {
     for width in WIDTHS {
-        // 2 border + 8 focus/marker + 20 cells of "  [00000000deadbeef]".
-        let d = width as usize - 30;
-        let summaries: Vec<(String, String)> = vec![
-            (m(d), m(d)),
-            (m(d + 1), format!("{}…", m(d - 1))),
-            (C.repeat(d), format!("{}…", C.repeat(d / 2 - 1))),
-            (format!("{}{G}", m(d - 2)), format!("{}{G}", m(d - 2))),
-            (format!("{}{G}z", m(d - 2)), format!("{}…", m(d - 2))),
-            (format!("{}{A}zzz", m(d - 2)), format!("{}{A}…", m(d - 2))),
-        ];
-        for (summary, want) in summaries {
+        for summary in [
+            "m".repeat(usize::from(width) - 2),
+            "m".repeat(usize::from(width) - 1),
+            C.repeat(usize::from(width)),
+            format!("{}{G}{A}tail", "m".repeat(usize::from(width) - 4)),
+        ] {
             let card = PendingForgetCard {
-                conversation_id: "c1".to_string(),
+                conversation_id: "c1".into(),
                 candidates: vec![(
                     0xdead_beef,
                     MemoryEntry {
@@ -235,15 +209,17 @@ fn k5b_forget_summary_leaves_room_for_the_key_suffix_at_60_80_130() {
                 )],
                 focused_index: 0,
             };
-            let lines = forget_card::render_forget_card_lines(&card, &Theme::dark(), width);
-            let p = paint_card(width, lines, false);
-            let body = between(&p, 3, width, '│', '│');
-            let summary_part = body
-                .strip_prefix(">   [x] ")
-                .and_then(|r| r.strip_suffix("  [00000000deadbeef]"))
-                .unwrap_or_else(|| panic!("width {width}: prefix/key suffix lost in {body:?}"));
-            assert_eq!(summary_part, want, "width {width} summary {summary:?}");
-            assert_whole_clusters(&p.buffer);
+            let buf = paint_decision(width, "c1", |state| {
+                decision_queue::raise_forget(state, card);
+            });
+            let flat = compact(&buf);
+            assert!(flat.contains(&summary), "{width}: {flat}");
+            assert!(flat.contains("[00000000deadbeef]"), "{width}: {flat}");
+            assert!(flat.contains("toggle"), "{width}: {flat}");
+            assert!(
+                flat.contains("forgetselected") && flat.contains("cancel"),
+                "{width}: {flat}"
+            );
         }
     }
 }
@@ -268,80 +244,78 @@ pub(crate) fn peer_pending(alias: &str, suggested: Option<&str>) -> PendingPeerA
         card,
         reach: None,
         reach_refresh: false,
-        prior_focus: FocusState::Chat,
     }
 }
 
 #[test]
-fn k5b_peer_add_card_rows_clip_at_whole_graphemes_at_60_80_130() {
+fn k5b_peer_add_card_rows_wrap_at_whole_graphemes_at_60_80_130() {
     let alias = format!("{}{G}{A}", C.repeat(20));
     let opaque = "a1B2c3D4".repeat(20);
-    let pending = peer_pending(&alias, Some(&opaque));
-    let source_lines: Vec<&str> = pending.card.lines().collect();
-    assert!(source_lines.len() >= 8, "{source_lines:?}");
     for width in WIDTHS {
-        let lines = peer_add_prompt::render_peer_add_lines(&pending, &Theme::dark(), width);
-        assert_eq!(lines.len(), source_lines.len());
-        let p = paint_card(width, lines, false);
-        // 2 border + 2 indent.
-        let budget = width as usize - 4;
-        for (i, line) in source_lines.iter().enumerate() {
-            let row = between(&p, i as u16 + 1, width, '│', '│');
-            let inner = if row.is_empty() {
-                ""
-            } else {
-                row.strip_prefix("  ")
-                    .unwrap_or_else(|| panic!("indent: {row:?}"))
-            };
-            assert_maximal_prefix(inner, line, budget);
-        }
-        assert_whole_clusters(&p.buffer);
-        assert_no_partial_family(&screen(&p.buffer));
-        // The alias row keeps the operator-typed alias whole where it fits.
+        let pending = peer_pending(&alias, Some(&opaque));
+        let body: String = pending
+            .card
+            .split("  [y]")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect();
+        let buf = paint_decision(width, "c1", |state| {
+            decision_queue::raise_peer_add(state, pending);
+        });
+        let flat = compact(&buf);
+        assert!(flat.contains(&body), "{width}: {flat}");
         assert!(
-            screen(&p.buffer).contains(&format!("Add peer — {alias}")),
-            "width {width}: alias lost"
+            flat.contains(&format!("Addpeer—{alias}")),
+            "{width}: {flat}"
+        );
+        assert!(
+            flat.contains("Confirmandpin") && flat.contains("Cancel"),
+            "{flat}"
         );
     }
 }
 
 #[test]
-fn k5b_peer_add_decision_line_is_whole_at_130() {
-    let pending = peer_pending("ab", None);
-    let lines = peer_add_prompt::render_peer_add_lines(&pending, &Theme::dark(), 130);
-    let p = paint_card(130, lines, false);
-    let screen = screen(&p.buffer);
-    assert!(
-        screen.contains("Awaiting your decision.  [y] Confirm and pin  [n] Cancel"),
-        "{screen}"
-    );
+fn k5b_peer_add_decision_line_and_frame_rail_are_visible() {
+    for width in WIDTHS {
+        let buf = paint_decision(width, "c1", |state| {
+            decision_queue::raise_peer_add(state, peer_pending("ab", None));
+        });
+        let flat = compact(&buf);
+        assert!(flat.contains("Awaitingyourdecision."), "{flat}");
+        assert!(
+            flat.contains("Confirmandpin") && flat.contains("Cancel"),
+            "{flat}"
+        );
+    }
 }
 
 #[test]
 fn k5b_peer_add_decision_row_keeps_its_emphasis() {
-    let pending = peer_pending("ab", None);
-    let theme = Theme::dark();
-    let lines = peer_add_prompt::render_peer_add_lines(&pending, &theme, 130);
-    let p = paint_card(130, lines, false);
-    let y = (0..p.buffer.area.height)
-        .find(|y| row_text(&p.buffer, *y).contains("Awaiting your decision"))
+    let buf = paint_decision(130, "c1", |state| {
+        decision_queue::raise_peer_add(state, peer_pending("ab", None));
+    });
+    let y = (0..buf.area.height)
+        .find(|y| row_text(&buf, *y).contains("Awaiting your decision"))
         .expect("decision row");
-    // Cell 3 is the `A` of "Awaiting" (border, then the 2-cell indent).
-    let cell = p.buffer.cell((3, y)).expect("decision cell");
-    assert_eq!(cell.symbol(), "A");
+    let x = col_of(&buf, y, "Awaiting").expect("decision text");
+    let cell = buf.cell((x, y)).expect("decision cell");
     assert!(cell.modifier.contains(ratatui::style::Modifier::BOLD));
-    assert_eq!(cell.fg, theme.colors.accent);
+    assert_eq!(cell.fg, Theme::dark().colors.accent);
 }
 
-pub(crate) fn retract_pending(card: &str) -> PendingTeamRetract {
-    PendingTeamRetract {
+pub(crate) fn retract_pending(card: &str) -> TeamRetractPayload {
+    TeamRetractPayload {
         conversation_id: "conv".to_owned(),
-        peer: "jun-dev".to_owned(),
-        item_id: "ri_x".to_owned(),
+        target: RetractTarget::Item {
+            peer: "jun-dev".into(),
+            item: "ri_x".into(),
+        },
         task: None,
         card: card.to_owned(),
         armed: true,
-        prior_focus: FocusState::Chat,
+        request: None,
     }
 }
 
@@ -350,33 +324,22 @@ fn k5b_retract_card_wraps_long_words_and_loses_nothing_at_60_80_130() {
     let alias = format!("{}{G}{A}", C.repeat(20));
     let long_id = "ri_V1StGXR8Z5jdHi6BmyTqWnEcZvPkLd8".repeat(6);
     let wide_id = format!("{}{G}{A}{}", C.repeat(70), "x".repeat(60));
-    let keys = "Awaiting your decision.  [y] Retract  [n] Cancel";
     for id in [long_id, wide_id] {
         let card = format!(
             "Retract on {alias}'s host\n\nitem         {id}\n\n\
-             This marks the item on their host. It does not delete it.\n\n{keys}"
+             This marks the item on their host. It does not delete it."
         );
         for width in WIDTHS {
-            let lines = team_retract_prompt::render_team_retract_lines(
-                &retract_pending(&card),
-                &Theme::dark(),
-                width,
-            );
-            let count = lines.len() as u16;
-            let p = paint_card(width, lines, true);
-            let painted: Vec<String> = (1..=count)
-                .map(|y| between(&p, y, width, '║', '║'))
-                .collect();
-            // Nothing vanishes: every non-blank character survives, in order.
-            let flat: String = painted.concat().split_whitespace().collect();
+            let buf = paint_decision(width, "conv", |state| {
+                decision_queue::raise_team_retract(state, retract_pending(&card), Responder::Local);
+            });
+            let flat = compact(&buf);
             let want: String = card.split_whitespace().collect();
-            assert_eq!(flat, want, "width {width}");
+            assert!(flat.contains(&want), "width {width}: {flat}");
             assert!(
-                painted.last().is_some_and(|r| r.contains("[n] Cancel")),
-                "{painted:?}"
+                flat.contains("Retract") && flat.contains("Cancel"),
+                "{flat}"
             );
-            assert_whole_clusters(&p.buffer);
-            assert_no_partial_family(&screen(&p.buffer));
         }
     }
 }
@@ -400,7 +363,6 @@ pub(crate) fn apply_pending(files: Vec<String>, predates: bool) -> PendingArtifa
         },
         files,
         workspace: std::path::PathBuf::from("/workspace"),
-        prior_focus: FocusState::Input,
         predates_apply_records: predates,
         mode: ArtifactCardMode::Apply,
     }
@@ -413,49 +375,22 @@ fn k5b_apply_card_never_clips_files_or_consequences_at_60_80_130() {
     for files in [cjk, unspaced] {
         for width in WIDTHS {
             let card = apply_pending(files.clone(), true);
-            let lines = apply_card::render_apply_card_lines(&card, &Theme::dark(), width);
-            let count = lines.len() as u16;
-            let p = paint_card(width, lines, true);
-            let painted: Vec<String> = (1..=count)
-                .map(|y| between(&p, y, width, '║', '║'))
-                .collect();
-            // The file region runs from the `Files:` row to the `Workspace:` row.
-            let start = painted
-                .iter()
-                .position(|r| r.starts_with("  Files: "))
-                .unwrap();
-            let end = painted
-                .iter()
-                .position(|r| r.starts_with("  Workspace:"))
-                .unwrap();
-            let listed: String = painted[start..end]
-                .concat()
-                .replace("Files:", "")
-                .split_whitespace()
-                .collect();
-            let want: String = files.join(",").split_whitespace().collect();
-            assert_eq!(listed, want, "width {width}");
-            // The consequences and both keys are on screen, wrapped not cut.
-            let flat = painted
-                .iter()
-                .map(|r| r.trim())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let buf = paint_decision(width, "conversation", |state| {
+                decision_queue::raise_artifact(state, card);
+            });
+            let flat = compact(&buf);
+            assert!(flat.contains(&files.join("")), "{width}: {flat}");
             for needle in [
                 "Apply state unknown — this journal predates apply records;",
                 "patch may already be in the working tree.",
                 "Warning: interruption can leave this patch indeterminate.",
                 "Recover with: /artifact resolve <id> present|absent.",
-                "[y] Apply",
-                "[n] Cancel",
+                "Apply",
+                "Cancel",
             ] {
-                assert!(
-                    flat.contains(needle),
-                    "width {width}: {needle:?} in {flat:?}"
-                );
+                let needle: String = needle.split_whitespace().collect();
+                assert!(flat.contains(&needle), "{width}: {needle:?} in {flat:?}");
             }
-            assert_whole_clusters(&p.buffer);
-            assert_no_partial_family(&screen(&p.buffer));
         }
     }
 }
@@ -463,45 +398,70 @@ fn k5b_apply_card_never_clips_files_or_consequences_at_60_80_130() {
 #[test]
 fn k5b_apply_card_file_word_boundary_at_the_real_budget() {
     for width in WIDTHS {
-        // 2 border + 9 indent leave `width - 11` cells (odd: 49/69/119).
-        let l = width as usize - 11;
+        // `frame_rect` gives the same inner width as decision_frame::inner_width:
+        // a full sheet below 100 columns, otherwise a centered 90% frame.
+        let area =
+            rustain::adapters::tui::presentation::geometry::frame_rect(Rect::new(0, 0, width, 100));
+        let inner = usize::from(area.width - 2);
+        let budget = inner - "  ".width();
         let f = |n: usize| "f".repeat(n);
-        let cases: Vec<(String, Vec<String>)> = vec![
-            (f(l), vec![f(l)]),
-            (f(l + 1), vec![f(l), f(1)]),
-            (C.repeat((l - 1) / 2), vec![C.repeat((l - 1) / 2)]),
+        let cjk_fit = format!("{}{}", C.repeat(budget / 2), f(budget % 2));
+        let cases = [
+            (f(budget), vec![format!("  {}", f(budget))]),
+            (f(budget + 1), vec![String::new(), f(budget + 1)]),
+            (cjk_fit.clone(), vec![format!("  {cjk_fit}")]),
             (
-                C.repeat((l - 1) / 2 + 1),
-                vec![C.repeat((l - 1) / 2), C.to_string()],
+                format!("{cjk_fit}{C}"),
+                vec![String::new(), format!("{cjk_fit}{C}")],
             ),
-            (format!("{}{G}", f(l - 2)), vec![format!("{}{G}", f(l - 2))]),
-            (format!("{}{G}", f(l - 1)), vec![f(l - 1), G.to_string()]),
             (
-                format!("{}{A}z", f(l - 1)),
-                vec![format!("{}{A}", f(l - 1)), "z".to_string()],
+                format!("{}{G}", f(budget - 2)),
+                vec![format!("  {}{G}", f(budget - 2))],
             ),
+            (
+                format!("{}{G}", f(budget - 1)),
+                vec![String::new(), format!("{}{G}", f(budget - 1))],
+            ),
+            (
+                format!("{}{A}z", f(budget - 1)),
+                vec![String::new(), format!("{}{A}z", f(budget - 1))],
+            ),
+            (f(inner + 1), vec![String::new(), f(inner), f(1)]),
         ];
-        for (name, want) in cases {
+        for (name, expected) in cases {
             let card = apply_pending(vec![name.clone()], false);
-            let lines = apply_card::render_apply_card_lines(&card, &Theme::dark(), width);
-            let count = lines.len() as u16;
-            let p = paint_card(width, lines, true);
-            let painted: Vec<String> = (1..=count)
-                .map(|y| between(&p, y, width, '║', '║'))
-                .collect();
+            let buf = paint_decision_in_area(width, "conversation", area, |state| {
+                decision_queue::raise_artifact(state, card);
+            });
+            let painted = rows(&buf);
             let start = painted
                 .iter()
-                .position(|r| r.starts_with("  Files: "))
+                .position(|row| row.contains("  Files:"))
                 .unwrap();
             let end = painted
                 .iter()
-                .position(|r| r.starts_with("  Workspace:"))
+                .position(|row| row.contains("  Workspace:"))
                 .unwrap();
-            let chunks: Vec<String> = painted[start..end]
+            let chunks: Vec<String> = painted[start + 1..end]
                 .iter()
-                .map(|r| r.chars().skip(9).collect())
+                .map(|row| {
+                    row.split_once('│')
+                        .and_then(|(_, inner)| inner.rsplit_once('│'))
+                        .expect("file row within frame borders")
+                        .0
+                        .trim_end()
+                        .to_owned()
+                })
                 .collect();
-            assert_eq!(chunks, want, "width {width} name {name:?}");
+            assert_eq!(chunks, expected, "width {width} name {name:?}");
+            assert!(
+                chunks
+                    .iter()
+                    .map(|chunk| chunk.trim())
+                    .collect::<String>()
+                    .contains(&name),
+                "{width}: {name:?}"
+            );
         }
     }
 }

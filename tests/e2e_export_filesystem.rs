@@ -18,13 +18,15 @@
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-use rustain::adapters::tui::state::TuiState;
-use rustain::domain::models::conversation::{ChatMessage, Conversation};
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-use rustain::domain::models::{FocusState, MessageRole, SessionMeta};
-use rustain::infrastructure::runtime::event_loop::{
+use crate::conformance_21_6_decision_queue::support;
+
+use rustain::adapters::tui::decision_queue::{DecisionKind, DecisionSubject};
+use rustain::adapters::tui::handlers::export::{
     apply_cancel_export_overwrite, apply_confirm_export_overwrite, apply_export_command,
 };
+use rustain::adapters::tui::state::TuiState;
+use rustain::domain::models::conversation::{ChatMessage, Conversation};
+use rustain::domain::models::{FocusState, MessageRole, SessionMeta};
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -146,17 +148,7 @@ async fn test_e2e_export_no_arg_never_prompts() {
 
     for _ in 0..5 {
         apply_export_command(None, &c, &m, workspace, &mut s).await;
-        assert!(
-            s.pending_export.is_none(),
-            "auto-number mode must not set pending_export"
-        );
-        assert_ne!(
-            s.focus,
-            FocusState::Overlay(OverlayType::Confirmation(
-                ConfirmationType::ExportOverwrite(PathBuf::from("dummy"))
-            )),
-            "auto-number mode must not open overwrite confirmation overlay"
-        );
+        assert!(!s.decisions.holds(DecisionKind::ExportOverwrite));
     }
 }
 
@@ -179,22 +171,7 @@ async fn test_e2e_export_explicit_path_overwrite_opens_confirmation_overlay() {
 
     apply_export_command(Some("notes.md"), &c, &m, workspace, &mut s).await;
 
-    assert!(
-        s.pending_export.is_some(),
-        "explicit-path collision must stash pending_export"
-    );
-    let (stashed_path, stashed_content) = s.pending_export.as_ref().unwrap();
-    assert_eq!(stashed_path, &target);
-    assert!(!stashed_content.is_empty(), "content must be pre-rendered");
-    assert!(
-        matches!(
-            s.focus,
-            FocusState::Overlay(OverlayType::Confirmation(
-                ConfirmationType::ExportOverwrite(_)
-            ))
-        ),
-        "explicit-path collision must open ExportOverwrite overlay"
-    );
+    assert!(s.decisions.holds(DecisionKind::ExportOverwrite));
 
     // Original file unchanged until user confirms.
     let content = std::fs::read_to_string(&target).unwrap();
@@ -217,10 +194,7 @@ async fn test_e2e_export_explicit_path_no_collision_writes_immediately() {
 
     let target = exports_dir.join("fresh.md");
     assert!(target.exists(), "fresh target must be written immediately");
-    assert!(
-        s.pending_export.is_none(),
-        "no collision → no pending_export"
-    );
+    assert!(!s.decisions.holds(DecisionKind::ExportOverwrite));
     assert_eq!(
         s.focus,
         FocusState::Chat,
@@ -350,28 +324,40 @@ async fn test_e2e_confirm_export_overwrite_writes_atomically() {
     // directly — the handler was previously only reachable via the full
     // event loop dispatch and had zero automated coverage.
     let tmp = TempDir::new().unwrap();
-    let target = tmp.path().join("notes.md");
-
-    // Pre-create the target file with original content.
+    let c = conv("Overwrite Test");
+    let m = meta();
+    let workspace = tmp.path();
+    let exports = workspace.join(".rustain/exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    let target = exports.join("notes.md");
     std::fs::write(&target, "ORIGINAL CONTENT").unwrap();
-
-    // Stash the pre-rendered new content in pending_export (mimicking
-    // what apply_export_command does before opening the overlay).
-    let mut s = state();
-    s.pending_export = Some((target.clone(), "NEW CONTENT".to_string()));
-    s.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::ExportOverwrite(target.clone()),
-    ));
-
-    apply_confirm_export_overwrite(&mut s).await;
+    let (mut s, clock) = support::clocked(80, 24);
+    apply_export_command(Some("notes.md"), &c, &m, workspace, &mut s).await;
+    support::paint(&mut s, &support::facts(&c.id), 80, 24);
+    support::ready(&mut s, &clock);
+    assert_eq!(
+        support::route(&mut s, &support::key('y'), &support::facts(&c.id))
+            .unwrap()
+            .into_action(),
+        rustain::adapters::tui::app::InputAction::ConfirmExportOverwrite
+    );
+    let Some(DecisionSubject::ExportOverwrite(payload)) = s.decisions.take_resolved() else {
+        panic!("confirmed export payload");
+    };
+    support::route(&mut s, &support::key('y'), &support::facts(&c.id));
+    assert!(
+        s.decisions.take_resolved().is_none(),
+        "a second confirmation has no payload"
+    );
+    assert_eq!(payload.target, target);
+    let expected = payload.content.clone();
+    assert!(!expected.is_empty());
+    apply_confirm_export_overwrite(&mut s, *payload).await;
 
     // File now contains the new content — atomic overwrite succeeded.
     let on_disk = std::fs::read_to_string(&target).unwrap();
-    assert_eq!(on_disk, "NEW CONTENT", "target file must be overwritten");
-
-    // pending_export is cleared, focus restored, flash set.
-    assert!(s.pending_export.is_none(), "pending_export must be cleared");
-    assert_eq!(s.focus, FocusState::Chat, "focus must return to Chat");
+    assert_eq!(on_disk, expected, "target file must be overwritten");
+    assert!(!s.decisions.holds(DecisionKind::ExportOverwrite));
     let flash = flash_message(&s).unwrap_or("");
     assert!(
         flash.contains("Overwrote"),
@@ -389,24 +375,32 @@ async fn test_e2e_confirm_export_overwrite_writes_atomically() {
 
 #[tokio::test]
 async fn test_e2e_cancel_export_overwrite_leaves_file_unchanged() {
-    // AC12: pressing `n` (or Esc) on the ExportOverwrite confirmation
-    // overlay must leave the existing file untouched and clear the
-    // pre-staged pending_export.
+    // AC12: `n` leaves the existing file untouched and retires the decision.
     //
     // Third-audit Fix R7: exercises `apply_cancel_export_overwrite`
     // directly to close the no-coverage gap.
     let tmp = TempDir::new().unwrap();
-    let target = tmp.path().join("notes.md");
-
+    let workspace = tmp.path();
+    let exports = workspace.join(".rustain/exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    let target = exports.join("notes.md");
     std::fs::write(&target, "UNTOUCHED ORIGINAL").unwrap();
     let mtime_before = std::fs::metadata(&target).unwrap().modified().unwrap();
-
-    let mut s = state();
-    s.pending_export = Some((target.clone(), "NEW CONTENT WE WILL DROP".to_string()));
-    s.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::ExportOverwrite(target.clone()),
+    let c = conv("Cancel Export");
+    let (mut s, clock) = support::clocked(80, 24);
+    apply_export_command(Some("notes.md"), &c, &meta(), workspace, &mut s).await;
+    support::paint(&mut s, &support::facts(&c.id), 80, 24);
+    support::ready(&mut s, &clock);
+    assert_eq!(
+        support::route(&mut s, &support::key('n'), &support::facts(&c.id))
+            .unwrap()
+            .into_action(),
+        rustain::adapters::tui::app::InputAction::CancelExportOverwrite
+    );
+    assert!(matches!(
+        s.decisions.take_resolved(),
+        Some(DecisionSubject::ExportOverwrite(_))
     ));
-
     apply_cancel_export_overwrite(&mut s);
 
     // File is still the original content.
@@ -423,12 +417,7 @@ async fn test_e2e_cancel_export_overwrite_leaves_file_unchanged() {
         "mtime must not change when export is cancelled"
     );
 
-    // pending_export is cleared, focus restored, cancelled flash set.
-    assert!(
-        s.pending_export.is_none(),
-        "pending_export must be cleared on cancel"
-    );
-    assert_eq!(s.focus, FocusState::Chat);
+    assert!(!s.decisions.holds(DecisionKind::ExportOverwrite));
     let flash = flash_message(&s).unwrap_or("");
     assert!(
         flash.contains("Export cancelled"),
@@ -438,17 +427,107 @@ async fn test_e2e_cancel_export_overwrite_leaves_file_unchanged() {
 }
 
 #[tokio::test]
-async fn test_e2e_confirm_export_overwrite_with_no_pending_is_noop() {
-    // Defensive: if `pending_export` is `None` (e.g. double-confirm), the
-    // handler must not panic and must restore focus to Chat.
-    let mut s = state();
-    s.pending_export = None;
-    s.focus = FocusState::Overlay(OverlayType::Confirmation(
-        ConfirmationType::ExportOverwrite(PathBuf::from("nonexistent")),
-    ));
+async fn test_e2e_confirm_export_overwrite_changed_target_is_not_written() {
+    let tmp = TempDir::new().unwrap();
+    let workspace = tmp.path();
+    let exports = workspace.join(".rustain/exports");
+    std::fs::create_dir_all(&exports).unwrap();
+    let target = exports.join("notes.md");
+    std::fs::write(&target, "original").unwrap();
+    let c = conv("Changed Export");
+    let (mut s, clock) = support::clocked(80, 24);
+    apply_export_command(Some("notes.md"), &c, &meta(), workspace, &mut s).await;
+    std::fs::write(&target, "changed externally, with a different length").unwrap();
+    support::paint(&mut s, &support::facts(&c.id), 80, 24);
+    support::ready(&mut s, &clock);
+    assert_eq!(
+        support::route(&mut s, &support::key('y'), &support::facts(&c.id))
+            .unwrap()
+            .into_action(),
+        rustain::adapters::tui::app::InputAction::ConfirmExportOverwrite
+    );
+    let Some(DecisionSubject::ExportOverwrite(payload)) = s.decisions.take_resolved() else {
+        panic!("confirmed export payload");
+    };
+    apply_confirm_export_overwrite(&mut s, *payload).await;
+    assert_eq!(
+        std::fs::read_to_string(target).unwrap(),
+        "changed externally, with a different length"
+    );
+    assert_eq!(
+        flash_message(&s),
+        Some("This decision is no longer pending. The export file changed; nothing was written.")
+    );
+    assert!(s.decisions.take_resolved().is_none());
+}
 
-    apply_confirm_export_overwrite(&mut s).await;
-
-    assert!(s.pending_export.is_none());
-    assert_eq!(s.focus, FocusState::Chat);
+/// 6D-L1-02: same-size replacement or in-place rewrite with restored mtime must
+/// not authorize overwriting unapproved bytes; an unchanged file remains writable.
+#[cfg(unix)]
+#[tokio::test]
+async fn overwrite_rejects_same_stat_replacement_and_rewrite() {
+    for change in ["replace", "rewrite", "unchanged"] {
+        let tmp = TempDir::new().unwrap();
+        let exports = tmp.path().join(".rustain/exports");
+        std::fs::create_dir_all(&exports).unwrap();
+        let target = exports.join("notes.md");
+        std::fs::write(&target, "original").unwrap();
+        let old_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        let c = conv("Identity");
+        let (mut s, clock) = support::clocked(80, 24);
+        apply_export_command(Some("notes.md"), &c, &meta(), tmp.path(), &mut s).await;
+        if change == "replace" {
+            let replacement = exports.join("replacement");
+            std::fs::write(&replacement, "replaced").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&replacement)
+                .unwrap()
+                .set_modified(old_time)
+                .unwrap();
+            std::fs::rename(replacement, &target).unwrap();
+        } else if change == "rewrite" {
+            std::fs::write(&target, "rewrites").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_modified(old_time)
+                .unwrap();
+        }
+        support::paint(&mut s, &support::facts(&c.id), 80, 24);
+        support::ready(&mut s, &clock);
+        assert_eq!(
+            support::route(&mut s, &support::key('y'), &support::facts(&c.id))
+                .unwrap()
+                .into_action(),
+            rustain::adapters::tui::app::InputAction::ConfirmExportOverwrite
+        );
+        let Some(DecisionSubject::ExportOverwrite(payload)) = s.decisions.take_resolved() else {
+            panic!("export payload")
+        };
+        let expected = payload.content.clone();
+        apply_confirm_export_overwrite(&mut s, *payload).await;
+        let actual = std::fs::read_to_string(&target).unwrap();
+        match change {
+            "replace" => assert_eq!(actual, "replaced"),
+            "rewrite" => assert_eq!(actual, "rewrites"),
+            _ => assert_eq!(actual, expected),
+        }
+        if change != "unchanged" {
+            assert_eq!(
+                flash_message(&s),
+                Some(
+                    "This decision is no longer pending. The export file changed; nothing was written."
+                )
+            );
+        }
+    }
 }

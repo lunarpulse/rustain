@@ -12,7 +12,7 @@ use rustain::adapters::tui::app::{
 use rustain::adapters::tui::decision_queue::{
     self, DecisionEffect, DecisionKind, DecisionSubject, QuestionPayload, Raised, Validity,
 };
-use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, reducer};
+use rustain::adapters::tui::presentation::{self, RouteEffect, Surface};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::DomainKey;
@@ -66,7 +66,7 @@ fn deliver(state: &mut TuiState, effect: Option<RouteEffect>) -> DecisionEffect 
         panic!("a question answer is a decision effect, got {effect:?}")
     };
     assert!(!action.is_mutation(), "a read-only tab still delivers it");
-    decision_queue::apply_resolved_action(state, action, reducer::restore_focus_after_modal);
+    decision_queue::apply_resolved_action(state, action);
     effect
 }
 
@@ -462,11 +462,7 @@ async fn question_and_idle_question_deciding_keys_need_a_plain_press() {
             assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
         } else {
             assert_eq!(action, InputAction::Decision(DecisionEffect::QuestionSend));
-            decision_queue::apply_resolved_action(
-                &mut state,
-                action,
-                reducer::restore_focus_after_modal,
-            );
+            decision_queue::apply_resolved_action(&mut state, action);
             assert_eq!(rx.try_recv(), Ok("ab".to_owned()));
         }
         let (mut state, _clock, mut rx) = open(80, 24);
@@ -476,11 +472,7 @@ async fn question_and_idle_question_deciding_keys_need_a_plain_press() {
         let ctrl_d = raw(KeyCode::Char('d'), KeyModifiers::CONTROL, Press);
         let action = raw_input(&mut state, &ctrl_d).expect("a Ctrl+D Press is handled");
         assert_eq!(action, InputAction::Decision(DecisionEffect::QuestionSkip));
-        decision_queue::apply_resolved_action(
-            &mut state,
-            action,
-            reducer::restore_focus_after_modal,
-        );
+        decision_queue::apply_resolved_action(&mut state, action);
         assert_eq!(rx.try_recv(), Err(TryRecvError::Closed));
     }
 }

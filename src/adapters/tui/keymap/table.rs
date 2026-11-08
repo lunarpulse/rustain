@@ -125,6 +125,23 @@ pub fn pane_effect_availability(
         | DecisionEffect::SpawnGateCancel
         | DecisionEffect::AgentKillConfirm
         | DecisionEffect::AgentKillDecline
+        | DecisionEffect::ConsolidationAccept
+        | DecisionEffect::ConsolidationDecline
+        | DecisionEffect::ForgetAccept
+        | DecisionEffect::ForgetDecline
+        | DecisionEffect::ArtifactAccept
+        | DecisionEffect::ArtifactDecline
+        | DecisionEffect::PeerAddConfirm
+        | DecisionEffect::PeerAddDecline
+        | DecisionEffect::TeamRetractConfirm
+        | DecisionEffect::TeamRetractDecline
+        | DecisionEffect::ForkConfirm
+        | DecisionEffect::ForkCancel
+        | DecisionEffect::RewindConfirm
+        | DecisionEffect::RewindForkInstead
+        | DecisionEffect::RewindCancel
+        | DecisionEffect::ExportOverwriteConfirm
+        | DecisionEffect::ExportOverwriteCancel
         | DecisionEffect::CancelDelete => Availability::Available,
     }
 }

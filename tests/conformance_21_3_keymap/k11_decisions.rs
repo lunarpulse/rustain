@@ -1,20 +1,6 @@
-//! K11 — decision surfaces through the local front door (Story 21.3 AC15-AC17, A8;
-//! re-pointed by 21-6 slice 6-C). The cards 21-6 has moved onto the decision frame
-//! (skill trust, plan approval / card / deviation, skip cascade, cancel plan, delegation,
-//! spawn gate, agent kill, the question) are queue items raised by their real producers
-//! and decided through the 21-4 router the event loop calls; the cards 6-D has yet to
-//! move are still built the way their producer leaves them (slot set, focus as the event
-//! loop sets it) and driven by real key events. The attached twins live in
-//! `attach_keys.rs` / `attach_loop.rs` (`story21_3_attached_*`).
-//!
-//! * `every_frame_key_decides_once_by_value` / `every_card_key_decides_once_by_value` are
-//!   the by-value records of every card key.
-//! * `esc_and_ctrl_c_never_decide_a_card` — legacy cards: `Esc` / `Ctrl+C` post ONE cue.
-//!   `esc_and_ctrl_c_defer_and_never_decide_a_frame_card` — frame cards: `Esc` defers,
-//!   `Ctrl+C` backs one frame (defers), the item stays queued, counted and answerable.
-//! * `typing_in_input_never_answers_a_card` — with any card pending, the keys typed in
-//!   Input are text.
-//! * `a_card_swallows_every_key_it_has_no_row_for` — the isolation sweep.
+//! K11 — decision surfaces through the local front door (Story 21.3 AC15-AC17).
+//! The migrated cards are raised through producers and exercised through the real
+//! decision route, including deferral, input isolation and by-value effects.
 
 use rustain::adapters::tui::app::InputAction;
 use rustain::adapters::tui::decision_queue::{
@@ -24,198 +10,19 @@ use rustain::adapters::tui::keymap::render::card_cue;
 use rustain::adapters::tui::keymap::{Context, Host, Key, Resolved, resolve};
 use rustain::adapters::tui::notifications::NoticeSeverity;
 use rustain::adapters::tui::presentation::{self, Surface};
-use rustain::adapters::tui::state::{PendingConsolidationCard, PendingForgetCard, TuiState};
+use rustain::adapters::tui::state::TuiState;
 use rustain::domain::models::FocusState;
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use tokio::sync::oneshot::error::TryRecvError;
 
 use super::support::feedback;
-use super::support::{fresh, is_inert, permission, permission_payload, press as press_base};
+use super::support::{is_inert, permission, permission_payload, press as press_base};
 use crate::conformance_21_6_decision_queue::raisers::{
     self, Hold, PLAIN, open_ready, press, repaint_ready,
 };
-use crate::conformance_21_11_display_width::k5b_cards::{
-    apply_pending, peer_pending, retract_pending,
-};
-
-fn confirm(card: ConfirmationType) -> FocusState {
-    FocusState::Overlay(OverlayType::Confirmation(card))
-}
-
-fn chat() -> TuiState {
-    let mut state = fresh();
-    state.focus = FocusState::Chat;
-    state
-}
-
-fn overlay(card: ConfirmationType) -> TuiState {
-    let mut state = fresh();
-    state.focus = confirm(card);
-    state
-}
-
-/// One legacy card (6-D has yet to move it): how it is built, whether it is still
-/// pending, the context that owns its keys, every key it answers (by value) and whether
-/// it consumes every other key.
-struct Card {
-    name: &'static str,
-    context: Context,
-    build: fn() -> TuiState,
-    pending: fn(&TuiState) -> bool,
-    rows: Vec<(Key, InputAction)>,
-    /// Focus `Chat` cards that swallow every character (consolidation, forget).
-    swallows_chars: bool,
-    /// Overlay-focus cards consume every key without a row.
-    overlay: bool,
-}
+use crate::conformance_21_11_display_width::k5b_cards::peer_pending;
 
 fn ch(c: char) -> Key {
     Key::Char(c)
-}
-
-fn cards() -> Vec<Card> {
-    let yn = |yes: InputAction, no: InputAction| vec![(ch('y'), yes), (ch('n'), no)];
-    vec![
-        Card {
-            name: "consolidation",
-            context: Context::Confirm,
-            build: || {
-                let mut s = chat();
-                s.pending_consolidation_card = Some(PendingConsolidationCard {
-                    conversation_id: "c1".into(),
-                    proposals: vec![],
-                });
-                s
-            },
-            pending: |s| s.pending_consolidation_card.is_some(),
-            rows: yn(
-                InputAction::ConsolidateAcceptAll,
-                InputAction::ConsolidateDeclineAll,
-            ),
-            swallows_chars: true,
-            overlay: false,
-        },
-        Card {
-            name: "forget",
-            context: Context::Forget,
-            build: || {
-                let mut s = chat();
-                s.pending_forget_card = Some(PendingForgetCard {
-                    conversation_id: "c1".into(),
-                    candidates: vec![],
-                    focused_index: 0,
-                });
-                s
-            },
-            pending: |s| s.pending_forget_card.is_some(),
-            rows: vec![
-                (ch('y'), InputAction::ForgetAcceptAll),
-                (ch('n'), InputAction::ForgetDeclineAll),
-                (ch(' '), InputAction::ForgetToggleSelection),
-                (ch('j'), InputAction::ForgetNavigateDown),
-                (ch('k'), InputAction::ForgetNavigateUp),
-            ],
-            swallows_chars: true,
-            overlay: false,
-        },
-        Card {
-            name: "artifact apply",
-            context: Context::Confirm,
-            build: || {
-                let mut s = overlay(ConfirmationType::ArtifactApply);
-                s.pending_artifact_card = Some(apply_pending(vec!["a.rs".into()], false));
-                s
-            },
-            pending: |s| s.pending_artifact_card.is_some(),
-            rows: yn(InputAction::ApplyCardAccept, InputAction::ApplyCardDecline),
-            swallows_chars: true,
-            overlay: true,
-        },
-        Card {
-            name: "peer add",
-            context: Context::Confirm,
-            build: || {
-                let mut s = overlay(ConfirmationType::PeerAdd);
-                s.pending_peer_add = Some(peer_pending("jun", None));
-                s
-            },
-            pending: |s| s.pending_peer_add.is_some(),
-            rows: yn(InputAction::PeerAddConfirm, InputAction::PeerAddDecline),
-            swallows_chars: true,
-            overlay: true,
-        },
-        Card {
-            name: "team retract",
-            context: Context::Confirm,
-            build: || {
-                let mut s = overlay(ConfirmationType::TeamRetract);
-                s.pending_team_retract = Some(retract_pending("card"));
-                s
-            },
-            pending: |s| s.pending_team_retract.is_some(),
-            rows: yn(
-                InputAction::TeamRetractConfirm,
-                InputAction::TeamRetractDecline,
-            ),
-            swallows_chars: true,
-            overlay: true,
-        },
-        Card {
-            name: "fork",
-            context: Context::Confirm,
-            build: || {
-                let mut s = overlay(ConfirmationType::Fork);
-                s.pending_fork_index = Some(0);
-                s
-            },
-            pending: |s| s.pending_fork_index.is_some(),
-            rows: yn(InputAction::ForkConfirm, InputAction::ForkCancel),
-            swallows_chars: true,
-            overlay: true,
-        },
-        Card {
-            name: "rewind",
-            context: Context::Rewind,
-            build: || {
-                let mut s = overlay(ConfirmationType::Rewind);
-                s.pending_rewind_index = Some(0);
-                s
-            },
-            pending: |s| s.pending_rewind_index.is_some(),
-            rows: vec![
-                (ch('y'), InputAction::RewindConfirm),
-                (ch('f'), InputAction::RewindForkInstead),
-                (ch('n'), InputAction::RewindCancel),
-            ],
-            swallows_chars: true,
-            overlay: true,
-        },
-        Card {
-            name: "export overwrite",
-            context: Context::ExportOverwrite,
-            build: || {
-                let mut s = overlay(ConfirmationType::ExportOverwrite("out.md".into()));
-                s.pending_export = Some(("out.md".into(), String::new()));
-                s
-            },
-            pending: |s| {
-                matches!(
-                    s.focus,
-                    FocusState::Overlay(OverlayType::Confirmation(
-                        ConfirmationType::ExportOverwrite(_)
-                    ))
-                )
-            },
-            rows: vec![
-                (ch('y'), InputAction::ConfirmExportOverwrite),
-                (ch('Y'), InputAction::ConfirmExportOverwrite),
-                (ch('n'), InputAction::CancelExportOverwrite),
-                (ch('N'), InputAction::CancelExportOverwrite),
-            ],
-            swallows_chars: true,
-            overlay: true,
-        },
-    ]
 }
 
 /// One card that is a decision frame (21-6 slice 6-C): its kind, the context that owns
@@ -235,6 +42,97 @@ fn effect(effect: DecisionEffect) -> InputAction {
 
 fn frame_cards() -> Vec<FrameCard> {
     vec![
+        FrameCard {
+            name: "consolidation",
+            kind: DecisionKind::Consolidation,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::ConsolidateAcceptAll),
+                (ch('n'), InputAction::ConsolidateDeclineAll),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "forget",
+            kind: DecisionKind::Forget,
+            context: Context::Forget,
+            rows: vec![
+                (ch('y'), InputAction::ForgetAcceptAll),
+                (ch('n'), InputAction::ForgetDeclineAll),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "artifact apply",
+            kind: DecisionKind::ArtifactApply,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::ApplyCardAccept),
+                (ch('n'), InputAction::ApplyCardDecline),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "artifact resolve",
+            kind: DecisionKind::ArtifactResolve,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::ApplyCardAccept),
+                (ch('n'), InputAction::ApplyCardDecline),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "peer add",
+            kind: DecisionKind::PeerAdd,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::PeerAddConfirm),
+                (ch('n'), InputAction::PeerAddDecline),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "team retract",
+            kind: DecisionKind::TeamRetract,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::TeamRetractConfirm),
+                (ch('n'), InputAction::TeamRetractDecline),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "fork",
+            kind: DecisionKind::Fork,
+            context: Context::DecisionConfirm,
+            rows: vec![
+                (ch('y'), InputAction::ForkConfirm),
+                (ch('n'), InputAction::ForkCancel),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "rewind",
+            kind: DecisionKind::Rewind,
+            context: Context::Rewind,
+            rows: vec![
+                (ch('y'), InputAction::RewindConfirm),
+                (ch('f'), InputAction::RewindForkInstead),
+                (ch('n'), InputAction::RewindCancel),
+            ],
+            keeps: vec![],
+        },
+        FrameCard {
+            name: "export overwrite",
+            kind: DecisionKind::ExportOverwrite,
+            context: Context::ExportOverwrite,
+            rows: vec![
+                (ch('y'), InputAction::ConfirmExportOverwrite),
+                (ch('n'), InputAction::CancelExportOverwrite),
+            ],
+            keeps: vec![],
+        },
         FrameCard {
             name: "skill trust",
             kind: DecisionKind::SkillTrust,
@@ -395,31 +293,32 @@ fn screen_of(state: &mut TuiState) -> String {
     crate::conformance_21_6_decision_queue::support::screen(
         &crate::conformance_21_6_decision_queue::support::paint(
             state,
-            &crate::conformance_21_6_decision_queue::support::facts("c1"),
+            &raisers::facts_6d("c1"),
             80,
             24,
         ),
     )
 }
 
-/// A legacy card (consolidation) under an open deviation frame: the frame owns every key,
-/// so `y` decides the deviation; the consolidation card stays pending and decides after.
+/// Queued consolidation cannot steal the active deviation frame's answer.
 #[test]
 fn consolidation_and_deviation_decide_their_own_card_the_frame_first() {
-    let (mut state, _clock, _hold) = open_ready(DecisionKind::PlanDeviation, PLAIN);
-    state.focus = FocusState::Chat;
-    state.pending_consolidation_card = Some(PendingConsolidationCard {
-        conversation_id: "c1".into(),
-        proposals: vec![],
-    });
+    let (mut state, clock, _hold) = open_ready(DecisionKind::PlanDeviation, PLAIN);
+    raisers::raise(&mut state, DecisionKind::Consolidation, PLAIN);
     assert_eq!(
         press(&mut state, ch('y')),
         effect(DecisionEffect::PlanDeviationApprove),
         "the frame decides the deviation, not the consolidation card"
     );
-    assert!(state.pending_consolidation_card.is_some(), "still pending");
+    assert!(
+        state.decisions.holds(DecisionKind::Consolidation),
+        "still pending"
+    );
+    let key = first_item(&state, DecisionKind::Consolidation);
+    assert!(decision_queue::open(&mut state, &key));
+    repaint_ready(&mut state, &clock);
     assert_eq!(
-        press_base(&mut state, ch('y')),
+        press(&mut state, ch('y')),
         InputAction::ConsolidateAcceptAll,
         "with the frame gone the consolidation card decides"
     );
@@ -427,26 +326,14 @@ fn consolidation_and_deviation_decide_their_own_card_the_frame_first() {
 
 #[test]
 fn drafted_inline_cards_that_swallow_i_preserve_the_draft_until_a_decision() {
-    // Legacy cards still swallow `i` without touching the draft.
-    for card in cards()
-        .into_iter()
-        .filter(|c| ["consolidation", "forget"].contains(&c.name))
-    {
-        let mut state = (card.build)();
-        state.input_buffer = "preserved draft".into();
-        let action = press_base(&mut state, ch('i'));
-        assert_eq!(action, InputAction::Consumed, "{}", card.name);
-        assert_eq!(state.focus, FocusState::Chat);
-        assert_eq!(state.input_buffer, "preserved draft");
-        assert!((card.pending)(&state));
-    }
-    // The frame cards do the same: `i` is no row (skill trust excepted), swallowed.
     for card in frame_cards().into_iter().filter(|c| {
         [
             "spawn gate",
             "plan deviation",
             "cancel plan",
             "skip cascade",
+            "consolidation",
+            "forget",
         ]
         .contains(&c.name)
     }) {
@@ -457,21 +344,6 @@ fn drafted_inline_cards_that_swallow_i_preserve_the_draft_until_a_decision() {
         assert_eq!(state.focus, FocusState::Chat, "{}", card.name);
         assert_eq!(state.input_buffer, "preserved draft", "{}", card.name);
         assert!(state.decisions.holds(card.kind), "{}", card.name);
-    }
-}
-
-#[test]
-fn every_card_key_decides_once_by_value() {
-    for card in cards() {
-        for (key, want) in &card.rows {
-            let mut state = (card.build)();
-            assert_eq!(
-                press_base(&mut state, *key),
-                *want,
-                "{}: {key:?}",
-                card.name
-            );
-        }
     }
 }
 
@@ -504,42 +376,146 @@ fn every_frame_key_decides_once_by_value() {
         }
     }
 }
+#[test]
+fn export_shifted_letters_never_decide_at_the_raw_boundary() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use rustain::adapters::tui::app::handle_operator_input;
+    use rustain::domain::events::DomainInputEvent;
+    for (letter, positive) in [
+        ('Y', InputAction::ConfirmExportOverwrite),
+        ('N', InputAction::CancelExportOverwrite),
+    ] {
+        let (mut state, _clock, _hold) = open_ready(DecisionKind::ExportOverwrite, PLAIN);
+        let raw = Event::Key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::SHIFT));
+        assert_eq!(
+            handle_operator_input(&mut state, &raw, &DomainInputEvent::KeyPress(letter)),
+            None
+        );
+        assert!(state.decisions.holds(DecisionKind::ExportOverwrite));
+        assert_eq!(press(&mut state, ch(letter.to_ascii_lowercase())), positive);
+    }
+}
+
+type RailCase<'a> = (DecisionKind, &'a str, &'a [(&'a str, &'a str)]);
 
 #[test]
-fn esc_and_ctrl_c_never_decide_a_card() {
-    for card in cards() {
-        let want_cue = card_cue(card.context, Host::Local);
-        for key in [Key::Esc, Key::Ctrl('c')] {
-            let mut state = (card.build)();
-            let focus = state.focus.clone();
-            let action = press_base(&mut state, key);
-            assert!(
-                is_inert(&action),
-                "{}: {key:?} returned {action:?}",
-                card.name
-            );
-            assert!(
-                (card.pending)(&state),
-                "{}: {key:?} resolved the card",
-                card.name
-            );
-            assert_eq!(state.focus, focus, "{}: {key:?} moved the focus", card.name);
-            assert_eq!(
-                cue_records(&state),
-                vec![want_cue.clone()],
-                "{}: {key:?} cue",
-                card.name
-            );
-            // Positive control: the explicit key still decides, once.
-            let (first, want) = &card.rows[0];
-            assert_eq!(
-                press_base(&mut state, *first),
-                *want,
-                "{}: answerable after {key:?}",
-                card.name
-            );
-        }
+fn migrated_decision_titles_and_rails_are_exact() {
+    use DecisionKind::*;
+    let cases: &[RailCase<'_>] = &[
+        (
+            Consolidation,
+            "Decision: Memory consolidation",
+            &[
+                ("[y]", "promote all"),
+                ("[n]", "decline"),
+                ("[Esc]", "Later"),
+            ],
+        ),
+        (
+            Forget,
+            "Decision: Forget memory",
+            &[
+                ("[↑/↓]", "navigate"),
+                ("[Space]", "toggle"),
+                ("[y]", "forget selected"),
+                ("[n]", "cancel"),
+                ("[Esc]", "Later"),
+            ],
+        ),
+        (
+            ArtifactApply,
+            "Decision: Apply artifact",
+            &[("[y]", "Apply"), ("[n]", "Cancel"), ("[Esc]", "Later")],
+        ),
+        (
+            ArtifactResolve,
+            "Decision: Resolve artifact",
+            &[
+                ("[y]", "Record report"),
+                ("[n]", "Cancel"),
+                ("[Esc]", "Later"),
+            ],
+        ),
+        (
+            PeerAdd,
+            "Decision: Add peer",
+            &[
+                ("[y]", "Confirm and pin"),
+                ("[n]", "Cancel"),
+                ("[Esc]", "Later"),
+            ],
+        ),
+        (
+            TeamRetract,
+            "Decision: Retract",
+            &[("[y]", "Retract"), ("[n]", "Cancel"), ("[Esc]", "Later")],
+        ),
+        (
+            Fork,
+            "Decision: Fork",
+            &[("[y]", "Fork"), ("[n]", "Cancel"), ("[Esc]", "Later")],
+        ),
+        (
+            Rewind,
+            "Decision: Rewind",
+            &[
+                ("[y]", "Rewind"),
+                ("[f]", "Fork instead"),
+                ("[n]", "Cancel"),
+                ("[Esc]", "Later"),
+            ],
+        ),
+        (
+            ExportOverwrite,
+            "Decision: Export overwrite",
+            &[("[y]", "Overwrite"), ("[n]", "Cancel"), ("[Esc]", "Later")],
+        ),
+    ];
+    for &(kind, title, expected) in cases {
+        let (mut state, _clock, _hold) = open_ready(kind, PLAIN);
+        assert_eq!(kind.frame_title(), title);
+        let item = state
+            .decisions
+            .items()
+            .find(|item| item.kind == kind)
+            .unwrap();
+        let actual = decision_queue::rail_of(item);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|(key, label)| (key.as_str(), *label))
+                .collect::<Vec<_>>(),
+            expected,
+            "{kind:?}"
+        );
+        assert!(screen_of(&mut state).contains(title), "{kind:?}");
     }
+}
+
+#[test]
+fn disarmed_retract_offers_only_cancel_and_cannot_confirm() {
+    let (mut state, clock) = crate::conformance_21_6_decision_queue::support::clocked(80, 24);
+    decision_queue::raise_team_retract(
+        &mut state,
+        raisers::retract(PLAIN, false),
+        decision_queue::Responder::Local,
+    );
+    repaint_ready(&mut state, &clock);
+    let item = state
+        .decisions
+        .items()
+        .find(|item| item.kind == DecisionKind::TeamRetract)
+        .unwrap();
+    let rail = decision_queue::rail_of(item);
+    assert_eq!(
+        rail.iter()
+            .map(|(key, label)| (key.as_str(), *label))
+            .collect::<Vec<_>>(),
+        vec![("[n]", "Cancel"), ("[Esc]", "Later")]
+    );
+    assert!(is_inert(&press(&mut state, ch('y'))));
+    assert!(state.decisions.holds(DecisionKind::TeamRetract));
+    assert_eq!(press(&mut state, ch('n')), InputAction::TeamRetractDecline);
 }
 
 /// 6-C: on a frame card `Esc` defers and `Ctrl+C` backs one frame (which defers): neither
@@ -591,26 +567,6 @@ fn esc_and_ctrl_c_defer_and_never_decide_a_frame_card() {
 
 #[test]
 fn typing_in_input_never_answers_a_card() {
-    for card in cards().iter().filter(|c| !c.overlay) {
-        for (key, answer) in &card.rows {
-            let Key::Char(c) = key else { continue };
-            let mut state = (card.build)();
-            state.focus = FocusState::Input;
-            let action = press_base(&mut state, *key);
-            assert_ne!(&action, answer, "{}: {c:?} answered from Input", card.name);
-            assert_eq!(
-                state.input_buffer,
-                c.to_string(),
-                "{}: {c:?} is text",
-                card.name
-            );
-            assert!(
-                (card.pending)(&state),
-                "{}: {c:?} resolved the card",
-                card.name
-            );
-        }
-    }
     // A frame card the user set aside (Esc) leaves Input a plain composer: its rail keys
     // are text, and the deferred item stays pending.
     for card in frame_cards() {
@@ -629,31 +585,6 @@ fn typing_in_input_never_answers_a_card() {
 
 #[test]
 fn a_card_swallows_every_key_it_has_no_row_for() {
-    for card in cards() {
-        for key in Key::universe() {
-            let own = card.rows.iter().any(|(k, _)| *k == key);
-            let reserved = matches!(key, Key::Esc | Key::Ctrl('c') | Key::Ctrl('q'));
-            let chars_only = !card.overlay && !matches!(key, Key::Char(_));
-            if own || reserved || chars_only || (!card.swallows_chars && !card.overlay) {
-                continue;
-            }
-            let mut state = (card.build)();
-            let focus = state.focus.clone();
-            let action = press_base(&mut state, key);
-            assert!(
-                is_inert(&action),
-                "{}: {key:?} returned {action:?}",
-                card.name
-            );
-            assert!(
-                (card.pending)(&state),
-                "{}: {key:?} resolved the card",
-                card.name
-            );
-            assert_eq!(state.focus, focus, "{}: {key:?} moved the focus", card.name);
-            assert_eq!(state.input_buffer, "", "{}: {key:?} typed", card.name);
-        }
-    }
     // The frame cards: every key their context has NO row for (own or inherited) is
     // swallowed with nothing typed and the item untouched.
     for card in frame_cards() {
@@ -745,11 +676,7 @@ fn ctrl_d_skips_the_question_and_esc_never_does() {
         effect(DecisionEffect::QuestionSend)
     );
     assert_eq!(decision_queue::waiting(&state), 0);
-    decision_queue::apply_resolved_action(
-        &mut state,
-        effect(DecisionEffect::QuestionSend),
-        presentation::reducer::restore_focus_after_modal,
-    );
+    decision_queue::apply_resolved_action(&mut state, effect(DecisionEffect::QuestionSend));
     assert_eq!(
         rx.try_recv(),
         Ok("h".to_string()),
@@ -764,11 +691,7 @@ fn ctrl_d_skips_the_question_and_esc_never_does() {
     );
     assert_eq!(decision_queue::waiting(&skip), 0);
     // The skip itself drops the reply when the host applies it.
-    decision_queue::apply_resolved_action(
-        &mut skip,
-        effect(DecisionEffect::QuestionSkip),
-        presentation::reducer::restore_focus_after_modal,
-    );
+    decision_queue::apply_resolved_action(&mut skip, effect(DecisionEffect::QuestionSkip));
     assert_eq!(
         r.try_recv(),
         Err(TryRecvError::Closed),
@@ -787,11 +710,7 @@ fn ctrl_d_skips_the_question_and_esc_never_does() {
         effect(DecisionEffect::QuestionSkip),
         "Ctrl+D skips from the idle question"
     );
-    decision_queue::apply_resolved_action(
-        &mut idle,
-        effect(DecisionEffect::QuestionSkip),
-        presentation::reducer::restore_focus_after_modal,
-    );
+    decision_queue::apply_resolved_action(&mut idle, effect(DecisionEffect::QuestionSkip));
     assert_eq!(
         r.try_recv(),
         Err(TryRecvError::Closed),
@@ -835,10 +754,29 @@ fn sub_frame_backs_stay_backs() {
 /// The forget card's arrows move its focus.
 #[test]
 fn forget_arrows_move_the_focus() {
-    let forget = cards().into_iter().find(|c| c.name == "forget").unwrap();
-    let mut state = (forget.build)();
-    assert_eq!(press_base(&mut state, Key::Down), InputAction::Consumed);
-    assert_eq!(press_base(&mut state, Key::Up), InputAction::Consumed);
+    let focused = |state: &TuiState| {
+        state
+            .decisions
+            .items()
+            .find_map(|item| match &item.subject {
+                DecisionSubject::Forget(card) => Some((card.focused_index, card.selected_keys())),
+                _ => None,
+            })
+            .expect("forget item")
+    };
+    let (mut state, _clock, _hold) = open_ready(DecisionKind::Forget, PLAIN);
+    let before = focused(&state);
+    assert!(is_inert(&press(&mut state, Key::Down)));
+    assert_eq!(focused(&state).0, 1);
+    assert!(is_inert(&press(&mut state, ch(' '))));
+    assert_ne!(focused(&state).1, before.1);
+    assert!(is_inert(&press(&mut state, Key::Up)));
+    assert_eq!(focused(&state).0, 0);
+    assert!(is_inert(&press(&mut state, ch('j'))));
+    assert_eq!(focused(&state).0, 1);
+    assert!(is_inert(&press(&mut state, ch('k'))));
+    assert_eq!(focused(&state).0, 0);
+    assert_eq!(press(&mut state, ch('n')), InputAction::ForgetDeclineAll);
 }
 
 /// The spawn gate's non-resolving rows edit the queued payload and keep the item.
@@ -882,8 +820,8 @@ fn the_shared_peer_add_card_copy_names_the_confirm_rows() {
     let card = peer_pending("jun", None).card;
     let line = format!(
         "{} Confirm and pin  {} Cancel",
-        rail(Context::Confirm, CardCmd::Yes),
-        rail(Context::Confirm, CardCmd::No)
+        rail(Context::DecisionConfirm, CardCmd::Yes),
+        rail(Context::DecisionConfirm, CardCmd::No)
     );
     assert!(card.contains(&line), "{card}");
 }
@@ -919,6 +857,9 @@ fn every_cue_names_its_negative_key_inside_the_toast_budget() {
                 | Context::Delegation
                 | Context::SpawnGate
                 | Context::DecisionConfirm
+                | Context::Forget
+                | Context::Rewind
+                | Context::ExportOverwrite
                 | Context::Consent
         )
     };
@@ -945,7 +886,7 @@ fn every_cue_names_its_negative_key_inside_the_toast_budget() {
             );
         }
     }
-    assert!(checked >= 6, "{checked} legacy negative keys checked");
+    assert!(checked >= 2, "{checked} legacy negative keys checked");
 }
 
 /// Feedback edits in the frame; Back never decides or posts a cue, Send resolves once.
@@ -1040,21 +981,18 @@ fn esc_goes_back_from_a_drill_down_or_reorder_after_the_frame_defers() {
     }
 }
 
-/// Every local row of `table_card` has a by-value witness: a `cards()` / `frame_cards()`
+/// Every local row of `table_card` has a by-value witness: a `frame_cards()`
 /// row, or one of the named tests below. A row added to the table without one fails here.
 /// (`TeamProposal` is witnessed in `app.rs` under `a2a` and `Consent` in the attached tests.)
 #[test]
 fn every_table_card_row_has_a_witness() {
     use rustain::adapters::tui::keymap::table_card;
     let mut witnessed: Vec<(Context, Key)> = Vec::new();
-    for card in cards() {
-        witnessed.extend(card.rows.iter().map(|(key, _)| (card.context, *key)));
-    }
     for card in frame_cards() {
         witnessed.extend(card.rows.iter().map(|(key, _)| (card.context, *key)));
     }
     witnessed.extend([
-        // `esc_and_ctrl_c_never_decide_a_card`, once per legacy card.
+        // `story21_3_local_team_proposal_rows_decide_once_and_esc_only_cues` in app.rs.
         (Context::Card, Key::Esc),
         (Context::Card, Key::Ctrl('c')),
         // `the_feedback_field_types_erases_sends_and_backs_out`, `the_question_*`.
@@ -1081,6 +1019,9 @@ fn every_table_card_row_has_a_witness() {
         (Context::SpawnGate, Key::Right),
         // `forget_arrows_move_the_focus`.
         (Context::Forget, Key::Down),
+        (Context::Forget, Key::Char(' ')),
+        (Context::Forget, Key::Char('j')),
+        (Context::Forget, Key::Char('k')),
         (Context::Forget, Key::Up),
     ]);
     let unwitnessed: Vec<String> = table_card::ROWS

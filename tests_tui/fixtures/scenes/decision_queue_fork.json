@@ -1,0 +1,15 @@
+{
+  "scene": "story-21-6-fork-confirm",
+  "personas": {
+    "operator": {
+      "turns": [
+        {
+          "expect": "start the fork scene",
+          "content": [{"type": "text", "text": "Fork scene ready."}],
+          "stop_reason": "end_turn",
+          "usage": {"input_tokens": 10, "output_tokens": 10}
+        }
+      ]
+    }
+  }
+}

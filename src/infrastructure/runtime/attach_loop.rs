@@ -1081,24 +1081,6 @@ async fn recipient_surface_key(
     state.needs_redraw = true;
 }
 
-fn retract_confirm_lines(preview: &str) -> Vec<ratatui::text::Line<'static>> {
-    use ratatui::text::Line;
-    vec![
-        Line::from(format!("Retract this auto-sent message? {}", preview)),
-        Line::from(format!(
-            "{} Retract — marked in your log, never deleted  {} Keep",
-            crate::adapters::tui::keymap::render::rail(
-                crate::adapters::tui::keymap::Context::Confirm,
-                crate::adapters::tui::keymap::table_card::CardCmd::Yes
-            ),
-            crate::adapters::tui::keymap::render::rail(
-                crate::adapters::tui::keymap::Context::Confirm,
-                crate::adapters::tui::keymap::table_card::CardCmd::No
-            )
-        )),
-    ]
-}
-
 fn tool_call_info_from_transition(call: &ToolCall) -> ToolCallInfo {
     let request = call.request();
     let result = match call {
@@ -1482,73 +1464,6 @@ impl AttachedTeamRequests {
     }
 }
 
-/// Story 19.21c: own every card key before the leader, palette or the composer.
-fn attached_team_retract_key(
-    state: &mut TuiState,
-    requests: &mut AttachedTeamRequests,
-    key: crossterm::event::KeyEvent,
-    frame_tx: &mpsc::UnboundedSender<ClientFrame>,
-) -> bool {
-    use crate::adapters::tui::handlers::team_command as handler;
-    use crossterm::event::{KeyCode, KeyModifiers};
-    let Some(pending) = &state.pending_team_retract else {
-        return false;
-    };
-    let decision = if !key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('y') if pending.armed => Some(true),
-            KeyCode::Char('n') => Some(false),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    // `Esc` and `Ctrl+C` never decide the card (A8): one cue naming the keys that do.
-    if key.kind == crossterm::event::KeyEventKind::Press
-        && (key.code == KeyCode::Esc && key.modifiers.is_empty()
-            || key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
-    {
-        crate::adapters::tui::notifications::info(
-            state,
-            crate::adapters::tui::notifications::NoticeSource::Approval,
-            crate::adapters::tui::keymap::render::card_cue(
-                crate::adapters::tui::keymap::Context::Confirm,
-                crate::adapters::tui::keymap::Host::Attached,
-            ),
-        );
-    }
-    if let Some(confirm) = decision {
-        handler::resolve_team_retract_card(state, confirm);
-        if let Some(request) = requests.open_retract.take() {
-            if confirm {
-                requests.pending.insert(
-                    request.clone(),
-                    AttachedTeamRequest::Retract {
-                        next_sequence: 0,
-                        view: String::new(),
-                        view_done: false,
-                    },
-                );
-                handler::show_team_retract(state, handler::TEAM_RETRACT_SENDING.to_owned());
-            } else {
-                requests.pending.remove(&request);
-            }
-            if frame_tx
-                .send(ClientFrame::TeamRetractDecision {
-                    request: request.clone(),
-                    confirm,
-                })
-                .is_err()
-            {
-                if let Some(pending) = requests.pending.remove(&request) {
-                    paint_team_request_failure(state, pending, "could not enqueue command");
-                }
-            }
-        }
-    }
-    true
-}
-
 /// Story 19.16g — what one composer key did on the attached client.
 #[derive(Debug)]
 enum ComposerOutcome {
@@ -1834,21 +1749,14 @@ fn attached_decision_pending(state: &TuiState) -> bool {
         || presentation::is_open(state, Surface::DecisionQueue)
 }
 
-fn attached_proposal_higher_confirmation(
-    state: &TuiState,
-    consolidation: bool,
-    retract: bool,
-) -> bool {
-    consolidation
-        || retract
-        || attached_decision_pending(state)
+fn attached_proposal_higher_confirmation(state: &TuiState) -> bool {
+    attached_decision_pending(state)
         || state
             .decisions
-            .holds(crate::adapters::tui::decision_queue::DecisionKind::Permission)
+            .presenting(crate::adapters::tui::decision_queue::DecisionKind::Permission)
         || state
             .decisions
-            .holds(crate::adapters::tui::decision_queue::DecisionKind::Consent)
-        || state.pending_team_retract.is_some()
+            .presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent)
         || crate::adapters::tui::app::proposal_higher_confirmation_active(state)
 }
 
@@ -1859,23 +1767,6 @@ fn attached_proposal_pending(
         .team_proposal_conversation_id
         .as_ref()
         .and_then(|id| state.pending_team_proposals.get(id))
-}
-
-/// A consolidation card may borrow Chat focus when the composer is empty.
-fn attached_card_arrived(state: &mut TuiState, read_only: bool) {
-    crate::adapters::tui::presentation::reducer::take_chat_focus_for_card(state, !read_only);
-}
-
-/// Same pending owners for overlay-close arrival reconciliation and settlement.
-fn attached_card_pending(state: &TuiState) -> bool {
-    state.attached.consolidation_token.is_some() || state.attached.retract_confirm.is_some()
-}
-
-fn settle_attached_card_focus(state: &mut TuiState, read_only: bool) {
-    if !read_only && state.card_focus_borrowed_from.is_some() {
-        let pending = attached_card_pending(state);
-        crate::adapters::tui::presentation::reducer::settle_borrowed_card_focus(state, pending);
-    }
 }
 
 /// Apply approval frames while keeping incomplete input outside the decision queue.
@@ -1976,19 +1867,12 @@ fn attached_notice_badges(
 }
 
 fn apply_attached_consolidation_frame(state: &mut TuiState, frame: DaemonFrame, read_only: bool) {
-    if let DaemonFrame::ConsolidationProposed {
-        token: arrived,
-        proposals,
-    } = frame
-    {
-        state.pending_consolidation_card =
-            Some(crate::adapters::tui::state::PendingConsolidationCard {
-                conversation_id: String::new(),
-                proposals: proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
-            });
-        state.attached.consolidation_token = Some(arrived);
-        attached_card_arrived(state, read_only);
-        state.needs_redraw = true;
+    if !read_only && let DaemonFrame::ConsolidationProposed { token, proposals } = frame {
+        crate::adapters::tui::decision_queue::raise_attached_consolidation(
+            state,
+            token,
+            proposals.into_iter().map(|pf| (pf.fact, true)).collect(),
+        );
     }
 }
 
@@ -2627,16 +2511,22 @@ fn apply_attached_team_frame(
                     body,
                     armed,
                 } => {
-                    let overlay = matches!(
-                        state.focus,
-                        FocusState::Overlay(
-                            crate::domain::models::visual::OverlayType::Confirmation(_)
-                        )
-                    );
+                    use crate::adapters::tui::decision_queue::{
+                        self, DecisionKind, Responder, RetractTarget, TeamRetractPayload,
+                    };
                     if confirmation_busy
-                        || overlay
-                        || state.pending_team_retract.is_some()
+                        || decision_queue::confirmation_pending(state)
+                        || state.decisions.presenting(DecisionKind::Permission)
+                        || state.decisions.presenting(DecisionKind::Consent)
                         || requests.open_retract.is_some()
+                        || requests.pending.iter().any(|(id, pending)| {
+                            id != &request
+                                && matches!(
+                                    pending,
+                                    AttachedTeamRequest::RetractPreview
+                                        | AttachedTeamRequest::Retract { .. }
+                                )
+                        })
                     {
                         requests.pending.remove(&request);
                         let _ = frame_tx.send(ClientFrame::TeamRetractDecision {
@@ -2646,18 +2536,52 @@ fn apply_attached_team_frame(
                         handler::show_team_retract(state,
                             "Another confirmation is already awaiting your answer. Nothing was sent for this one.".into());
                     } else {
-                        handler::open_team_retract_card(
+                        use crate::domain::services::transparency::{
+                            MAX_PEER_ID_BYTES, sanitize_disclosable,
+                        };
+                        let shown_peer = sanitize_disclosable(&peer, MAX_PEER_ID_BYTES);
+                        let shown_item = sanitize_disclosable(&item_id, MAX_PEER_ID_BYTES);
+                        let mut body = body
+                            .replace(&format!("{peer}'s host"), &format!("{shown_peer}'s host"))
+                            .replace(
+                                &format!("addresses {peer} with"),
+                                &format!("addresses {shown_peer} with"),
+                            )
+                            .replace(
+                                &format!("item         {item_id}"),
+                                &format!("item         {shown_item}"),
+                            );
+                        let (yes, no) = {
+                            use crate::adapters::tui::keymap::{
+                                Context, render::rail, table_card::CardCmd,
+                            };
+                            (
+                                rail(Context::DecisionConfirm, CardCmd::Yes),
+                                rail(Context::DecisionConfirm, CardCmd::No),
+                            )
+                        };
+                        let has_keys = |text: &str| text.contains(&yes) || text.contains(&no);
+                        if let Some((prefix, last)) = body.rsplit_once("\n\n") {
+                            if has_keys(last) {
+                                body = prefix.trim_end().to_owned();
+                            }
+                        } else if has_keys(&body) {
+                            body.clear();
+                        }
+                        decision_queue::raise_team_retract(
                             state,
-                            "daemon-attachment",
-                            crate::domain::events::TeamRetractPreview::Card(
-                                crate::domain::events::TeamRetractCard {
+                            TeamRetractPayload {
+                                target: RetractTarget::Item {
                                     peer,
-                                    item_id,
-                                    task: None,
-                                    body,
-                                    armed,
+                                    item: item_id,
                                 },
-                            ),
+                                conversation_id: String::new(),
+                                task: None,
+                                card: body,
+                                armed,
+                                request: Some(request.clone()),
+                            },
+                            Responder::Attached,
                         );
                         requests.open_retract = Some(request);
                     }
@@ -2672,6 +2596,9 @@ fn apply_attached_team_frame(
             ) {
                 requests.pending.remove(&request);
                 requests.open_retract = None;
+                crate::adapters::tui::decision_queue::withdraw_team_retract_request(
+                    state, &request,
+                );
                 crate::adapters::tui::handlers::team_command::show_team_retract(state, message);
             } else {
                 tracing::warn!(%request, "attach: unmatched retract answer");
@@ -2766,10 +2693,8 @@ fn apply_attached_team_refusal(
         AttachedTeamRequest::RetractPreview | AttachedTeamRequest::Retract { .. } => {
             if requests.open_retract.as_deref() == Some(request.as_str()) {
                 requests.open_retract = None;
-                crate::adapters::tui::handlers::team_command::resolve_team_retract_card(
-                    state, false,
-                );
             }
+            crate::adapters::tui::decision_queue::withdraw_team_retract_request(state, &request);
             crate::adapters::tui::handlers::team_command::show_team_retract(state, message);
         }
         AttachedTeamRequest::Status | AttachedTeamRequest::Untrust => {
@@ -2917,11 +2842,7 @@ fn paint_attached(
         .set_capacity(crate::adapters::tui::widgets::toast_layer::capacity_for(
             layout.chat_pane.height,
         ));
-    let proposal_higher = attached_proposal_higher_confirmation(
-        state,
-        state.pending_consolidation_card.is_some(),
-        state.attached.retract_confirm.is_some(),
-    );
+    let proposal_higher = attached_proposal_higher_confirmation(state);
     let proposal_card = prepare_attached_proposal(
         state,
         tab_render_state,
@@ -2931,8 +2852,6 @@ fn paint_attached(
         area,
     );
     let peer_card = if state.recipient_surface.is_none()
-        && state.attached.retract_confirm.is_none()
-        && state.pending_consolidation_card.is_none()
         && !proposal_higher
         && attached_proposal_pending(state).is_none()
     {
@@ -3019,60 +2938,14 @@ fn paint_attached(
             &state.theme,
         ));
     }
-    // Story 12.2d AC3 — render the consolidation card with the IDENTICAL
-    // bottom-anchored inline grammar the local TUI uses (bordered + accent,
-    // event_loop.rs ~8925), not a hand-rolled borderless paragraph.
-    if !attached_decision_pending(state)
-        && let Some(card) = &state.pending_consolidation_card
-    {
-        use crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines;
-        use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
-        let card_lines =
-            render_consolidation_card_lines(card, &state.theme, layout.chat_pane.width);
-        opaque.host(Some(render_bottom_anchored_card(
-            f.buffer_mut(),
-            card_lines,
-            state.theme.colors.accent,
-            layout.chat_pane,
-        )));
-    }
-    // Story 18.3c AC3/AC5 — the peer response card (and the retract
-    // confirmation, which takes precedence while open) ride the same
-    // bottom-anchored inline grammar as the consolidation card.
-    use crate::adapters::tui::widgets::inline_card::{
-        render_bottom_anchored_card, render_bottom_anchored_decision_card,
-    };
-    if !attached_decision_pending(state)
-        && let Some((_, preview)) = &state.attached.retract_confirm
-    {
-        opaque.host(Some(render_bottom_anchored_card(
-            f.buffer_mut(),
-            retract_confirm_lines(preview),
-            state.theme.colors.auto_sent_border,
-            layout.chat_pane,
-        )));
-    } else if let Some(lines) = peer_card {
+    use crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card;
+    if let Some(lines) = peer_card {
         render_bottom_anchored_card(
             f.buffer_mut(),
             lines,
             state.theme.colors.accent,
             layout.chat_pane,
         );
-    }
-    // Story 19.21c: the retract card owns every key while open, so it paints last.
-    if !attached_decision_pending(state)
-        && let Some(pending) = &state.pending_team_retract
-    {
-        opaque.host(Some(render_bottom_anchored_decision_card(
-            f.buffer_mut(),
-            crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(
-                pending,
-                &state.theme,
-                layout.chat_pane.width,
-            ),
-            state.theme.colors.accent,
-            layout.chat_pane,
-        )));
     }
     state.team_proposal_scroll_max = proposal_card.as_ref().map_or(0, |card| card.scroll_max());
     state.team_proposal_scroll = state
@@ -3311,223 +3184,217 @@ pub async fn run_attached(
         }
 
         tokio::select! {
-                    maybe_ev = events.next() => {
-                        match maybe_ev {
-                            Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
-                                let mut key_ctx = attach_keys::KeyCtx {
-                                    workspace,
-                                    read_only,
-                                    state: &mut state,
-                                    conversation,
-                                    streaming,
-                                    frame_tx: &frame_tx,
-                                    team_requests: &mut attached_team_requests,
-                                    tab: &mut tab_render_state,
-                                    view,
-                                    interrupt: &attached_interrupt,
-                                    driver: &driver,
-                                    lifecycle: &mut lifecycle,
-                                    session_manager: &mut session_manager,
-                                    log_service: &log_service,
-                                    chrome: &mut attached_chrome,
-                                };
-                                match attach_keys::handle_attached_key(&mut key_ctx, key).await {
-                                    attach_keys::KeyFlow::Continue => {}
-                                    attach_keys::KeyFlow::Detach | attach_keys::KeyFlow::Quit => break Ok(()),
-                                }
-                            }
-                            Some(Ok(Event::Paste(text))) => {
-                                let pending = attached_card_pending(
-        &state,
-        );
-                                attached_chrome.paste(&mut state, &text, pending, workspace).await;
-                            }
-                            Some(Ok(event @ Event::Mouse(_))) => {
-                                let _ = attach_keys::handle_attached_mouse(&mut state, view, &event);
-                            }
-                            Some(Ok(Event::Resize(w, h))) => {
-                                state.terminal_width = w;
-                                state.terminal_height = h;
-                            }
-                            Some(Ok(_)) => {}
-                            Some(Err(e)) => break Err(anyhow!("terminal input error: {e}")),
-                            None => break Ok(()),
+            maybe_ev = events.next() => {
+                match maybe_ev {
+                    Some(Ok(Event::Key(key))) if key.kind != KeyEventKind::Release => {
+                        let mut key_ctx = attach_keys::KeyCtx {
+                            workspace,
+                            read_only,
+                            state: &mut state,
+                            conversation,
+                            streaming,
+                            frame_tx: &frame_tx,
+                            team_requests: &mut attached_team_requests,
+                            tab: &mut tab_render_state,
+                            view,
+                            interrupt: &attached_interrupt,
+                            driver: &driver,
+                            lifecycle: &mut lifecycle,
+                            session_manager: &mut session_manager,
+                            log_service: &log_service,
+                            chrome: &mut attached_chrome,
+                        };
+                        match attach_keys::handle_attached_key(&mut key_ctx, key).await {
+                            attach_keys::KeyFlow::Continue => {}
+                            attach_keys::KeyFlow::Detach | attach_keys::KeyFlow::Quit => break Ok(()),
                         }
                     }
-                    frame = read_frame::<_, DaemonFrame>(&mut read_half) => {
-                        match frame {
-                                Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
-                                    let refresh_node = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                        let RecipientSurfaceTarget::Node(node) = &surface.target else { return false };
-                                        let (row_id, new_control) = match operation.as_ref() {
-                                            crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
-                                                (message.id.as_str(), control.as_ref()),
-                                            crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
-                                                (row_id.as_str(), None),
-                                        };
-                                        new_control.or_else(|| conversation.peer_row_controls.get(row_id))
-                                            .is_some_and(|control| &control.node_id == node)
-                                    });
-                                    let refresh_item = state.recipient_surface.as_ref().is_some_and(|surface| {
-                                        let RecipientSurfaceTarget::Item(address) = &surface.target else { return false };
-                                        let (row_id, new_control) = match operation.as_ref() {
-                                            crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
-                                                (message.id.as_str(), control.as_ref()),
-                                            crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
-                                                (row_id.as_str(), None),
-                                        };
-                                        new_control
-                                            .or_else(|| conversation.peer_row_controls.get(row_id))
-                                            .is_some_and(|control| control.item_address.as_ref() == Some(address))
-                                    });
-                                    if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
-                                        if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
-                                            && let RecipientSurfaceTarget::Node(node) = &surface.target
-                                        {
-                                            if let Some((message, control)) = pinned_response(conversation, node) {
-                                                surface.content = legacy_response_content(message, control);
-                                                surface.can_toggle_target = control.item_address.is_some();
-                                            } else {
-                                                surface.content = "response already settled — no action applied".to_owned();
-                                                surface.can_toggle_target = false;
-                                            }
-                                            surface.cached_width = 0;
-                                        }
-                                        if refresh_item {
-                                            super::recipient_surface::reconcile_item_surface(&mut state, conversation);
-                                        }
-                                        state.needs_redraw = true;
+                    Some(Ok(Event::Paste(text))) => {
+                        let pending = false;
+                        attached_chrome.paste(&mut state, &text, pending, workspace).await;
+                    }
+                    Some(Ok(event @ Event::Mouse(_))) => {
+                        let _ = attach_keys::handle_attached_mouse(&mut state, view, &event);
+                    }
+                    Some(Ok(Event::Resize(w, h))) => {
+                        state.terminal_width = w;
+                        state.terminal_height = h;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => break Err(anyhow!("terminal input error: {e}")),
+                    None => break Ok(()),
+                }
+            }
+            frame = read_frame::<_, DaemonFrame>(&mut read_half) => {
+                match frame {
+                        Ok(Some(DaemonFrame::PeerRowOperation(operation))) => {
+                            let refresh_node = state.recipient_surface.as_ref().is_some_and(|surface| {
+                                let RecipientSurfaceTarget::Node(node) = &surface.target else { return false };
+                                let (row_id, new_control) = match operation.as_ref() {
+                                    crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
+                                        (message.id.as_str(), control.as_ref()),
+                                    crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
+                                        (row_id.as_str(), None),
+                                };
+                                new_control.or_else(|| conversation.peer_row_controls.get(row_id))
+                                    .is_some_and(|control| &control.node_id == node)
+                            });
+                            let refresh_item = state.recipient_surface.as_ref().is_some_and(|surface| {
+                                let RecipientSurfaceTarget::Item(address) = &surface.target else { return false };
+                                let (row_id, new_control) = match operation.as_ref() {
+                                    crate::domain::models::PeerRowOperation::Upsert { message, control, .. } =>
+                                        (message.id.as_str(), control.as_ref()),
+                                    crate::domain::models::PeerRowOperation::Remove { row_id, .. } =>
+                                        (row_id.as_str(), None),
+                                };
+                                new_control
+                                    .or_else(|| conversation.peer_row_controls.get(row_id))
+                                    .is_some_and(|control| control.item_address.as_ref() == Some(address))
+                            });
+                            if apply_peer_row_operation(conversation, Arc::unwrap_or_clone(operation)) {
+                                if refresh_node && let Some(surface) = state.recipient_surface.as_mut()
+                                    && let RecipientSurfaceTarget::Node(node) = &surface.target
+                                {
+                                    if let Some((message, control)) = pinned_response(conversation, node) {
+                                        surface.content = legacy_response_content(message, control);
+                                        surface.can_toggle_target = control.item_address.is_some();
+                                    } else {
+                                        surface.content = "response already settled — no action applied".to_owned();
+                                        surface.can_toggle_target = false;
                                     }
+                                    surface.cached_width = 0;
                                 }
-                                Ok(Some(DaemonFrame::Event(raw))) => {
-                                    tool_inputs.apply(
-                                        raw,
-                                        None,
-                                        conversation,
-                                        streaming,
-                                        reducer,
-                                        &mut state,
-                                        &mut permission_mode,
-                                        &*clock,
-                                    );
+                                if refresh_item {
+                                    super::recipient_surface::reconcile_item_surface(&mut state, conversation);
                                 }
-                            Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
-                                tool_inputs.apply(
-                                    event, Some(withheld), conversation, streaming, reducer,
-                                    &mut state, &mut permission_mode, &*clock,
-                                );
-                            }
-                            Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
-                                for entry in withheld {
-                                    tool_inputs.reasons.insert(entry.tool_call_id, entry.withheld);
-                                }
-                                let existing: std::collections::HashSet<_> =
-                                    conversation.messages.iter().map(|row| row.id.clone()).collect();
-                                let mut earlier: Vec<_> = messages.into_iter()
-                                    .filter(|row| !existing.contains(&row.id)).collect();
-                                earlier.append(&mut conversation.messages);
-                                conversation.messages = earlier;
                                 state.needs_redraw = true;
                             }
-                            Ok(Some(frame @ (DaemonFrame::FrameTooLarge { .. }
-                                | DaemonFrame::Error(_)
-                                | DaemonFrame::ActiveTurn { .. }
-                                | DaemonFrame::InterruptResult { .. }))) => {
-                                apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
-                            }
-                            Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
-                            | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
-                            | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
-                            | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
-                            | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
-                                apply_attached_approval_frame(&mut state, &mut approval_assemblies, frame, read_only);
-                            }
-                            Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
-                                apply_attached_consolidation_frame(&mut state, frame, read_only);
-                            }
-                            Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
-                                apply_attached_proposal_frame(
-                                    &mut state, &mut tab_render_state, &mut attached_team_requests,
-                                    &conversation.id, frame,
-                                );
-                            }
-                            Ok(Some(DaemonFrame::Detached)) => break Ok(()),
-                            Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamViewChunk { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamViewDone { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamRetractPreviewed { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
-                            | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
-                            | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
-                                let confirmation_busy = attached_proposal_higher_confirmation(
-                                    &state,
-                                    state.attached.consolidation_token.is_some(),
-                                    state.attached.retract_confirm.is_some(),
-                                ) || attached_proposal_pending(&state).is_some();
-                                let _ = apply_attached_team_frame(
-                                    &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
-                                );
-                            }
-                            Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
-                                match target {
-                                    crate::adapters::daemon::protocol::RecipientActionTarget::Request { request } => {
-                                        let _ = apply_attached_team_refusal(
-                                            &mut state, &mut attached_team_requests, action, request, outcome,
-                                        );
-                                    }
-                                    target if matches!(
-                                        action,
-                                        crate::adapters::daemon::protocol::RecipientAction::TeamSend
-                                            | crate::adapters::daemon::protocol::RecipientAction::TeamBoard
-                                            | crate::adapters::daemon::protocol::RecipientAction::TeamStatus
-                                            | crate::adapters::daemon::protocol::RecipientAction::RevokeSenderConsent
-                                    ) => {
-                                        tracing::warn!(?action, ?target, "attach: team refusal used a non-request target");
-                                    }
-                                    target => crate::adapters::tui::handlers::recipient_actions::apply_action_result(
-                                        &mut state, action, target, outcome,
-                                    ),
-                                }
-                            }
-                            Ok(Some(DaemonFrame::RecipientContextState {
-                                selected_item_ids, inventory, show_inventory,
-                            })) => {
-                                crate::adapters::tui::handlers::recipient_actions::apply_context_state(
-                                    &mut state, selected_item_ids, inventory, show_inventory,
-                                );
-                            }
-                            // AttachAck/History are not expected post-handshake; ignore.
-                            Ok(Some(_)) => {}
-                            Ok(None) => {
-                                notifications::warning(
-                                    &mut state,
-                                    NoticeSource::Daemon,
-                                    "— daemon closed the connection —",
-                                );
-                                break Ok(());
-                            }
-                            // Forward-compat: an undecodable / future-shaped frame body is
-                            // logged and skipped — the stream survives (split insurance).
-                            Err(FrameError::Json(e)) => {
-                                tracing::warn!(error = %e, "attach: skipping undecodable frame (forward-compat)");
-                            }
-                            Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                         }
-                        settle_attached_card_focus(
-        &mut state,
-        read_only,
-        );
+                        Ok(Some(DaemonFrame::Event(raw))) => {
+                            tool_inputs.apply(
+                                raw,
+                                None,
+                                conversation,
+                                streaming,
+                                reducer,
+                                &mut state,
+                                &mut permission_mode,
+                                &*clock,
+                            );
+                        }
+                    Ok(Some(DaemonFrame::ToolEventWithheld { event, withheld })) => {
+                        tool_inputs.apply(
+                            event, Some(withheld), conversation, streaming, reducer,
+                            &mut state, &mut permission_mode, &*clock,
+                        );
                     }
-                    _ = tick.tick() => {
-                        crate::adapters::tui::decision_queue::tick(&mut state);
-                        log_awareness.tick(&mut state.log_awareness);
-                        // Story 21.1 AC6: attached notices expire — the tick requests the
-                        // deadline redraw (the draw's `begin_draw` does the sweep).
-                        notifications::tick(&mut state);
+                    Ok(Some(DaemonFrame::History { messages, withheld_tool_inputs: withheld, .. })) => {
+                        for entry in withheld {
+                            tool_inputs.reasons.insert(entry.tool_call_id, entry.withheld);
+                        }
+                        let existing: std::collections::HashSet<_> =
+                            conversation.messages.iter().map(|row| row.id.clone()).collect();
+                        let mut earlier: Vec<_> = messages.into_iter()
+                            .filter(|row| !existing.contains(&row.id)).collect();
+                        earlier.append(&mut conversation.messages);
+                        conversation.messages = earlier;
+                        state.needs_redraw = true;
                     }
+                    Ok(Some(frame @ (DaemonFrame::FrameTooLarge { .. }
+                        | DaemonFrame::Error(_)
+                        | DaemonFrame::ActiveTurn { .. }
+                        | DaemonFrame::InterruptResult { .. }))) => {
+                        apply_notice_frame(&mut state, &mut attached_interrupt, &frame);
+                    }
+                    Ok(Some(frame @ DaemonFrame::ApprovalRequest { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalInputChunk { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalInputComplete { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalClosed { .. }))
+                    | Ok(Some(frame @ DaemonFrame::ApprovalRefused { .. })) => {
+                        apply_attached_approval_frame(&mut state, &mut approval_assemblies, frame, read_only);
+                    }
+                    Ok(Some(frame @ DaemonFrame::ConsolidationProposed { .. })) => {
+                        apply_attached_consolidation_frame(&mut state, frame, read_only);
+                    }
+                    Ok(Some(frame @ DaemonFrame::TeamProposal { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamProposalClosed { .. })) => {
+                        apply_attached_proposal_frame(
+                            &mut state, &mut tab_render_state, &mut attached_team_requests,
+                            &conversation.id, frame,
+                        );
+                    }
+                    Ok(Some(DaemonFrame::Detached)) => break Ok(()),
+                    Ok(Some(frame @ DaemonFrame::TeamSendStarted { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamSendSettled { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamViewChunk { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamViewDone { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamRetractPreviewed { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamRetractAnswered { .. }))
+                    | Ok(Some(frame @ DaemonFrame::TeamStatusResult { .. }))
+                    | Ok(Some(frame @ DaemonFrame::SenderConsentRevoked { .. })) => {
+                        if !read_only || !matches!(&frame, DaemonFrame::TeamRetractPreviewed { .. }) {
+                            let confirmation_busy =
+                                crate::adapters::tui::app::proposal_higher_confirmation_active(&state)
+                                    || state.decisions.presenting(crate::adapters::tui::decision_queue::DecisionKind::Consent);
+                            let _ = apply_attached_team_frame(
+                                &mut state, &mut attached_team_requests, frame, confirmation_busy, &frame_tx,
+                            );
+                        }
+                    }
+                    Ok(Some(DaemonFrame::RecipientActionResult { action, target, outcome })) => {
+                        match target {
+                            crate::adapters::daemon::protocol::RecipientActionTarget::Request { request } => {
+                                let _ = apply_attached_team_refusal(
+                                    &mut state, &mut attached_team_requests, action, request, outcome,
+                                );
+                            }
+                            target if matches!(
+                                action,
+                                crate::adapters::daemon::protocol::RecipientAction::TeamSend
+                                    | crate::adapters::daemon::protocol::RecipientAction::TeamBoard
+                                    | crate::adapters::daemon::protocol::RecipientAction::TeamStatus
+                                    | crate::adapters::daemon::protocol::RecipientAction::RevokeSenderConsent
+                            ) => {
+                                tracing::warn!(?action, ?target, "attach: team refusal used a non-request target");
+                            }
+                            target => crate::adapters::tui::handlers::recipient_actions::apply_action_result(
+                                &mut state, action, target, outcome,
+                            ),
+                        }
+                    }
+                    Ok(Some(DaemonFrame::RecipientContextState {
+                        selected_item_ids, inventory, show_inventory,
+                    })) => {
+                        crate::adapters::tui::handlers::recipient_actions::apply_context_state(
+                            &mut state, selected_item_ids, inventory, show_inventory,
+                        );
+                    }
+                    // AttachAck/History are not expected post-handshake; ignore.
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        notifications::warning(
+                            &mut state,
+                            NoticeSource::Daemon,
+                            "— daemon closed the connection —",
+                        );
+                        break Ok(());
+                    }
+                    // Forward-compat: an undecodable / future-shaped frame body is
+                    // logged and skipped — the stream survives (split insurance).
+                    Err(FrameError::Json(e)) => {
+                        tracing::warn!(error = %e, "attach: skipping undecodable frame (forward-compat)");
+                    }
+                    Err(e) => break Err(anyhow!("attach socket read error: {e}")),
                 }
+            }
+            _ = tick.tick() => {
+                crate::adapters::tui::decision_queue::tick(&mut state);
+                log_awareness.tick(&mut state.log_awareness);
+                // Story 21.1 AC6: attached notices expire — the tick requests the
+                // deadline redraw (the draw's `begin_draw` does the sweep).
+                notifications::tick(&mut state);
+            }
+        }
     };
 
     // Clean detach (AC4): tell the daemon, briefly observe `Detached`, restore.
@@ -3889,7 +3756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_attached_card_and_leader_cover_the_only_projected_row() {
+    async fn story21_6_attached_decision_and_leader_project_the_only_row() {
         use crate::adapters::tui::keymap::Key;
         for read_only in [false, true] {
             for (width, height) in [(60, 16), (80, 24), (130, 30)] {
@@ -3930,23 +3797,31 @@ mod tests {
                             },
                             read_only,
                         );
-                        assert!(rig.state.attached.consolidation_token.is_some());
+                        assert_eq!(rig.state.decisions.undecided(), usize::from(!read_only));
                     } else {
                         rig.key(Key::Ctrl('x')).await;
                         assert!(rig.state.pending_leader.is_some());
                     }
                     let covered = rig.paint();
                     let screen = attached_screen(&covered);
-                    assert_eq!(
-                        covered.backend().buffer()
-                            [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
-                            .symbol(),
-                        "┘",
-                        "the actual opaque bottom rail covers the observed row: {screen}"
-                    );
-                    assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
-                    assert_eq!(rig.state.pending_log_visit, Some(visit));
-                    assert!(rig.state.log_awareness.presented.is_empty());
+                    if !card {
+                        assert_eq!(
+                            covered.backend().buffer()
+                                [(layout.chat_pane.right() - 1, layout.chat_pane.bottom() - 1)]
+                                .symbol(),
+                            "┘",
+                            "the opaque leader rail covers the observed row: {screen}"
+                        );
+                        assert!(!screen.contains("M12-ATTACHED-VISIBLE"), "{screen}");
+                        assert_eq!(rig.state.pending_log_visit, Some(visit));
+                        assert!(rig.state.log_awareness.presented.is_empty());
+                    } else if screen.contains("M12-ATTACHED-VISIBLE") {
+                        assert!(rig.state.pending_log_visit.is_none());
+                        assert_eq!(rig.state.log_awareness.presented, [visit]);
+                    } else {
+                        assert_eq!(rig.state.pending_log_visit, Some(visit));
+                        assert!(rig.state.log_awareness.presented.is_empty());
+                    }
                     assert!(
                         rig.frames().is_empty(),
                         "local paint/leader/admission sends no wire actions"
@@ -4164,7 +4039,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_attached_state_owned_card_answers_reach_the_actual_wire() {
+    async fn story21_6_attached_queued_answers_reach_the_actual_wire() {
         use crate::adapters::tui::keymap::Key;
         use crate::adapters::tui::presentation::{self, Surface};
         for kind in ["consolidation", "retract"] {
@@ -4186,11 +4061,23 @@ mod tests {
                     row.id = "peer-response-owned-wire".into();
                     row.send_authorization = crate::domain::models::SendAuthorization::Automatic;
                     rig.domain_tab.conversation.messages.push(row);
-                    rig.state.attached.retract_confirm = Some((
-                        "peer-response-owned-wire".into(),
-                        "actual retract target".into(),
-                    ));
-                    attached_card_arrived(&mut rig.state, false);
+                    use crate::adapters::tui::decision_queue::{
+                        self, Responder, RetractTarget, TeamRetractPayload,
+                    };
+                    decision_queue::raise_team_retract(
+                        &mut rig.state,
+                        TeamRetractPayload {
+                            target: RetractTarget::AutoResponse {
+                                message_id: "peer-response-owned-wire".into(),
+                            },
+                            conversation_id: String::new(),
+                            task: None,
+                            card: "Retract actual retract target".into(),
+                            armed: true,
+                            request: None,
+                        },
+                        Responder::Attached,
+                    );
                 }
                 _ => unreachable!(),
             }
@@ -4200,13 +4087,18 @@ mod tests {
             assert!(rig.frames().is_empty(), "a covered card cannot answer");
             rig.key(Key::Esc).await;
             assert!(!presentation::is_open(&rig.state, Surface::CommandPalette));
-            assert_eq!(rig.state.focus, FocusState::Chat);
+            let key = rig.state.decisions.items().next().unwrap().key();
+            assert!(crate::adapters::tui::decision_queue::open(
+                &mut rig.state,
+                &key
+            ));
             let painted = rig.paint();
             assert!(attached_screen(&painted).contains(match kind {
                 "consolidation" => "memory",
                 "retract" => "Retract",
                 _ => unreachable!(),
             }));
+            rig.ready();
             rig.key(Key::Char('y')).await;
             let frames = rig.frames();
             match (kind, frames.as_slice()) {
@@ -4232,7 +4124,7 @@ mod tests {
                     panic!("state-owned answer must use its actual request identity: {other:?}")
                 }
             }
-            assert!(!attached_card_pending(&rig.state));
+            assert!(rig.state.decisions.is_empty());
             assert_eq!(rig.state.focus, FocusState::Input);
             rig.key(Key::Char('y')).await;
             assert_eq!(rig.state.input_buffer, "y");
@@ -5571,12 +5463,66 @@ mod tests {
             surface.assert_send();
         }
 
+        /// 6D-L1-03: a deferred consolidation no longer hides the attached proposal
+        /// or steals the Send key.
+        #[test]
+        fn story21_6_attached_defer_restores_proposal_paint_and_keys() {
+            use crate::adapters::tui::{app, decision_queue};
+            use crate::domain::events::{DomainInputEvent, DomainKey};
+            let mut surface = Surface::new("body");
+            let before = surface.paint(80, 24, false, false);
+            assert!(before.contains("Your agent proposes a message"));
+            decision_queue::raise_attached_consolidation(
+                &mut surface.state,
+                crate::adapters::daemon::protocol::ProposalToken(1),
+                Vec::new(),
+            );
+            assert!(attached_proposal_higher_confirmation(&surface.state));
+            app::handle_input(
+                &mut surface.state,
+                &DomainInputEvent::SpecialKey(DomainKey::Esc),
+            );
+            assert!(
+                surface
+                    .state
+                    .decisions
+                    .holds(decision_queue::DecisionKind::Consolidation)
+            );
+            let higher = attached_proposal_higher_confirmation(&surface.state);
+            assert!(!higher);
+            assert_eq!(surface.paint(80, 24, higher, false), before);
+            surface.assert_send();
+        }
+
         #[test]
         fn attached_proposal_higher_confirmations_and_raw_key_fences_keep_ownership() {
             let mut surface = Surface::new("body");
-            for (consolidation, retract) in [(true, false), (false, true)] {
-                let higher =
-                    attached_proposal_higher_confirmation(&surface.state, consolidation, retract);
+            for retract in [false, true] {
+                let mut surface = Surface::new("body");
+                if retract {
+                    crate::adapters::tui::decision_queue::raise_team_retract(
+                        &mut surface.state,
+                        crate::adapters::tui::decision_queue::TeamRetractPayload {
+                            target:
+                                crate::adapters::tui::decision_queue::RetractTarget::AutoResponse {
+                                    message_id: "m1".into(),
+                                },
+                            conversation_id: String::new(),
+                            task: None,
+                            card: "retract".into(),
+                            armed: true,
+                            request: None,
+                        },
+                        crate::adapters::tui::decision_queue::Responder::Attached,
+                    );
+                } else {
+                    crate::adapters::tui::decision_queue::raise_attached_consolidation(
+                        &mut surface.state,
+                        crate::adapters::daemon::protocol::ProposalToken(1),
+                        Vec::new(),
+                    );
+                }
+                let higher = attached_proposal_higher_confirmation(&surface.state);
                 assert!(higher);
                 surface.paint(80, 24, false, false);
                 assert!(
@@ -5608,7 +5554,7 @@ mod tests {
             );
             surface.state.pending_leader = None;
             assert!(
-                attached_proposal_higher_confirmation(&surface.state, false, false),
+                attached_proposal_higher_confirmation(&surface.state),
                 "attached permission prompts must outrank proposals"
             );
             assert!(!surface.key(KeyCode::Char('y'), true, false));
@@ -5623,11 +5569,7 @@ mod tests {
                 },
             );
             surface.state.pending_leader = None;
-            assert!(attached_proposal_higher_confirmation(
-                &surface.state,
-                false,
-                false
-            ));
+            assert!(attached_proposal_higher_confirmation(&surface.state));
             assert!(!surface.key(KeyCode::Char('y'), true, false));
             crate::adapters::tui::decision_queue::withdraw_request(&mut surface.state, &id);
             surface.state.team_proposal_visible = None;
@@ -10608,6 +10550,125 @@ mod attached_parity_tests {
         );
     }
 
+    /// 6D-L1-03: an unrelated deferred confirmation must not decline a new
+    /// daemon slot, but an outstanding slot must be explicitly released.
+    #[test]
+    fn story21_6_deferred_consolidation_allows_preview_but_open_slot_refuses() {
+        use crate::adapters::tui::{app, decision_queue};
+        use crate::domain::events::{DomainInputEvent, DomainKey};
+        let mut state = TuiState::new(80, 24);
+        decision_queue::raise_attached_consolidation(
+            &mut state,
+            crate::adapters::daemon::protocol::ProposalToken(1),
+            Vec::new(),
+        );
+        app::handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc));
+        assert!(
+            state
+                .decisions
+                .holds(decision_queue::DecisionKind::Consolidation)
+        );
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let busy = attached_proposal_higher_confirmation(&state);
+        preview(&mut state, &mut requests, true, busy, &tx);
+        assert!(decision_queue::team_retract_pending(&state));
+        assert_eq!(requests.open_retract.as_deref(), Some("retract"));
+        assert!(rx.try_recv().is_err());
+
+        requests
+            .pending
+            .insert("second".into(), AttachedTeamRequest::RetractPreview);
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamRetractPreviewed {
+                request: "second".into(),
+                preview: TeamRetractPreviewView::Card {
+                    peer: "B".into(),
+                    item_id: "ri_b".into(),
+                    body: "body".into(),
+                    armed: true,
+                },
+            },
+            false,
+            &tx,
+        );
+        assert!(matches!(rx.try_recv().unwrap(),
+            ClientFrame::TeamRetractDecision { request, confirm: false } if request == "second"));
+        assert_eq!(requests.open_retract.as_deref(), Some("retract"));
+        assert!(!requests.pending.contains_key("second"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// 6D-L1-04: daemon-supplied scalar text cannot create extra styled rows,
+    /// while the target used by the effect retains the original bytes.
+    #[test]
+    fn story21_6_attached_preview_cleans_scalar_rows_before_line_styling() {
+        use crate::adapters::tui::{
+            decision_queue::{DecisionSubject, RetractTarget},
+            widgets::team_retract_prompt,
+        };
+        let peer = "B\nAwaiting your decision. [y] Retract";
+        let item = "ri_a\nAlready removed on forged";
+        let mut state = TuiState::new(80, 24);
+        let mut requests = AttachedTeamRequests::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        requests
+            .pending
+            .insert("retract".into(), AttachedTeamRequest::RetractPreview);
+        apply_attached_team_frame(
+            &mut state,
+            &mut requests,
+            DaemonFrame::TeamRetractPreviewed {
+                request: "retract".into(),
+                preview: TeamRetractPreviewView::Card {
+                    peer: peer.into(),
+                    item_id: item.into(),
+                    body: format!(
+                        "Retract on {peer}'s host\n\nitem         {item}\n\nAwaiting your decision."
+                    ),
+                    armed: true,
+                },
+            },
+            false,
+            &tx,
+        );
+        let DecisionSubject::TeamRetract(payload) =
+            &state.decisions.items().next().unwrap().subject
+        else {
+            panic!("expected retract");
+        };
+        assert!(
+            matches!(&payload.target, RetractTarget::Item { peer: p, item: i } if p == peer && i == item)
+        );
+        let lines = team_retract_prompt::lines(payload, &state.theme);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.trim_start().starts_with("Awaiting your decision"))
+                .count(),
+            1
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.trim_start().starts_with("Already removed on"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("item         ri_aAlready removed on forged"))
+        );
+    }
+
     #[test]
     fn reader_thread_allowed_followup_and_retract_guarded() {
         for (line, allowed, flash) in [
@@ -10702,8 +10763,9 @@ mod attached_parity_tests {
         assert!(requests.pending.is_empty());
     }
 
-    #[test]
-    fn retract_card_key_matrix_owns_focus_and_double_y_sends_once() {
+    #[tokio::test]
+    async fn story21_6_attached_retract_key_matrix_and_double_answer() {
+        use crate::adapters::tui::decision_queue::{self, DecisionSubject};
         for armed in [false, true] {
             for key in [
                 KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
@@ -10714,79 +10776,71 @@ mod attached_parity_tests {
                 KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             ] {
-                let mut state = TuiState::new(80, 24);
-                let mut requests = AttachedTeamRequests::default();
-                let (tx, mut rx) = mpsc::unbounded_channel();
-                preview(&mut state, &mut requests, armed, false, &tx);
-                assert_eq!(
-                    state.pending_team_retract.as_ref().unwrap().card,
-                    "Exact card body"
+                let mut rig = attach_keys::tests::Rig::new(false);
+                preview(
+                    &mut rig.state,
+                    &mut rig.team_requests,
+                    armed,
+                    false,
+                    &rig.tx,
                 );
-                assert!(attached_team_retract_key(
-                    &mut state,
-                    &mut requests,
-                    key,
-                    &tx
-                ));
+                let item = rig.state.decisions.items().next().unwrap();
+                assert!(
+                    matches!(&item.subject, DecisionSubject::TeamRetract(payload)
+                    if payload.card == "Exact card body" && payload.armed == armed)
+                );
+                rig.ready();
+                rig.raw_key(key).await;
                 let expected = match key.code {
                     KeyCode::Char('y') if armed => Some(true),
                     KeyCode::Char('n') => Some(false),
                     _ => None,
                 };
                 if let Some(confirm) = expected {
-                    assert!(
-                        matches!(rx.try_recv().unwrap(), ClientFrame::TeamRetractDecision {
-                        request, confirm: found } if request == "retract" && found == confirm)
-                    );
-                    assert!(state.pending_team_retract.is_none());
-                    assert!(requests.open_retract.is_none());
+                    assert!(matches!(rig.frames().as_slice(),
+                        [ClientFrame::TeamRetractDecision { request, confirm: found }]
+                            if request == "retract" && *found == confirm));
+                    assert!(!decision_queue::team_retract_pending(&rig.state));
+                    assert!(rig.team_requests.open_retract.is_none());
                     if confirm {
                         assert!(matches!(
-                            requests.pending["retract"],
+                            rig.team_requests.pending["retract"],
                             AttachedTeamRequest::Retract { .. }
                         ));
-                        assert!(!attached_team_retract_key(
-                            &mut state,
-                            &mut requests,
-                            key,
-                            &tx
-                        ));
                     } else {
-                        assert!(requests.pending.is_empty());
+                        assert!(rig.team_requests.pending.is_empty());
                     }
+                    rig.raw_key(key).await;
                 } else {
-                    assert!(state.pending_team_retract.is_some());
-                    assert_eq!(requests.open_retract.as_deref(), Some("retract"));
-                    let cue = matches!(key.code, KeyCode::Esc | KeyCode::Char('c'));
-                    assert_eq!(
-                        state.notifications.records().count(),
-                        usize::from(cue),
-                        "{key:?} posts the cue and decides nothing"
-                    );
+                    assert!(decision_queue::team_retract_pending(&rig.state));
+                    assert_eq!(rig.team_requests.open_retract.as_deref(), Some("retract"));
                 }
-                assert!(rx.try_recv().is_err());
+                assert!(rig.frames().is_empty(), "{key:?} must not send twice");
             }
         }
     }
 
     #[test]
-    fn preview_busy_declines_and_second_retract_never_replaces_pending_card() {
+    fn story21_6_attached_preview_busy_declines_and_second_retract_never_replaces_item() {
         for busy in [false, true] {
             let mut state = TuiState::new(80, 24);
             let mut requests = AttachedTeamRequests::default();
             let (tx, mut rx) = mpsc::unbounded_channel();
             preview(&mut state, &mut requests, true, busy, &tx);
             if busy {
-                assert!(state.pending_team_retract.is_none());
+                assert!(!crate::adapters::tui::decision_queue::team_retract_pending(
+                    &state
+                ));
                 assert!(matches!(
                     rx.try_recv().unwrap(),
-                    ClientFrame::TeamRetractDecision { confirm: false, .. }
+                    ClientFrame::TeamRetractDecision { request, confirm: false } if request == "retract"
                 ));
                 assert!(
                     state.feedback_blocks["team-retract"]
                         .message
                         .starts_with("Another confirmation")
                 );
+                assert!(rx.try_recv().is_err());
             } else {
                 submit(
                     &mut state,
@@ -10796,7 +10850,11 @@ mod attached_parity_tests {
                     &tx,
                 );
                 assert!(rx.try_recv().is_err());
-                assert_eq!(state.pending_team_retract.as_ref().unwrap().item_id, "ri_a");
+                assert!(matches!(
+                    &state.decisions.items().next().unwrap().subject,
+                    crate::adapters::tui::decision_queue::DecisionSubject::TeamRetract(payload)
+                        if matches!(&payload.target, crate::adapters::tui::decision_queue::RetractTarget::Item { item, .. } if item == "ri_a")
+                ));
             }
         }
         let mut state = TuiState::new(80, 24);

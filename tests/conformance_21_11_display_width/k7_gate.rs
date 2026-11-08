@@ -103,37 +103,13 @@ const SITES: &[Site] = &[
         ]
     ),
     site!("widgets/ask_user_question.rs", ["question_lines"]),
-    site!(
-        "widgets/fork_confirm.rs",
-        ["render_fork_confirmation_lines"]
-    ),
-    site!(
-        "widgets/rewind_confirm.rs",
-        [
-            "panel_top_row",
-            "panel_row",
-            "render_rewind_confirmation_lines"
-        ]
-    ),
-    site!(
-        "widgets/consolidation_card.rs",
-        ["render_consolidation_card_lines"]
-    ),
-    site!("widgets/forget_card.rs", ["render_forget_card_lines"]),
-    site!("widgets/peer_add_prompt.rs", ["render_peer_add_lines"]),
-    site!(
-        "widgets/team_retract_prompt.rs",
-        ["render_team_retract_lines", "wrap_chars"]
-    ),
-    site!(
-        "widgets/apply_card.rs",
-        [
-            "fits",
-            "wrap_words",
-            "wrapped_file_chunks",
-            "push_apply_body"
-        ]
-    ),
+    site!("widgets/fork_confirm.rs", ["lines"]),
+    site!("widgets/rewind_confirm.rs", ["lines"]),
+    site!("widgets/consolidation_card.rs", ["lines"]),
+    site!("widgets/forget_card.rs", ["lines"]),
+    site!("widgets/peer_add_prompt.rs", ["lines"]),
+    site!("widgets/team_retract_prompt.rs", ["lines"]),
+    site!("widgets/apply_card.rs", ["lines"]),
     site!(
         "widgets/skill_trust_prompt.rs",
         ["trust_lines", "inspect_lines"]

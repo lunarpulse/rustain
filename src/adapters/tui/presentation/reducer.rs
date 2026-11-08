@@ -6,8 +6,7 @@ use crate::adapters::tui::decision_queue::{DecisionKey, DecisionKind};
 use crate::adapters::tui::notification_log::NotificationLogState;
 use crate::adapters::tui::quit_confirm::{QuitConfirmState, QuitFacts, QuitRequest};
 use crate::adapters::tui::state::{LoginFrameIntent, TuiState};
-use crate::domain::models::visual::ConfirmationType;
-use crate::domain::models::{FocusState, OverlayType};
+use crate::domain::models::FocusState;
 
 /// Every host, including a read-only attachment, starts at the shared composer.
 pub fn initial_base() -> FocusState {
@@ -15,7 +14,7 @@ pub fn initial_base() -> FocusState {
 }
 
 /// Runtime effects may change an empty stack's base, never a retained caller.
-/// Sidebar and legacy confirmations remain base slots until their owner stories.
+/// Sidebar focus remains a base slot.
 pub fn set_base(state: &mut TuiState, focus: FocusState) {
     if may_set_base(state, &focus) && state.focus != focus {
         state.focus = focus;
@@ -44,154 +43,8 @@ pub fn update_sidebar_selection(state: &mut TuiState, selected: usize) {
     }
 }
 
-fn may_set_base(state: &TuiState, focus: &FocusState) -> bool {
+fn may_set_base(state: &TuiState, _focus: &FocusState) -> bool {
     state.modal_stack.is_empty()
-        && (matches!(focus, FocusState::Overlay(_)) || !current_confirmation_pending(state))
-}
-
-fn higher_owner(state: &TuiState) -> bool {
-    !state.modal_stack.is_empty()
-        || state.pending_leader.is_some()
-        || state.autocomplete.is_open()
-        || state.reverse_search.is_open()
-}
-
-fn confirmation_pending(state: &TuiState, kind: &ConfirmationType) -> bool {
-    match kind {
-        ConfirmationType::Fork => state.pending_fork_index.is_some(),
-        ConfirmationType::Rewind => state.pending_rewind_index.is_some(),
-        ConfirmationType::ExportOverwrite(path) => state
-            .pending_export
-            .as_ref()
-            .is_some_and(|(pending, _)| pending == path),
-        ConfirmationType::ArtifactApply => state.pending_artifact_card.is_some(),
-        ConfirmationType::PeerAdd => state.pending_peer_add.is_some(),
-        ConfirmationType::TeamRetract => state.pending_team_retract.is_some(),
-    }
-}
-
-fn current_confirmation_pending(state: &TuiState) -> bool {
-    matches!(
-        &state.focus,
-        FocusState::Overlay(OverlayType::Confirmation(kind)) if confirmation_pending(state, kind)
-    )
-}
-
-/// The real payload/queue remains pending beneath any higher keyboard owner.
-pub fn raise_confirmation(state: &mut TuiState, confirmation: ConfirmationType) {
-    if !confirmation_pending(state, &confirmation) {
-        return;
-    }
-    if higher_owner(state) {
-        state.modal_stack.pending_confirmation = Some(confirmation);
-    } else {
-        set_base(
-            state,
-            FocusState::Overlay(OverlayType::Confirmation(confirmation)),
-        );
-    }
-}
-
-fn pending_confirmation(state: &TuiState) -> Option<ConfirmationType> {
-    if state.pending_artifact_card.is_some() {
-        Some(ConfirmationType::ArtifactApply)
-    } else if state.pending_peer_add.is_some() {
-        Some(ConfirmationType::PeerAdd)
-    } else if state.pending_team_retract.is_some() {
-        Some(ConfirmationType::TeamRetract)
-    } else if state.pending_fork_index.is_some() {
-        Some(ConfirmationType::Fork)
-    } else if state.pending_rewind_index.is_some() {
-        Some(ConfirmationType::Rewind)
-    } else {
-        // A different deferred kind may replace the intent, never the live payload.
-        // Legacy focus owns a separate target, so recovery then needs this copy.
-        state
-            .pending_export
-            .as_ref()
-            .map(|(path, _)| ConfirmationType::ExportOverwrite(path.clone()))
-    }
-}
-
-fn settle_legacy_inner(state: &mut TuiState) -> bool {
-    if state
-        .modal_stack
-        .pending_confirmation
-        .as_ref()
-        .is_some_and(|kind| !confirmation_pending(state, kind))
-    {
-        state.modal_stack.pending_confirmation = None;
-    }
-    if higher_owner(state) || current_confirmation_pending(state) {
-        return false;
-    }
-    let next = state
-        .modal_stack
-        .pending_confirmation
-        .take()
-        .or_else(|| pending_confirmation(state));
-    if let Some(kind) = next {
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(kind));
-        return true;
-    }
-    let mut changed = false;
-    if matches!(state.focus, FocusState::Overlay(_)) {
-        state.focus = if state.recipient_surface.is_some() {
-            FocusState::Chat
-        } else {
-            FocusState::Input
-        };
-        changed = true;
-    }
-    changed
-}
-
-/// Run after real keys, async resolutions and frame ownership transitions.
-pub fn settle_legacy(state: &mut TuiState) {
-    if settle_legacy_inner(state) {
-        refresh_hint(state);
-    }
-}
-
-pub fn restore_focus_after_modal(state: &mut TuiState) {
-    let focus = if state.recipient_surface.is_some() {
-        FocusState::Chat
-    } else {
-        FocusState::Input
-    };
-    set_base(state, focus);
-    settle_legacy(state);
-}
-
-/// The shared composer fact is authoritative in both hosts.
-pub fn take_chat_focus_for_card(state: &mut TuiState, can_answer: bool) -> bool {
-    let moves = can_answer
-        && state.input_buffer.is_empty()
-        && state.focus == FocusState::Input
-        && !crate::adapters::tui::decision_queue::card_focus_blocked(state);
-    if moves {
-        state
-            .card_focus_borrowed_from
-            .get_or_insert(FocusState::Input);
-        set_base(state, FocusState::Chat);
-    }
-    moves
-}
-
-/// Explicit user navigation relinquishes a borrow; closing the final card returns it.
-pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
-    if state.card_focus_borrowed_from.is_none() {
-        return;
-    }
-    if state.focus != FocusState::Chat
-        || crate::adapters::tui::decision_queue::card_focus_blocked(state)
-        || state.recipient_surface.is_some()
-    {
-        state.card_focus_borrowed_from = None;
-    } else if !card_pending {
-        let previous = state.card_focus_borrowed_from.take().unwrap();
-        set_base(state, previous);
-    }
 }
 
 /// Reopen truncates to the existing frame and retains its untouched payload.
@@ -853,7 +706,6 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
 }
 
 fn transition(state: &mut TuiState) {
-    settle_legacy_inner(state);
     refresh_hint(state);
 }
 
@@ -878,7 +730,7 @@ mod tests {
     use crate::adapters::tui::notifications::{self, NoticeSeverity, NoticeSource};
     use crate::adapters::tui::presentation::consistent;
     use crate::adapters::tui::quit_confirm::{self, QuitHost, QuitKeyOutcome};
-    use crate::domain::models::{FocusState, OverlayType};
+    use crate::domain::models::FocusState;
 
     #[test]
     fn story21_4_pane_opener_enters_the_stack() {

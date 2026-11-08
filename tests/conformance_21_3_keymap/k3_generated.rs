@@ -22,7 +22,6 @@ use rustain::adapters::tui::app::status_tail;
 use rustain::adapters::tui::keymap::render::StatusTail;
 use rustain::adapters::tui::keymap::render_tips::tip;
 use rustain::adapters::tui::keymap::{Context, Host};
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use unicode_width::UnicodeWidthStr;
 
 use super::k4_overlays::cross_search_state;
@@ -194,7 +193,6 @@ fn menu_keeps_the_relative_order_of_21_1_and_21_2() {
 /// omit it whole when status facts need the width (status_bar witnesses).
 #[test]
 fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
-    let overlay = |o: OverlayType| FocusState::Overlay(o);
     let foci = [
         ("Input", FocusState::Input),
         ("Chat", FocusState::Chat),
@@ -214,10 +212,7 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         ("BookmarkList", FocusState::Chat),
         ("UsagePanel", FocusState::Input),
         ("WaveOverlay", FocusState::Chat),
-        (
-            "Confirmation",
-            overlay(OverlayType::Confirmation(ConfirmationType::Fork)),
-        ),
+        ("Confirmation", FocusState::Input),
         ("Login", FocusState::Input),
     ];
     let (mut opened, mut blocked) = (0, 0);
@@ -226,6 +221,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         state.focus = focus.clone();
         if name == "CrossSearch" {
             state = cross_search_state();
+        } else if name == "Confirmation" {
+            rustain::adapters::tui::decision_queue::raise_fork(&mut state, "c1", 0, "preview", 0);
         } else if name == "Help" {
             press(&mut state, Key::Char('?'));
         } else if name == "CommandPalette" {
@@ -249,7 +246,16 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
         }
         let cross_frame = (name == "CrossSearch").then(|| state.modal_stack.top().unwrap().clone());
         let offered = status_tail(&state) == StatusTail::Menu;
-        press(&mut state, Key::Ctrl('x'));
+        if name == "Confirmation" {
+            crate::conformance_21_6_decision_queue::raisers::press(&mut state, Key::Ctrl('x'));
+            assert!(
+                state
+                    .decisions
+                    .holds(rustain::adapters::tui::decision_queue::DecisionKind::Fork)
+            );
+        } else {
+            press(&mut state, Key::Ctrl('x'));
+        }
         if let Some(frame) = cross_frame {
             assert_eq!(state.focus, focus);
             assert_eq!(state.modal_stack.top(), Some(&frame));
@@ -263,8 +269,8 @@ fn status_tail_menu_offered_iff_ctrl_x_opens_leader() {
     }
     assert_eq!(
         (opened, blocked),
-        (13, 1),
-        "Input, Chat, ReverseSearch popup and migrated frames open; only Confirmation blocks"
+        (14, 0),
+        "Input, Chat, ReverseSearch popup and decision frames open the leader"
     );
 }
 

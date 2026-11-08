@@ -59,8 +59,7 @@ pub(crate) fn local_facts(
     facts.pending_images = state.pending_images.len() + large_images;
     facts.peer_compose = state.pinned_peer_compose.is_some()
         || crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
-    facts.pending_decisions = usize::from(state.pending_consolidation_card.is_some())
-        + (state.decisions.undecided() - large_images)
+    facts.pending_decisions = (state.decisions.undecided() - large_images)
         - settled_plan_cards(state, conversation, tabs);
     facts
 }
@@ -711,6 +710,68 @@ mod tests {
             assert_eq!(pending(&h), 2, "{kind:?}: two");
             assert_eq!(h.state.decisions.count(kind), 2, "{kind:?}: two queued");
             assert_eq!(ask(&mut h), QuitRequest::Confirming, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn story21_6_each_6d_kind_counts_once_and_a_stale_item_does_not_count() {
+        use crate::adapters::tui::notification_log::LogFacts;
+
+        for kind in [
+            DecisionKind::Consolidation,
+            DecisionKind::Forget,
+            DecisionKind::ArtifactApply,
+            DecisionKind::ArtifactResolve,
+            DecisionKind::PeerAdd,
+            DecisionKind::TeamRetract,
+            DecisionKind::Fork,
+            DecisionKind::Rewind,
+            DecisionKind::ExportOverwrite,
+        ] {
+            let mut h = host();
+            decision_queue::raise(
+                &mut h.state,
+                DecisionDraft::new(kind, "pending").conversation("closed"),
+                Arrival::Requested,
+            );
+            assert_eq!(pending(&h), 1, "{kind:?}: one live decision");
+            assert_eq!(ask(&mut h), QuitRequest::Confirming, "{kind:?}");
+
+            let mut stale = host();
+            decision_queue::raise(
+                &mut stale.state,
+                DecisionDraft::new(kind, "pending").conversation("closed"),
+                Arrival::Requested,
+            );
+            decision_queue::prune_closed(
+                &mut stale.state,
+                &LogFacts {
+                    active_conversation_id: Some("open".into()),
+                    titles: vec![("open".into(), "open".into())],
+                    ..Default::default()
+                },
+            );
+            assert!(
+                stale.state.decisions.items().any(|item| item.is_stale()),
+                "{kind:?}: shown item is stale"
+            );
+            assert_eq!(pending(&stale), 0, "{kind:?}: closed target");
+            assert_eq!(ask(&mut stale), QuitRequest::ExitNow, "{kind:?}");
+            decision_queue::raise(
+                &mut stale.state,
+                DecisionDraft::new(kind, "live").conversation("open"),
+                Arrival::Requested,
+            );
+            assert_eq!(
+                pending(&stale),
+                1,
+                "{kind:?}: only the live neighbour counts"
+            );
+            assert_eq!(
+                ask(&mut stale),
+                QuitRequest::Confirming,
+                "{kind:?}: live neighbour"
+            );
         }
     }
 

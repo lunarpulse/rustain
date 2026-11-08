@@ -1,94 +1,28 @@
 use ratatui::prelude::*;
 
-use super::plan_card::wrap_description;
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
+use crate::adapters::tui::decision_queue::ForkPayload;
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 
-/// Render a fork confirmation card as styled lines.
-///
-/// Uses double border `╔═╗` with fork prompt and `[y] Fork  [n] Cancel`.
-/// Grapheme-safe, cell-bounded truncation for the message preview.
-pub fn render_fork_confirmation_lines(
-    message_preview: &str,
-    message_index: usize,
-    width: u16,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
-    let w = width as usize;
-    let inner_width = w.saturating_sub(4); // ║ + space + content + space + ║
-
-    let mut lines = Vec::new();
-
-    // Top border: ╔═══════╗
-    let top = format!("╔{}╗", "═".repeat(w.saturating_sub(2)));
-    lines.push(Line::from(Span::styled(
-        top,
-        Style::default()
-            .fg(theme.colors.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    // Title line
-    let title = "Fork conversation at this message?";
-    let padded_title = format!("║ {} ║", geom::pad_right(title, inner_width));
-    lines.push(Line::from(Span::styled(
-        padded_title,
-        Style::default()
-            .fg(theme.colors.fg_primary)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    // Message preview line (cell-bounded, with message index): the label's
-    // own cells come out of the row budget, the marker is inside the preview's.
-    let label_head = format!("Message {}: \"", message_index + 1);
-    let preview_budget = 50.min(inner_width.saturating_sub(geom::cells(&label_head) + 1));
-    let preview = geom::ellipsize(message_preview, preview_budget, "…");
-    let preview_label = format!("{label_head}{preview}\"");
-    let padded_preview = format!("║ {} ║", geom::pad_right(&preview_label, inner_width));
-    lines.push(Line::from(Span::styled(
-        padded_preview,
-        Style::default().fg(theme.colors.fg_secondary),
-    )));
-
-    // Info line
-    let info = "A new tab will be created with messages up to this point.";
-    // Wrap if needed
-    let info_chunks = wrap_description(info, inner_width);
-    for chunk in info_chunks {
-        let padded = format!("║ {} ║", geom::pad_right(&chunk, inner_width));
-        lines.push(Line::from(Span::styled(
-            padded,
+/// Build the fork confirmation body without the frame or action rail.
+pub fn lines(payload: &ForkPayload, theme: &Theme) -> Vec<Line<'static>> {
+    let preview = geom::ellipsize(&payload.preview, 50, "…");
+    vec![
+        Line::from(Span::styled(
+            "Fork conversation at this message?",
+            Style::default()
+                .fg(theme.colors.fg_primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("Message {}: \"{}\"", payload.message_index + 1, preview),
+            Style::default().fg(theme.colors.fg_secondary),
+        )),
+        Line::from(Span::styled(
+            "A new tab will be created with messages up to this point.",
             Style::default().fg(theme.colors.fg_muted),
-        )));
-    }
-
-    // Action line
-    let actions = format!(
-        "{} Fork  {} Cancel",
-        rail(Context::Confirm, CardCmd::Yes),
-        rail(Context::Confirm, CardCmd::No)
-    );
-    let padded_actions = format!("║ {} ║", geom::pad_right(&actions, inner_width));
-    lines.push(Line::from(Span::styled(
-        padded_actions,
-        Style::default()
-            .fg(theme.colors.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    // Bottom border: ╚═══════╝
-    let bottom = format!("╚{}╝", "═".repeat(w.saturating_sub(2)));
-    lines.push(Line::from(Span::styled(
-        bottom,
-        Style::default()
-            .fg(theme.colors.accent)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    lines
+        )),
+    ]
 }
 
 #[cfg(test)]
@@ -96,45 +30,31 @@ mod tests {
     use super::*;
     use crate::adapters::tui::theme::Theme;
 
+    fn payload(preview: &str, message_index: usize) -> ForkPayload {
+        ForkPayload {
+            conversation_id: "c1".into(),
+            message_index,
+            target_hash: 0,
+            preview: preview.into(),
+        }
+    }
+
     #[test]
-    fn test_fork_confirmation_renders_double_border() {
-        let theme = Theme::dark();
-        let lines = render_fork_confirmation_lines("Hello world", 0, 60, &theme);
-
-        // Should have at minimum: top border, title, preview, info, actions, bottom border
-        assert!(lines.len() >= 5);
-
-        let first: String = lines[0]
-            .spans
+    fn fork_body_has_no_border_or_action_rail() {
+        let text: String = lines(&payload("Hello world", 0), &Theme::dark())
             .iter()
-            .map(|s| s.content.to_string())
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
             .collect();
-        assert!(
-            first.starts_with('╔'),
-            "Expected '╔' at start, got: {}",
-            first
-        );
-        assert!(first.ends_with('╗'), "Expected '╗' at end, got: {}", first);
-
-        let last: String = lines
-            .last()
-            .unwrap()
-            .spans
-            .iter()
-            .map(|s| s.content.to_string())
-            .collect();
-        assert!(
-            last.starts_with('╚'),
-            "Expected '╚' at start, got: {}",
-            last
-        );
-        assert!(last.ends_with('╝'), "Expected '╝' at end, got: {}", last);
+        assert!(text.contains("Fork conversation at this message?"));
+        assert!(!text.contains('║'));
+        assert!(!text.contains("[y]"));
     }
 
     #[test]
     fn test_fork_confirmation_shows_message_index() {
         let theme = Theme::dark();
-        let lines = render_fork_confirmation_lines("Some message content", 2, 60, &theme);
+        let lines = lines(&payload("Some message content", 2), &theme);
         let all_text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter())
@@ -148,22 +68,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fork_confirmation_shows_actions() {
-        let theme = Theme::dark();
-        let lines = render_fork_confirmation_lines("msg", 0, 60, &theme);
-        let all_text: String = lines
+    fn fork_body_leaves_actions_to_frame() {
+        let text: String = lines(&payload("msg", 0), &Theme::dark())
             .iter()
-            .flat_map(|l| l.spans.iter())
-            .map(|s| s.content.to_string())
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
             .collect();
-        assert!(
-            all_text.contains("[y] Fork"),
-            "Expected '[y] Fork' in output"
-        );
-        assert!(
-            all_text.contains("[n] Cancel"),
-            "Expected '[n] Cancel' in output"
-        );
+        assert!(!text.contains("[y] Fork"));
+        assert!(!text.contains("[n] Cancel"));
     }
 
     #[test]
@@ -171,7 +83,7 @@ mod tests {
         // 200-char ASCII string
         let long_msg: String = "a".repeat(200);
         let theme = Theme::dark();
-        let lines = render_fork_confirmation_lines(&long_msg, 0, 60, &theme);
+        let lines = lines(&payload(&long_msg, 0), &theme);
         // Should not panic and should produce a valid output
         assert!(!lines.is_empty());
     }
@@ -182,7 +94,7 @@ mod tests {
         let utf8_msg: String = "中文字符测试消息".repeat(10); // 80 chars
         let theme = Theme::dark();
         // This must not panic
-        let lines = render_fork_confirmation_lines(&utf8_msg, 0, 60, &theme);
+        let lines = lines(&payload(&utf8_msg, 0), &theme);
         assert!(!lines.is_empty());
         // Verify all rendered content is valid UTF-8 (no byte slicing panics)
         for line in &lines {

@@ -331,16 +331,15 @@ fn test_density_mode_variants() {
 #[test]
 fn test_focus_state_variants() {
     use rustain::domain::models::FocusState;
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType, PanelType};
+    use rustain::domain::models::visual::PanelType;
 
-    // 4 variants: Input, Chat, Sidebar, Overlay
+    // Base focus has three variants; decisions are separate presentation frames.
     let input = FocusState::Input;
     let chat = FocusState::Chat;
     let sidebar = FocusState::Sidebar {
         panel: PanelType::History,
         selected: 0,
     };
-    let overlay = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
 
     // Chat is a unit variant (scroll state owned by TuiState)
     assert_eq!(chat, FocusState::Chat);
@@ -348,20 +347,12 @@ fn test_focus_state_variants() {
     // All variants are distinct
     assert_ne!(input, chat);
     assert_ne!(input, sidebar);
-    assert_ne!(input, overlay);
+    assert_ne!(chat, sidebar);
 }
 
 // Covers: FR22 (vim keybindings)
 #[test]
-fn test_overlay_type_variants() {
-    use rustain::domain::models::visual::{ConfirmationType, OverlayType};
-
-    // Confirmation is the sole legacy overlay; all other surfaces own frames.
-    let variants = [OverlayType::Confirmation(ConfirmationType::Fork)];
-    assert_eq!(variants.len(), 1);
-    for overlay in variants {
-        let OverlayType::Confirmation(_) = overlay;
-    }
+fn test_presentation_surface_contexts() {
     use rustain::adapters::tui::keymap::Context;
     use rustain::adapters::tui::presentation::Surface;
     assert_ne!(Surface::Help, Surface::CommandPalette);

@@ -38,8 +38,10 @@ use crate::adapters::tui::widgets::permission_prompt::{
     ExactInput, FrameRows, PermissionCard, card_rows, review_rows,
 };
 use crate::adapters::tui::widgets::{
-    ModalPart, agent_inspector, ask_user_question, cancel_plan_confirm_card, delegation_card,
-    fit_modal, plan_approval, plan_deviation_card, skill_trust_prompt, task_skip_cascade_card,
+    ModalPart, agent_inspector, apply_card, ask_user_question, cancel_plan_confirm_card,
+    consolidation_card, delegation_card, fit_modal, forget_card, fork_confirm, peer_add_prompt,
+    plan_approval, plan_deviation_card, rewind_confirm, skill_trust_prompt, task_skip_cascade_card,
+    team_retract_prompt,
 };
 use crate::domain::models::Plan;
 use crate::domain::services::approval_presentation;
@@ -173,17 +175,20 @@ pub(crate) struct PreparedBody {
     width: usize,
     /// Identity of the text the rows were wrapped from (address, length, mode).
     signature: (usize, usize, usize),
-    colors: [Color; 5],
+    colors: [Color; 7],
     rows: Vec<Line<'static>>,
+    forget_rows: Vec<usize>,
 }
 
-fn body_colors(theme: &Theme) -> [Color; 5] {
+fn body_colors(theme: &Theme) -> [Color; 7] {
     [
         theme.colors.accent,
         theme.colors.fg_primary,
         theme.colors.fg_secondary,
         theme.colors.fg_muted,
         theme.colors.tool_status_error,
+        theme.colors.tool_status_success,
+        theme.colors.warning,
     ]
 }
 
@@ -195,6 +200,10 @@ fn is_heavy(item: &DecisionItem) -> bool {
             | DecisionSubject::SkillTrust(_)
             | DecisionSubject::PlanApproval(_)
             | DecisionSubject::PlanCard(_)
+            | DecisionSubject::Artifact(_)
+            | DecisionSubject::Rewind(_)
+            | DecisionSubject::Forget(_)
+            | DecisionSubject::Consolidation(_)
     )
 }
 
@@ -215,10 +224,69 @@ fn signature(item: &DecisionItem, state: &TuiState) -> (usize, usize, usize) {
         }
         DecisionSubject::PlanApproval(payload) => of(&payload.contents, 3),
         DecisionSubject::PlanCard(payload) => of(&payload.plan_snapshot.title, 4),
+        DecisionSubject::Artifact(card) => {
+            (card.as_ref() as *const _ as usize, card.files.len(), 5)
+        }
+        DecisionSubject::Rewind(payload) => (
+            payload.as_ref() as *const _ as usize,
+            payload.preview.files_to_revert.len(),
+            6,
+        ),
+        DecisionSubject::Forget(card) => (
+            card.as_ref() as *const _ as usize,
+            card.candidates.len(),
+            card.focused_index,
+        ),
+        DecisionSubject::Consolidation(payload) => (
+            payload.as_ref() as *const _ as usize,
+            payload.card.proposals.len(),
+            8,
+        ),
         _ => (0, 0, 0),
     }
 }
 
+/// Every span of `lines` through the tool-text sanitizer: a body built from model-, peer-
+/// or file-originated strings paints no terminal control or bidi override (the effect and
+/// `c` Copy keep the original bytes). Whitespace and alignment are kept.
+fn clean_lines(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    lines
+        .into_iter()
+        .map(|mut line| {
+            for span in &mut line.spans {
+                if let std::borrow::Cow::Owned(cleaned) = sanitize_tool_text_block(&span.content) {
+                    span.content = cleaned.into();
+                }
+            }
+            line
+        })
+        .collect()
+}
+
+/// The export overwrite card body: the target and what an overwrite writes.
+fn export_lines(
+    payload: &decision_queue::ExportOverwritePayload,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let strong = Style::default()
+        .fg(theme.colors.fg_primary)
+        .add_modifier(Modifier::BOLD);
+    let muted = Style::default().fg(theme.colors.fg_secondary);
+    vec![
+        Line::from(Span::styled("Overwrite the existing export?", strong)),
+        Line::from(Span::styled(
+            format!("File: {}", payload.target.display()),
+            muted,
+        )),
+        Line::from(Span::styled(
+            format!(
+                "The file is replaced by this conversation ({} bytes).",
+                payload.content.len()
+            ),
+            muted,
+        )),
+    ]
+}
 fn clean(text: &str) -> String {
     sanitize_tool_text_block(text).into_owned()
 }
@@ -329,6 +397,18 @@ fn wrap_line(line: &Line<'static>, width: usize, out: &mut Vec<Line<'static>>) {
     }
 }
 
+/// The sanitized pre-cell body rows of `item` at `width` (what the painter paints, before
+/// any cell exists): the K8 sanitation witness.
+#[doc(hidden)]
+#[must_use]
+pub fn body_lines_for_test(
+    item: &DecisionItem,
+    state: &TuiState,
+    width: usize,
+) -> Vec<Line<'static>> {
+    build_body(item, state, &state.theme, width)
+}
+
 /// The unscrolled body of a live, non-permission item at `width`.
 fn build_body(
     item: &DecisionItem,
@@ -416,6 +496,33 @@ fn build_body(
             agent_inspector::kill_lines(&clean_line(&payload.label), theme),
             width,
         ),
+        DecisionSubject::Consolidation(payload) => wrap_lines(
+            clean_lines(consolidation_card::lines(&payload.card, theme)),
+            width,
+        ),
+        DecisionSubject::Forget(card) => {
+            wrap_lines(clean_lines(forget_card::lines(card, theme)), width)
+        }
+        DecisionSubject::Artifact(card) => {
+            wrap_lines(clean_lines(apply_card::lines(card, theme)), width)
+        }
+        DecisionSubject::PeerAdd(pending) => {
+            wrap_lines(clean_lines(peer_add_prompt::lines(pending, theme)), width)
+        }
+        DecisionSubject::TeamRetract(payload) => wrap_lines(
+            clean_lines(team_retract_prompt::lines(payload, theme)),
+            width,
+        ),
+        DecisionSubject::Fork(payload) => {
+            wrap_lines(clean_lines(fork_confirm::lines(payload, theme)), width)
+        }
+        DecisionSubject::Rewind(payload) => wrap_lines(
+            clean_lines(rewind_confirm::lines(&payload.preview, theme)),
+            width,
+        ),
+        DecisionSubject::ExportOverwrite(payload) => {
+            wrap_lines(clean_lines(export_lines(payload, theme)), width)
+        }
         _ => wrapped(&body_text(item), normal, width),
     }
 }
@@ -440,12 +547,26 @@ fn body_all(
     {
         return Arc::clone(hit);
     }
+    let mut forget_rows = Vec::new();
+    let rows = if let DecisionSubject::Forget(card) = &item.subject {
+        let mut rows = Vec::new();
+        for (index, line) in forget_card::lines(card, theme).into_iter().enumerate() {
+            if index >= 2 {
+                forget_rows.push(rows.len());
+            }
+            rows.extend(wrap_lines(clean_lines(vec![line]), width));
+        }
+        rows
+    } else {
+        build_body(item, state, theme, width)
+    };
     let prepared = Arc::new(PreparedBody {
         key,
         width,
         signature,
         colors,
-        rows: build_body(item, state, theme, width),
+        rows,
+        forget_rows,
     });
     if heavy {
         *state.decisions.body_layout.borrow_mut() = Some(Arc::clone(&prepared));
@@ -583,7 +704,14 @@ fn parts(
         slice_rows(&wrapped(&text, normal, width), queue.scroll(), visible)
     } else {
         let all = body_all(item, state, theme, width);
-        slice_rows(&all.rows, queue.scroll(), visible)
+        let focus = forget_focus_row(item, state, width);
+        let scroll = focus.map_or(queue.scroll(), |row| {
+            queue
+                .scroll()
+                .min(row)
+                .max(row.saturating_sub(visible.saturating_sub(1)))
+        });
+        slice_rows(&all.rows, scroll, visible)
     };
     let field = match (&item.validity, &item.subject) {
         (Validity::Live, DecisionSubject::Question(payload)) => {
@@ -622,6 +750,21 @@ pub(crate) fn body_rows(item: &DecisionItem, state: &TuiState) -> usize {
         (Validity::Stale(_), _) => wrapped(&body_text(item), Style::default(), width).len(),
         _ => body_all(item, state, theme, width).rows.len(),
     }
+}
+
+/// The first wrapped row of the focused memory, using the painter's prepared body.
+pub(crate) fn forget_focus_row(
+    item: &DecisionItem,
+    state: &TuiState,
+    width: usize,
+) -> Option<usize> {
+    let DecisionSubject::Forget(card) = &item.subject else {
+        return None;
+    };
+    body_all(item, state, &state.theme, width)
+        .forget_rows
+        .get(card.focused_index)
+        .copied()
 }
 
 /// The breadcrumb's source: the item's own summary, else its source identity.
@@ -698,9 +841,21 @@ pub fn render(
     if !header.is_empty() {
         layout.push(ModalPart::Notice(header));
     }
+    let selected = if matches!(item.validity, Validity::Live) && queue.feedback().is_none() {
+        forget_focus_row(item, state, inner_width).map_or((0, 0), |row| {
+            let scroll = queue
+                .scroll()
+                .min(row)
+                .max(row.saturating_sub(usize::from(area.height).saturating_sub(1)));
+            let relative = row - scroll;
+            (relative, relative + 1)
+        })
+    } else {
+        (0, 0)
+    };
     layout.push(ModalPart::Rows {
         lines: body,
-        selected: (0, 0),
+        selected,
     });
     layout.push(ModalPart::Footer(rail));
 
@@ -759,8 +914,184 @@ fn json_bytes(value: &serde_json::Value, limit: usize) -> usize {
     total
 }
 
+/// Count the exact plain-line representation without allocating it.
+struct SourceCounter {
+    bytes: usize,
+    lines: usize,
+}
+
+impl std::fmt::Write for SourceCounter {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        self.bytes = self.bytes.saturating_add(text.len());
+        Ok(())
+    }
+}
+
+impl SourceCounter {
+    fn line(&mut self, text: std::fmt::Arguments<'_>) {
+        use std::fmt::Write;
+        if self.lines > 0 {
+            self.bytes = self.bytes.saturating_add(1);
+        }
+        self.lines = self.lines.saturating_add(1);
+        let _ = self.write_fmt(text);
+    }
+}
+
+fn new_subject_source_len(item: &DecisionItem, limit: usize) -> Option<usize> {
+    use crate::adapters::tui::decision_queue::ArtifactCardMode;
+    use crate::domain::models::OperatorApplyFinding;
+    let mut count = SourceCounter { bytes: 0, lines: 0 };
+    match &item.subject {
+        DecisionSubject::Artifact(card) => {
+            let id = card.artifact.id.as_str();
+            let end = id
+                .char_indices()
+                .nth(crate::adapters::tui::widgets::artifacts_panel::ID_PREFIX_LEN)
+                .map_or(id.len(), |(index, _)| index);
+            let id = &id[..end];
+            match card.mode {
+                ArtifactCardMode::Apply => {
+                    count.line(format_args!("  [patch] Apply {id}"));
+                    if card.predates_apply_records {
+                        count.line(format_args!(
+                            "  Apply state unknown — this journal predates apply records;"
+                        ));
+                        count.line(format_args!("  patch may already be in the working tree."));
+                    }
+                    count.line(format_args!(
+                        "  Warning: interruption can leave this patch indeterminate."
+                    ));
+                    count.line(format_args!(
+                        "  Recover with: /artifact resolve <id> present|absent."
+                    ));
+                }
+                ArtifactCardMode::Resolve(finding) => {
+                    count.line(format_args!("  [patch] Record apply inspection {id}"));
+                    if matches!(finding, OperatorApplyFinding::Present) {
+                        count.line(format_args!("  Warning: this patch becomes applyable again, and applying a delta that is already in the tree can succeed silently."));
+                    }
+                    count.line(format_args!(
+                        "  No workspace write is performed by this decision."
+                    ));
+                    count.line(format_args!(
+                        "  You are reporting: this patch's changes {} in the working tree.",
+                        crate::adapters::tui::handlers::artifact_command::finding_clause(finding)
+                    ));
+                    count.line(format_args!("  This records what YOU report, not what the system observed. It did not look at the working tree, and it will not."));
+                }
+            }
+            count.line(format_args!("  Awaiting your decision."));
+            count.line(format_args!(
+                "  Producer: {}",
+                card.artifact.producer.as_str()
+            ));
+            count.line(format_args!("  Files:"));
+            for file in &card.files {
+                count.line(format_args!("  {file}"));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+            }
+            count.line(format_args!("  Workspace: {}", card.workspace.display()));
+        }
+        DecisionSubject::Rewind(payload) => {
+            for file in &payload.preview.files_to_revert {
+                count.line(format_args!("{}", file.display_path));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+            }
+        }
+        DecisionSubject::Fork(payload) => return Some(payload.preview.len()),
+        DecisionSubject::Forget(card) => {
+            let n = card.candidates.len();
+            count.line(format_args!(
+                "  [mem] Forget memory — {n} match{}",
+                if n == 1 { "" } else { "es" }
+            ));
+            count.line(format_args!(""));
+            for (key, entry, selected) in &card.candidates {
+                count.line(format_args!(
+                    "{}{}{}  [{key:016x}]",
+                    "  ",
+                    if *selected { "  [x] " } else { "  [ ] " },
+                    entry.summary
+                ));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+            }
+        }
+        DecisionSubject::Consolidation(payload) => {
+            let n = payload.card.proposals.len();
+            count.line(format_args!(
+                "  [mem] Consolidate memory — {n} proposal{}",
+                if n == 1 { "" } else { "s" }
+            ));
+            count.line(format_args!(""));
+            for (fact, selected) in &payload.card.proposals {
+                count.line(format_args!(
+                    "{}## {} — {}",
+                    if *selected { "  [x] " } else { "  [ ] " },
+                    fact.category,
+                    fact.fact
+                ));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+                if let Some(detail) = &fact.detail {
+                    for seg in detail.split('\n').filter(|seg| !seg.trim().is_empty()) {
+                        count.line(format_args!("        {seg}"));
+                        if count.bytes > limit {
+                            return Some(count.bytes);
+                        }
+                    }
+                }
+            }
+        }
+        DecisionSubject::PeerAdd(payload) => {
+            let yes = keymap::render::rail(Context::DecisionConfirm, CardCmd::Yes);
+            for raw in payload.card.lines() {
+                let text = if raw.starts_with("Awaiting your decision") {
+                    raw.match_indices("  ")
+                        .find(|(index, _)| raw[index + 2..].starts_with(&yes))
+                        .map_or(raw, |(index, _)| &raw[..index])
+                } else {
+                    raw
+                };
+                count.line(format_args!("  {text}"));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+            }
+        }
+        DecisionSubject::TeamRetract(payload) => {
+            for raw in payload.card.lines() {
+                count.line(format_args!("  {raw}"));
+                if count.bytes > limit {
+                    return Some(count.bytes);
+                }
+            }
+        }
+        DecisionSubject::ExportOverwrite(payload) => {
+            count.line(format_args!("Overwrite the existing export?"));
+            count.line(format_args!("File: {}", payload.target.display()));
+            count.line(format_args!(
+                "The file is replaced by this conversation ({} bytes).",
+                payload.content.len()
+            ));
+        }
+        _ => return None,
+    }
+    Some(count.bytes)
+}
+
 /// The bytes of the big strings an item carries (what a copy would have to build).
 fn source_len(item: &DecisionItem, limit: usize) -> usize {
+    if let Some(bytes) = new_subject_source_len(item, limit) {
+        return bytes;
+    }
     match &item.subject {
         DecisionSubject::Question(payload) => payload.question.len(),
         DecisionSubject::SkillTrust(payload) => payload
@@ -851,6 +1182,26 @@ fn source_text(item: &DecisionItem, theme: &Theme) -> String {
         DecisionSubject::AgentKill(payload) => {
             plain(&agent_inspector::kill_lines(&payload.label, theme))
         }
+        DecisionSubject::Consolidation(payload) => {
+            plain(&consolidation_card::lines(&payload.card, theme))
+        }
+        DecisionSubject::Forget(card) => plain(&forget_card::lines(card, theme)),
+        DecisionSubject::Artifact(card) => {
+            plain(&apply_card::lines_with_file_limit(card, theme, usize::MAX))
+        }
+        DecisionSubject::PeerAdd(pending) => plain(&peer_add_prompt::lines(pending, theme)),
+        DecisionSubject::TeamRetract(payload) => plain(&team_retract_prompt::lines(payload, theme)),
+        // The builders clip the preview and paths to a few cells for the card; Copy keeps
+        // the original bytes.
+        DecisionSubject::Fork(payload) => payload.preview.clone(),
+        DecisionSubject::Rewind(payload) => payload
+            .preview
+            .files_to_revert
+            .iter()
+            .map(|file| file.display_path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        DecisionSubject::ExportOverwrite(payload) => plain(&export_lines(payload, theme)),
         DecisionSubject::Text | DecisionSubject::LargeImage(_) | DecisionSubject::Delete(_) => {
             item.detail.clone()
         }
@@ -1254,5 +1605,189 @@ mod tests {
             clean_line(&format!(" {HOSTILE}\n\t{HOSTILE} ")),
             format!("{CLEANED} {CLEANED}")
         );
+    }
+
+    fn artifact_with_files(files: Vec<String>) -> decision_queue::PendingArtifactCard {
+        use crate::domain::models::{
+            AgentId, ArtifactId, ArtifactKind, CapabilityTokenId, ContentHash, EvidenceArtifact,
+            HostBinding, ProvenanceTag, ReviewStatus,
+        };
+        let hash = |c: char| ContentHash::parse_hex(&c.to_string().repeat(64)).unwrap();
+        decision_queue::PendingArtifactCard {
+            conversation_id: "c1".into(),
+            artifact: EvidenceArtifact {
+                id: ArtifactId::from(hash('a')),
+                kind: ArtifactKind::Patch,
+                producer: AgentId::parse("spoke-1").unwrap(),
+                content_hash: hash('0'),
+                authority: CapabilityTokenId::default(),
+                provenance: vec![ProvenanceTag::UserOriginated],
+                depends_on: Vec::new(),
+                review: Some(ReviewStatus::Pending),
+                host: HostBinding::new("host-A", "workspace"),
+            },
+            files,
+            workspace: "/workspace".into(),
+            predates_apply_records: false,
+            mode: decision_queue::ArtifactCardMode::Apply,
+        }
+    }
+
+    /// 6D-L1-05: repeated bounds reuse the body, and same-key replacement invalidates it.
+    #[test]
+    fn story21_6_file_bodies_reuse_and_invalidate() {
+        let mut state = TuiState::new(80, 24);
+        let mut card = artifact_with_files(vec!["first".into()]);
+        decision_queue::raise_artifact(&mut state, card.clone());
+        let item = state.decisions.items().next().unwrap();
+        let _ = body_rows(item, &state);
+        let first = state
+            .decisions
+            .body_layout
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let _ = body_rows(item, &state);
+        assert!(Arc::ptr_eq(
+            &first,
+            state.decisions.body_layout.borrow().as_ref().unwrap()
+        ));
+        card.files[0] = "replacement".into();
+        decision_queue::raise_artifact(&mut state, card);
+        let item = state.decisions.items().next().unwrap();
+        let _ = body_rows(item, &state);
+        let second = state
+            .decisions
+            .body_layout
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(
+            text_of(&second.rows)
+                .iter()
+                .any(|row| row.contains("replacement"))
+        );
+        let mut rewind = TuiState::new(80, 24);
+        let mut preview = decision_queue::RewindPreview {
+            target_message_index: 1,
+            messages_to_remove: 2,
+            files_to_revert: vec![decision_queue::RevertPreviewItem {
+                display_path: "first".into(),
+                conflict: false,
+            }],
+        };
+        decision_queue::raise_rewind(&mut rewind, "c1", preview.clone(), 0);
+        let item = rewind.decisions.items().next().unwrap();
+        let _ = body_rows(item, &rewind);
+        let first = rewind
+            .decisions
+            .body_layout
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let _ = body_rows(item, &rewind);
+        assert!(Arc::ptr_eq(
+            &first,
+            rewind.decisions.body_layout.borrow().as_ref().unwrap()
+        ));
+        preview.files_to_revert[0].display_path = "replacement".into();
+        decision_queue::raise_rewind(&mut rewind, "c1", preview, 0);
+        let item = rewind.decisions.items().next().unwrap();
+        let _ = body_rows(item, &rewind);
+        let second = rewind
+            .decisions
+            .body_layout
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(
+            text_of(&second.rows)
+                .iter()
+                .any(|row| row.contains("replacement"))
+        );
+    }
+
+    /// 6D-L1-05: a 50,000-file payload produces only bounded visible builder rows.
+    #[test]
+    fn story21_6_file_body_builders_bound_large_lists() {
+        let card = artifact_with_files((0..50_000).map(|i| format!("file-{i}")).collect());
+        let rows = apply_card::lines(&card, &Theme::dark());
+        assert!(rows.len() < 220);
+        assert!(
+            text_of(&rows)
+                .iter()
+                .any(|row| row.contains("… and 49800 more files"))
+        );
+        let preview = decision_queue::RewindPreview {
+            target_message_index: 1,
+            messages_to_remove: 2,
+            files_to_revert: card
+                .files
+                .iter()
+                .map(|file| decision_queue::RevertPreviewItem {
+                    display_path: file.clone(),
+                    conflict: false,
+                })
+                .collect(),
+        };
+        let rows = rewind_confirm::lines(&preview, &Theme::dark());
+        assert!(rows.len() < 220);
+        assert!(
+            text_of(&rows)
+                .iter()
+                .any(|row| row.contains("… and 49800 more files"))
+        );
+    }
+
+    /// 6D-L1-05/07: Copy retains omitted file bytes and its preflight counts exactly.
+    #[test]
+    fn story21_6_artifact_copy_keeps_all_files_and_counts_exactly() {
+        let mut state = TuiState::new(80, 24);
+        let files = (0..205).map(|i| format!("file-{i}")).collect();
+        decision_queue::raise_artifact(&mut state, artifact_with_files(files));
+        let item = state.decisions.items().next().unwrap();
+        let CopySource::Text(text) = copy_source(item, &state) else {
+            panic!("copy")
+        };
+        assert!(text.contains("file-204"));
+        assert!(!text.contains("more files"));
+        assert_eq!(source_len(item, usize::MAX), text.len());
+    }
+
+    /// 6D-L1-07: preflight detects oversized file bodies before source_text can allocate.
+    #[test]
+    fn story21_6_file_copy_preflight_counts_before_building() {
+        let files = vec!["x".repeat(4096); COPY_MAX_BYTES / 4096 + 1];
+        let mut artifact = TuiState::new(80, 24);
+        decision_queue::raise_artifact(&mut artifact, artifact_with_files(files.clone()));
+        let item = artifact.decisions.items().next().unwrap();
+        assert!(source_len(item, COPY_MAX_BYTES) > COPY_MAX_BYTES);
+        assert_eq!(copy_source(item, &artifact), CopySource::TooLarge);
+        let mut rewind = TuiState::new(80, 24);
+        decision_queue::raise_rewind(
+            &mut rewind,
+            "c1",
+            decision_queue::RewindPreview {
+                target_message_index: 1,
+                messages_to_remove: 2,
+                files_to_revert: files
+                    .into_iter()
+                    .map(|display_path| decision_queue::RevertPreviewItem {
+                        display_path,
+                        conflict: false,
+                    })
+                    .collect(),
+            },
+            0,
+        );
+        let item = rewind.decisions.items().next().unwrap();
+        assert!(source_len(item, COPY_MAX_BYTES) > COPY_MAX_BYTES);
+        assert_eq!(copy_source(item, &rewind), CopySource::TooLarge);
     }
 }

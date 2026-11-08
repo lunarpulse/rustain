@@ -14,7 +14,7 @@
 //! Effectful work (the journal read, the export write) happens in the dispatch
 //! arm's shell and arrives here as data.
 
-use crate::adapters::tui::presentation::reducer;
+use crate::adapters::tui::decision_queue::{self, Responder, RetractTarget, TeamRetractPayload};
 use crate::adapters::tui::state::TuiState;
 use crate::adapters::tui::text_geometry as geom;
 use crate::domain::events::AppEvent;
@@ -1189,66 +1189,47 @@ pub fn show_team_retract(state: &mut TuiState, message: String) {
 /// The preview-ready handler (Story 19.16f `AC4(c)`): raise the decision
 /// card from the confirm-time read, or render the sentence that replaces it.
 ///
-/// The only production constructor of [`PendingTeamRetract`], and the only
-/// writer of `ConfirmationType::TeamRetract` focus. A card already awaiting an
-/// answer is never replaced by a newer read: the operator answers the card on
-/// screen, and the newer command's result says so.
+/// A card already awaiting an answer is never replaced by a newer read.
 pub fn open_team_retract_card(
     state: &mut TuiState,
     conversation_id: &str,
     preview: crate::domain::events::TeamRetractPreview,
 ) {
     use crate::domain::events::TeamRetractPreview;
-    use crate::domain::models::visual::{ConfirmationType, OverlayType};
 
     let card = match preview {
         TeamRetractPreview::Answer(message) => return show_team_retract(state, message),
         TeamRetractPreview::Card(card) => card,
     };
-    if state.pending_team_retract.is_some() {
+    if decision_queue::team_retract_pending(state) {
         return show_team_retract(
             state,
             "A retract is already awaiting your answer. Nothing was sent for this one.".to_owned(),
         );
     }
-    if matches!(
-        state.focus,
-        crate::domain::models::FocusState::Overlay(OverlayType::Confirmation(_))
-    ) {
+    if decision_queue::confirmation_pending(state) {
         return show_team_retract(
             state,
             "Another confirmation is already awaiting your answer. Nothing was sent for this one."
                 .to_owned(),
         );
     }
-    state.pending_team_retract = Some(crate::adapters::tui::state::PendingTeamRetract {
-        conversation_id: conversation_id.to_owned(),
-        peer: card.peer,
-        item_id: card.item_id,
-        task: card.task,
-        card: card.body,
-        armed: card.armed,
-        prior_focus: state.focus.clone(),
-    });
-    reducer::raise_confirmation(state, ConfirmationType::TeamRetract);
+    decision_queue::raise_team_retract(
+        state,
+        TeamRetractPayload {
+            conversation_id: conversation_id.to_owned(),
+            target: RetractTarget::Item {
+                peer: card.peer,
+                item: card.item_id,
+            },
+            task: card.task,
+            card: card.body,
+            armed: card.armed,
+            request: None,
+        },
+        Responder::Local,
+    );
     state.needs_redraw = true;
-}
-
-/// Resolve the retract card: take the slot, restore focus, and return it only
-/// when accepted **and armed** (Story 19.16f `AC4(b)`, `AC10(b)`).
-///
-/// Taking the slot is the double-press guard: a second `y` finds no slot, so
-/// it can never reach a second dispatch. The key path already refuses `y` on a
-/// disarmed card; this refuses it again at the one place a dispatch is
-/// decided.
-pub fn resolve_team_retract_card(
-    state: &mut TuiState,
-    accept: bool,
-) -> Option<crate::adapters::tui::state::PendingTeamRetract> {
-    let pending = state.pending_team_retract.take()?;
-    reducer::set_base(state, pending.prior_focus.clone());
-    state.needs_redraw = true;
-    (accept && pending.armed).then_some(pending)
 }
 
 #[cfg(test)]
@@ -2158,100 +2139,62 @@ mod tests {
     #[test]
     fn story21_4_retract_arrival_and_resolution_preserve_palette_and_base() {
         use crate::adapters::tui::app::handle_input;
-        use crate::adapters::tui::presentation::{Surface, reducer};
+        use crate::adapters::tui::presentation::Surface;
         use crate::domain::events::{
             DomainInputEvent, DomainKey, TeamRetractCard, TeamRetractPreview,
         };
-        use crate::domain::models::FocusState;
-        use crate::domain::models::visual::{ConfirmationType, OverlayType};
 
-        let preview = || {
-            TeamRetractPreview::Card(TeamRetractCard {
-                peer: "jun-dev".to_owned(),
-                item_id: "ri_x".to_owned(),
-                task: Some("task-x".to_owned()),
-                body: "retract the selected item".to_owned(),
-                armed: true,
-            })
-        };
         let mut state = TuiState::new(80, 24);
         handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::CtrlP));
         for c in ['m', 'o'] {
             handle_input(&mut state, &DomainInputEvent::KeyPress(c));
         }
         let frame = state.modal_stack.top().expect("palette opened").clone();
-        assert_eq!(frame.surface, Surface::CommandPalette);
-        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
         let base = state.focus.clone();
-
-        open_team_retract_card(&mut state, "conv", preview());
+        open_team_retract_card(
+            &mut state,
+            "conv",
+            TeamRetractPreview::Card(TeamRetractCard {
+                peer: "jun-dev".into(),
+                item_id: "ri_x".into(),
+                task: Some("task-x".into()),
+                body: "retract the selected item".into(),
+                armed: true,
+            }),
+        );
         let pending = state
-            .pending_team_retract
-            .as_ref()
-            .expect("real card retained");
+            .decisions
+            .items()
+            .find_map(|item| match &item.subject {
+                decision_queue::DecisionSubject::TeamRetract(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("retract retained");
         assert_eq!(pending.conversation_id, "conv");
-        assert_eq!(pending.peer, "jun-dev");
-        assert_eq!(pending.item_id, "ri_x");
+        assert_eq!(
+            pending.target,
+            RetractTarget::Item {
+                peer: "jun-dev".into(),
+                item: "ri_x".into()
+            }
+        );
         assert_eq!(pending.card, "retract the selected item");
         assert!(pending.armed);
         assert_eq!(state.modal_stack.top(), Some(&frame));
+        assert_eq!(frame.surface, Surface::CommandPalette);
         assert_eq!(state.command_palette.filter_text.as_str(), "mo");
-        assert_eq!(
-            state.focus, base,
-            "arrival cannot overwrite interrupted base"
-        );
-
-        let resolved = resolve_team_retract_card(&mut state, true).expect("armed dispatch");
-        assert_eq!(resolved.item_id, "ri_x");
-        assert!(state.pending_team_retract.is_none());
-        assert_eq!(state.modal_stack.top(), Some(&frame));
-        assert_eq!(state.command_palette.filter_text.as_str(), "mo");
-        assert_eq!(
-            state.focus, base,
-            "action cannot overwrite interrupted base"
-        );
-        reducer::back(&mut state);
-        assert!(state.modal_stack.is_empty());
         assert_eq!(state.focus, base);
-
-        let mut empty = TuiState::new(80, 24);
-        assert_eq!(empty.focus, FocusState::Input);
-        open_team_retract_card(&mut empty, "conv", preview());
-        assert_eq!(
-            empty.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract))
-        );
-        assert!(resolve_team_retract_card(&mut empty, true).is_some());
-        assert_eq!(empty.focus, FocusState::Input);
-        assert!(empty.pending_team_retract.is_none());
-
-        // A frame can cover a card that was already active. Its resolution
-        // must not write the saved Input focus through that frame either.
-        let mut covered = TuiState::new(80, 24);
-        open_team_retract_card(&mut covered, "conv", preview());
-        reducer::open(&mut covered, Surface::CommandPalette);
-        handle_input(&mut covered, &DomainInputEvent::KeyPress('m'));
-        let frame = covered.modal_stack.top().expect("covering palette").clone();
-        let interrupted = covered.focus.clone();
-        assert_ne!(interrupted, FocusState::Input);
-        assert!(resolve_team_retract_card(&mut covered, true).is_some());
-        assert!(covered.pending_team_retract.is_none());
-        assert_eq!(covered.modal_stack.top(), Some(&frame));
-        assert_eq!(covered.command_palette.filter_text.as_str(), "m");
-        assert_eq!(
-            covered.focus, interrupted,
-            "resolution must respect the cover"
-        );
     }
 
     #[test]
     fn an_async_retract_preview_does_not_steal_an_existing_confirmation() {
         use crate::domain::events::{TeamRetractCard, TeamRetractPreview};
-        use crate::domain::models::FocusState;
-        use crate::domain::models::visual::{ConfirmationType, OverlayType};
-
         let mut state = TuiState::new(80, 24);
-        state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd));
+        decision_queue::raise(
+            &mut state,
+            decision_queue::DecisionDraft::new(decision_queue::DecisionKind::PeerAdd, "peer"),
+            decision_queue::Arrival::Requested,
+        );
 
         open_team_retract_card(
             &mut state,
@@ -2265,11 +2208,8 @@ mod tests {
             }),
         );
 
-        assert!(state.pending_team_retract.is_none());
-        assert!(matches!(
-            state.focus,
-            FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd))
-        ));
+        assert!(!decision_queue::team_retract_pending(&state));
+        assert!(state.decisions.holds(decision_queue::DecisionKind::PeerAdd));
         assert_eq!(
             state.feedback_blocks[TEAM_RETRACT_BLOCK_ID].message,
             "Another confirmation is already awaiting your answer. Nothing was sent for this one."

@@ -1,10 +1,26 @@
 //! Fork/rewind storage actions use durable transcript coordinates, not live rows.
 
-use crate::adapters::tui::state::TuiState;
 use crate::domain::errors::StorageError;
 use crate::domain::models::checkpoint::CheckpointId;
 use crate::domain::models::{Conversation, RevertedFile};
 use crate::domain::ports::StoragePort;
+
+/// Refuse an answer whose index now names a different message.
+pub fn verify_target(
+    conversation: &Conversation,
+    index: usize,
+    target_hash: u64,
+) -> Result<(), &'static str> {
+    match conversation.messages.get(index) {
+        Some(message)
+            if crate::adapters::tui::decision_queue::message_target_fingerprint(message)
+                == target_hash =>
+        {
+            Ok(())
+        }
+        _ => Err("This decision is no longer pending."),
+    }
+}
 
 pub fn durable_target(
     conversation: &Conversation,
@@ -33,14 +49,9 @@ pub async fn handle_fork_confirm(
 pub async fn handle_rewind_fork_instead(
     storage: &dyn StoragePort,
     conversation: &Conversation,
-    state: &mut TuiState,
-) -> Option<(usize, Result<String, StorageError>)> {
-    state.rewind_preview = None;
-    let index = state.pending_rewind_index.take()?;
-    Some((
-        index,
-        handle_fork_confirm(storage, conversation, index).await,
-    ))
+    index: usize,
+) -> Result<String, StorageError> {
+    handle_fork_confirm(storage, conversation, index).await
 }
 
 pub struct RewindOutcome {

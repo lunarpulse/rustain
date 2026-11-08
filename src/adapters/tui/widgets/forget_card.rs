@@ -1,36 +1,13 @@
-//! Inline `/memory forget` disambiguation/confirm card — Story 11.4a (AC-R0).
-//!
-//! Reuses the consolidation-card grammar (a `pending_*_card` state field →
-//! `render_*_lines` → key intercept → resolution event) — the same "helpful
-//! review, never an interruption" inline list the user accepts/declines. Because
-//! no `/memory show` exists, this card DOUBLES as the scoped "what's in memory"
-//! view: each row shows the matched entry's preview + its stable key, so the user
-//! can see exactly what permanent removal will purge from the search index.
-//!
-//! Monochrome-safe (the selection marker carries meaning, not just colour) and
-//! uses the `[mem]` source badge, matching the consolidation card.
+//! Memory-forget decision frame body.
 
 use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::PendingForgetCard;
-use crate::adapters::tui::text_geometry as geom;
+use crate::adapters::tui::decision_queue::PendingForgetCard;
 use crate::adapters::tui::theme::Theme;
 
-/// Render the forget confirm card as a list of chat-pane lines.
-pub fn render_forget_card_lines<'a>(
-    card: &PendingForgetCard,
-    theme: &Theme,
-    width: u16,
-) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line<'a>> = Vec::new();
-    // The card is painted inside a single-cell border on each side, so the
-    // real content width is two cells narrower than the pane. Each row
-    // reserves its focus indicator, marker and actual key suffix in cells
-    // (see below), so the summary excerpt never overflows the pane width.
-    let content = (width as usize).saturating_sub(2);
+/// Build the forget confirmation body; the decision frame wraps its rows.
+pub fn lines(card: &PendingForgetCard, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     let count = card.candidates.len();
     // Header: [mem] badge + count. "forget" wording is honest (this purges).
@@ -52,11 +29,6 @@ pub fn render_forget_card_lines<'a>(
         let marker = if *selected { "  [x] " } else { "  [ ] " };
         let focus_indicator = if is_focused { "> " } else { "  " };
         let key_suffix = format!("  [{:016x}]", *key);
-        let inner = content
-            .saturating_sub(
-                geom::cells(focus_indicator) + geom::cells(marker) + geom::cells(&key_suffix),
-            )
-            .max(1);
         lines.push(Line::from(vec![
             Span::styled(
                 focus_indicator.to_string(),
@@ -75,32 +47,14 @@ pub fn render_forget_card_lines<'a>(
                 }),
             ),
             Span::styled(
-                truncate(&entry.summary, inner),
+                entry.summary.clone(),
                 Style::default().fg(theme.colors.fg_primary),
             ),
             Span::styled(key_suffix, Style::default().fg(theme.colors.fg_muted)),
         ]));
     }
 
-    lines.push(Line::from(String::new()));
-    // Key-hint footer. Honest, destructive-action wording.
-    lines.push(Line::from(vec![Span::styled(
-        format!(
-            "    [↑/↓] navigate  {} toggle  {} forget selected  {} cancel",
-            rail(Context::Forget, CardCmd::Toggle),
-            rail(Context::Forget, CardCmd::Yes),
-            rail(Context::Forget, CardCmd::No)
-        ),
-        Style::default().fg(theme.colors.fg_muted),
-    )]));
-
     lines
-}
-
-/// Grapheme-safe truncation to `max` display cells; the `…` marker is inside
-/// the budget.
-fn truncate(s: &str, max: usize) -> String {
-    geom::ellipsize(s, max, "…").into_owned()
 }
 
 #[cfg(test)]
@@ -131,7 +85,7 @@ mod tests {
 
     fn render_text(card: &PendingForgetCard) -> String {
         let theme = Theme::dark();
-        render_forget_card_lines(card, &theme, 80)
+        lines(card, &theme)
             .iter()
             .map(|l| {
                 l.spans
@@ -150,9 +104,7 @@ mod tests {
         assert!(text.contains("secret handshake ritual"));
         assert!(text.contains("[mem]"));
         assert!(text.contains("2 matches"));
-        // honest, destructive wording (AC-R4 — not "hidden")
-        assert!(text.contains("forget selected"));
-        assert!(text.contains("[n]"));
+        assert!(!text.contains("[n]"));
         // each row shows its stable key (the scoped-view role)
         assert!(text.contains("deadbeef"));
     }

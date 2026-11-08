@@ -33,7 +33,7 @@ use crate::adapters::p2p_config::{
     load_workspace_p2p_config, pin_peer_in_workspace_config, remove_peer_from_workspace_config,
 };
 use crate::adapters::p2p_reach::record_peer_reach;
-use crate::adapters::tui::presentation::reducer;
+use crate::adapters::tui::decision_queue::{self, PendingPeerAdd};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
     P2pConfigState, PeerAdmissionOutcome, PeerId, PeerTicket, PinnedKey, RoomEvent,
@@ -1258,7 +1258,7 @@ async fn raise_peer_add_confirm(
 ) {
     use crate::adapters::tui::handlers::peer_command as handler;
 
-    if state.pending_peer_add.is_some() {
+    if decision_queue::peer_add_pending(state, conversation_id) {
         return handler::show_peer_message(
             state,
             "A peer import is already awaiting your answer.".to_owned(),
@@ -1359,8 +1359,7 @@ async fn raise_peer_add_confirm(
     }
 }
 
-/// Raise one pending peer card. One place sets the overlay focus, so the import
-/// card and the reach-refresh card cannot drift in how they are dismissed.
+/// Raise the import or reach-refresh decision in the shared queue.
 #[allow(clippy::too_many_arguments)]
 fn raise_peer_add_card(
     state: &mut TuiState,
@@ -1372,28 +1371,31 @@ fn raise_peer_add_card(
     reach: Option<PeerAddress>,
     reach_refresh: bool,
 ) {
-    state.pending_peer_add = Some(crate::adapters::tui::state::PendingPeerAdd {
-        conversation_id: conversation_id.to_owned(),
-        alias: alias.to_owned(),
-        ticket,
-        peer_id,
-        card,
-        reach,
-        reach_refresh,
-        prior_focus: state.focus.clone(),
-    });
-    reducer::raise_confirmation(
+    decision_queue::raise_peer_add(
         state,
-        crate::domain::models::visual::ConfirmationType::PeerAdd,
+        PendingPeerAdd {
+            conversation_id: conversation_id.to_owned(),
+            alias: alias.to_owned(),
+            ticket,
+            peer_id,
+            card,
+            reach,
+            reach_refresh,
+        },
     );
     state.needs_redraw = true;
 }
 
 /// Resolve the pending `/peer add` card. `confirm == false` writes nothing.
-pub(crate) async fn resolve_peer_add(state: &mut TuiState, confirm: bool, app_state: &AppState) {
+pub async fn resolve_peer_add(
+    state: &mut TuiState,
+    pending: Option<PendingPeerAdd>,
+    confirm: bool,
+    app_state: &AppState,
+) {
     use crate::adapters::tui::handlers::peer_command as handler;
 
-    let Some(pending) = handler::resolve_peer_add_card(state, confirm) else {
+    let Some(pending) = pending.filter(|_| confirm) else {
         if !confirm {
             handler::show_peer_message(
                 state,

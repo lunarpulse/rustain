@@ -670,3 +670,146 @@ def test_leg_c_question_compose_80x24(monkeypatch):
         manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
         (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
         print(f"NATIVE_21_6_C_EVIDENCE={evidence}", flush=True)
+
+
+# ── Leg D (slice 6-D): fork is the `Decision: Fork` frame ─────────────────────────────
+
+FORK_SCENE = Path(__file__).parent / "fixtures/scenes/decision_queue_fork.json"
+FORK_RAIL = ("[y] Fork", "[n] Cancel", "[Esc] Later")
+FORK_CRUMB = re.compile(r"Needs you › Fork( .*)? \| \d+ pending")
+FORKED_ROW = re.compile(r"Forked from \".*\" at message \d+")
+
+
+def fork_frame(screen):
+    """A complete Fork sheet: breadcrumb, a body row naming the message and the whole generated
+    rail (it may wrap by whole pairs onto two rows). Returns the content rows or None while torn."""
+    content = _c_box(screen, "Fork")
+    if not content or not FORK_CRUMB.fullmatch(content[0]):
+        return None
+    body = content[1:]
+    if len(body) < 2 or not all(item in " ".join(body[-2:]) for item in FORK_RAIL):
+        return None
+    if not body[-1].endswith(FORK_RAIL[-1]) or not any("Message " in row for row in body[:-1]):
+        return None
+    return tuple(body)
+
+
+def _d_deferred(screen):
+    status = harness.status_row(screen)
+    return "Needs you (1) ^X q" in status and "Decision:" not in screen and "┌ Needs you " not in screen
+
+
+def _d_listed(screen):
+    rows = screen.split("\n")
+    return (any(row.startswith("┌ Needs you ") for row in rows)
+            and any("▸ Fork" in row for row in rows)
+            and "[Enter] Open  [Esc] Back  [Up/Down] Select" in screen)
+
+
+def _d_forked(screen):
+    return "Decision:" not in screen and any(FORKED_ROW.search(row) for row in screen.split("\n"))
+
+
+def _d_sheet(width, height, tear=None, rail_rows=None):
+    box = width if width < FULL_SHEET_BELOW else 100
+    left = (width - box) // 2
+    region, inner = height - 4, box - 2
+    rail = "  ".join(FORK_RAIL)
+    body = ["Needs you › Fork message 1 | 1 pending", 'Message 1: "hello"', "A new tab will be created."]
+    if tear == "no-crumb":
+        body[0] = "no crumb here"
+    if tear == "no-message":
+        body[1] = ""
+    interior = body + [""] * (region - 2 - len(body) - len(rail_rows or [rail])) + list(rail_rows or [rail])
+    if tear == "half-rail":
+        interior[-1] = "[y] Fork"
+    box_rows = [("┌ Decision: Fork " + "─" * inner)[:inner + 1] + "┐"]
+    for index, text in enumerate(interior):
+        box_rows.append("│" + text.ljust(inner) + (" " if tear == "right-border" and index == 1 else "│"))
+    box_rows.append("└" + "─" * inner + "┘")
+    if tear == "no-bottom":
+        box_rows[-1] = " " * box
+    rows = [" " * left + row + " " * (width - left - box) for row in box_rows]
+    rows += ["┌" + "─" * (width - 2) + "┐", "│" + " " * (width - 2) + "│", "└" + "─" * (width - 2) + "┘",
+             " anthropic/claude-sonnet-4-6 [F] │ Normal │ Ready".ljust(width)[:width]]
+    return "\n".join(rows)
+
+
+def test_d_fork_predicate_accepts_the_whole_sheet_and_rejects_torn_frames():
+    for width, height in SIZES:
+        assert fork_frame(_d_sheet(width, height)) is not None
+        assert fork_frame(_d_sheet(width, height, rail_rows=["[y] Fork  [n] Cancel", "[Esc] Later"])) is not None
+        for tear in ("half-rail", "no-bottom", "no-crumb", "no-message", "right-border"):
+            assert fork_frame(_d_sheet(width, height, tear=tear)) is None, (width, height, tear)
+        assert fork_frame(_d_sheet(width, height, rail_rows=["[y] Fork"])) is None
+        assert fork_frame(_d_sheet(width, height).replace("Fork", "Rewind")) is None
+
+
+def test_d_deferred_list_and_forked_predicates():
+    rows = ["···"] + [""] * 19 + [" anthropic/claud [F] │ Normal │ Ready │ Needs you (1) ^X q", "┌─┐", "│ │", "└─┘"]
+    assert _d_deferred("\n".join(rows))
+    assert not _d_deferred("\n".join(["┌ Decision: Fork ┐"] + rows))
+    assert not _d_deferred("\n".join(rows).replace("(1)", "(2)"))
+    listed = ["┌ Needs you ─┐", "│ ▸ Fork · message 1 │", "│ [Enter] Open  [Esc] Back  [Up/Down] Select │"]
+    assert _d_listed("\n".join(listed)) and not _d_listed("\n".join(listed[:2]))
+    assert not _d_listed("\n".join(listed).replace("▸ Fork", "▸ Rewind"))
+    assert _d_forked('Forked from "x" at message 1') and _d_forked('● Forked from "New" at message 2 ')
+    assert not _d_forked('┌ Decision: Fork ┐\nForked from "x" at message 1')
+
+
+@pytest.mark.flaky(reruns=0)
+@pytest.mark.timeout(400)
+def test_leg_d_user_confirmation_80x24(monkeypatch):
+    binary = harness._resolve_binary()[0].resolve()
+    if not binary.is_file():
+        pytest.skip("no native binary: build `cargo build --bin rustain` and set RUSTAIN_TUI_BINARY")
+    assert "debug" in binary.parts and "release" not in binary.parts, binary
+    monkeypatch.setattr(harness, "TERM_COLS", WIDTH)
+    monkeypatch.setattr(harness, "TERM_ROWS", HEIGHT)
+    parent = Path(os.environ.get("RUSTAIN_CAPTURE_EVIDENCE_DIR", tempfile.gettempdir())).resolve()
+    parent.mkdir(parents=True, exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix="21-6-d-", dir=parent))
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    manifest = {"binary": str(binary), "sha256": digest, "bytes": binary.stat().st_size,
+                "viewport": [WIDTH, HEIGHT], "leg": "D",
+                "started_at": datetime.now(timezone.utc).isoformat(), "result": "RUNNING"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="r216d-", dir="/tmp") as directory, ExitStack() as stack:
+            root = Path(directory)
+            ws, env, gate, stub = _b_world(stack, root, evidence, "local", FORK_SCENE)
+            tui = _b_launch(stack, ws, env, evidence, "local", False)
+            _b_send(tui, "\x1b[200~start the fork scene\x1b[201~\r")
+            _b_wait(tui, lambda s: any("Fork scene ready." in row for row in s.split("\n")), "scene reply painted")
+            # Esc leaves the composer for Chat focus, `g` jumps to the first message, `f` forks there.
+            _b_send(tui, "\x1b")
+            _b_wait(tui, lambda s: "Decision:" not in s, "chat focus")
+            _b_send(tui, "g")
+            _b_send(tui, "f")
+            screen = _b_wait(tui, fork_frame, "complete fork sheet")
+            _b_capture(evidence, "local-fork", screen)
+            # Keys wait for the inert window: Esc defers at once (never inert), `y` is ignored on first sight.
+            _b_stable(tui, fork_frame, "fork frame beyond its inert window")
+            _b_send(tui, "\x1b")
+            screen = _b_wait(tui, _d_deferred, "Esc defers: chip only")
+            _b_capture(evidence, "local-deferred", screen)
+            assert not any(FORKED_ROW.search(row) for row in screen.split("\n")), screen
+            _b_send(tui, "\x18q")
+            _b_wait(tui, _d_listed, "Needs-you list with the fork")
+            _b_stable(tui, _d_listed, "Needs-you list beyond its inert window")
+            _b_send(tui, "\r")
+            screen = _b_wait(tui, fork_frame, "reopened fork frame")
+            _b_capture(evidence, "local-reopened", screen)
+            _b_stable(tui, fork_frame, "reopened fork frame beyond its inert window")
+            _b_send(tui, "y")
+            screen = _b_wait(tui, _d_forked, "the fork's status row")
+            _b_capture(evidence, "local-forked", screen)
+        assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
+        manifest["result"] = "PASS"
+    except BaseException:
+        manifest["result"] = "FAIL"
+        (evidence / "failure.txt").write_text(traceback.format_exc())
+        raise
+    finally:
+        manifest["completed_at"] = datetime.now(timezone.utc).isoformat()
+        (evidence / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(f"NATIVE_21_6_D_EVIDENCE={evidence}", flush=True)

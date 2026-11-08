@@ -1019,6 +1019,19 @@ fn neither_peer_surface_routes_through_the_apply_card_key_table() {
     let apply = std::fs::read_to_string("src/adapters/tui/widgets/apply_card.rs").expect("read");
     assert!(apply.contains("pub fn choice_for_key"), "{apply:.0}");
 
+    // 21-6: the frame dispatches by decision kind, not by the apply card's
+    // mode-blind choice table. Pin both peer effects at the new dispatch site.
+    let keys = std::fs::read_to_string("src/adapters/tui/decision_queue/keys.rs").expect("read");
+    let keys = code_only(keys.split("#[cfg(test)]").next().unwrap_or(&keys));
+    assert!(keys.contains("DecisionKind::PeerAdd, Cmd::Card(CardCmd::Yes)"));
+    assert!(keys.contains("DecisionEffect::PeerAddConfirm"));
+    assert!(keys.contains("DecisionKind::PeerAdd, Cmd::Card(CardCmd::No)"));
+    assert!(keys.contains("DecisionEffect::PeerAddDecline"));
+    assert!(
+        !keys.contains("choice_for_key"),
+        "peer dispatch must not borrow apply choices"
+    );
+
     // The alarm block carries NO actions, so no keystroke resolves it at all.
     let handler =
         std::fs::read_to_string("src/adapters/tui/handlers/peer_command.rs").expect("read");

@@ -315,12 +315,51 @@ async fn k03_modified_and_repeat_keys_do_not_decide() {
 async fn k03_higher_confirmation_owns_decision_keys() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut f = fixture(&host).await;
-    f.state.focus =
-        FocusState::Overlay(rustain::domain::models::visual::OverlayType::Confirmation(
-            rustain::domain::models::visual::ConfirmationType::Fork,
-        ));
-    let action = f.key(DomainInputEvent::KeyPress('y')).await;
-    assert!(!matches!(action, InputAction::TeamProposal { .. }));
+    use rustain::adapters::tui::decision_queue::{self, ExportOverwritePayload};
+    use rustain::adapters::tui::keymap::Host;
+    use rustain::adapters::tui::notification_log::LogFacts;
+    use rustain::adapters::tui::notifications::NotificationStore;
+    use rustain::adapters::tui::presentation::{self, RouteEffect};
+    use rustain::domain::clock::MockClock;
+    use rustain::domain::models::NotificationsConfig;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let clock = Arc::new(MockClock::new(Instant::now()));
+    f.state.notifications =
+        NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
+    decision_queue::raise_export_overwrite(
+        &mut f.state,
+        ExportOverwritePayload {
+            conversation_id: f.conversation.id.clone(),
+            target: "existing.md".into(),
+            content: "export".into(),
+            stamp: None,
+        },
+    );
+    let facts = LogFacts {
+        active_conversation_id: Some(f.conversation.id.clone()),
+        active_messages: f.conversation.messages.len(),
+        decisions_supported: true,
+        ..LogFacts::default()
+    };
+    decision_queue::note_painted(&mut f.state);
+    clock.advance(Duration::from_millis(500));
+    let action = presentation::route(
+        &mut f.state,
+        &DomainInputEvent::KeyPress('n'),
+        Host::Local,
+        &facts,
+    );
+    assert_eq!(
+        action,
+        Some(RouteEffect::Action(InputAction::CancelExportOverwrite))
+    );
+    let action = f.key(DomainInputEvent::KeyPress('r')).await;
+    assert!(matches!(
+        action,
+        InputAction::TeamProposal { decision: None, .. }
+    ));
     assert!(
         f.state
             .pending_team_proposals

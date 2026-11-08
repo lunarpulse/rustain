@@ -12,15 +12,19 @@
 //! Rail keys are inert for 500 ms from the frame's first paint; `Ctrl+C` backs
 //! without deciding. This module is pure: no I/O and no clock of its own.
 
+mod artifact;
 mod compose;
+mod confirm;
 mod delegation;
 mod handle;
 mod keys;
 mod kinds;
 mod list;
+mod memory;
 mod permission;
 mod plan;
 mod question;
+mod retract;
 mod skill_trust;
 
 #[cfg(test)]
@@ -29,6 +33,15 @@ mod cards_tests;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+pub use artifact::{
+    ArtifactCardMode, PendingArtifactCard, PendingPeerAdd, artifact_pending, peer_add_pending,
+    raise_artifact, raise_peer_add,
+};
+pub use confirm::{
+    ExportOverwritePayload, FileStamp, ForkPayload, RevertPreviewItem, RewindPayload,
+    RewindPreview, fork_pending, message_fingerprint, message_target_fingerprint,
+    raise_export_overwrite, raise_fork, raise_rewind, retire_message_targets, rewind_pending,
+};
 pub use delegation::{
     AgentKillPayload, PendingDelegationCard, PendingSpawnGate, raise_agent_kill, raise_delegation,
     raise_spawn_gate, withdraw_agent_kill, withdraw_gone_agent_kills,
@@ -36,13 +49,18 @@ pub use delegation::{
 pub use handle::ReplyHandle;
 pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key, settle_sent};
 pub(crate) use keys::{clear_feedback, paste};
-pub(crate) use kinds::rail_of;
+pub use kinds::rail_of;
 pub use kinds::{
     APPROVAL_NO_LONGER_PENDING, DecisionEffect, DecisionKind, DecisionSubject, EscPolicy,
     NO_LONGER_PENDING, Responder, StaleCopy, Validity,
 };
 pub(crate) use list::selected_index as list_selected_index;
 pub use list::{ListOutcome, handle_list_key, open_list};
+pub use memory::{
+    ConsolidationPayload, PendingConsolidationCard, PendingForgetCard, accepted_facts,
+    consolidation_frame, consolidation_pending, forget_pending, forget_resolution,
+    memory_answer_event, raise_attached_consolidation, raise_consolidation, raise_forget,
+};
 pub use permission::{
     ConsentPayload, PermissionInput, PermissionPayload, complete_input, drain_permissions,
     holds_request, raise_consent, raise_permission, withdraw_request,
@@ -55,6 +73,10 @@ pub use plan::{
     withdraw_plan, withdraw_plan_card,
 };
 pub use question::{ANSWER_MAX_BYTES, QuestionPayload, drain_questions, raise_question};
+pub use retract::{
+    RetractTarget, TeamRetractPayload, confirmation_pending, raise_team_retract,
+    team_retract_pending, withdraw_team_retract_request,
+};
 pub use skill_trust::{
     SkillOrigin, SkillTrustPayload, drain_skill_trust, inspect_target, open_inspect,
     raise_model_skill_trust, raise_user_skill_trust,
@@ -93,14 +115,9 @@ pub fn waiting_toast() -> String {
 /// resolved its item and restored or promoted its caller (`RecoveryContinue`, the
 /// image and delete effects, the question's send / skip, and the spawn / cancel-plan /
 /// agent-kill declines). Surviving caller frames keep their interrupted base focus. Only
-/// an empty stack uses the pre-stack restoration (including permission/recipient handoff
-/// for images and sidebar selection for delete cancellation). The host supplies its
-/// existing image-focus policy without coupling the pane to its runtime.
-pub fn apply_resolved_action(
-    state: &mut TuiState,
-    action: InputAction,
-    restore_base_focus: fn(&mut TuiState),
-) {
+/// an empty stack settles to the recipient/chat or input base for images and declines,
+/// or to sidebar selection for delete cancellation.
+pub fn apply_resolved_action(state: &mut TuiState, action: InputAction) {
     match action {
         InputAction::Decision(DecisionEffect::RecoveryContinue) => {
             if state.modal_stack.is_empty() {
@@ -120,14 +137,24 @@ pub fn apply_resolved_action(
                 ));
             }
             if state.modal_stack.is_empty() {
-                restore_base_focus(state);
+                let focus = if state.recipient_surface.is_some() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                };
+                presentation::reducer::set_base(state, focus);
             }
         }
         InputAction::ImageConfirmCancel => {
             drop(state.decisions.take_resolved());
             notifications::info(state, NoticeSource::Image, "Image attachment cancelled");
             if state.modal_stack.is_empty() {
-                restore_base_focus(state);
+                let focus = if state.recipient_surface.is_some() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                };
+                presentation::reducer::set_base(state, focus);
             }
         }
         InputAction::CancelDelete => {
@@ -164,7 +191,12 @@ pub fn apply_resolved_action(
         ) => {
             drop(state.decisions.take_resolved());
             if state.modal_stack.is_empty() {
-                restore_base_focus(state);
+                let focus = if state.recipient_surface.is_some() {
+                    FocusState::Chat
+                } else {
+                    FocusState::Input
+                };
+                presentation::reducer::set_base(state, focus);
             }
         }
         _ => unreachable!("only state-only resolved pane actions enter this seam"),
@@ -371,6 +403,17 @@ impl DecisionQueue {
         self.items.iter().any(|item| item.kind == kind)
     }
 
+    /// Whether a live, undeferred item of this kind is decidable on the current tab.
+    #[must_use]
+    pub fn presenting(&self, kind: DecisionKind) -> bool {
+        self.items.iter().any(|item| {
+            item.kind == kind
+                && !item.is_stale()
+                && !item.deferred
+                && self.here(item.conversation_id.as_deref())
+        })
+    }
+
     /// An item of `kind` the user has not set aside: the only kind of waiting
     /// that gates other prompts (a deferred large image never does).
     #[must_use]
@@ -453,7 +496,7 @@ impl DecisionQueue {
     }
 
     /// The payload of the item a rail key just resolved; taken once by its effect arm.
-    pub(crate) fn take_resolved(&mut self) -> Option<DecisionSubject> {
+    pub fn take_resolved(&mut self) -> Option<DecisionSubject> {
         self.resolved.take()
     }
 
@@ -871,15 +914,6 @@ pub fn tick(state: &mut TuiState) -> bool {
 #[must_use]
 pub fn waiting(state: &TuiState) -> usize {
     state.decisions.len()
-}
-
-/// Key-owning surfaces may keep Input focus; card arrivals must wait for dismissal.
-pub fn card_focus_blocked(state: &TuiState) -> bool {
-    matches!(state.focus, FocusState::Overlay(_))
-        || !state.modal_stack.is_empty()
-        || state.pending_leader.is_some()
-        || state.autocomplete.is_open()
-        || state.reverse_search.is_open()
 }
 
 /// The status-row cue while decisions wait.
@@ -1581,54 +1615,33 @@ mod tests {
         assert_eq!(status_cue(3).as_deref(), Some("Needs you (3) ^X q"));
     }
 
-    /// FR-21-3-c: a card arriving in an empty Input hands it Chat focus; nothing else moves.
+    /// Queue arrivals preserve the composer and never borrow Chat focus.
     #[test]
-    fn story21_3_card_arrival_takes_chat_focus_only_from_an_empty_input() {
-        // (focus, can answer, user mid-sentence) -> (focus after, moved)
-        let cases = [
-            (FocusState::Input, true, false, FocusState::Chat, true),
-            (FocusState::Input, true, true, FocusState::Input, false),
-            (FocusState::Chat, true, false, FocusState::Chat, false),
-            (FocusState::Input, false, false, FocusState::Input, false),
-        ];
-        for (focus, can_answer, typing, want, moved) in cases {
-            let before = focus.clone();
+    fn story21_6_card_arrival_preserves_input_and_covering_frames() {
+        for draft in ["", "draft"] {
             let mut state = TuiState::new(80, 24);
-            state.focus = focus;
-            if typing {
-                state.input_buffer = "draft".into();
-            }
-            assert_eq!(
-                presentation::reducer::take_chat_focus_for_card(&mut state, can_answer),
-                moved,
-                "{before:?} answer={can_answer} typing={typing}"
+            state.input_buffer = draft.into();
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Consolidation, "review"),
+                Arrival::Automatic,
             );
-            assert_eq!(
-                state.focus, want,
-                "{before:?} answer={can_answer} typing={typing}"
-            );
-            assert_eq!(
-                state.card_focus_borrowed_from,
-                moved.then_some(FocusState::Input)
-            );
+            assert_eq!(state.focus, FocusState::Input);
+            assert_eq!(state.input_buffer, draft);
+            assert!(state.decisions.holds(DecisionKind::Consolidation));
         }
-        // The local host reads the composer from the state and asks for a redraw.
-        let mut state = TuiState::new(80, 24);
-        state.needs_redraw = false;
-        presentation::reducer::take_chat_focus_for_card(&mut state, true);
-        assert!(state.focus == FocusState::Chat && state.needs_redraw);
-        let mut typing = TuiState::new(80, 24);
-        typing.input_buffer = "draft".into();
-        typing.needs_redraw = false;
-        presentation::reducer::take_chat_focus_for_card(&mut typing, true);
-        assert!(typing.focus == FocusState::Input && !typing.needs_redraw);
         for surface in [Surface::ModelSelector, Surface::Search] {
-            let mut framed = TuiState::new(80, 24);
-            presentation::reducer::open(&mut framed, surface);
-            let frame = framed.modal_stack.top().cloned();
-            presentation::reducer::take_chat_focus_for_card(&mut framed, true);
-            assert_eq!(framed.focus, FocusState::Input);
-            assert_eq!(framed.modal_stack.top(), frame.as_ref());
+            let mut state = TuiState::new(80, 24);
+            presentation::reducer::open(&mut state, surface);
+            let frame = state.modal_stack.top().cloned();
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Consolidation, "review"),
+                Arrival::Automatic,
+            );
+            assert_eq!(state.focus, FocusState::Input);
+            assert_eq!(state.modal_stack.top(), frame.as_ref());
+            assert!(state.decisions.holds(DecisionKind::Consolidation));
         }
     }
 
@@ -1948,11 +1961,7 @@ mod tests {
             state.pending_images.is_empty(),
             "the effect arm attaches, not the key"
         );
-        apply_resolved_action(
-            &mut state,
-            InputAction::ImageConfirmAttach,
-            presentation::reducer::restore_focus_after_modal,
-        );
+        apply_resolved_action(&mut state, InputAction::ImageConfirmAttach);
         assert_eq!(state.pending_images, vec![image]);
         assert!(state.image_indicator.is_some());
         assert!(state.decisions.is_empty());
@@ -1970,11 +1979,7 @@ mod tests {
             handle_key(&mut state, PaneKey::Char('n'), &f),
             PaneOutcome::Effect(DecisionEffect::CancelLargeImage)
         );
-        apply_resolved_action(
-            &mut state,
-            InputAction::ImageConfirmCancel,
-            presentation::reducer::restore_focus_after_modal,
-        );
+        apply_resolved_action(&mut state, InputAction::ImageConfirmCancel);
         assert_eq!(state.pending_images.len(), 1);
         assert_eq!(state.decisions.take_resolved(), None);
     }

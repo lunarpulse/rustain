@@ -1,37 +1,13 @@
-//! Inline memory-consolidation review card — Story 11.2a (completes 11.2 AC4).
-//!
-//! Reuses the plan-card / delegation-card UI *grammar* (a `pending_*_card`
-//! state field → `render_*_lines` → key intercept → resolution event), NOT a
-//! new approval *model* (UX principle 5). It IS a genuinely new *widget*
-//! because no existing card renders a *list* the user accepts / declines —
-//! that list-review is the one new shape this story adds.
-//!
-//! Rendered inline in the chat pane (like plan_card / delegation_card), never a
-//! modal overlay — "helpful review, never an interruption" (UX). Uses the memory
-//! signal vocabulary (`[mem]` source badge, `## Category` headers) and stays
-//! monochrome-safe (the selection symbol carries meaning, not just colour).
+//! Memory-consolidation decision frame body.
 
 use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
-use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::PendingConsolidationCard;
-use crate::adapters::tui::text_geometry as geom;
+use crate::adapters::tui::decision_queue::PendingConsolidationCard;
 use crate::adapters::tui::theme::Theme;
 
-/// Render the consolidation review card as a list of chat-pane lines.
-pub fn render_consolidation_card_lines<'a>(
-    card: &PendingConsolidationCard,
-    theme: &Theme,
-    width: u16,
-) -> Vec<Line<'a>> {
-    let mut lines: Vec<Line<'a>> = Vec::new();
-    // The card is painted inside a single-cell border on each side, so the
-    // real content width is two cells narrower than the pane.
-    let content = (width as usize).saturating_sub(2);
-    // Detail rows are indented eight cells.
-    let detail_budget = content.saturating_sub(8).max(1);
+/// Build the consolidation review body; the decision frame wraps its rows.
+pub fn lines(card: &PendingConsolidationCard, theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
 
     let count = card.proposals.len();
     // Header: [mem] badge + count.
@@ -51,10 +27,6 @@ pub fn render_consolidation_card_lines<'a>(
     for (fact, selected) in &card.proposals {
         let marker = if *selected { "  [x] " } else { "  [ ] " };
         let category = format!("## {} — ", fact.category);
-        // Reserve the marker and the actual category prefix, in cells.
-        let fact_budget = content
-            .saturating_sub(geom::cells(marker) + geom::cells(&category))
-            .max(1);
         lines.push(Line::from(vec![
             Span::styled(
                 marker.to_string(),
@@ -66,7 +38,7 @@ pub fn render_consolidation_card_lines<'a>(
             ),
             Span::styled(category, Style::default().fg(theme.colors.fg_muted)),
             Span::styled(
-                truncate(&fact.fact, fact_budget),
+                fact.fact.clone(),
                 Style::default().fg(theme.colors.fg_primary),
             ),
         ]));
@@ -77,33 +49,13 @@ pub fn render_consolidation_card_lines<'a>(
                 }
                 lines.push(Line::from(vec![
                     Span::raw("        "),
-                    Span::styled(
-                        truncate(seg, detail_budget),
-                        Style::default().fg(theme.colors.fg_muted),
-                    ),
+                    Span::styled(seg.to_owned(), Style::default().fg(theme.colors.fg_muted)),
                 ]));
             }
         }
     }
 
-    lines.push(Line::from(String::new()));
-    // Key-hint footer (MVP floor: accept-all / decline-all).
-    lines.push(Line::from(vec![Span::styled(
-        format!(
-            "    {} promote all   {} decline",
-            rail(Context::Confirm, CardCmd::Yes),
-            rail(Context::Confirm, CardCmd::No)
-        ),
-        Style::default().fg(theme.colors.fg_muted),
-    )]));
-
     lines
-}
-
-/// Grapheme-safe truncation to `max` display cells; the `…` marker is inside
-/// the budget.
-fn truncate(s: &str, max: usize) -> String {
-    geom::ellipsize(s, max, "…").into_owned()
 }
 
 #[cfg(test)]
@@ -138,7 +90,7 @@ mod tests {
 
     fn render_text(card: &PendingConsolidationCard) -> String {
         let theme = Theme::dark();
-        render_consolidation_card_lines(card, &theme, 80)
+        lines(card, &theme)
             .iter()
             .map(|l| {
                 l.spans
@@ -160,9 +112,8 @@ mod tests {
         // memory signal vocabulary + count header
         assert!(text.contains("[mem]"));
         assert!(text.contains("2 proposals"));
-        // key-hint footer
-        assert!(text.contains("[y]"));
-        assert!(text.contains("[n]"));
+        assert!(!text.contains("[y]"));
+        assert!(!text.contains("[n]"));
     }
 
     #[test]

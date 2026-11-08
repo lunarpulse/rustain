@@ -13,17 +13,18 @@
 
 use tempfile::TempDir;
 
+use crate::conformance_21_6_decision_queue::support;
 use rustain::adapters::filesystem::FileSystemStorage;
 use rustain::adapters::tui::app::{InputAction, handle_input};
+use rustain::adapters::tui::decision_queue::{self, DecisionKind, DecisionSubject, ForkPayload};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::theme::Theme;
-use rustain::adapters::tui::widgets::fork_confirm::render_fork_confirmation_lines;
+use rustain::adapters::tui::widgets::fork_confirm;
 use rustain::domain::models::checkpoint::CheckpointId;
 use rustain::domain::models::conversation::{
     ChatMessage, Conversation, ForkSource, generate_conversation_id,
 };
 use rustain::domain::models::tab::TabManager;
-use rustain::domain::models::visual::{ConfirmationType, OverlayType};
 use rustain::domain::models::{FocusState, MessageRole};
 use rustain::domain::ports::StoragePort;
 
@@ -53,6 +54,30 @@ fn make_state_in_chat_focus(width: u16, height: u16) -> TuiState {
     let mut state = TuiState::new(width, height);
     state.focus = FocusState::Chat;
     state
+}
+
+fn fork_ready(index: usize) -> TuiState {
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_fork(&mut state, "c1", index, "message", 0);
+    support::paint(&mut state, &fork_facts(), 80, 24);
+    support::ready(&mut state, &clock);
+    state
+}
+
+fn fork_facts() -> rustain::adapters::tui::notification_log::LogFacts {
+    rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: 5,
+        ..support::facts("c1")
+    }
+}
+
+fn fork_body(preview: &str, index: usize) -> ForkPayload {
+    ForkPayload {
+        conversation_id: "c1".into(),
+        message_index: index,
+        target_hash: 0,
+        preview: preview.into(),
+    }
 }
 
 fn make_conversation_5_messages() -> Conversation {
@@ -105,80 +130,52 @@ fn test_e2e_fork_f_key_opens_confirmation() {
 
 #[test]
 fn test_e2e_fork_cancel_via_n_key() {
-    // Given: fork confirmation overlay is active
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-    state.pending_fork_index = Some(2);
-
-    // When: I press 'n'
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('n');
-    let action = handle_input(&mut state, &event);
-
-    // Then: ForkCancel returned
+    let mut state = fork_ready(2);
     assert_eq!(
-        action,
-        InputAction::ForkCancel,
-        "'n' in Fork confirmation should return ForkCancel"
+        support::route(&mut state, &support::key('n'), &fork_facts())
+            .unwrap()
+            .into_action(),
+        InputAction::ForkCancel
     );
+    assert!(
+        matches!(state.decisions.take_resolved(), Some(DecisionSubject::Fork(p)) if p.message_index == 2 && p.conversation_id == "c1")
+    );
+    assert!(!decision_queue::fork_pending(&state, "c1"));
 }
 
 #[test]
 fn test_e2e_fork_esc_does_not_cancel_the_confirmation() {
-    // Given: fork confirmation overlay is active
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-    state.pending_fork_index = Some(2);
-
-    // When: I press Esc
-    use rustain::domain::events::{DomainInputEvent, DomainKey};
-    let event = DomainInputEvent::SpecialKey(DomainKey::Esc);
-    let action = handle_input(&mut state, &event);
-
-    // Then: nothing is decided (3-C, A8: Esc never answers a card; `n` cancels)
-    assert_eq!(action, InputAction::Consumed);
-    assert_eq!(state.pending_fork_index, Some(2));
+    let mut state = fork_ready(2);
+    support::route(
+        &mut state,
+        &support::special(rustain::domain::events::DomainKey::Esc),
+        &fork_facts(),
+    );
+    assert!(decision_queue::fork_pending(&state, "c1"));
+    assert!(state.decisions.take_resolved().is_none());
 }
 
 #[test]
 fn test_e2e_fork_confirm_via_y_key() {
-    // Given: fork confirmation overlay is active
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-    state.pending_fork_index = Some(2);
-
-    // When: I press 'y'
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('y');
-    let action = handle_input(&mut state, &event);
-
-    // Then: ForkConfirm returned
+    let mut state = fork_ready(2);
     assert_eq!(
-        action,
-        InputAction::ForkConfirm,
-        "'y' in Fork confirmation should return ForkConfirm"
+        support::route(&mut state, &support::key('y'), &fork_facts())
+            .unwrap()
+            .into_action(),
+        InputAction::ForkConfirm
     );
+    assert!(
+        matches!(state.decisions.take_resolved(), Some(DecisionSubject::Fork(p)) if p.message_index == 2 && p.conversation_id == "c1")
+    );
+    assert!(!decision_queue::fork_pending(&state, "c1"));
 }
-
-// ── AC[1]: Overlay blocks other interactions (Tier-1 pattern) ────────────────
 
 #[test]
 fn test_e2e_fork_overlay_blocks_chat_chars() {
-    // Given: fork confirmation overlay is active
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-
-    // When: I press an unrelated key (not y/n/Esc)
-    use rustain::domain::events::DomainInputEvent;
-    let event = DomainInputEvent::KeyPress('k'); // navigation key
-    let action = handle_input(&mut state, &event);
-
-    // Then: Consumed (blocked, not passed through to Chat)
-    assert_eq!(
-        action,
-        InputAction::Consumed,
-        "Fork overlay should consume all keys except y/n/Esc"
-    );
+    let mut state = fork_ready(2);
+    support::route(&mut state, &support::key('k'), &fork_facts());
+    assert!(decision_queue::fork_pending(&state, "c1"));
+    assert!(state.decisions.take_resolved().is_none());
 }
 
 // ── AC[2]: Fork Execution -- New Tab with Truncated Messages ──────────────────
@@ -192,12 +189,37 @@ async fn test_e2e_fork_confirm_creates_new_tab() {
     let source_id = conv.id.clone();
     storage.save_conversation(&conv).await.unwrap();
 
-    // When: I fork at message 2 (checkpoint=2)
-    let checkpoint = CheckpointId(2);
-    let new_id = storage
-        .fork_at_checkpoint(&source_id, checkpoint)
-        .await
-        .unwrap();
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_fork(
+        &mut state,
+        &source_id,
+        2,
+        &conv.messages[2].content,
+        decision_queue::message_target_fingerprint(&conv.messages[2]),
+    );
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&source_id)
+    };
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    assert_eq!(
+        support::route(&mut state, &support::key('y'), &facts)
+            .unwrap()
+            .into_action(),
+        InputAction::ForkConfirm
+    );
+    let Some(DecisionSubject::Fork(payload)) = state.decisions.take_resolved() else {
+        panic!("confirmed fork payload");
+    };
+    assert_eq!(payload.conversation_id, source_id);
+    let new_id = rustain::adapters::tui::handlers::transcript_target::handle_fork_confirm(
+        &storage,
+        &conv,
+        payload.message_index,
+    )
+    .await
+    .unwrap();
 
     // Then: a new conversation was created
     assert_ne!(new_id, source_id, "Forked conversation must have a new ID");
@@ -213,6 +235,112 @@ async fn test_e2e_fork_confirm_creates_new_tab() {
         3,
         "Forked conversation should have 3 messages (indices 0, 1, 2)"
     );
+    let mut tabs = TabManager::default();
+    let before = tabs.tab_count();
+    let tab = tabs.create_tab_with_conversation(forked);
+    assert_eq!(tabs.tab_count(), before + 1);
+    assert_eq!(tabs.active_tab_id(), tab);
+    assert_eq!(tabs.active_tab().conversation.id, new_id);
+}
+
+/// 6D-L1-01: a reused index with different content cannot create storage or a tab.
+#[tokio::test]
+async fn fork_refuses_changed_target_before_storage() {
+    let tmp = TempDir::new().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let mut conv = make_conversation_5_messages();
+    storage.save_conversation(&conv).await.unwrap();
+    let mut tabs = TabManager::default();
+    tabs.create_tab_with_conversation(conv.clone());
+    let before_tabs = tabs.tab_count();
+    let before_conversations = storage.list_conversations().await.unwrap().len();
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_fork(
+        &mut state,
+        &conv.id,
+        3,
+        &conv.messages[3].content,
+        decision_queue::message_target_fingerprint(&conv.messages[3]),
+    );
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&conv.id)
+    };
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    conv.messages[3].content = "different message".into();
+    assert_eq!(
+        support::route(&mut state, &support::key('y'), &facts)
+            .unwrap()
+            .into_action(),
+        InputAction::ForkConfirm
+    );
+    let Some(DecisionSubject::Fork(payload)) = state.decisions.take_resolved() else {
+        panic!("fork payload")
+    };
+    let verified = rustain::adapters::tui::handlers::transcript_target::verify_target(
+        &conv,
+        payload.message_index,
+        payload.target_hash,
+    );
+    assert_eq!(verified, Err("This decision is no longer pending."));
+    if verified.is_ok() {
+        let id = rustain::adapters::tui::handlers::transcript_target::handle_fork_confirm(
+            &storage,
+            &conv,
+            payload.message_index,
+        )
+        .await
+        .unwrap();
+        tabs.create_tab_with_conversation(storage.load_conversation(&id).await.unwrap().unwrap());
+    }
+    assert_eq!(tabs.tab_count(), before_tabs);
+    assert_eq!(
+        storage.list_conversations().await.unwrap().len(),
+        before_conversations
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_fork_cancel_preserves_conversation_and_tabs() {
+    let tmp = TempDir::new().unwrap();
+    let storage = FileSystemStorage::new(tmp.path().join("sessions"));
+    let conv = make_conversation_5_messages();
+    storage.save_conversation(&conv).await.unwrap();
+    let mut tabs = TabManager::default();
+    tabs.create_tab_with_conversation(conv.clone());
+    let before = tabs.tab_count();
+    let (mut state, clock) = support::clocked(80, 24);
+    decision_queue::raise_fork(
+        &mut state,
+        &conv.id,
+        2,
+        &conv.messages[2].content,
+        decision_queue::message_target_fingerprint(&conv.messages[2]),
+    );
+    let facts = rustain::adapters::tui::notification_log::LogFacts {
+        active_messages: conv.messages.len(),
+        ..support::facts(&conv.id)
+    };
+    support::paint(&mut state, &facts, 80, 24);
+    support::ready(&mut state, &clock);
+    assert_eq!(
+        support::route(&mut state, &support::key('n'), &facts)
+            .unwrap()
+            .into_action(),
+        InputAction::ForkCancel
+    );
+    assert!(matches!(
+        state.decisions.take_resolved(),
+        Some(DecisionSubject::Fork(_))
+    ));
+    assert_eq!(tabs.tab_count(), before);
+    let saved = storage.load_conversation(&conv.id).await.unwrap().unwrap();
+    assert_eq!(saved.messages.len(), conv.messages.len());
+    for (actual, original) in saved.messages.iter().zip(&conv.messages) {
+        assert_eq!(actual.id, original.id);
+        assert_eq!(actual.content, original.content);
+    }
 }
 
 #[tokio::test]
@@ -739,33 +867,18 @@ async fn test_e2e_fork_empty_conversation_returns_error() {
 // ── AC[1]: Fork confirmation card widget ─────────────────────────────────────
 
 #[test]
-fn test_e2e_fork_widget_renders_double_border() {
-    let theme = Theme::dark();
-    let lines = render_fork_confirmation_lines("Hello world", 0, 60, &theme);
-
-    assert!(lines.len() >= 5);
-    let first: String = lines[0]
-        .spans
-        .iter()
-        .map(|s| s.content.to_string())
-        .collect();
-    let last: String = lines
-        .last()
-        .unwrap()
-        .spans
-        .iter()
-        .map(|s| s.content.to_string())
-        .collect();
-    assert!(first.starts_with('╔'));
-    assert!(first.ends_with('╗'));
-    assert!(last.starts_with('╚'));
-    assert!(last.ends_with('╝'));
+fn test_e2e_fork_widget_renders_frame() {
+    let (mut state, _) = support::clocked(80, 24);
+    decision_queue::raise_fork(&mut state, "c1", 0, "Hello world", 0);
+    let text = support::screen(&support::paint(&mut state, &fork_facts(), 80, 24));
+    assert!(text.contains("Hello world"));
+    assert!(text.contains("Fork"));
 }
 
 #[test]
 fn test_e2e_fork_widget_shows_correct_message_number() {
     let theme = Theme::dark();
-    let lines = render_fork_confirmation_lines("Hello", 4, 60, &theme);
+    let lines = fork_confirm::lines(&fork_body("Hello", 4), &theme);
     let text: String = lines
         .iter()
         .flat_map(|l| l.spans.iter())
@@ -779,15 +892,11 @@ fn test_e2e_fork_widget_shows_correct_message_number() {
 
 #[test]
 fn test_e2e_fork_widget_shows_actions() {
-    let theme = Theme::dark();
-    let lines = render_fork_confirmation_lines("msg", 0, 60, &theme);
-    let text: String = lines
-        .iter()
-        .flat_map(|l| l.spans.iter())
-        .map(|s| s.content.to_string())
-        .collect();
-    assert!(text.contains("[y] Fork"), "Should show [y] Fork action");
-    assert!(text.contains("[n] Cancel"), "Should show [n] Cancel action");
+    let (mut state, _) = support::clocked(80, 24);
+    decision_queue::raise_fork(&mut state, "c1", 0, "msg", 0);
+    let text = support::screen(&support::paint(&mut state, &fork_facts(), 80, 24));
+    assert!(text.contains("Fork"));
+    assert!(text.contains("Cancel"));
 }
 
 #[test]
@@ -796,7 +905,7 @@ fn test_e2e_fork_widget_truncates_long_utf8_safely() {
     let utf8_msg = "日本語のテスト".repeat(20); // 140 multi-byte chars
     let theme = Theme::dark();
     // Must not panic
-    let lines = render_fork_confirmation_lines(&utf8_msg, 0, 60, &theme);
+    let lines = fork_confirm::lines(&fork_body(&utf8_msg, 0), &theme);
     assert!(!lines.is_empty());
 }
 
@@ -1057,49 +1166,27 @@ async fn test_e2e_fork_nonempty_title_preserves_format() {
     assert_eq!(forked.title, "Fork of Test Conversation");
 }
 
-/// P5 dedup invariant: once `pending_fork_index` has been taken, a subsequent
-/// ForkConfirm action must find it `None` and refuse to start a second fork.
-///
-/// We can't drive the full event loop from a unit test, so we assert the
-/// precondition the event_loop.rs match arm relies on: `.take()` leaves the
-/// Option empty, and the `if let Some(...)` guard trivially short-circuits.
+/// A resolved decision can only hand its payload to the effect arm once.
 #[test]
-fn test_e2e_fork_pending_index_take_makes_confirm_noop() {
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-    state.pending_fork_index = Some(3);
-
-    // First confirm takes the value.
-    let first = state.pending_fork_index.take();
-    assert_eq!(first, Some(3));
-
-    // A second confirm landing before focus is cleared would hit the same
-    // match arm — but `take()` has already cleared the Option, so the
-    // `if let Some(_) = state.pending_fork_index.take()` check is a no-op.
-    let second = state.pending_fork_index.take();
-    assert_eq!(
-        second, None,
-        "Second ForkConfirm must observe None — this is the dedup guarantee"
+fn test_e2e_fork_decision_payload_taken_once() {
+    let mut state = fork_ready(3);
+    support::route(&mut state, &support::key('y'), &fork_facts());
+    assert!(
+        matches!(state.decisions.take_resolved(), Some(DecisionSubject::Fork(p)) if p.message_index == 3)
     );
+    assert!(state.decisions.take_resolved().is_none());
+    assert!(!state.decisions.holds(DecisionKind::Fork));
 }
 
-/// P2: While the fork confirmation overlay is active, user input keys (e.g. a
-/// submit via Enter) must not be routed to the input box. This eliminates the
-/// "message count changes between 'f' and 'y'" concern — no async path can add
-/// a message while the overlay is up.
 #[test]
 fn test_e2e_fork_overlay_blocks_enter_submit() {
-    let mut state = TuiState::new(80, 24);
-    state.focus = FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Fork));
-    state.pending_fork_index = Some(1);
-
-    use rustain::domain::events::{DomainInputEvent, DomainKey};
-    let action = handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Enter));
-
-    // Enter must not produce a SubmitMessage action — it's consumed by the overlay.
-    assert!(
-        !matches!(action, InputAction::SubmitMessage(_)),
-        "Enter in Fork overlay must NOT produce SubmitMessage, got: {:?}",
-        action
+    let mut state = fork_ready(1);
+    let result = support::route(
+        &mut state,
+        &support::special(rustain::domain::events::DomainKey::Enter),
+        &fork_facts(),
     );
+    assert!(result.is_some());
+    assert!(decision_queue::fork_pending(&state, "c1"));
+    assert!(state.decisions.take_resolved().is_none());
 }

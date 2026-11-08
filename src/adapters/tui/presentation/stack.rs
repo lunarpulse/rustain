@@ -121,9 +121,6 @@ pub struct ModalStack {
     pub(super) frames: Vec<Frame>,
     pub(super) last_id: u64,
     pub(super) continuations: Vec<Continuation>,
-    /// Owned legacy intent, not a frame or an independent payload/open flag.
-    /// In particular, retain an already-owned export path without cloning it.
-    pub(super) pending_confirmation: Option<crate::domain::models::visual::ConfirmationType>,
 }
 
 impl ModalStack {

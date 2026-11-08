@@ -26,11 +26,12 @@
 //! `room.artifacts()` and the **resolved** `ArtifactRef` is what reaches the
 //! port.
 
+use crate::adapters::tui::decision_queue::{self, ArtifactCardMode, PendingArtifactCard};
 use crate::adapters::tui::handlers::artifact_command::{
     self as handler, ArtifactCommandArgs, ResolveError,
 };
 use crate::adapters::tui::presentation::reducer;
-use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard, TuiState};
+use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{
     AgentId, ArtifactRef, OperatorApplyFinding, OrchestrationRoom, PermissionMode, ReviewVerdict,
     RoomEditDecision, RoomEditKind, RoomEvent,
@@ -410,7 +411,7 @@ async fn open_apply_card(
     typed: &str,
     permission_mode: PermissionMode,
 ) -> Result<(), String> {
-    if state.pending_artifact_card.is_some() {
+    if decision_queue::artifact_pending(state, conversation_id) {
         return Err("an artifact apply decision is already awaiting your answer".to_owned());
     }
     let room = load_room(app_state).await?;
@@ -446,19 +447,16 @@ async fn open_apply_card(
         .map_err(|error| error.to_string())?;
     let files = patch_files(&body);
     let predates_apply_records = room.predates_apply_records().contains(&artifact.id);
-    let prior_focus = state.focus.clone();
-    state.pending_artifact_card = Some(PendingArtifactCard {
-        conversation_id: conversation_id.to_owned(),
-        artifact,
-        files,
-        workspace: app_state.compose_snapshot.workspace_path.clone(),
-        prior_focus,
-        predates_apply_records,
-        mode: ArtifactCardMode::Apply,
-    });
-    reducer::raise_confirmation(
+    decision_queue::raise_artifact(
         state,
-        crate::domain::models::visual::ConfirmationType::ArtifactApply,
+        PendingArtifactCard {
+            conversation_id: conversation_id.to_owned(),
+            artifact,
+            files,
+            workspace: app_state.compose_snapshot.workspace_path.clone(),
+            predates_apply_records,
+            mode: ArtifactCardMode::Apply,
+        },
     );
     state.needs_redraw = true;
     Ok(())
@@ -482,7 +480,7 @@ async fn open_resolve_card(
     typed: &str,
     finding: crate::domain::models::OperatorApplyFinding,
 ) -> Result<(), String> {
-    if state.pending_artifact_card.is_some() {
+    if decision_queue::artifact_pending(state, conversation_id) {
         return Err("an artifact decision is already awaiting your answer".to_owned());
     }
     let room = load_room(app_state).await?;
@@ -510,19 +508,16 @@ async fn open_resolve_card(
         .map_err(|error| error.to_string())?;
     let files = patch_files(&body);
     let predates_apply_records = room.predates_apply_records().contains(&artifact.id);
-    let prior_focus = state.focus.clone();
-    state.pending_artifact_card = Some(PendingArtifactCard {
-        conversation_id: conversation_id.to_owned(),
-        artifact,
-        files,
-        workspace: app_state.compose_snapshot.workspace_path.clone(),
-        prior_focus,
-        predates_apply_records,
-        mode: ArtifactCardMode::Resolve(finding),
-    });
-    reducer::raise_confirmation(
+    decision_queue::raise_artifact(
         state,
-        crate::domain::models::visual::ConfirmationType::ArtifactApply,
+        PendingArtifactCard {
+            conversation_id: conversation_id.to_owned(),
+            artifact,
+            files,
+            workspace: app_state.compose_snapshot.workspace_path.clone(),
+            predates_apply_records,
+            mode: ArtifactCardMode::Resolve(finding),
+        },
     );
     state.needs_redraw = true;
     Ok(())

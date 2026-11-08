@@ -21,6 +21,10 @@
 
 #![cfg(unix)]
 
+#[allow(clippy::duplicate_mod)]
+#[path = "conformance_21_6_decision_queue/support.rs"]
+mod decision_support;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1525,14 +1529,9 @@ impl FrontDoor {
 
 /// **AC4 keystone (a) — behavioural, through the REAL front door.**
 ///
-/// `state.input_buffer` → `submit_message_for_test` →
-/// `InputAction::ExecuteCommand` → `artifact_bridge::artifact_command` → the
-/// card → `handle_input('y')` → `InputAction::ApplyCardAccept` →
-/// `resolve_apply_card` → the real effect arm → the journal file on disk.
-///
-/// ⛔ **Forbidden bypass (named):** driving `resolve_apply_card` or the port
-/// without going through `handle_input` — the exact bypass cut 2's review
-/// caught, and the third consecutive cut in which it happened.
+/// `state.input_buffer` → command dispatch → decision frame → local route →
+/// resolved payload → the real effect arm → the journal file on disk.
+/// The key must traverse the actual frame, not invoke the effect directly.
 ///
 /// **First mutant:** append when the card is *opened* rather than on `y` — the
 /// journal is asserted byte-identical across the preview.
@@ -1540,14 +1539,14 @@ impl FrontDoor {
 /// asserts nothing was written and the state did not move.
 #[tokio::test]
 async fn the_resolve_command_reaches_the_journal_through_the_real_dispatch_path() {
-    use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
-    use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
-    use rustain::adapters::tui::state::{ArtifactCardMode, TuiState};
-    use rustain::domain::events::DomainInputEvent;
+    use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
+    use rustain::adapters::tui::decision_queue::{self, ArtifactCardMode, DecisionSubject};
+    use rustain::adapters::tui::presentation::RouteEffect;
 
     let door = FrontDoor::wedged().await;
     let app_state = door.app_state();
-    let mut state = TuiState::new(120, 40);
+    let (mut state, clock) = decision_support::clocked(120, 40);
+    let facts = decision_support::facts("conv");
 
     // ── decline first: n writes nothing ──────────────────────────────────
     let before = door.journal_lines();
@@ -1564,10 +1563,15 @@ async fn the_resolve_command_reaches_the_journal_through_the_real_dispatch_path(
         PermissionMode::Yolo,
     )
     .await;
-    let card = state
-        .pending_artifact_card
-        .as_ref()
-        .expect("the resolve decision card");
+    let DecisionSubject::Artifact(card) = &state
+        .decisions
+        .items()
+        .next()
+        .expect("resolve decision card")
+        .subject
+    else {
+        panic!("artifact decision expected");
+    };
     assert_eq!(
         card.mode,
         ArtifactCardMode::Resolve(OperatorApplyFinding::Absent),
@@ -1578,11 +1582,16 @@ async fn the_resolve_command_reaches_the_journal_through_the_real_dispatch_path(
         before,
         "opening the card must append nothing"
     );
+    decision_support::paint(&mut state, &facts, 120, 40);
+    decision_support::ready(&mut state, &clock);
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('n')),
-        InputAction::ApplyCardDecline
+        decision_support::route(&mut state, &decision_support::key('n'), &facts),
+        Some(RouteEffect::Action(InputAction::ApplyCardDecline))
     );
-    assert!(resolve_apply_card(&mut state, false).is_none());
+    assert!(matches!(
+        state.decisions.take_resolved(),
+        Some(DecisionSubject::Artifact(_))
+    ));
     assert_eq!(door.journal_lines(), before, "decline writes nothing");
     assert_eq!(
         door.projected().await,
@@ -1603,17 +1612,21 @@ async fn the_resolve_command_reaches_the_journal_through_the_real_dispatch_path(
         PermissionMode::Yolo,
     )
     .await;
-    assert!(state.pending_artifact_card.is_some());
+    assert!(decision_queue::artifact_pending(&state, "conv"));
     assert_eq!(door.journal_lines(), before, "still nothing before `y`");
+    decision_support::paint(&mut state, &facts, 120, 40);
+    decision_support::ready(&mut state, &clock);
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-        InputAction::ApplyCardAccept
+        decision_support::route(&mut state, &decision_support::key('y'), &facts),
+        Some(RouteEffect::Action(InputAction::ApplyCardAccept))
     );
-    let card = resolve_apply_card(&mut state, true).expect("accepted card");
+    let Some(DecisionSubject::Artifact(card)) = state.decisions.take_resolved() else {
+        panic!("accepted artifact payload");
+    };
     rustain::infrastructure::runtime::artifact_bridge::apply_confirmed_card(
         &mut state,
         &app_state,
-        card,
+        *card,
         PermissionMode::Yolo,
     )
     .await;
@@ -1644,17 +1657,13 @@ async fn the_resolve_command_reaches_the_journal_through_the_real_dispatch_path(
 /// it shows `[y] Apply` on a verb that applies nothing (ruling A13).
 ///
 /// ⚠ Asserted on a **painted `ratatui` buffer**, never a formatter's return
-/// value, and at the spec's 36/60/120 reference widths. Reading symbols out of
+/// value, and at the decision frame's 60/80/130 reference widths. Reading symbols out of
 /// the buffer discards style entirely, so every claim here is carried by text —
 /// NFR34's "never colour alone" holds by construction.
 #[test]
 fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use rustain::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard, TuiState};
-    use rustain::adapters::tui::widgets::{apply_card, inline_card};
+    use rustain::adapters::tui::decision_queue::{self, ArtifactCardMode, PendingArtifactCard};
 
-    let state = TuiState::new(80, 24);
     for (finding, expected) in [
         (OperatorApplyFinding::Present, "ARE in the working tree"),
         (OperatorApplyFinding::Absent, "are NOT in the working tree"),
@@ -1664,34 +1673,21 @@ fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
             artifact: card_artifact(),
             files: vec!["src/lib.rs".to_owned()],
             workspace: std::path::PathBuf::from("/workspace"),
-            prior_focus: rustain::domain::models::FocusState::Input,
             predates_apply_records: true,
             mode: ArtifactCardMode::Resolve(finding),
         };
-        for width in [36u16, 60, 120] {
-            let area = Rect::new(0, 0, width, 20);
-            let mut buffer = Buffer::empty(area);
-            let lines = apply_card::render_apply_card_lines(&card, &state.theme, area.width);
-            inline_card::render_bottom_anchored_decision_card(
-                &mut buffer,
-                lines,
-                state.theme.colors.accent,
-                area,
-            );
-            let rendered = (0..area.height)
-                .map(|y| {
-                    (0..area.width)
-                        .map(|x| buffer[(x, y)].symbol())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+        for width in [60u16, 80, 130] {
+            let (mut state, _) = decision_support::clocked(width, 40);
+            decision_queue::raise_artifact(&mut state, card.clone());
+            let rendered = decision_support::screen(&decision_support::paint(
+                &mut state,
+                &decision_support::facts("conversation"),
+                width,
+                40,
+            ));
             assert!(!rendered.trim().is_empty(), "width {width} renders nothing");
-            // NFR35: nothing may spill past the pane edge at ANY reference
-            // width. The card wraps its prose and breaks its action row rather
-            // than truncating, so every claim below is asserted at 36 too — a
-            // clipped needle would make the negative assertions vacuous, which
-            // is the Rule-0 Class A failure this file exists to avoid.
+            // The 21-6 frame operates at widths of at least 60 columns.
+            // Each claim below must remain painted within that viewport.
             for line in rendered.lines() {
                 assert!(
                     line.chars().count() <= width as usize,
@@ -1700,13 +1696,12 @@ fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
             }
             // Prose needles are matched against a chrome-stripped,
             // whitespace-normalised view: the card WRAPS its sentences to the
-            // pane, so at 36 columns a claim is painted across two rows with a
-            // box border between them — and it is no less painted for it.
+            // pane, so a claim may span two bordered rows without being lost.
             // ⚠ The raw render is what the width and key assertions use.
             let flat = rendered
                 .chars()
                 .map(|glyph| {
-                    if "║╔╗╚╝═".contains(glyph) {
+                    if "║╔╗╚╝═│┌┐└┘─".contains(glyph) {
                         ' '
                     } else {
                         glyph
@@ -1714,6 +1709,12 @@ fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
                 })
                 .collect::<String>()
                 .split_whitespace()
+                // The decision frame is centred above 100 columns: the Stage's background
+                // rows (`stage row NN`) sit beside it on the same screen rows.
+                .filter(|word| {
+                    !matches!(*word, "stage" | "row")
+                        && !(word.len() == 2 && word.bytes().all(|b| b.is_ascii_digit()))
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
 
@@ -1779,20 +1780,15 @@ fn the_painted_resolve_card_states_its_epistemics_and_never_paints_apply() {
 /// **Review finding F3 — the epistemic consent survives a multi-file overflow
 /// (AC4).**
 ///
-/// The resolve card renders through the tail-scrolling decision-card renderer.
-/// A multi-file patch can produce more lines than the pane shows, so the lead
-/// scrolls off — and the consent sentence must stay visible before `[y]`,
+/// A multi-file patch can produce more lines than the pane shows. The initial
+/// decision frame must nevertheless show the epistemic consent before `[y]`,
 /// because confirming a report the operator was not shown is the exact defect
-/// the epistemics exist to prevent. After the re-order the consent sits in the
-/// tail region the renderer always keeps.
+/// the epistemics exist to prevent.
 #[test]
 fn the_resolve_card_keeps_the_consent_visible_when_files_overflow() {
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    use rustain::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard, TuiState};
-    use rustain::adapters::tui::widgets::{apply_card, inline_card};
+    use rustain::adapters::tui::decision_queue::{self, ArtifactCardMode, PendingArtifactCard};
 
-    let state = TuiState::new(80, 24);
+    let (mut state, _) = decision_support::clocked(60, 16);
     // Enough files that the joined list overflows a short pane many times over.
     let many_files: Vec<String> = (0..40)
         .map(|i| format!("crates/module_{i}/src/deeply/nested/path/to/file_{i}.rs"))
@@ -1802,41 +1798,17 @@ fn the_resolve_card_keeps_the_consent_visible_when_files_overflow() {
         artifact: card_artifact(),
         files: many_files,
         workspace: std::path::PathBuf::from("/workspace"),
-        prior_focus: rustain::domain::models::FocusState::Input,
         predates_apply_records: true,
         mode: ArtifactCardMode::Resolve(OperatorApplyFinding::Absent),
     };
-    // A short pane forces the decision-card renderer to tail-scroll.
-    let height = 16u16;
-    let width = 60u16;
-    let area = Rect::new(0, 0, width, height);
-    let lines = apply_card::render_apply_card_lines(&card, &state.theme, area.width);
-    assert!(
-        lines.len() > height as usize,
-        "precondition: the card overflows the {}-row pane ({} lines)",
-        height,
-        lines.len()
-    );
-    let mut buffer = Buffer::empty(area);
-    inline_card::render_bottom_anchored_decision_card(
-        &mut buffer,
-        lines,
-        state.theme.colors.accent,
-        area,
-    );
-    let rendered = (0..area.height)
-        .map(|y| {
-            (0..area.width)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let facts = decision_support::facts("conversation");
+    decision_queue::raise_artifact(&mut state, card);
+    let rendered = decision_support::screen(&decision_support::paint(&mut state, &facts, 60, 16));
     // Strip the decision-card chrome the same way the painted-card test does.
     let flat = rendered
         .chars()
         .map(|glyph| {
-            if "║╔╗╚╝═".contains(glyph) {
+            if "║╔╗╚╝═│┌┐└┘─".contains(glyph) {
                 ' '
             } else {
                 glyph

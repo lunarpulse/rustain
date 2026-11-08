@@ -353,6 +353,142 @@ fn story21_6_every_deciding_key_resolves_once_and_hands_over_its_payload() {
 }
 
 #[test]
+fn story21_6_retract_answer_transfers_the_armed_payload_once_and_restores_base() {
+    for (key, effect) in [
+        ('y', DecisionEffect::TeamRetractConfirm),
+        ('n', DecisionEffect::TeamRetractDecline),
+    ] {
+        let (mut state, clock) = clocked();
+        let payload = TeamRetractPayload {
+            target: RetractTarget::Item {
+                peer: "jun-dev".into(),
+                item: "ri_x".into(),
+            },
+            conversation_id: CONV.into(),
+            task: Some("task-x".into()),
+            card: "retract the selected item".into(),
+            armed: true,
+            request: None,
+        };
+        raise_team_retract(&mut state, payload.clone(), Responder::Local);
+        ready(&mut state, &clock);
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Char(key), &facts(CONV)),
+            PaneOutcome::Effect(effect)
+        );
+        assert_eq!(
+            state.decisions.take_resolved(),
+            Some(DecisionSubject::TeamRetract(Box::new(payload)))
+        );
+        assert!(state.decisions.take_resolved().is_none());
+        assert_eq!(state.focus, FocusState::Input);
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Char(key), &facts(CONV)),
+            PaneOutcome::Consumed
+        );
+    }
+}
+
+#[test]
+fn story21_6_retract_resolution_restores_the_interrupted_frame() {
+    let (mut state, clock) = clocked();
+    presentation::reducer::open(&mut state, Surface::Help);
+    let interrupted = state.modal_stack.top().unwrap().clone();
+    raise_team_retract(
+        &mut state,
+        TeamRetractPayload {
+            target: RetractTarget::Item {
+                peer: "jun-dev".into(),
+                item: "ri_x".into(),
+            },
+            conversation_id: CONV.into(),
+            task: None,
+            card: "retract".into(),
+            armed: true,
+            request: None,
+        },
+        Responder::Local,
+    );
+    ready(&mut state, &clock);
+    assert_eq!(
+        handle_key(&mut state, PaneKey::Char('y'), &facts(CONV)),
+        PaneOutcome::Effect(DecisionEffect::TeamRetractConfirm)
+    );
+    assert_eq!(state.modal_stack.top(), Some(&interrupted));
+    assert_eq!(state.focus, FocusState::Input);
+}
+
+#[test]
+fn story21_6_disarmed_retract_cannot_confirm() {
+    let (mut state, clock) = clocked();
+    raise_team_retract(
+        &mut state,
+        TeamRetractPayload {
+            target: RetractTarget::Item {
+                peer: "jun-dev".into(),
+                item: "ri_x".into(),
+            },
+            conversation_id: CONV.into(),
+            task: None,
+            card: "Cannot verify on jun-dev's host.".into(),
+            armed: false,
+            request: None,
+        },
+        Responder::Local,
+    );
+    ready(&mut state, &clock);
+    assert_eq!(
+        handle_key(&mut state, PaneKey::Char('y'), &facts(CONV)),
+        PaneOutcome::Consumed
+    );
+    assert!(team_retract_pending(&state));
+    assert!(state.decisions.take_resolved().is_none());
+    assert_eq!(
+        handle_key(&mut state, PaneKey::Char('n'), &facts(CONV)),
+        PaneOutcome::Effect(DecisionEffect::TeamRetractDecline)
+    );
+}
+
+#[test]
+fn story21_6_forget_selection_resolves_once_with_the_original_conversation() {
+    let (mut state, clock) = clocked();
+    let entry = |summary: &str| crate::domain::models::MemoryEntry {
+        timestamp: chrono::Local::now(),
+        summary: summary.into(),
+        context: None,
+    };
+    raise_forget(
+        &mut state,
+        PendingForgetCard {
+            conversation_id: CONV.into(),
+            candidates: vec![(7, entry("a"), true), (9, entry("b"), false)],
+            focused_index: 0,
+        },
+    );
+    ready(&mut state, &clock);
+    assert_eq!(
+        handle_key(&mut state, PaneKey::Char('y'), &facts(CONV)),
+        PaneOutcome::Effect(DecisionEffect::ForgetAccept)
+    );
+    let Some(DecisionSubject::Forget(card)) = state.decisions.take_resolved() else {
+        panic!("forget payload missing");
+    };
+    match forget_resolution(&card, true) {
+        crate::domain::events::AppEvent::MemoryForgetResolved {
+            conversation_id,
+            keys,
+        } => {
+            assert_eq!(conversation_id, CONV);
+            assert_eq!(keys, vec![7]);
+        }
+        _ => panic!("wrong event"),
+    }
+    assert!(state.decisions.take_resolved().is_none());
+    assert!(!forget_pending(&state, CONV));
+}
+
+#[test]
 fn story21_6_every_effect_maps_to_an_existing_action_or_the_decision_action() {
     use DecisionEffect as E;
     assert!(matches!(
@@ -776,7 +912,6 @@ fn story21_6_a_question_edits_its_own_field_never_the_composer() {
     apply_resolved_action(
         &mut state,
         InputAction::Decision(DecisionEffect::QuestionSend),
-        presentation::reducer::restore_focus_after_modal,
     );
     assert_eq!(rx.try_recv().unwrap(), "hic !");
     assert_eq!(
@@ -844,7 +979,6 @@ fn story21_6_esc_leaves_the_answer_field_then_defers_and_reopening_keeps_the_tex
     apply_resolved_action(
         &mut state,
         InputAction::Decision(DecisionEffect::QuestionSend),
-        presentation::reducer::restore_focus_after_modal,
     );
     assert_eq!(rx.try_recv().unwrap(), "ab");
     assert_eq!(
@@ -872,7 +1006,6 @@ fn story21_6_an_empty_answer_sends_nothing_and_ctrl_d_skips() {
     apply_resolved_action(
         &mut state,
         InputAction::Decision(DecisionEffect::QuestionSkip),
-        presentation::reducer::restore_focus_after_modal,
     );
     assert!(
         matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
@@ -1017,7 +1150,7 @@ fn story21_6_untrusted_card_text_is_sanitized_at_paint() {
 }
 
 #[test]
-fn story21_6_the_card_contexts_are_decision_children_with_the_rekeyed_rows() {
+fn story21_6_the_decision_contexts_are_children_with_the_rekeyed_rows() {
     use crate::adapters::tui::keymap::table_card::CardCmd;
     use crate::adapters::tui::keymap::{CommandId, Host, Key, Resolved, resolve};
     for context in [
@@ -1030,6 +1163,9 @@ fn story21_6_the_card_contexts_are_decision_children_with_the_rekeyed_rows() {
         Context::Delegation,
         Context::SpawnGate,
         Context::DecisionConfirm,
+        Context::Forget,
+        Context::Rewind,
+        Context::ExportOverwrite,
     ] {
         assert_eq!(context.parents(), &[Context::Decision], "{context:?}");
         for key in [

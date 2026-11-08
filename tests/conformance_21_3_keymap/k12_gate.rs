@@ -100,6 +100,7 @@ const ALLOWLIST: &[Allow] = &[
     // `[x]` / `[ ]` are checkbox markers, not keys
     ("src/adapters/tui/widgets/consolidation_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
     ("src/adapters/tui/widgets/forget_card.rs", &["  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers, not keys"),
+    ("src/adapters/tui/widgets/decision_frame.rs", &["  [x]   [ ] ", "  [x]   [ ] "], OWNER_PERMANENT, "checkbox markers counted by the Copy preflight, not keys"),
     // 21-4: the login overlay keeps `handlers::login::on_key` (security boundary)
     ("src/adapters/tui/widgets/login_dialog.rs", &[
         "Esc back", "Esc close", "↑↓ navigate · Enter select · Esc back", "↑↓ navigate · Enter select · Esc close",

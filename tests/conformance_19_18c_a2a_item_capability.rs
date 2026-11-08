@@ -37,6 +37,10 @@
 
 #![cfg(feature = "a2a")]
 
+#[allow(clippy::duplicate_mod)]
+#[path = "conformance_21_6_decision_queue/support.rs"]
+mod decision_support;
+
 use std::sync::{Once, OnceLock};
 
 use base64::Engine as _;
@@ -44,12 +48,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use rustain::adapters::a2a::item_capability::{
     ItemCapabilityKey, ItemCapabilityKeyStore, derive_item_capability, load_item_capability_key,
 };
-use rustain::adapters::tui::app::handle_input;
-use rustain::adapters::tui::handlers::team_command::{
-    open_team_retract_card, resolve_team_retract_card,
-};
+use rustain::adapters::tui::decision_queue::{self, DecisionKind, DecisionSubject};
+use rustain::adapters::tui::handlers::team_command::open_team_retract_card;
+use rustain::adapters::tui::presentation::RouteEffect;
 use rustain::domain::events::DomainInputEvent;
-use rustain::infrastructure::runtime::transparency_bridge::team_retract_dispatch;
+use rustain::infrastructure::runtime::transparency_bridge::resolve_team_retract;
 use sha2::Digest as _;
 
 use std::path::{Path, PathBuf};
@@ -1351,21 +1354,52 @@ async fn raise_retract_card(sender: &mut Sender, state: &mut TuiState, line: &st
     })
     .await
     .expect("the preview spawn publishes TeamRetractPreviewReady");
+    let clock = Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
+    decision_queue::prune_closed(state, &decision_support::facts("conv"));
     open_team_retract_card(state, "conv", preview);
+    decision_support::paint(state, &decision_support::facts("conv"), 120, 40);
+    decision_support::advance(&clock, decision_queue::INERT_AFTER_PAINT);
 }
 
 /// Press `y` exactly as the event loop acts on it; the dispatch's sentence.
-async fn press_y(sender: &Sender, state: &mut TuiState) -> Option<String> {
-    use rustain::adapters::tui::app::InputAction;
-    if handle_input(state, &DomainInputEvent::KeyPress('y')) != InputAction::TeamRetractConfirm {
+async fn press_y(sender: &mut Sender, state: &mut TuiState) -> Option<String> {
+    if decision_support::route(
+        state,
+        &DomainInputEvent::KeyPress('y'),
+        &decision_support::facts("conv"),
+    ) != Some(RouteEffect::Action(InputAction::TeamRetractConfirm))
+    {
         return None;
     }
-    let pending = resolve_team_retract_card(state, true)?;
-    let runtime = sender.app_state.a2a_send.as_ref().expect("egress runtime");
+    let Some(DecisionSubject::TeamRetract(payload)) = state.decisions.take_resolved() else {
+        panic!("resolved retract payload");
+    };
+    resolve_team_retract(state, Some(*payload), true, &sender.app_state).await;
     Some(
-        team_retract_dispatch(runtime, &pending.peer, &pending.item_id, pending.task)
-            .await
-            .message,
+        tokio::time::timeout(SETTLE, async {
+            loop {
+                match sender.domain_rx.recv().await {
+                    Some(AppEvent::TeamRetractAnswered {
+                        conversation_id,
+                        message,
+                        ..
+                    }) => {
+                        assert_eq!(conversation_id, "conv");
+                        break message;
+                    }
+                    Some(_) => {}
+                    None => panic!("domain channel closed before retract answer"),
+                }
+            }
+        })
+        .await
+        .expect("retract answer"),
     )
 }
 
@@ -1629,7 +1663,15 @@ async fn k05_only_the_sender_can_read_answer_poll_cancel_or_retract_its_item() {
     // … even on a tombstone: the check runs before the tombstone class.
     let third = send_item(&mut a, &mut state, "b", &b.host, "third").await;
     raise_retract_card(&mut a, &mut state, &format!("/team retract b {}", third.id)).await;
-    assert!(state.pending_team_retract.as_ref().expect("card").armed);
+    let item = state
+        .decisions
+        .items()
+        .find(|item| {
+            item.kind == DecisionKind::TeamRetract
+                && item.conversation_id.as_deref() == Some("conv")
+        })
+        .expect("card");
+    assert!(matches!(&item.subject, DecisionSubject::TeamRetract(card) if card.armed));
     remove_on_host(&mut operator, &b.host, &third.id).await;
     let wrong_third = stranger(&third.task);
     let probe = attacker
@@ -1644,14 +1686,14 @@ async fn k05_only_the_sender_can_read_answer_poll_cancel_or_retract_its_item() {
     );
     // Positive control: A's matched capability reaches the tombstone class.
     assert_eq!(
-        press_y(&a, &mut state).await.expect("dispatched"),
+        press_y(&mut a, &mut state).await.expect("dispatched"),
         "b's host already removed that item — its content is no longer shown there.\n\
          Nothing was marked."
     );
 
     // 7. A retracts its own item: landed, the mark is on B's item.
     raise_retract_card(&mut a, &mut state, &format!("/team retract b {ri_a}")).await;
-    let landed = press_y(&a, &mut state).await.expect("dispatched");
+    let landed = press_y(&mut a, &mut state).await.expect("dispatched");
     assert!(landed.starts_with("Retracted on b's host."), "{landed}");
     assert!(retracted(&room_events(&b.host.journal).await, &ri_a));
     // 7b. … and a wrong capability still reads as never-existed, never
@@ -1836,7 +1878,7 @@ async fn k06_a_co_holding_sender_cannot_act_on_another_senders_item() {
         )
         .await;
         assert_eq!(
-            press_y(&c, &mut state_c).await.expect("dispatched"),
+            press_y(&mut c, &mut state_c).await.expect("dispatched"),
             format!(
                 "b's host has no item {} this host can address. Nothing was marked.",
                 sent.id
@@ -2763,7 +2805,9 @@ async fn k12_no_raw_capability_is_stored_exported_or_logged() {
     settle_send(&mut a, &mut state).await;
     minted(&b.host, "more").await;
     raise_retract_card(&mut a, &mut state, &format!("/team retract b {}", first.id)).await;
-    press_y(&a, &mut state).await.expect("retract dispatched");
+    press_y(&mut a, &mut state)
+        .await
+        .expect("retract dispatched");
     raw(&b, KEY)
         .call(task_body(
             6,

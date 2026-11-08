@@ -13,11 +13,10 @@ use rustain::adapters::tui::{
 };
 use rustain::domain::clock::MockClock;
 use rustain::domain::models::{
-    ApprovalOutcome, FocusState, NotificationsConfig, OverlayType, PermissionResolution, RequestId,
+    ApprovalOutcome, FocusState, NotificationsConfig, PermissionResolution, RequestId,
     SkillTrustResponse, ToolRisk,
     palette::{PaletteAction, PaletteEntry, PaletteScope},
     tool_call::ApprovalSource,
-    visual::ConfirmationType,
 };
 use rustain::domain::services::approval_runtime::{
     ApprovalRuntime, ApprovalRuntimeEvent, ResolvedApproval, ReviewScope,
@@ -82,10 +81,6 @@ impl Approvals {
         );
         approval_bridge::apply(state, event, None);
     }
-}
-
-fn confirmation(kind: ConfirmationType) -> FocusState {
-    FocusState::Overlay(OverlayType::Confirmation(kind))
 }
 
 fn frames(state: &TuiState) -> Vec<Frame> {
@@ -492,45 +487,41 @@ async fn queued_request_preserves_an_active_trust_owner() {
 }
 
 #[tokio::test]
-async fn queued_request_retains_a_deferred_export_until_its_owner_releases() {
-    let mut state = TuiState::new(80, 24);
+async fn story21_6_queued_requests_preserve_the_export_frame() {
+    use crate::conformance_21_6_decision_queue::raisers::{facts_6d, press as frame_press, raise};
+    use crate::conformance_21_6_decision_queue::support::{paint, ready};
+    let (mut state, clock) = mock_state();
     let mut approvals = Approvals::new();
-    let path = std::path::PathBuf::from("deferred-export.md");
-    state.pending_export = Some((path.clone(), "retained export content".into()));
-    reducer::raise_confirmation(&mut state, ConfirmationType::ExportOverwrite(path.clone()));
+    raise(
+        &mut state,
+        DecisionKind::ExportOverwrite,
+        "deferred-export.md",
+    );
+    let export_frame = state.modal_stack.top().unwrap().clone();
     let (first, mut first_response) = approvals.request(&mut state).await;
     let (second, mut second_response) = approvals.request(&mut state).await;
-    assert_eq!(state.decisions.len(), 2);
+    assert_eq!(state.modal_stack.top(), Some(&export_frame));
+    assert_eq!(state.decisions.len(), 3);
     assert!(matches!(
         first_response.try_recv(),
         Err(TryRecvError::Empty)
     ));
-    assert_eq!(
-        state.focus,
-        confirmation(ConfirmationType::ExportOverwrite(path.clone()))
-    );
-    let pending = state.pending_export.as_ref().unwrap();
-    assert_eq!(pending.0, path);
-    assert_eq!(pending.1, "retained export content");
     assert!(matches!(
         second_response.try_recv(),
         Err(TryRecvError::Empty)
     ));
-    assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
-    assert!(state.pending_export.is_some());
+    paint(&mut state, &facts_6d("c1"), 80, 24);
+    ready(&mut state, &clock);
     assert_eq!(
-        press(&mut state, Key::Char('n')),
+        frame_press(&mut state, Key::Char('n')),
         InputAction::CancelExportOverwrite
     );
-    rustain::adapters::tui::handlers::export::apply_cancel_export_overwrite(&mut state);
-    reducer::settle_legacy(&mut state);
-    assert!(state.pending_export.is_none());
-    assert!(rustain::adapters::tui::decision_queue::holds_request(
-        &state, &first
+    assert!(matches!(
+        state.decisions.take_resolved(),
+        Some(DecisionSubject::ExportOverwrite(_))
     ));
-    assert!(rustain::adapters::tui::decision_queue::holds_request(
-        &state, &second
-    ));
+    assert!(decision_queue::holds_request(&state, &first));
+    assert!(decision_queue::holds_request(&state, &second));
     assert_eq!(state.decisions.len(), 2);
     assert!(!presentation::is_open(&state, Surface::Decision));
     assert!(matches!(
@@ -1036,119 +1027,6 @@ mod local_occlusion {
         }
     }
 
-    // Payload constructors mirror the existing K11 producer-shaped fixtures. Only
-    // event-backed kinds may ARRIVE beneath an already-open frame.
-    //
-    // 21-6 slice 6-C moved the skill-trust, plan approval / card, delegation, spawn-gate
-    // and question cards into the decision queue. This matrix keeps the cards 6-D has yet
-    // to move; the moved kinds are covered pairwise by
-    // `queue_kinds_paint_only_the_oldest_item_and_decide_it_alone`.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum Mixed {
-        Apply,
-        Consolidation,
-        Forget,
-        Export,
-        Peer,
-        Retract,
-        Fork,
-        Rewind,
-    }
-
-    const MIXED: [Mixed; 8] = [
-        Mixed::Apply,
-        Mixed::Consolidation,
-        Mixed::Forget,
-        Mixed::Export,
-        Mixed::Peer,
-        Mixed::Retract,
-        Mixed::Fork,
-        Mixed::Rewind,
-    ];
-    const ASYNC: [Mixed; 2] = [Mixed::Consolidation, Mixed::Retract];
-
-    fn seed_mixed(f: &mut Visit, kind: Mixed) {
-        use crate::conformance_21_11_display_width::k5b_cards::{
-            apply_pending, peer_pending, retract_pending,
-        };
-        use rustain::adapters::tui::state::*;
-        let state = &mut f.h.state;
-        let confirmation = match kind {
-            Mixed::Apply => {
-                state.pending_artifact_card = Some(apply_pending(vec!["mixed.rs".into()], false));
-                Some(ConfirmationType::ArtifactApply)
-            }
-            Mixed::Consolidation => {
-                state.pending_consolidation_card = Some(PendingConsolidationCard {
-                    conversation_id: "c1".into(),
-                    proposals: vec![],
-                });
-                reducer::take_chat_focus_for_card(state, true);
-                None
-            }
-            Mixed::Forget => {
-                state.pending_forget_card = Some(PendingForgetCard {
-                    conversation_id: "c1".into(),
-                    candidates: vec![],
-                    focused_index: 0,
-                });
-                None
-            }
-            Mixed::Export => {
-                state.pending_export = Some(("mixed-export.md".into(), "retained export".into()));
-                Some(ConfirmationType::ExportOverwrite("mixed-export.md".into()))
-            }
-            Mixed::Peer => {
-                state.pending_peer_add = Some(peer_pending("mixed-peer", None));
-                Some(ConfirmationType::PeerAdd)
-            }
-            Mixed::Retract => {
-                state.pending_team_retract = Some(retract_pending(
-                    "mixed retract body\n\nAwaiting your decision.  [y] Retract  [n] Cancel",
-                ));
-                Some(ConfirmationType::TeamRetract)
-            }
-            Mixed::Fork => {
-                state.pending_fork_index = Some(0);
-                Some(ConfirmationType::Fork)
-            }
-            Mixed::Rewind => {
-                state.pending_rewind_index = Some(0);
-                state.rewind_preview = Some(RewindPreview {
-                    target_message_index: 0,
-                    messages_to_remove: 1,
-                    files_to_revert: vec![],
-                });
-                Some(ConfirmationType::Rewind)
-            }
-        };
-        if let Some(kind) = confirmation {
-            reducer::raise_confirmation(state, kind);
-        }
-    }
-
-    fn selected_mixed(state: &TuiState) -> Mixed {
-        match &state.focus {
-            FocusState::Overlay(OverlayType::Confirmation(kind)) => match kind {
-                ConfirmationType::ArtifactApply => Mixed::Apply,
-                ConfirmationType::ExportOverwrite(_) => Mixed::Export,
-                ConfirmationType::PeerAdd => Mixed::Peer,
-                ConfirmationType::TeamRetract => Mixed::Retract,
-                ConfirmationType::Fork => Mixed::Fork,
-                ConfirmationType::Rewind => Mixed::Rewind,
-            },
-            FocusState::Chat => {
-                if state.pending_forget_card.is_some() {
-                    Mixed::Forget
-                } else {
-                    assert!(state.pending_consolidation_card.is_some());
-                    Mixed::Consolidation
-                }
-            }
-            other => panic!("mixed fixture lost its owner: {other:?}"),
-        }
-    }
-
     fn offered_rails(f: &Visit) -> Vec<String> {
         let keys = [
             "[y]", "[n]", "[d]", "[c]", "[Enter]", "[e]", "[a]", "[s]", "[f]", "[r]",
@@ -1159,20 +1037,114 @@ mod local_occlusion {
             .collect()
     }
 
-    fn open_mixed_door(state: &mut TuiState, surface: Surface) -> bool {
-        if surface == Surface::QuitConfirm {
-            let action = press(state, Key::Ctrl('q'));
-            if action != InputAction::Quit {
-                assert!(
-                    state.modal_stack.is_empty(),
-                    "legacy CtrlQ does not open a frame"
-                );
-                return false;
+    /// The generic `open_quit` routes with default (no active tab) facts, which closes a
+    /// conversation-scoped decision before quitting: this opener uses the active tab's facts.
+    fn quit_over(state: &mut rustain::adapters::tui::state::TuiState) {
+        use crate::conformance_21_6_decision_queue::raisers::press as frame_press;
+        use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
+        let _ = frame_press(state, Key::Ctrl('q'));
+        let _ = quit_confirm::request(
+            state,
+            QuitFacts {
+                streams: 1,
+                ..QuitFacts::idle(QuitHost::Local)
+            },
+        );
+    }
+
+    fn screen_rails(screen: &str) -> Vec<String> {
+        let keys = [
+            "[y]", "[n]", "[d]", "[c]", "[Enter]", "[Esc]", "[e]", "[a]", "[s]", "[f]", "[r]",
+            "[x]", "[i]", "[l]",
+        ];
+        screen
+            .lines()
+            .filter(|row| keys.iter().any(|key| row.contains(key)))
+            // The Stage's background text beside a centred frame is not part of the rail.
+            .map(|row| match (row.find('│'), row.rfind('│')) {
+                (Some(left), Some(right)) if right > left => {
+                    row[left + '│'.len_utf8()..right].trim().to_owned()
+                }
+                _ => row.to_owned(),
+            })
+            .collect()
+    }
+
+    fn decline_action(kind: DecisionKind) -> InputAction {
+        match kind {
+            DecisionKind::Consolidation => InputAction::ConsolidateDeclineAll,
+            DecisionKind::Forget => InputAction::ForgetDeclineAll,
+            DecisionKind::ArtifactApply | DecisionKind::ArtifactResolve => {
+                InputAction::ApplyCardDecline
             }
-            use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
+            DecisionKind::PeerAdd => InputAction::PeerAddDecline,
+            DecisionKind::TeamRetract => InputAction::TeamRetractDecline,
+            DecisionKind::Fork => InputAction::ForkCancel,
+            DecisionKind::Rewind => InputAction::RewindCancel,
+            DecisionKind::ExportOverwrite => InputAction::CancelExportOverwrite,
+            _ => panic!("not a 6-D kind: {kind:?}"),
+        }
+    }
+
+    /// Every 6-D frame owns its rail while a real automatic trust request waits.
+    #[tokio::test]
+    async fn story21_6_mixed_frames_paint_and_decide_only_the_visible_owner() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6D, PLAIN, facts_6d, press as frame_press, raise,
+        };
+        use crate::conformance_21_6_decision_queue::support::{paint, screen};
+        for kind in ALL_6D {
+            let mut solo = Visit::new(130, 40).await;
+            raise(&mut solo.h.state, kind, PLAIN);
+            let solo_screen = screen(&paint(&mut solo.h.state, &facts_6d("c1"), 130, 40));
+            assert!(solo_screen.contains("[n]"), "{kind:?}: {solo_screen}");
+            let solo_rails = screen_rails(&solo_screen);
+            assert!(!solo_rails.is_empty(), "{kind:?}: {solo_screen}");
+            solo.ready();
+            let expected = frame_press(&mut solo.h.state, Key::Char('n'));
+            assert_eq!(expected, decline_action(kind), "{kind:?}");
+
+            let mut f = Visit::new(130, 40).await;
+            raise(&mut f.h.state, kind, PLAIN);
+            let frame = f.h.state.modal_stack.top().unwrap().clone();
+            let mut response = trust(&mut f.h.state, "waiting-mixed-trust");
+            assert_eq!(f.h.state.modal_stack.top(), Some(&frame), "{kind:?}");
+            let painted = screen(&paint(&mut f.h.state, &facts_6d("c1"), 130, 40));
+            assert!(painted.contains("[n]"), "{kind:?}: {painted}");
+            assert_eq!(screen_rails(&painted), solo_rails, "{kind:?}");
+            assert!(
+                !painted.contains("waiting-mixed-trust"),
+                "{kind:?}: {painted}"
+            );
+            f.ready();
+            assert_eq!(
+                frame_press(&mut f.h.state, Key::Char('n')),
+                expected,
+                "{kind:?}"
+            );
+            assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
+            assert!(f.h.state.decisions.holds(DecisionKind::SkillTrust));
+        }
+    }
+
+    /// Quit is now available from every migrated frame and Back restores that frame.
+    #[test]
+    fn story21_6_each_card_requests_quit_and_restores_its_frame() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6D, PLAIN, open_ready, press as frame_press,
+        };
+        use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
+        for kind in ALL_6D {
+            let (mut state, _clock, _hold) = open_ready(kind, PLAIN);
+            let before = state.modal_stack.top().unwrap().clone();
+            assert_eq!(
+                frame_press(&mut state, Key::Ctrl('q')),
+                InputAction::Quit,
+                "{kind:?}"
+            );
             assert_eq!(
                 quit_confirm::request(
-                    state,
+                    &mut state,
                     QuitFacts {
                         streams: 1,
                         ..QuitFacts::idle(QuitHost::Local)
@@ -1180,156 +1152,52 @@ mod local_occlusion {
                 ),
                 QuitRequest::Confirming
             );
-        } else {
-            press(state, Key::Ctrl('x'));
-            if state.pending_leader.is_none() {
-                assert!(
-                    state.modal_stack.is_empty(),
-                    "legacy card does not open leader"
-                );
-                return false;
-            }
             assert_eq!(
-                press(
-                    state,
-                    Key::Char(if surface == Surface::Help { '?' } else { 'n' })
-                ),
+                frame_press(&mut state, Key::Char('n')),
                 InputAction::Consumed
             );
-        }
-        assert_eq!(state.modal_stack.top().unwrap().surface, surface);
-        true
-    }
-
-    #[tokio::test]
-    async fn c_r1_reachable_mixed_ordered_pairs_paint_only_the_selected_owner() {
-        let mut reached = [0; 3];
-        for (surface_index, surface) in [
-            Surface::QuitConfirm,
-            Surface::NotificationLog,
-            Surface::Help,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            for first in MIXED {
-                for second in ASYNC {
-                    if first == second {
-                        continue;
-                    }
-                    let mut f = Visit::new(130, 40).await;
-                    // Log/Help cannot be opened FROM an overlay card. Their
-                    // genuine mixed case is two asynchronous arrivals below it.
-                    if surface != Surface::QuitConfirm {
-                        if !ASYNC.contains(&first) {
-                            continue;
-                        }
-                        assert!(open_mixed_door(&mut f.h.state, surface));
-                    }
-                    seed_mixed(&mut f, first);
-                    if surface == Surface::QuitConfirm && !open_mixed_door(&mut f.h.state, surface)
-                    {
-                        continue;
-                    }
-                    let retained = f.h.state.focus.clone();
-                    seed_mixed(&mut f, second);
-                    assert_eq!(f.h.state.focus, retained, "{first:?} -> {second:?}");
-                    assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-                    let selected = selected_mixed(&f.h.state);
-                    if matches!(retained, FocusState::Overlay(_)) {
-                        assert_eq!(f.h.state.focus, retained, "keep the selected real owner");
-                        assert_eq!(selected, first);
-                    }
-                    f.draw();
-                    let mut solo = Visit::new(130, 40).await;
-                    seed_mixed(&mut solo, selected);
-                    solo.draw();
-                    assert!(
-                        !offered_rails(&solo).is_empty(),
-                        "solo {selected:?} genuinely offers keys"
-                    );
-                    assert_eq!(
-                        offered_rails(&f),
-                        offered_rails(&solo),
-                        "{surface:?}: {first:?} -> {second:?}, selected {selected:?}"
-                    );
-                    // A raw decision key has the same meaning as the solo paint,
-                    // without running any effect for the deferred operation.
-                    let key = Key::Char('y');
-                    assert_eq!(press(&mut f.h.state, key), press(&mut solo.h.state, key));
-                    reached[surface_index] += 1;
-                }
-            }
-        }
-        // Four legacy Quit doors stay closed (Forget's special-key consumer, Export, Fork,
-        // Rewind): 4 open first cards x 2 async seconds - 2 equal pairs; Log/Help admit
-        // the 2 ordered pairs of the 2 async cards each.
-        assert_eq!(reached, [6, 2, 2], "all reachable ordered pairs must run");
-    }
-
-    #[tokio::test]
-    async fn c_r1_legacy_non_openable_doors_remain_closed() {
-        for kind in [Mixed::Forget, Mixed::Export, Mixed::Fork, Mixed::Rewind] {
-            let mut f = Visit::new(80, 24).await;
-            seed_mixed(&mut f, kind);
-            let focus = f.h.state.focus.clone();
-            assert!(
-                !open_mixed_door(&mut f.h.state, Surface::QuitConfirm),
+            assert_eq!(state.modal_stack.top(), Some(&before), "{kind:?}");
+            assert_eq!(
+                frame_press(&mut state, Key::Char('n')),
+                decline_action(kind),
                 "{kind:?}"
             );
-            assert_eq!(f.h.state.focus, focus);
-            assert!(!open_mixed_door(&mut f.h.state, Surface::Help), "{kind:?}");
-            assert_eq!(f.h.state.focus, focus);
         }
-        // Permission is now a stack frame, not a legacy non-openable card; since 6-C so is
-        // every question / trust / plan / delegation / spawn-gate / kill card: `Ctrl+Q`
-        // requests quit from their frame (see
-        // `queue_kinds_request_quit_from_their_frame_unlike_the_legacy_cards`).
     }
 
-    #[tokio::test]
-    async fn c_r1_real_permission_and_async_cards_share_the_painted_owner() {
-        for surface in [
-            Surface::QuitConfirm,
-            Surface::NotificationLog,
-            Surface::Help,
-        ] {
-            for kind in ASYNC {
-                let mut f = Visit::new(130, 40).await;
-                assert!(open_mixed_door(&mut f.h.state, surface));
-                let mut approvals = Approvals::new();
-                let (id, mut response) = approvals.request(&mut f.h.state).await;
-                seed_mixed(&mut f, kind);
-                assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
-                f.draw();
-                assert_queued(&f.h.state);
-                assert!(decision_queue::holds_request(&f.h.state, &id));
-                let mut solo = Visit::new(130, 40).await;
-                let kind = selected_mixed(&f.h.state);
-                seed_mixed(&mut solo, kind);
-                solo.draw();
-                let actual = offered_rails(&f);
-                let expected = offered_rails(&solo);
-                assert_eq!(
-                    actual.len(),
-                    expected.len(),
-                    "{surface:?}: permission + {kind:?}"
-                );
-                for (actual, expected) in actual.iter().zip(&expected) {
-                    // A waiting-decision toast can share this terminal row, outside
-                    // the card. Compare the complete card rail, not the toast.
-                    let expected = expected.trim_end_matches(['│', '║', '╝', '┘', '═', '─', ' ']);
-                    let suffix = actual.strip_prefix(expected).unwrap_or_else(|| {
-                        panic!("{surface:?}: permission + {kind:?}: {actual:?} != {expected:?}")
-                    });
-                    for key in [
-                        "[y]", "[n]", "[d]", "[c]", "[Enter]", "[e]", "[a]", "[s]", "[f]", "[r]",
-                    ] {
-                        assert!(!suffix.contains(key), "unexpected second rail: {actual}");
-                    }
-                }
-                assert!(matches!(response.try_recv(), Err(TryRecvError::Empty)));
+    /// Requested confirmations interrupt Help; the automatic consolidation waits.
+    #[test]
+    fn story21_6_requested_frames_restore_help_and_automatic_arrivals_wait() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6D, PLAIN, facts_6d, press as frame_press, raise,
+        };
+        use crate::conformance_21_6_decision_queue::support::{clocked, paint, ready};
+        for kind in ALL_6D {
+            let (mut state, clock) = clocked(80, 24);
+            reducer::open(&mut state, Surface::Help);
+            let help = state.modal_stack.top().unwrap().clone();
+            // Recent typing prevents an automatic arrival from interrupting Help.
+            state.last_printable_at = Some(state.notifications.now());
+            raise(&mut state, kind, PLAIN);
+            if kind == DecisionKind::Consolidation {
+                assert_eq!(state.modal_stack.top(), Some(&help));
+                assert!(decision_queue::consolidation_pending(&state, "c1"));
+                continue;
             }
+            assert_eq!(
+                state.modal_stack.top().unwrap().surface,
+                Surface::Decision,
+                "{kind:?}"
+            );
+            assert_eq!(state.modal_stack.len(), 2, "{kind:?}");
+            paint(&mut state, &facts_6d("c1"), 80, 24);
+            ready(&mut state, &clock);
+            assert_eq!(
+                frame_press(&mut state, Key::Char('n')),
+                decline_action(kind),
+                "{kind:?}"
+            );
+            assert_eq!(state.modal_stack.top(), Some(&help), "{kind:?}");
         }
     }
 
@@ -1399,6 +1267,136 @@ mod local_occlusion {
             }
         }
         assert_eq!(reached, 60, "every ordered pair ran");
+    }
+
+    /// All 6-D owners retain their complete solo rail against every automatic 6-C
+    /// arrival, including a second rail whose labels do not name the waiting item.
+    #[tokio::test]
+    async fn six_d_owners_paint_only_their_solo_rail_for_automatic_arrivals() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6D, PLAIN, facts_6d, press as frame_press, raise,
+        };
+        use crate::conformance_21_6_decision_queue::support::{paint, screen};
+        let automatic = [
+            DecisionKind::Question,
+            DecisionKind::SkillTrust,
+            DecisionKind::PlanApproval,
+            DecisionKind::PlanCard,
+            DecisionKind::PlanDeviation,
+            DecisionKind::Delegation,
+        ];
+        let mut reached = 0;
+        for first in ALL_6D {
+            let mut solo = Visit::new(130, 40).await;
+            let _solo_hold = raise(&mut solo.h.state, first, PLAIN);
+            let solo_screen = screen(&paint(&mut solo.h.state, &facts_6d("c1"), 130, 40));
+            let solo_rails = screen_rails(&solo_screen);
+            assert!(!solo_rails.is_empty(), "{first:?}: {solo_screen}");
+            solo.ready();
+            let solo_action = frame_press(&mut solo.h.state, Key::Char('n'));
+            assert_eq!(solo_action, decline_action(first), "{first:?}");
+            for second in automatic {
+                let mut f = Visit::new(130, 40).await;
+                let _first_hold = raise(&mut f.h.state, first, PLAIN);
+                let _second_hold = raise(&mut f.h.state, second, PLAIN);
+                let at = format!("{first:?} -> {second:?}");
+                assert_eq!(f.h.state.decisions.undecided(), 2, "{at}");
+                assert_eq!(
+                    f.h.state
+                        .modal_stack
+                        .iter()
+                        .filter(|frame| frame.surface == Surface::Decision)
+                        .count(),
+                    1,
+                    "{at}"
+                );
+                let painted = screen(&paint(&mut f.h.state, &facts_6d("c1"), 130, 40));
+                assert_eq!(screen_rails(&painted), solo_rails, "{at}");
+                f.ready();
+                assert_eq!(
+                    frame_press(&mut f.h.state, Key::Char('n')),
+                    solo_action,
+                    "{at}"
+                );
+                assert!(f.h.state.decisions.holds(second), "{at}");
+                reached += 1;
+            }
+        }
+        assert_eq!(reached, 54);
+    }
+
+    /// Requested cards interrupt retained Help/NotificationLog callers. Quit
+    /// covers every owner instead; Back restores the same owner and its sole rail.
+    #[tokio::test]
+    async fn six_d_rail_exclusivity_survives_retained_doors_and_quit_occlusion() {
+        use crate::conformance_21_6_decision_queue::raisers::{
+            ALL_6D, PLAIN, facts_6d, press as frame_press, raise,
+        };
+        use crate::conformance_21_6_decision_queue::support::{paint, screen};
+        for kind in ALL_6D {
+            let mut solo = Visit::new(130, 40).await;
+            raise(&mut solo.h.state, kind, PLAIN);
+            let solo_screen = screen(&paint(&mut solo.h.state, &facts_6d("c1"), 130, 40));
+            let expected = screen_rails(&solo_screen);
+            assert!(!expected.is_empty(), "{kind:?}");
+
+            for door in [Surface::Help, Surface::NotificationLog] {
+                if kind == DecisionKind::Consolidation {
+                    continue; // Automatic arrival waits beneath these callers.
+                }
+                let mut f = Visit::new(130, 40).await;
+                reducer::open(&mut f.h.state, door);
+                let caller = f.h.state.modal_stack.top().unwrap().clone();
+                raise(&mut f.h.state, kind, PLAIN);
+                assert_eq!(
+                    f.h.state.modal_stack.top().unwrap().surface,
+                    Surface::Decision
+                );
+                let _waiting = trust(&mut f.h.state, "waiting-door-trust");
+                let painted = screen(&paint(&mut f.h.state, &facts_6d("c1"), 130, 40));
+                assert_eq!(screen_rails(&painted), expected, "{kind:?} over {door:?}");
+                f.ready();
+                assert_eq!(
+                    frame_press(&mut f.h.state, Key::Char('n')),
+                    decline_action(kind)
+                );
+                assert_eq!(
+                    f.h.state.modal_stack.top(),
+                    Some(&caller),
+                    "{kind:?} over {door:?}"
+                );
+                assert!(f.h.state.decisions.holds(DecisionKind::SkillTrust));
+            }
+
+            let mut f = Visit::new(130, 40).await;
+            raise(&mut f.h.state, kind, PLAIN);
+            let owner = f.h.state.modal_stack.top().unwrap().clone();
+            quit_over(&mut f.h.state);
+            let mut solo_quit = Visit::new(130, 40).await;
+            raise(&mut solo_quit.h.state, kind, PLAIN);
+            quit_over(&mut solo_quit.h.state);
+            let solo_covered = screen(&paint(&mut solo_quit.h.state, &facts_6d("c1"), 130, 40));
+            let _waiting = trust(&mut f.h.state, "waiting-quit-trust");
+            let covered = screen(&paint(&mut f.h.state, &facts_6d("c1"), 130, 40));
+            assert_eq!(
+                screen_rails(&covered),
+                screen_rails(&solo_covered),
+                "{kind:?} under Quit"
+            );
+            // The quit frame's title names the owner beneath it (`Decision: X › System · Quit`);
+            // the owner's own body (its breadcrumb row) is covered.
+            assert!(
+                !covered.contains(&format!("Needs you › {}", kind.title())),
+                "{kind:?}: {covered}"
+            );
+            assert_eq!(
+                frame_press(&mut f.h.state, Key::Char('n')),
+                InputAction::Consumed
+            );
+            assert_eq!(f.h.state.modal_stack.top(), Some(&owner), "{kind:?}");
+            let restored = screen(&paint(&mut f.h.state, &facts_6d("c1"), 130, 40));
+            assert_eq!(screen_rails(&restored), expected, "{kind:?} after Quit");
+        }
     }
 
     /// 6-C: the legacy overlay cards swallow `Ctrl+Q` (DF-21-3-LOCAL-CARD-CTRLQ); the moved
@@ -1517,7 +1515,7 @@ mod local_occlusion {
     #[tokio::test]
     async fn c_r1_actual_artifact_quit_trust_executes_only_the_visible_apply_once() {
         use crate::conformance_21_6_decision_queue::raisers::press as frame_press;
-        use rustain::adapters::tui::handlers::artifact_command::resolve_apply_card;
+        use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
         use rustain::adapters::{artifact::FileSystemArtifactStore, merge_back::GitPatchApplier};
         use rustain::domain::models::{
             AgentId, CapabilityTokenId, HostBinding, PermissionMode, ProvenanceTag,
@@ -1578,30 +1576,59 @@ mod local_occlusion {
         )
         .await;
         assert_eq!(
-            f.h.state.focus,
-            confirmation(ConfirmationType::ArtifactApply)
+            f.h.state.modal_stack.top().unwrap().surface,
+            Surface::Decision
         );
-        assert!(f.h.state.pending_artifact_card.is_some());
+        assert!(decision_queue::artifact_pending(
+            &f.h.state,
+            &conversation_id
+        ));
         assert!(f.draw().contains("[y] Apply"));
-        open_quit(&mut f.h.state);
+        let apply_frame = f.h.state.modal_stack.top().unwrap().clone();
+        // The generic open_quit helper routes with default (no active tab) facts,
+        // which would close this conversation-scoped decision before requesting quit.
+        assert_eq!(
+            frame_press(&mut f.h.state, Key::Ctrl('q')),
+            InputAction::Quit
+        );
+        assert_eq!(
+            quit_confirm::request(
+                &mut f.h.state,
+                QuitFacts {
+                    streams: 1,
+                    ..QuitFacts::idle(QuitHost::Local)
+                }
+            ),
+            QuitRequest::Confirming
+        );
+        assert_eq!(
+            f.h.state.modal_stack.top().unwrap().surface,
+            Surface::QuitConfirm
+        );
         // The trust prompt and a permission arrive under the quit frame: both queue.
         let mut response = trust(&mut f.h.state, "deferred-real-trust");
         let mut approvals = Approvals::new();
         let (_, mut permission_response) = approvals.request(&mut f.h.state).await;
-        assert_eq!(f.h.state.decisions.len(), 2);
-        assert_eq!(press(&mut f.h.state, Key::Char('n')), InputAction::Consumed);
+        assert_eq!(f.h.state.decisions.len(), 3);
+        assert_eq!(
+            frame_press(&mut f.h.state, Key::Char('n')),
+            InputAction::Consumed
+        );
+        assert_eq!(f.h.state.modal_stack.top(), Some(&apply_frame));
         let screen = f.draw();
         assert!(screen.contains("[y] Apply"), "{screen}");
         assert!(!screen.contains("deferred-real-trust"), "{screen}");
         assert!(!f._workspace.path().join("visible.txt").exists());
+        f.ready();
         assert_eq!(
-            press(&mut f.h.state, Key::Char('y')),
+            frame_press(&mut f.h.state, Key::Char('y')),
             InputAction::ApplyCardAccept
         );
-        let card = resolve_apply_card(&mut f.h.state, true).unwrap();
-        artifact_bridge::apply_confirmed_card(&mut f.h.state, &f.app, card, PermissionMode::Yolo)
+        let Some(DecisionSubject::Artifact(card)) = f.h.state.decisions.take_resolved() else {
+            panic!("the accepted frame returns its artifact payload");
+        };
+        artifact_bridge::apply_confirmed_card(&mut f.h.state, &f.app, *card, PermissionMode::Yolo)
             .await;
-        reducer::settle_legacy(&mut f.h.state);
         assert_eq!(
             std::fs::read_to_string(f._workspace.path().join("visible.txt")).unwrap(),
             "visible operation\n"
@@ -1612,7 +1639,7 @@ mod local_occlusion {
             Err(TryRecvError::Empty)
         ));
         assert!(
-            resolve_apply_card(&mut f.h.state, true).is_none(),
+            f.h.state.decisions.take_resolved().is_none(),
             "spent apply cannot repeat"
         );
         // The settled apply card never opens the queued trust prompt by surprise; the user
@@ -1644,7 +1671,10 @@ mod local_occlusion {
             press(&mut f.h.state, Key::Char('y')),
             InputAction::ApplyCardAccept
         );
-        assert!(f.h.state.pending_artifact_card.is_none());
+        assert!(!decision_queue::artifact_pending(
+            &f.h.state,
+            &conversation_id
+        ));
     }
 
     #[tokio::test]

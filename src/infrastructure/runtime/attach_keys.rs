@@ -31,9 +31,9 @@ use tokio::sync::mpsc;
 use super::{
     AttachedTeamRequests, ComposerOutcome, SocketTurnDriver,
     attached_composer_key_with_team_requests, attached_proposal_higher_confirmation,
-    attached_proposal_key, attached_proposal_pending, attached_team_retract_key,
-    dispatch_recipient_surface_key, open_response_surface, pending_peer_response, preview_line,
-    recipient_surface_flash, retractable_rows, system_message, take_current_peer_compose,
+    attached_proposal_key, attached_proposal_pending, dispatch_recipient_surface_key,
+    open_response_surface, pending_peer_response, preview_line, recipient_surface_flash,
+    retractable_rows, system_message, take_current_peer_compose,
 };
 use crate::adapters::builtin_commands::{self, CommandHost};
 use crate::adapters::command_registry::{CommandRegistry, CommandSource};
@@ -315,26 +315,6 @@ impl KeyCtx<'_> {
         crate::adapters::tui::handlers::recipient_actions::pending_composition(self.state).is_some()
             || self.state.recipient_surface.is_some()
     }
-
-    fn decision_cards_pending(&self) -> bool {
-        self.state.attached.consolidation_token.is_some()
-    }
-}
-
-/// The remaining attached card that owns `Esc` / `Ctrl+C`.
-fn attached_card_context(ctx: &KeyCtx<'_>) -> Option<Context> {
-    if !super::attached_decision_pending(ctx.state)
-        && (ctx.state.attached.consolidation_token.is_some()
-            || ctx.state.attached.retract_confirm.is_some())
-    {
-        Some(Context::Confirm)
-    } else {
-        None
-    }
-}
-
-fn is_ctrl(key: &KeyEvent, c: char) -> bool {
-    key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char(c)
 }
 
 /// The status-row hint for the attached client, generated from the registry
@@ -415,7 +395,7 @@ pub(super) fn handle_attached_paste(state: &mut TuiState, text: &str, card_pendi
         && state.focus == FocusState::Input
         && state.recipient_surface.is_none()
         && crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_none()
-        && state.pending_team_retract.is_none()
+        && !crate::adapters::tui::decision_queue::team_retract_pending(state)
     {
         let cursor = crate::adapters::tui::text_geometry::snap_boundary(
             &state.input_buffer,
@@ -459,6 +439,10 @@ fn invalid_decision_key(state: &TuiState, key: KeyEvent) -> bool {
                     'y' | 'Y' | 's' | 'S' | 'a' | 'A' | 'n' | 'N' | 'f' | 'F' | 'r' | 'R'
                 )
             )
+            || matches!(
+                item.kind,
+                DecisionKind::Consolidation | DecisionKind::TeamRetract
+            ) && matches!(key.code, KeyCode::Char('y' | 'Y' | 'n' | 'N'))
     };
     answer && (key.kind != KeyEventKind::Press || !key.modifiers.is_empty())
 }
@@ -468,8 +452,6 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     if invalid_decision_key(ctx.state, key) {
         return KeyFlow::Continue;
     }
-    // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
-    let overlay_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(ctx.state);
     let owner_before = (
         ctx.state.modal_stack.top().map(|frame| frame.id),
         ctx.state.pending_leader,
@@ -495,25 +477,128 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         Some(RouteEffect::Action(_)) => unreachable!("local-only frame action in attached host"),
         Some(RouteEffect::Decision(_)) => {
             if let Some((key, effect, subject)) = ctx.state.decisions.take_sending() {
-                use crate::adapters::tui::decision_queue::{self, DecisionSubject};
-                let response = match subject {
-                    DecisionSubject::Permission(payload) => payload
-                        .outcome(effect)
-                        .map(|outcome| (payload.request_id, outcome)),
-                    DecisionSubject::Consent(payload) => payload
-                        .outcome(effect)
-                        .map(|outcome| (payload.request_id, outcome)),
+                use crate::adapters::tui::decision_queue::{
+                    self, DecisionEffect as Effect, DecisionSubject, RetractTarget,
+                };
+                let mut settle = false;
+                let frame = match (subject, effect) {
+                    (DecisionSubject::Consolidation(_) | DecisionSubject::TeamRetract(_), _)
+                        if ctx.read_only =>
+                    {
+                        decision_queue::withdraw_key(
+                            ctx.state,
+                            &key,
+                            decision_queue::NO_LONGER_PENDING,
+                        );
+                        None
+                    }
+                    (DecisionSubject::Permission(payload), effect) => {
+                        payload
+                            .outcome(effect)
+                            .map(|outcome| ClientFrame::ApprovalResponse {
+                                request_id: payload.request_id,
+                                outcome,
+                            })
+                    }
+                    (DecisionSubject::Consent(payload), effect) => {
+                        payload
+                            .outcome(effect)
+                            .map(|outcome| ClientFrame::ApprovalResponse {
+                                request_id: payload.request_id,
+                                outcome,
+                            })
+                    }
+                    (
+                        DecisionSubject::Consolidation(payload),
+                        effect @ (Effect::ConsolidationAccept | Effect::ConsolidationDecline),
+                    ) => {
+                        let frame = decision_queue::consolidation_frame(
+                            &key.source,
+                            &payload,
+                            matches!(effect, Effect::ConsolidationAccept),
+                        );
+                        if frame.is_none() {
+                            decision_queue::withdraw_key(
+                                ctx.state,
+                                &key,
+                                decision_queue::NO_LONGER_PENDING,
+                            );
+                        }
+                        frame
+                    }
+                    (
+                        DecisionSubject::TeamRetract(payload),
+                        effect @ (Effect::TeamRetractConfirm | Effect::TeamRetractDecline),
+                    ) => {
+                        let confirm = matches!(effect, Effect::TeamRetractConfirm);
+                        if let Some(request) = payload.request {
+                            ctx.team_requests.open_retract.take();
+                            if confirm {
+                                ctx.team_requests.pending.insert(
+                                    request.clone(),
+                                    super::AttachedTeamRequest::Retract {
+                                        next_sequence: 0,
+                                        view: String::new(),
+                                        view_done: false,
+                                    },
+                                );
+                                crate::adapters::tui::handlers::team_command::show_team_retract(ctx.state, crate::adapters::tui::handlers::team_command::TEAM_RETRACT_SENDING.to_owned());
+                            } else {
+                                ctx.team_requests.pending.remove(&request);
+                            }
+                            let frame = ClientFrame::TeamRetractDecision {
+                                request: request.clone(),
+                                confirm,
+                            };
+                            if ctx.frame_tx.send(frame).is_ok() {
+                                settle = true;
+                            } else {
+                                let pending = ctx
+                                    .team_requests
+                                    .pending
+                                    .remove(&request)
+                                    .unwrap_or(super::AttachedTeamRequest::RetractPreview);
+                                super::paint_team_request_failure(
+                                    ctx.state,
+                                    pending,
+                                    "could not enqueue command",
+                                );
+                            }
+                            None
+                        } else if let RetractTarget::AutoResponse { message_id } = payload.target {
+                            if !confirm {
+                                settle = true;
+                                None
+                            } else if retractable_rows(ctx.conversation)
+                                .any(|row| row.id == message_id)
+                            {
+                                let sent = ctx
+                                    .frame_tx
+                                    .send(ClientFrame::RetractAutoResponse {
+                                        message_id,
+                                        target_seq: None,
+                                    })
+                                    .is_ok();
+                                if sent {
+                                    ctx.view_block("peer-retract", "Retracted. Marked in your log — never deleted.\nWhat was already read, was read.");
+                                    settle = true;
+                                }
+                                None
+                            } else {
+                                ctx.info("that message can no longer be retracted — nothing sent");
+                                settle = true;
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
                     _ => None,
                 };
-                if let Some((request_id, outcome)) = response
-                    && ctx
-                        .frame_tx
-                        .send(ClientFrame::ApprovalResponse {
-                            request_id,
-                            outcome,
-                        })
-                        .is_ok()
-                {
+                if frame.is_some_and(|frame| ctx.frame_tx.send(frame).is_ok()) {
+                    settle = true;
+                }
+                if settle {
                     decision_queue::settle_sent(ctx.state, &log_facts(&ctx.conversation.id), &key);
                 }
             }
@@ -527,13 +612,6 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
         }
         None => handle_attached_key_inner(ctx, key).await,
     };
-    if overlay_was_open
-        && ctx.state.focus == FocusState::Input
-        && !crate::adapters::tui::decision_queue::card_focus_blocked(ctx.state)
-    {
-        reconcile_pending_card_after_overlay_close(ctx);
-    }
-    super::settle_attached_card_focus(ctx.state, ctx.read_only);
     let owner_after = (
         ctx.state.modal_stack.top().map(|frame| frame.id),
         ctx.state.pending_leader,
@@ -553,12 +631,6 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     flow
 }
 
-fn reconcile_pending_card_after_overlay_close(ctx: &mut KeyCtx<'_>) {
-    if super::attached_card_pending(ctx.state) {
-        super::attached_card_arrived(ctx.state, ctx.read_only);
-    }
-}
-
 async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     use crossterm::event::KeyEventKind;
 
@@ -569,17 +641,7 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
         return flow;
     }
 
-    // Story 19.21c: every retract-card key before the composer.
-    if !super::attached_decision_pending(ctx.state)
-        && attached_team_retract_key(ctx.state, ctx.team_requests, key, ctx.frame_tx)
-    {
-        return KeyFlow::Continue;
-    }
-    let proposal_higher = attached_proposal_higher_confirmation(
-        ctx.state,
-        ctx.state.pending_consolidation_card.is_some(),
-        ctx.state.attached.retract_confirm.is_some(),
-    );
+    let proposal_higher = attached_proposal_higher_confirmation(ctx.state);
     if attached_proposal_key(
         key,
         proposal_higher,
@@ -634,119 +696,29 @@ async fn handle_attached_key_inner(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFl
     // Any further keypress dismisses the retract confirmation.
     ctx.state.feedback_blocks.remove("peer-retract");
 
-    // `Esc` and `Ctrl+C` never decide a card (A8): one cue naming the keys that do. A card
-    // answers only in Chat focus (AC17); in Input both keys keep their usual meaning.
-    let chat = ctx.state.focus == FocusState::Chat;
-    if chat
-        && key.kind == KeyEventKind::Press
-        && (key.code == KeyCode::Esc && key.modifiers.is_empty() || is_ctrl(&key, 'c'))
-        && let Some(card) = attached_card_context(ctx)
-    {
-        ctx.info(crate::adapters::tui::keymap::render::card_cue(
-            card,
-            Host::Attached,
-        ));
-        ctx.state.needs_redraw = true;
+    let pressed = Key::from_crossterm(&key);
+    // An open peer surface owns every printable key.
+    if matches!(pressed, Key::Char(_)) && ctx.state.recipient_surface.is_some() {
         return KeyFlow::Continue;
     }
-
-    match (key.code, key.modifiers) {
-        // Story 12.2d AC4/AC5 — consolidation card intercept.
-        (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !super::attached_decision_pending(ctx.state)
-                && ctx.state.attached.consolidation_token.is_some() =>
-        {
-            if let Some(token) = ctx.state.attached.consolidation_token.take() {
-                let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
-                    token,
-                    accept: true,
-                });
+    let context = if ctx.state.focus == FocusState::Input {
+        Context::Input
+    } else {
+        Context::Chat
+    };
+    match command_in(context, pressed) {
+        Some(command) => execute_attached(ctx, command, key).await,
+        None => {
+            // No row: a printable key types into the Input composer; every other
+            // key (a Ctrl/Alt letter included) is a consumed no-op (Story 21.3 AC12).
+            if let Key::Char(c) = pressed
+                && ctx.state.focus == FocusState::Input
+            {
+                type_char(ctx, c);
             }
-            ctx.state.pending_consolidation_card = None;
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !super::attached_decision_pending(ctx.state)
-                && ctx.state.attached.consolidation_token.is_some() =>
-        {
-            // n while the card is shown → decline.
-            if let Some(token) = ctx.state.attached.consolidation_token.take() {
-                let _ = ctx.frame_tx.send(ClientFrame::ConsolidationResolve {
-                    token,
-                    accept: false,
-                });
-            }
-            ctx.state.pending_consolidation_card = None;
-            ctx.state.needs_redraw = true;
-        }
-        // Story 18.3c AC5 — the retract confirmation owns y/n/Esc while open
-        // (Approval grammar, never a bare key on a transient surface). It is
-        // opened only by the palette's retract route.
-        (KeyCode::Char('y'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !super::attached_decision_pending(ctx.state)
-                && ctx.state.attached.retract_confirm.is_some() =>
-        {
-            if ctx.read_only {
-                ctx.info("read-only — can't retract here");
-            } else if let Some((message_id, _)) = ctx.state.attached.retract_confirm.take() {
-                // Stale-target gate: the row must still be retractable now.
-                if retractable_rows(ctx.conversation).any(|row| row.id == message_id) {
-                    let _ = ctx.frame_tx.send(ClientFrame::RetractAutoResponse {
-                        message_id,
-                        target_seq: None,
-                    });
-                    ctx.view_block(
-                        "peer-retract",
-                        "Retracted. Marked in your log — never deleted.\nWhat was already read, was read.",
-                    );
-                } else {
-                    ctx.info("that message can no longer be retracted — nothing sent");
-                }
-            }
-            ctx.state.needs_redraw = true;
-        }
-        (KeyCode::Char('n'), m)
-            if !m.contains(KeyModifiers::CONTROL)
-                && chat
-                && !super::attached_decision_pending(ctx.state)
-                && ctx.state.attached.retract_confirm.is_some() =>
-        {
-            ctx.state.attached.retract_confirm = None;
-            ctx.state.needs_redraw = true;
-        }
-        _ => {
-            let pressed = Key::from_crossterm(&key);
-            // An open peer surface owns every printable key.
-            if matches!(pressed, Key::Char(_)) && ctx.state.recipient_surface.is_some() {
-                return KeyFlow::Continue;
-            }
-            let context = if ctx.state.focus == FocusState::Input {
-                Context::Input
-            } else {
-                Context::Chat
-            };
-            return match command_in(context, pressed) {
-                Some(command) => execute_attached(ctx, command, key).await,
-                None => {
-                    // No row: a printable key types into the Input composer; every other
-                    // key (a Ctrl/Alt letter included) is a consumed no-op (Story 21.3 AC12).
-                    if let Key::Char(c) = pressed
-                        && ctx.state.focus == FocusState::Input
-                    {
-                        type_char(ctx, c);
-                    }
-                    KeyFlow::Continue
-                }
-            };
+            KeyFlow::Continue
         }
     }
-    KeyFlow::Continue
 }
 
 /// The registry key behind a press as an overlay reads it: a navigation key held
@@ -1000,8 +972,7 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
         peer_compose: ctx.state.pinned_peer_compose.is_some()
             || crate::adapters::tui::handlers::recipient_actions::pending_composition(ctx.state)
                 .is_some(),
-        pending_decisions: usize::from(ctx.state.attached.consolidation_token.is_some())
-            + (ctx.state.decisions.undecided() - large_images)
+        pending_decisions: (ctx.state.decisions.undecided() - large_images)
             + usize::from(attached_proposal_pending(ctx.state).is_some()),
     };
     match presentation::reducer::request_quit(ctx.state, facts) {
@@ -1272,11 +1243,24 @@ fn begin_retract(ctx: &mut KeyCtx<'_>, message_id: Option<&str>) {
         .find(|row| row.id == message_id)
         .map(|row| (row.id.clone(), preview_line(&row.content, 48)));
     match target {
-        Some(target) => {
-            ctx.state.attached.retract_confirm = Some(target);
-            // FR-21-3-c: the operator opened it; the confirm answers only in Chat focus.
-            presentation::reducer::take_chat_focus_for_card(ctx.state, !ctx.read_only);
-            presentation::reducer::set_base(ctx.state, FocusState::Chat);
+        Some((message_id, preview)) => {
+            use crate::adapters::tui::decision_queue::{
+                self, Responder, RetractTarget, TeamRetractPayload,
+            };
+            decision_queue::raise_team_retract(
+                ctx.state,
+                TeamRetractPayload {
+                    target: RetractTarget::AutoResponse { message_id },
+                    conversation_id: String::new(),
+                    task: None,
+                    card: format!(
+                        "Retract this auto-sent message? {preview}\nRetract — marked in your log, never deleted"
+                    ),
+                    armed: true,
+                    request: None,
+                },
+                Responder::Attached,
+            );
         }
         None => ctx.info("that message can no longer be retracted — nothing sent"),
     }
@@ -1459,17 +1443,17 @@ async fn submit_enter(ctx: &mut KeyCtx<'_>) -> KeyFlow {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::{apply_attached_approval_frame, attached_card_arrived};
+    use super::super::apply_attached_approval_frame;
     use super::*;
     use crate::adapters::daemon::protocol::ProposalToken;
     use crate::adapters::daemon::protocol::{DaemonFrame, InterruptRefusal, TurnGeneration};
+    use crate::adapters::tui::decision_queue::{self, DecisionKind, DecisionSubject};
     use crate::adapters::tui::keymap::render::leader_menu;
     use crate::adapters::tui::keymap::resolve::{Resolved, resolve, rows_of};
     use crate::adapters::tui::keymap::table::GlobalCmd;
     use crate::adapters::tui::keymap::table_chat::ChatCmd;
     use crate::adapters::tui::keymap::table_input::InputCmd;
     use crate::adapters::tui::keymap::{self, Availability, Context};
-    use crate::adapters::tui::state::PendingConsolidationCard;
     use crate::domain::models::SendAuthorization;
     use crate::domain::models::session::SessionState;
     use std::collections::BTreeSet;
@@ -1479,14 +1463,14 @@ pub(super) mod tests {
         workspace: tempfile::TempDir,
         read_only: bool,
         pub(crate) state: TuiState,
-        tx: mpsc::UnboundedSender<ClientFrame>,
+        pub(crate) tx: mpsc::UnboundedSender<ClientFrame>,
         clock: std::sync::Arc<crate::domain::clock::MockClock>,
         assemblies: std::collections::HashMap<
             crate::domain::models::RequestId,
             crate::adapters::daemon::protocol::ExactInputAssembly,
         >,
         rx: mpsc::UnboundedReceiver<ClientFrame>,
-        team_requests: AttachedTeamRequests,
+        pub(crate) team_requests: AttachedTeamRequests,
         tab: TabRenderState,
         pub(crate) domain_tab: crate::domain::models::tab::TabState,
         interrupt: AttachedInterrupt,
@@ -1561,7 +1545,7 @@ pub(super) mod tests {
             self.raw_key(KeyEvent::new(code, modifiers)).await
         }
 
-        async fn raw_key(&mut self, key: KeyEvent) -> KeyFlow {
+        pub(crate) async fn raw_key(&mut self, key: KeyEvent) -> KeyFlow {
             let mut ctx = KeyCtx {
                 workspace: self.workspace.path(),
                 read_only: self.read_only,
@@ -1618,7 +1602,7 @@ pub(super) mod tests {
         }
 
         pub(crate) async fn paste(&mut self, text: &str) {
-            let pending = super::super::attached_card_pending(&self.state);
+            let pending = false;
             self.chrome
                 .paste(&mut self.state, text, pending, self.workspace.path())
                 .await;
@@ -1682,6 +1666,53 @@ pub(super) mod tests {
             row.id = id.to_owned();
             row.send_authorization = SendAuthorization::Automatic;
             self.domain_tab.conversation.messages.push(row);
+        }
+
+        fn consolidation(&mut self, token: u64) {
+            super::super::apply_attached_consolidation_frame(
+                &mut self.state,
+                DaemonFrame::ConsolidationProposed {
+                    token: ProposalToken(token),
+                    proposals: vec![],
+                },
+                self.read_only,
+            );
+        }
+
+        fn open_kind(&mut self, kind: DecisionKind) {
+            let key = self
+                .state
+                .decisions
+                .items()
+                .find(|item| item.kind == kind)
+                .unwrap()
+                .key();
+            if decision_queue::focused_key(&self.state).as_ref() != Some(&key) {
+                assert!(decision_queue::open(&mut self.state, &key));
+            }
+            self.ready();
+        }
+
+        fn preview_retract(&mut self, armed: bool) {
+            self.team_requests.pending.insert(
+                "retract-a".into(),
+                super::super::AttachedTeamRequest::RetractPreview,
+            );
+            super::super::apply_attached_team_frame(
+                &mut self.state,
+                &mut self.team_requests,
+                DaemonFrame::TeamRetractPreviewed {
+                    request: "retract-a".into(),
+                    preview: crate::adapters::daemon::protocol::TeamRetractPreviewView::Card {
+                        peer: "peer-a".into(),
+                        item_id: "item-a".into(),
+                        body: "team retract canary".into(),
+                        armed,
+                    },
+                },
+                false,
+                &self.tx,
+            );
         }
 
         fn palette_names(&self) -> Vec<String> {
@@ -2710,14 +2741,14 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn story21_2_attached_palette_retract_selects_a_real_row_and_keeps_every_gate() {
+    async fn story21_6_attached_palette_retract_selects_a_real_row_and_keeps_every_gate() {
         let mut rig = Rig::new(false);
         rig.retractable("peer-response-node-a", "first auto reply");
         rig.retractable("peer-response-node-b", "second auto reply");
         // Ctrl+X is the leader now — never an immediate retract.
         rig.ctrl('x').await;
         assert!(rig.state.pending_leader.is_some());
-        assert!(rig.state.attached.retract_confirm.is_none());
+        assert!(!decision_queue::team_retract_pending(&rig.state));
         rig.esc().await;
 
         rig.ctrl('p').await;
@@ -2738,23 +2769,15 @@ pub(super) mod tests {
         }
         assert_eq!(rig.enter().await, KeyFlow::Continue);
         // Preview + explicit confirmation: nothing was sent yet.
-        assert_eq!(
-            rig.state
-                .attached
-                .retract_confirm
-                .as_ref()
-                .map(|(id, _)| id.as_str()),
-            Some("peer-response-node-a")
-        );
+        assert!(rig.state.decisions.items().any(|item| matches!(
+            &item.subject, DecisionSubject::TeamRetract(payload)
+                if matches!(&payload.target, decision_queue::RetractTarget::AutoResponse { message_id } if message_id == "peer-response-node-a")
+        )));
         assert!(rig.frames().is_empty(), "no immediate effect");
         // `n` declines; reopen and confirm with `y`.
-        assert_eq!(
-            rig.state.focus,
-            FocusState::Chat,
-            "the palette route hands the confirm Chat focus, where it answers (AC17)"
-        );
+        rig.open_kind(DecisionKind::TeamRetract);
         rig.ch('n').await;
-        assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
+        assert!(!decision_queue::team_retract_pending(&rig.state) && rig.frames().is_empty());
         assert_eq!(
             rig.state.focus,
             FocusState::Input,
@@ -2766,6 +2789,7 @@ pub(super) mod tests {
             rig.press(KeyCode::Down, KeyModifiers::NONE).await;
         }
         rig.enter().await;
+        rig.open_kind(DecisionKind::TeamRetract);
         rig.ch('y').await;
         let frames = rig.frames();
         assert!(matches!(
@@ -2773,9 +2797,9 @@ pub(super) mod tests {
             [ClientFrame::RetractAutoResponse { message_id, target_seq: None }]
                 if message_id == "peer-response-node-a"
         ));
+        assert!(rig.frames().is_empty());
 
-        // Stale target: the row was retracted meanwhile — `y` sends nothing. The confirm
-        // opens through the real palette route, which hands it Chat focus (FR-21-3-c).
+        // A target retracted after opening cannot be sent again.
         let mut rig = Rig::new(false);
         rig.retractable("peer-response-node-a", "auto reply");
         assert_eq!(rig.state.focus, FocusState::Input);
@@ -2784,16 +2808,13 @@ pub(super) mod tests {
         rig.ctrl('p').await;
         rig.type_text("retract").await;
         rig.enter().await;
-        assert!(rig.state.attached.retract_confirm.is_some());
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        rig.ch('i').await;
-        assert_eq!(rig.state.focus, FocusState::Input);
+        assert!(decision_queue::team_retract_pending(&rig.state));
         assert_eq!(rig.state.input_buffer, "saved retract draft");
-        rig.esc().await;
+        rig.open_kind(DecisionKind::TeamRetract);
         rig.domain_tab.conversation.messages[0].retracted_at_ms = Some(1);
         rig.ch('y').await;
         assert!(rig.frames().is_empty(), "stale target never retracts");
-        assert!(rig.state.attached.retract_confirm.is_none());
+        assert!(!decision_queue::team_retract_pending(&rig.state));
 
         // Read-only: the entry is labelled unavailable and selecting it refuses.
         let mut rig = Rig::new(true);
@@ -2807,7 +2828,7 @@ pub(super) mod tests {
                 .contains("read-only")
         );
         rig.enter().await;
-        assert!(rig.state.attached.retract_confirm.is_none());
+        assert!(!decision_queue::team_retract_pending(&rig.state));
         assert!(rig.frames().is_empty());
         assert_eq!(
             rig.notice(NoticeSource::Attached),
@@ -2889,25 +2910,20 @@ pub(super) mod tests {
 
     // ── the pre-existing owners keep their keys ──────────────────────────────
 
-    /// The retract confirmation remains a legacy card in this slice.
     #[tokio::test]
-    async fn story21_3_attached_retract_card_never_decides_on_esc() {
+    async fn story21_6_attached_retract_escape_defers_without_deciding() {
         let mut rig = Rig::new(false);
-        rig.state.attached.retract_confirm =
-            Some(("peer-response-node-a".to_owned(), "first".to_owned()));
-        assert_eq!(rig.state.focus, FocusState::Input);
-        attached_card_arrived(&mut rig.state, false);
+        rig.preview_retract(true);
+        rig.open_kind(DecisionKind::TeamRetract);
         rig.esc().await;
-        assert!(rig.state.attached.retract_confirm.is_some() && rig.frames().is_empty());
-        assert_eq!(
-            rig.notice(NoticeSource::Attached),
-            Some(
-                crate::adapters::tui::keymap::render::card_cue(Context::Confirm, Host::Attached)
-                    .as_str()
-            )
-        );
+        assert!(decision_queue::team_retract_pending(&rig.state));
+        assert!(rig.frames().is_empty());
+        rig.open_kind(DecisionKind::TeamRetract);
         rig.ch('n').await;
-        assert!(rig.state.attached.retract_confirm.is_none());
+        assert!(matches!(rig.frames().as_slice(),
+            [ClientFrame::TeamRetractDecision { request, confirm: false }] if request == "retract-a"));
+        assert!(rig.frames().is_empty());
+        assert!(!decision_queue::team_retract_pending(&rig.state));
     }
 
     impl Rig {
@@ -2976,22 +2992,15 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_attached_consolidation() {
+    async fn story21_6_attached_consolidation_arrival_preserves_focus_and_draft() {
         for draft in ["", "saved draft"] {
             let mut rig = Rig::new(false);
             rig.state.input_buffer = draft.into();
             rig.state.cursor_position = draft.chars().count();
             rig.retained_arrives(true);
             assert_eq!(rig.state.input_buffer, draft);
-            assert_eq!(
-                rig.state.focus,
-                if draft.is_empty() {
-                    FocusState::Chat
-                } else {
-                    FocusState::Input
-                }
-            );
-            assert!(rig.state.attached.consolidation_token.is_some());
+            assert_eq!(rig.state.focus, FocusState::Input);
+            assert!(rig.state.decisions.holds(DecisionKind::Consolidation));
             assert!(rig.frames().is_empty());
         }
     }
@@ -3356,7 +3365,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn story21_6_attached_waiting_and_deferred_permissions_leave_legacy_cards_usable() {
+    async fn story21_6_attached_waiting_permissions_and_queued_decisions() {
         for deferred in [false, true] {
             for card in ["consolidation", "retract", "team"] {
                 let mut rig = Rig::new(false);
@@ -3374,28 +3383,32 @@ pub(super) mod tests {
                     "consolidation" => rig.retained_arrives(true),
                     "retract" => {
                         rig.retractable("peer-response-test", "retract canary");
-                        rig.state.attached.retract_confirm =
-                            Some(("peer-response-test".into(), "retract canary".into()));
-                        attached_card_arrived(&mut rig.state, false);
+                        rig.ctrl('p').await;
+                        rig.type_text("retract").await;
+                        rig.enter().await;
+                    }
+                    "team" if deferred => {
+                        // 6D-L1-03: a set-aside permission is not a reason to decline an
+                        // unrelated retract preview: it is queued beside it, nothing is sent.
+                        rig.preview_retract(true);
+                        assert!(rig.frames().is_empty());
+                        assert_eq!(rig.state.decisions.undecided(), 2);
+                        continue;
                     }
                     "team" => {
-                        crate::adapters::tui::handlers::team_command::open_team_retract_card(
-                            &mut rig.state,
-                            "daemon-attachment",
-                            crate::domain::events::TeamRetractPreview::Card(
-                                crate::domain::events::TeamRetractCard {
-                                    peer: "peer-a".into(),
-                                    item_id: "item-a".into(),
-                                    task: None,
-                                    body: "team retract canary".into(),
-                                    armed: true,
-                                },
-                            ),
-                        );
-                        rig.team_requests.open_retract = Some("retract-a".into());
+                        rig.preview_retract(true);
+                        assert!(matches!(rig.frames().as_slice(),
+                            [ClientFrame::TeamRetractDecision { request, confirm: false }] if request == "retract-a"));
+                        assert_eq!(rig.state.decisions.undecided(), 1);
+                        continue;
                     }
                     _ => unreachable!(),
                 }
+                rig.open_kind(if card == "consolidation" {
+                    DecisionKind::Consolidation
+                } else {
+                    DecisionKind::TeamRetract
+                });
                 let painted = screen(&mut rig);
                 let expected = match card {
                     "consolidation" => "memory",
@@ -3419,13 +3432,12 @@ pub(super) mod tests {
                             }]
                         ),
                         "retract" =>
-                            matches!(frames.as_slice(), [ClientFrame::RetractAutoResponse { message_id, .. }] if message_id == "peer-response-test"),
-                        "team" =>
-                            matches!(frames.as_slice(), [ClientFrame::TeamRetractDecision { request, confirm: true }] if request == "retract-a"),
+                            matches!(frames.as_slice(), [ClientFrame::RetractAutoResponse { message_id, target_seq: None }] if message_id == "peer-response-test"),
                         _ => false,
                     },
                     "{card} deferred={deferred}: {frames:?}"
                 );
+                assert!(rig.frames().is_empty());
                 assert_eq!(rig.state.decisions.undecided(), 1);
             }
         }
@@ -3748,40 +3760,27 @@ pub(super) mod tests {
         }
     }
 
-    /// R4a: the consolidation card answers `y` / `n` in Chat (a token is sent once), they are
-    /// text in Input, and `Esc` / `Ctrl+C` post the registry cue and leave it pending. The
-    /// arrival takes the Chat focus through the loop's own function.
     #[tokio::test]
-    async fn story21_3_attached_consolidation_card_answers_in_chat_and_cues_on_esc() {
-        fn card() -> Option<PendingConsolidationCard> {
-            Some(PendingConsolidationCard {
-                conversation_id: String::new(),
-                proposals: vec![],
-            })
-        }
+    async fn story21_6_attached_consolidation_answers_and_defers() {
         let mut rig = Rig::new(false);
-        rig.state.pending_consolidation_card = card();
-        rig.state.attached.consolidation_token = Some(ProposalToken(7));
-        // Input focus: `y` / `n` are text.
+        rig.state.input_buffer = "draft".into();
+        rig.state.cursor_position = 5;
+        rig.consolidation(7);
         rig.ch('y').await;
         rig.ch('n').await;
-        assert_eq!(rig.state.input_buffer, "yn");
-        assert!(rig.frames().is_empty() && rig.state.attached.consolidation_token.is_some());
-        rig.state.input_buffer.clear();
-        rig.state.cursor_position = 0;
-        rig.state.input_scroll_offset = 0;
-        attached_card_arrived(&mut rig.state, false);
-        assert_eq!(rig.state.focus, FocusState::Chat);
-        let cue = crate::adapters::tui::keymap::render::card_cue(Context::Confirm, Host::Attached);
+        assert_eq!(rig.state.input_buffer, "draftyn");
+        assert!(rig.frames().is_empty());
         for ctrl_c in [false, true] {
+            rig.open_kind(DecisionKind::Consolidation);
             if ctrl_c {
                 rig.ctrl('c').await;
             } else {
                 rig.esc().await;
             }
-            assert!(rig.frames().is_empty() && rig.state.attached.consolidation_token.is_some());
-            assert_eq!(rig.notice(NoticeSource::Attached), Some(cue.as_str()));
+            assert!(rig.frames().is_empty());
+            assert!(rig.state.decisions.holds(DecisionKind::Consolidation));
         }
+        rig.open_kind(DecisionKind::Consolidation);
         rig.ch('n').await;
         assert!(matches!(
             rig.frames().as_slice(),
@@ -3790,26 +3789,130 @@ pub(super) mod tests {
                 accept: false
             }]
         ));
-        assert!(
-            rig.state.attached.consolidation_token.is_none()
-                && rig.state.pending_consolidation_card.is_none()
+        assert!(rig.frames().is_empty());
+        assert!(!rig.state.decisions.holds(DecisionKind::Consolidation));
+        assert_eq!(rig.state.input_buffer, "draftyn");
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_consolidations_resolve_under_their_own_tokens() {
+        let mut rig = Rig::new(false);
+        rig.consolidation(7);
+        rig.consolidation(8);
+        assert_eq!(rig.state.decisions.count(DecisionKind::Consolidation), 2);
+        for (token, key, accept) in [(7, 'y', true), (8, 'n', false)] {
+            rig.open_kind(DecisionKind::Consolidation);
+            rig.ch(key).await;
+            assert!(matches!(rig.frames().as_slice(),
+                [ClientFrame::ConsolidationResolve { token: ProposalToken(actual), accept: value }]
+                    if *actual == token && *value == accept));
+            assert!(rig.frames().is_empty());
+        }
+        assert!(rig.state.decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_mismatched_consolidation_token_sends_nothing() {
+        use decision_queue::{
+            Arrival, ConsolidationPayload, DecisionDraft, PendingConsolidationCard, Responder,
+        };
+        let mut rig = Rig::new(false);
+        decision_queue::raise(
+            &mut rig.state,
+            DecisionDraft::new(DecisionKind::Consolidation, "")
+                .source("7")
+                .responder(Responder::Attached)
+                .subject(DecisionSubject::Consolidation(Box::new(
+                    ConsolidationPayload {
+                        card: PendingConsolidationCard {
+                            conversation_id: String::new(),
+                            proposals: vec![],
+                        },
+                        token: Some(ProposalToken(8)),
+                    },
+                ))),
+            Arrival::Automatic,
         );
-        assert_eq!(
-            rig.state.focus,
-            FocusState::Input,
-            "consolidation returns borrowed focus"
-        );
-        rig.state.pending_consolidation_card = card();
-        rig.state.attached.consolidation_token = Some(ProposalToken(8));
-        attached_card_arrived(&mut rig.state, false);
+        rig.open_kind(DecisionKind::Consolidation);
         rig.ch('y').await;
-        assert!(matches!(
-            rig.frames().as_slice(),
-            [ClientFrame::ConsolidationResolve {
-                token: ProposalToken(8),
-                accept: true
-            }]
-        ));
+        assert!(rig.frames().is_empty());
+        assert_eq!(rig.state.decisions.undecided(), 0);
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_disarmed_retract_consumes_yes() {
+        let mut rig = Rig::new(false);
+        rig.preview_retract(false);
+        rig.open_kind(DecisionKind::TeamRetract);
+        rig.ch('y').await;
+        assert!(rig.frames().is_empty());
+        assert!(decision_queue::team_retract_pending(&rig.state));
+        rig.ch('n').await;
+        assert!(matches!(rig.frames().as_slice(),
+            [ClientFrame::TeamRetractDecision { request, confirm: false }] if request == "retract-a"));
+        assert!(rig.frames().is_empty());
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_raw_modified_and_nonpress_keys_never_decide() {
+        use crossterm::event::KeyEventKind;
+        for kind in [DecisionKind::Consolidation, DecisionKind::TeamRetract] {
+            let mut rig = Rig::new(false);
+            if kind == DecisionKind::Consolidation {
+                rig.consolidation(7);
+            } else {
+                rig.preview_retract(true);
+            }
+            rig.open_kind(kind);
+            for c in ['y', 'n'] {
+                for event in [
+                    KeyEvent::new_with_kind(
+                        KeyCode::Char(c),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Repeat,
+                    ),
+                    KeyEvent::new_with_kind(
+                        KeyCode::Char(c),
+                        KeyModifiers::NONE,
+                        KeyEventKind::Release,
+                    ),
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT),
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+                    KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT),
+                ] {
+                    rig.raw_key(event).await;
+                    assert!(rig.frames().is_empty());
+                    assert!(rig.state.decisions.holds(kind));
+                }
+            }
+            rig.ch('n').await;
+            let frames = rig.frames();
+            assert!(match kind {
+                DecisionKind::Consolidation => matches!(
+                    frames.as_slice(),
+                    [ClientFrame::ConsolidationResolve {
+                        token: ProposalToken(7),
+                        accept: false
+                    }]
+                ),
+                _ => matches!(frames.as_slice(),
+                    [ClientFrame::TeamRetractDecision { request, confirm: false }] if request == "retract-a"),
+            });
+            assert!(rig.frames().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn story21_6_attached_read_only_never_holds_consolidation_or_retract() {
+        let mut rig = Rig::new(true);
+        rig.consolidation(7);
+        rig.retractable("peer-response-node-a", "auto reply");
+        rig.ctrl('p').await;
+        rig.type_text("retract").await;
+        rig.enter().await;
+        assert!(!rig.state.decisions.holds(DecisionKind::Consolidation));
+        assert!(!decision_queue::team_retract_pending(&rig.state));
+        assert!(rig.frames().is_empty());
     }
 
     // ── draw: the attached overlays at 60 / 80 / 130 columns ─────────────────
@@ -5499,24 +5602,11 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_attached_ctrl_q_over_team_retract_preserves_card() {
+    async fn story21_6_attached_ctrl_q_over_team_retract_preserves_item() {
         let mut rig = Rig::at(FocusState::Input, "retained draft");
-        crate::adapters::tui::handlers::team_command::open_team_retract_card(
-            &mut rig.state,
-            "daemon-attachment",
-            crate::domain::events::TeamRetractPreview::Card(
-                crate::domain::events::TeamRetractCard {
-                    peer: "peer-a".into(),
-                    item_id: "item-a".into(),
-                    task: Some("task-a".into()),
-                    body: "Retraction still needs its own answer".into(),
-                    armed: true,
-                },
-            ),
-        );
-        rig.team_requests.open_retract = Some("retract-a".into());
+        rig.preview_retract(true);
         let before = (
-            format!("{:?}", rig.state.pending_team_retract),
+            rig.state.decisions.items().cloned().collect::<Vec<_>>(),
             rig.state.focus.clone(),
             rig.state.input_buffer.clone(),
         );
@@ -5525,20 +5615,20 @@ pub(super) mod tests {
             &rig.state,
             presentation::Surface::QuitConfirm
         ));
-        assert_eq!(rig.state.modal_stack.len(), 1);
+        assert!(presentation::is_open(&rig.state, Surface::Decision));
         assert_eq!(
             (
-                format!("{:?}", rig.state.pending_team_retract),
+                rig.state.decisions.items().cloned().collect::<Vec<_>>(),
                 rig.state.focus.clone(),
                 rig.state.input_buffer.clone()
             ),
             before
         );
         rig.ch('n').await;
-        assert!(rig.state.modal_stack.is_empty());
+        assert!(presentation::is_open(&rig.state, Surface::Decision));
         assert_eq!(
             (
-                format!("{:?}", rig.state.pending_team_retract),
+                rig.state.decisions.items().cloned().collect::<Vec<_>>(),
                 rig.state.focus.clone(),
                 rig.state.input_buffer.clone()
             ),
@@ -6432,7 +6522,7 @@ pub(super) mod tests {
         }
     }
     #[tokio::test]
-    async fn story21_4_attached_a2a_nested_palette_retract_preserves_owner() {
+    async fn story21_6_attached_a2a_nested_palette_retract_preserves_owner() {
         use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
         for nested in [false, true] {
             let mut rig = Rig::at(FocusState::Input, "retained retract draft");
@@ -6473,20 +6563,15 @@ pub(super) mod tests {
                 assert_eq!(palette_digest(&rig), palette);
                 assert_eq!(rig.state.help_overlay.scroll_offset, 7);
                 assert_eq!(rig.state.focus, FocusState::Input);
-                assert!(rig.state.attached.retract_confirm.is_none());
+                assert!(!decision_queue::team_retract_pending(&rig.state));
                 assert_eq!(rig.state.notifications.records().len(), records + 1);
                 assert_eq!(rig.notice(NoticeSource::Palette), Some(CLOSE_WINDOW_FIRST));
             } else {
-                assert!(rig.state.modal_stack.is_empty());
-                assert_eq!(
-                    rig.state
-                        .attached
-                        .retract_confirm
-                        .as_ref()
-                        .map(|(id, _)| id.as_str()),
-                    Some("peer-response-auto-b")
-                );
-                assert_eq!(rig.state.focus, FocusState::Chat);
+                assert!(rig.state.decisions.items().any(|item| matches!(
+                    &item.subject, DecisionSubject::TeamRetract(payload)
+                        if matches!(&payload.target, decision_queue::RetractTarget::AutoResponse { message_id } if message_id == "peer-response-auto-b")
+                )));
+                assert_eq!(rig.state.focus, FocusState::Input);
                 assert_eq!(rig.state.notifications.records().len(), records);
             }
             assert_eq!(rig.state.input_buffer, "retained retract draft");
@@ -6615,7 +6700,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn story21_4_attached_a2a_nested_palette_refusal_is_visible_without_dispatch() {
+    async fn story21_6_attached_a2a_nested_palette_refusal_is_visible_without_dispatch() {
         use crate::adapters::tui::keymap::table::CLOSE_WINDOW_FIRST;
         for width in [60, 80, 130] {
             let mut rig = Rig::at(FocusState::Input, "palette draft");
@@ -6664,7 +6749,7 @@ pub(super) mod tests {
             };
             let footer = footer_text(&rows);
             assert!(footer.contains(CLOSE_WINDOW_FIRST), "{width}: {rows:?}");
-            assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
+            assert!(!decision_queue::team_retract_pending(&rig.state) && rig.frames().is_empty());
             rig.press(KeyCode::Left, KeyModifiers::NONE).await;
             assert_eq!(
                 palette_digest(&rig),
@@ -6683,7 +6768,7 @@ pub(super) mod tests {
             );
             assert_eq!(rig.state.input_buffer, "palette draft");
             assert_eq!(rig.state.focus, FocusState::Input);
-            assert!(rig.state.attached.retract_confirm.is_none() && rig.frames().is_empty());
+            assert!(!decision_queue::team_retract_pending(&rig.state) && rig.frames().is_empty());
         }
     }
 

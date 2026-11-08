@@ -257,9 +257,7 @@ pub fn paint_wave_base(
 use crate::domain::events::{AppEvent, ChunkAction, CompactionPurpose};
 use crate::domain::models::tab::TabManager;
 use crate::domain::models::turn::TurnId;
-use crate::domain::models::visual::{
-    ConfirmationType, DeleteConfirmTarget, OverlayType, PanelType,
-};
+use crate::domain::models::visual::{DeleteConfirmTarget, PanelType};
 use crate::domain::models::{
     AppConfig, ApprovalOutcome, ChatMessage, CompletionOptions, ContentBlockType, Conversation,
     FocusState, ImageAttachment, MessageRole, NoticeLevel, PermissionMode, PlanStatus,
@@ -1400,70 +1398,28 @@ pub async fn run(
                                         });
                                     }
                                 }
-                                // Story 11.2a: Memory-consolidation card key handlers
-                                InputAction::ConsolidateAcceptAll => {
-                                    if let Some(card) = state.pending_consolidation_card.take() {
-                                        let conversation_id = conversation.id.clone();
-                                        let accepted: Vec<crate::domain::models::MemoryFact> =
-                                            card.proposals.into_iter().map(|(f, _)| f).collect();
-                                        state.needs_redraw = true;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
-                                            conversation_id,
-                                            accepted,
-                                        });
+                                action @ (InputAction::ConsolidateAcceptAll | InputAction::ConsolidateDeclineAll
+                                    | InputAction::ForgetAcceptAll | InputAction::ForgetDeclineAll) => {
+                                    let Some(subject) = state.decisions.take_resolved() else { continue };
+                                    let accept = matches!(action, InputAction::ConsolidateAcceptAll | InputAction::ForgetAcceptAll);
+                                    if let Some(event) = dq::memory_answer_event(subject, accept) {
+                                        let _ = app_state.event_bus.emit_domain(event);
                                     }
                                 }
-                                InputAction::ConsolidateDeclineAll => {
-                                    if state.pending_consolidation_card.take().is_some() {
-                                        let conversation_id = conversation.id.clone();
-                                        state.needs_redraw = true;
-                                        let _ = app_state.event_bus.emit_domain(AppEvent::MemoryConsolidationResolved {
-                                            conversation_id,
-                                            accepted: Vec::new(),
-                                        });
+                                action @ (InputAction::ApplyCardAccept | InputAction::ApplyCardDecline) => {
+                                    let Some(DS::Artifact(card)) = state.decisions.take_resolved() else { continue };
+                                    if matches!(action, InputAction::ApplyCardAccept) {
+                                        crate::infrastructure::runtime::artifact_bridge::apply_confirmed_card(&mut state, &app_state, *card, security.current_mode()).await;
                                     }
                                 }
-                                // Story 11.4a: `/memory forget` card key handlers.
-                                InputAction::ForgetAcceptAll => {
-                                    if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, true) {
-                                        let _ = app_state.event_bus.emit_domain(ev);
-                                    }
+                                action @ (InputAction::PeerAddConfirm | InputAction::PeerAddDecline) => {
+                                    let Some(DS::PeerAdd(pending)) = state.decisions.take_resolved() else { continue };
+                                    crate::infrastructure::runtime::peer_bridge::resolve_peer_add(&mut state, Some(*pending), matches!(action, InputAction::PeerAddConfirm), &app_state).await;
                                 }
-                                InputAction::ForgetToggleSelection => {
-                                    if let Some(ref mut card) = state.pending_forget_card {
-                                        let idx = card.focused_index;
-                                        if let Some((_, _, selected)) = card.candidates.get_mut(idx) {
-                                            *selected = !*selected;
-                                            state.needs_redraw = true;
-                                        }
-                                    }
+                                action @ (InputAction::TeamRetractConfirm | InputAction::TeamRetractDecline) => {
+                                    let Some(DS::TeamRetract(payload)) = state.decisions.take_resolved() else { continue };
+                                    crate::infrastructure::runtime::transparency_bridge::resolve_team_retract(&mut state, Some(*payload), matches!(action, InputAction::TeamRetractConfirm), &app_state).await;
                                 }
-                                InputAction::ForgetNavigateUp => {
-                                    // Handled in app.rs (focus change + redraw)
-                                }
-                                InputAction::ForgetNavigateDown => {
-                                    // Handled in app.rs (focus change + redraw)
-                                }
-                                InputAction::ForgetDeclineAll => {
-                                    if let Some(ev) = handlers::forget_command::resolve_forget_card(&mut state, &conversation.id, false) {
-                                        let _ = app_state.event_bus.emit_domain(ev);
-                                    }
-                                }
-                                InputAction::ApplyCardAccept => {
-                                    if let Some(card) = handlers::artifact_command::resolve_apply_card(&mut state, true) {
-                                        crate::infrastructure::runtime::artifact_bridge::apply_confirmed_card(&mut state, &app_state, card, security.current_mode()).await;
-                                    }
-                                    reducer::settle_legacy(&mut state);
-                                }
-                                InputAction::ApplyCardDecline => {
-                                    let _ = handlers::artifact_command::resolve_apply_card(&mut state, false);
-                                    reducer::settle_legacy(&mut state);
-                                }
-                                InputAction::PeerAddConfirm | InputAction::PeerAddDecline => {
-                                    let confirmed = matches!(action, InputAction::PeerAddConfirm);
-                                    crate::infrastructure::runtime::peer_bridge::resolve_peer_add(&mut state, confirmed, &app_state).await;
-                                }
-                                InputAction::TeamRetractConfirm | InputAction::TeamRetractDecline => crate::infrastructure::runtime::transparency_bridge::resolve_team_retract(&mut state, matches!(action, InputAction::TeamRetractConfirm), &app_state).await,
                                 InputAction::DelegationCardCancel => {
                                     if let Some(DS::Delegation(pending)) = state.decisions.take_resolved() {
                                         let conv_id = conversation.id.clone();
@@ -1811,7 +1767,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                     match effect {
                                         DecisionEffect::RecoveryContinue => {
-                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
+                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect));
                                         }
                                         DecisionEffect::RecoveryNewSession => {
                                             decision_effects::start_new_session(&mut conversation, &mut state);
@@ -1854,7 +1810,7 @@ pub async fn run(
                                         | DecisionEffect::SpawnGateCancel
                                         | DecisionEffect::AgentKillDecline
                                         | DecisionEffect::CancelPlanDecline => {
-                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
+                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect));
                                         }
                                         DecisionEffect::AgentKillConfirm => {
                                             let Some(DS::AgentKill(kill)) = state.decisions.take_resolved() else { continue };
@@ -1904,7 +1860,15 @@ pub async fn run(
                                         | DecisionEffect::ConsentOnce
                                         | DecisionEffect::ConsentAlways
                                         | DecisionEffect::ConsentDecline
-                                        | DecisionEffect::CancelDelete => {
+                                        | DecisionEffect::CancelDelete
+                                        | DecisionEffect::ConsolidationAccept | DecisionEffect::ConsolidationDecline
+                                        | DecisionEffect::ForgetAccept | DecisionEffect::ForgetDecline
+                                        | DecisionEffect::ArtifactAccept | DecisionEffect::ArtifactDecline
+                                        | DecisionEffect::PeerAddConfirm | DecisionEffect::PeerAddDecline
+                                        | DecisionEffect::TeamRetractConfirm | DecisionEffect::TeamRetractDecline
+                                        | DecisionEffect::ForkConfirm | DecisionEffect::ForkCancel
+                                        | DecisionEffect::RewindConfirm | DecisionEffect::RewindForkInstead | DecisionEffect::RewindCancel
+                                        | DecisionEffect::ExportOverwriteConfirm | DecisionEffect::ExportOverwriteCancel => {
                                             unreachable!("DecisionEffect::into_action maps these to their own arms");
                                         }
                                     }
@@ -2755,7 +2719,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 action @ (InputAction::ImageConfirmAttach | InputAction::ImageConfirmCancel) => {
-                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action);
                                 }
                                 InputAction::RequestClipboardPaste => {
                                     // Async: read image (or text) from the OS clipboard via
@@ -3160,8 +3124,8 @@ pub async fn run(
                                                 // Single conversation delete
                                                 if conv_id == conversation.id {
                                                     let tab_id = tab_manager.active_tab_id();
-                                        if streaming.is_streaming || turn_lifecycle.is_live(&conversation.id) || tab_manager.active_tab().reducer.open_turn.is_some() || state.pending_consolidation_card.is_some() {
-                                            if state.pending_consolidation_card.is_some() {
+                                        if streaming.is_streaming || turn_lifecycle.is_live(&conversation.id) || tab_manager.active_tab().reducer.open_turn.is_some() || dq::consolidation_pending(&state, &conversation.id) {
+                                            if dq::consolidation_pending(&state, &conversation.id) {
                                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
                                                     conversation_id: Some(conversation.id.clone()),
                                                     level: crate::domain::models::NoticeLevel::Info,
@@ -3252,7 +3216,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 action @ InputAction::CancelDelete => {
-                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action);
                                 }
                                 // ── Fork Conversation (Story 4-3a) ──────────────
                                 InputAction::ForkAtMessage => {
@@ -3288,35 +3252,19 @@ pub async fn run(
                                             state.needs_redraw = true;
                                             continue;
                                         }
-                                        state.pending_fork_index = Some(fork_message_index);
-                                        reducer::raise_confirmation(&mut state, ConfirmationType::Fork);
-                                        state.needs_redraw = true;
+                                        let target = &conversation.messages[fork_message_index];
+                                        dq::raise_fork(&mut state, &conversation.id, fork_message_index, &target.content, dq::message_target_fingerprint(target));
                                     }
                                 }
                                 InputAction::ForkConfirm => {
-                                    // DF-096 (assessment): index-based pending_fork_index is
-                                    // safe — no message_id re-validation needed. Reasoning:
-                                    // (a) The event loop is single-threaded per select! branch;
-                                    //     no concurrent mutation of conversation.messages is
-                                    //     possible while this branch executes.
-                                    // (b) Messages are only ever APPENDED (never prepended or
-                                    //     deleted) while the fork overlay is shown. An index
-                                    //     captured at 'f' press time still refers to the same
-                                    //     message when 'y' is pressed even if streaming appended
-                                    //     further messages in between.
-                                    // (c) fork_at_checkpoint re-reads the conversation from
-                                    //     storage, but only to obtain the current tail; the
-                                    //     slice [..=message_index] is unaffected by appends.
-                                    //
-                                    // P5 dedup invariant (party-mode review 2026-04-12):
-                                    // `.take()` drops pending_fork_index to None BEFORE the
-                                    // storage await, so a second 'y' press that lands while
-                                    // fork_at_checkpoint is in flight will be a no-op. The
-                                    // event loop is single-threaded per iteration — crossterm
-                                    // events queue behind the current select! branch and are
-                                    // processed after we return. Do not move `.take()` below
-                                    // the await without re-analyzing this invariant.
-                                    if let Some(message_index) = state.pending_fork_index.take() {
+                                    let Some(DS::Fork(payload)) = state.decisions.take_resolved() else { continue };
+                                    let message_index = payload.message_index;
+                                    if let Err(notice) = handlers::transcript_target::verify_target(&conversation, message_index, payload.target_hash) {
+                                        notifications::info(&mut state, NoticeSource::Session, notice);
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    {
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
                                         match handlers::transcript_target::handle_fork_confirm(&*storage, &conversation, message_index).await {
@@ -3356,27 +3304,22 @@ pub async fn run(
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
-                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                     Err(e) => {
                                                         tracing::error!("Failed to load forked conversation: {}", e);
-                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork failed: {}", e);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                                reducer::set_base(&mut state, FocusState::Chat);
                                             }
                                         }
                                         state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::ForkCancel => {
-                                    state.pending_fork_index = None;
-                                    reducer::set_base(&mut state, FocusState::Chat);
-                                    state.needs_redraw = true;
+                                    let Some(DS::Fork(_)) = state.decisions.take_resolved() else { continue };
                                 }
                                 // ── Rewind Conversation (Story 4-3b) ─────────────────
                                 InputAction::RewindAtMessage => {
@@ -3423,33 +3366,36 @@ pub async fn run(
                                             .list_snapshot_files(&conversation.id, durable_target)
                                             .await
                                             .unwrap_or_default();
-                                        let files_to_revert: Vec<crate::adapters::tui::state::RevertPreviewItem> = files
+                                        let files_to_revert: Vec<dq::RevertPreviewItem> = files
                                             .into_iter()
                                             .map(|(path, is_conflict)| {
                                                 let display_path = path
                                                     .strip_prefix(&workspace_path)
                                                     .map(|p| p.to_string_lossy().to_string())
                                                     .unwrap_or_else(|_| path.to_string_lossy().to_string());
-                                                crate::adapters::tui::state::RevertPreviewItem {
+                                                dq::RevertPreviewItem {
                                                     display_path,
                                                     conflict: is_conflict,
                                                 }
                                             })
                                             .collect();
 
-                                        state.pending_rewind_index = Some(target_message_index);
-                                        state.rewind_preview = Some(crate::adapters::tui::state::RewindPreview {
+                                        dq::raise_rewind(&mut state, &conversation.id, dq::RewindPreview {
                                             target_message_index,
                                             messages_to_remove,
                                             files_to_revert,
-                                        });
-                                        reducer::raise_confirmation(&mut state, ConfirmationType::Rewind);
-                                        state.needs_redraw = true;
+                                        }, dq::message_target_fingerprint(&conversation.messages[target_message_index]));
                                     }
                                 }
                                 InputAction::RewindConfirm => {
-                                    if let Some(target_msg_idx) = state.pending_rewind_index.take() {
-                                        state.rewind_preview = None;
+                                    let Some(DS::Rewind(payload)) = state.decisions.take_resolved() else { continue };
+                                    let target_msg_idx = payload.preview.target_message_index;
+                                    if let Err(notice) = handlers::transcript_target::verify_target(&conversation, target_msg_idx, payload.target_hash) {
+                                        notifications::info(&mut state, NoticeSource::Session, notice);
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    {
 
                                         tracing::debug!(
                                             "rewind: target_msg_idx={}, conv_id={}",
@@ -3461,14 +3407,12 @@ pub async fn run(
                                             Err(handlers::transcript_target::RewindFailure::Begin(error)) => {
                                                 tracing::error!("begin_rewind_txn failed — aborting rewind: {}", error);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Rewind aborted: could not create recovery journal ({})", error));
-                                                reducer::set_base(&mut state, FocusState::Chat);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
                                             Err(handlers::transcript_target::RewindFailure::Truncate(error)) => {
                                                 tracing::error!("revert_to_checkpoint failed: {}", error);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Rewind failed: {}", error));
-                                                reducer::set_base(&mut state, FocusState::Chat);
                                                 state.needs_redraw = true;
                                                 continue;
                                             }
@@ -3496,6 +3440,7 @@ pub async fn run(
 
                                         {
                                             let truncated = outcome.conversation;
+                                            dq::retire_message_targets(&mut state, &conversation.id, truncated.messages.len());
                                                 // 3. Update active-tab proxy (AC3 step 3)
                                                 save_active_tab(&mut tab_manager, &conversation, &streaming, &session_manager, &state, &turn_queue);
                                                 tab_manager.active_tab_mut().conversation = truncated;
@@ -3529,19 +3474,22 @@ pub async fn run(
                                                 let severity = if conflicts > 0 { NoticeSeverity::Warning } else { NoticeSeverity::Success };
                                                 notifications::notify(&mut state, NoticeSource::Session, severity, status_msg);
                                             }
-                                        presentation::reducer::settle_stage_base(&mut state, FocusState::Chat);
                                         state.needs_redraw = true;
                                     }
                                 }
                                 InputAction::RewindCancel => {
-                                    state.pending_rewind_index = None;
-                                    state.rewind_preview = None;
-                                    reducer::set_base(&mut state, FocusState::Chat);
-                                    state.needs_redraw = true;
+                                    let Some(DS::Rewind(_)) = state.decisions.take_resolved() else { continue };
                                 }
                                 InputAction::RewindForkInstead => {
-                                    // AC4: rewind → fork-instead path; mirrors ForkConfirm body.
-                                    if let Some((message_index, result)) = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &conversation, &mut state).await {
+                                    let Some(DS::Rewind(payload)) = state.decisions.take_resolved() else { continue };
+                                    let message_index = payload.preview.target_message_index;
+                                    if let Err(notice) = handlers::transcript_target::verify_target(&conversation, message_index, payload.target_hash) {
+                                        notifications::info(&mut state, NoticeSource::Session, notice);
+                                        state.needs_redraw = true;
+                                        continue;
+                                    }
+                                    {
+                                        let result = handlers::transcript_target::handle_rewind_fork_instead(&*storage, &conversation, message_index).await;
                                         let is_last = message_index == conversation.messages.len().saturating_sub(1);
 
                                         match result {
@@ -3573,23 +3521,17 @@ pub async fn run(
                                                     }
                                                     Ok(None) => {
                                                         tracing::error!("Forked conversation {} not found after creation", new_id);
-                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                     Err(e) => {
                                                         tracing::error!("Failed to load forked conversation: {}", e);
-                                                        reducer::set_base(&mut state, FocusState::Chat);
                                                     }
                                                 }
                                             }
                                             Err(e) => {
                                                 tracing::error!("Fork (from rewind) failed: {}", e);
                                                 notifications::error(&mut state, NoticeSource::Session, format!("Fork failed: {}", e));
-                                                reducer::set_base(&mut state, FocusState::Chat);
                                             }
                                         }
-                                        state.needs_redraw = true;
-                                    } else {
-                                        reducer::set_base(&mut state, FocusState::Chat);
                                         state.needs_redraw = true;
                                     }
                                 }
@@ -3683,12 +3625,11 @@ pub async fn run(
                                     handlers::export::close_cross_search(&mut state);
                                 }
                                 InputAction::ConfirmExportOverwrite => {
-                                    // Third-audit Fix R6 — delegate to the `pub` helper so
-                                    // integration tests exercise the same code path as the
-                                    // event loop.
-                                    apply_confirm_export_overwrite(&mut state).await;
+                                    let Some(DS::ExportOverwrite(payload)) = state.decisions.take_resolved() else { continue };
+                                    apply_confirm_export_overwrite(&mut state, *payload).await;
                                 }
                                 InputAction::CancelExportOverwrite => {
+                                    let Some(DS::ExportOverwrite(_)) = state.decisions.take_resolved() else { continue };
                                     apply_cancel_export_overwrite(&mut state);
                                 }
                                 InputAction::SetActiveAgent { name, then_submit } => {
@@ -4939,6 +4880,7 @@ pub async fn run(
                                         if let (Some(text), Some(mut fallback_agent)) = (last_user_text, agent_snap) {
                                             if let Some(pos) = conversation.messages.iter().rposition(|m| m.role == MessageRole::User) {
                                                 conversation.messages.truncate(pos);
+                                                dq::retire_message_targets(&mut state, &conversation.id, pos);
                                             }
                                             fallback_agent.model = None;
                                             let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -5172,7 +5114,7 @@ pub async fn run(
                             });
                             state.needs_redraw = true;
                         } else {
-                            arrive_consolidation_card(&mut state, crate::adapters::tui::state::PendingConsolidationCard {
+                            dq::raise_consolidation(&mut state, dq::PendingConsolidationCard {
                                 conversation_id: conversation.id.clone(),
                                 proposals: proposals.into_iter().map(|f| (f, true)).collect(),
                             });
@@ -5182,8 +5124,6 @@ pub async fn run(
                         if conversation.id != conversation_id {
                             tracing::warn!("MemoryConsolidationResolved for mismatched conversation");
                         } else {
-                            state.pending_consolidation_card = None;
-                            reducer::restore_focus_after_modal(&mut state);
                             if accepted.is_empty() {
                                 // Declined — AC3/AC4: nothing is written.
                                 let _ = app_state.event_bus.emit_domain(AppEvent::SystemNotice {
@@ -5256,8 +5196,6 @@ pub async fn run(
                         // (MEMORY.md/daily-log) is left intact (Strategy A). Notice wording
                         // lives in the handler to respect the AC-4 line budget.
                         if conversation.id == conversation_id {
-                            state.pending_forget_card = None;
-                            reducer::restore_focus_after_modal(&mut state);
                             let result = if keys.is_empty() {
                                 None
                             } else {
@@ -5820,7 +5758,7 @@ pub async fn run(
                         question,
                         response_tx,
                     } => {
-                        let rewinding = matches!(state.focus, FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::Rewind)));
+                        let rewinding = dq::rewind_pending(&state, &conversation.id);
                         if conversation_id == conversation.id && rewinding {
                             // DF-018 inverse guard (AC6, Story 4-3b): rewind overlay active →
                             // drop the request; response_tx drops, the turn gets RecvError.
@@ -6730,8 +6668,6 @@ pub async fn run(
             // Branch 4: Active task monitoring (placeholder for future stories)
             // Currently a no-op future that never resolves
         }
-        reducer::settle_legacy(&mut state);
-        crate::adapters::tui::app::settle_local_card_focus(&mut state);
 
         if state.should_quit {
             break;
@@ -7464,7 +7400,6 @@ pub fn render(
     crate::adapters::tui::decision_queue::prune_closed(state, &log_facts);
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
-    let inline_card = crate::adapters::tui::app::inline_card(state);
     let mut content_height = 0usize;
     let mut block_bounds: Vec<usize> = Vec::new();
     let mut msg_bounds: Vec<usize> = Vec::new();
@@ -7501,9 +7436,6 @@ pub fn render(
         ref image_indicator,
         density_mode,
         sidebar_visible,
-        ref pending_fork_index,
-        ref pending_rewind_index,
-        ref rewind_preview,
         ..
     } = *state;
 
@@ -7837,9 +7769,7 @@ pub fn render(
                         state.task_panel_state.detail_scroll_offset = 0;
                         state.task_panel_state.last_executed_plan_id = None;
                     }
-                } else if !matches!(focus, FocusState::Overlay(_))
-                    && inline_card.is_none()
-                    && let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
+                } else if let Some(agent_id) = state.agent_panel_state.drill_down_agent.clone() {
                     use crate::adapters::tui::widgets::agent_inspector;
                     let entry = state
                         .agent_panel_state
@@ -7955,132 +7885,6 @@ pub fn render(
                 state.team_proposal_footer_visible = card.as_ref().is_some_and(|card| card.footer_visible());
                 opaque.host(card.as_ref().map(|card| card.area()));
                 state.team_proposal_visible = team_proposal_card::render(card, frame.buffer_mut(), theme);
-                // Story 11.2a: render the memory-consolidation review card as a
-                // bottom-anchored inline card over the chat pane (helpful review,
-                // never a modal interruption — UX).
-                if let Some(card) = &state.pending_consolidation_card
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Consolidation) {
-                    let card_lines = crate::adapters::tui::widgets::consolidation_card::render_consolidation_card_lines(
-                        card,
-                        theme,
-                        app_layout.chat_pane.width,
-                    );
-                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
-                        frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
-                    )));
-                }
-
-                // Story 11.4a: render the `/memory forget` confirm card, same
-                // bottom-anchored inline grammar as the consolidation card.
-                if let Some(card) = &state.pending_forget_card
-                    && inline_card == Some(crate::adapters::tui::app::InlineCard::Forget) {
-                    let card_lines = crate::adapters::tui::widgets::forget_card::render_forget_card_lines(
-                        card,
-                        theme,
-                        app_layout.chat_pane.width,
-                    );
-                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
-                        frame.buffer_mut(), card_lines, theme.colors.accent, app_layout.chat_pane,
-                    )));
-                }
-
-                if let Some(card) = &state.pending_artifact_card
-                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::ArtifactApply)) {
-                    let card_lines = crate::adapters::tui::widgets::apply_card::render_apply_card_lines(
-                        card,
-                        theme,
-                        app_layout.chat_pane.width,
-                    );
-                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(
-                        frame.buffer_mut(),
-                        card_lines,
-                        theme.colors.accent,
-                        app_layout.chat_pane,
-                    )));
-                }
-
-                if let Some(pending) = &state.pending_team_retract
-                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::TeamRetract)) {
-                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_decision_card(frame.buffer_mut(), crate::adapters::tui::widgets::team_retract_prompt::render_team_retract_lines(pending, theme, app_layout.chat_pane.width), theme.colors.accent, app_layout.chat_pane)));
-                }
-
-                if let Some(pending) = &state.pending_peer_add
-                    && *focus == FocusState::Overlay(OverlayType::Confirmation(ConfirmationType::PeerAdd)) {
-                    let card_lines = crate::adapters::tui::widgets::peer_add_prompt::render_peer_add_lines(
-                        pending, theme, app_layout.chat_pane.width,
-                    );
-                    opaque.host(Some(crate::adapters::tui::widgets::inline_card::render_bottom_anchored_card(
-                        frame.buffer_mut(), card_lines, theme.colors.decision_border, app_layout.chat_pane,
-                    )));
-                }
-
-                // Render fork confirmation card at bottom of chat pane if pending (Story 4-3a, AC1)
-                if *focus
-                    == FocusState::Overlay(
-                        crate::domain::models::visual::OverlayType::Confirmation(
-                            crate::domain::models::visual::ConfirmationType::Fork,
-                        ),
-                    )
-                {
-                    if let Some(fork_idx) = pending_fork_index {
-                        use crate::adapters::tui::widgets::fork_confirm;
-                        // Get message preview from conversation
-                        let preview = conversation
-                            .messages
-                            .get(*fork_idx)
-                            .map(|m| m.content.as_str())
-                            .unwrap_or("");
-                        let fork_lines = fork_confirm::render_fork_confirmation_lines(
-                            preview,
-                            *fork_idx,
-                            app_layout.chat_pane.width,
-                            theme,
-                        );
-                        let fork_height = fork_lines.len() as u16;
-                        let fork_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - fork_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: fork_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(fork_lines);
-                        frame.render_widget(ratatui::widgets::Clear, fork_area);
-                        frame.render_widget(paragraph, fork_area);
-                        opaque.host(Some(fork_area));
-                    }
-                }
-
-                // Render rewind confirmation card at bottom of chat pane if pending (Story 4-3b, AC1)
-                if *focus
-                    == FocusState::Overlay(
-                        crate::domain::models::visual::OverlayType::Confirmation(
-                            crate::domain::models::visual::ConfirmationType::Rewind,
-                        ),
-                    )
-                {
-                    let _ = pending_rewind_index; // used by handler; preview drives render
-                    if let Some(preview) = rewind_preview {
-                        use crate::adapters::tui::widgets::rewind_confirm;
-                        let rewind_lines = rewind_confirm::render_rewind_confirmation_lines(
-                            preview,
-                            app_layout.chat_pane.width,
-                            theme,
-                        );
-                        let rewind_height = rewind_lines.len() as u16;
-                        let rewind_area = ratatui::prelude::Rect {
-                            x: app_layout.chat_pane.x,
-                            y: app_layout.chat_pane.y + app_layout.chat_pane.height
-                                - rewind_height.min(app_layout.chat_pane.height),
-                            width: app_layout.chat_pane.width,
-                            height: rewind_height.min(app_layout.chat_pane.height),
-                        };
-                        let paragraph = ratatui::widgets::Paragraph::new(rewind_lines);
-                        frame.render_widget(ratatui::widgets::Clear, rewind_area);
-                        frame.render_widget(paragraph, rewind_area);
-                        opaque.host(Some(rewind_area));
-                    }
-                }
 
                 let session_title = if !conversation.title.is_empty() {
                     Some(conversation.title.as_str())
@@ -8757,16 +8561,6 @@ pub fn complete_bulk_delete(state: &mut TuiState) {
     notifications::success(state, NoticeSource::Session, "All conversations deleted");
 }
 
-// Small presentation arms shared by the live arrivals and their focus witnesses.
-fn arrive_consolidation_card(
-    state: &mut TuiState,
-    card: crate::adapters::tui::state::PendingConsolidationCard,
-) {
-    state.pending_consolidation_card = Some(card);
-    reducer::take_chat_focus_for_card(state, true);
-    state.needs_redraw = true;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8941,11 +8735,7 @@ mod tests {
                     assert_eq!(action, expected);
                     // The same effect consumer called by run(), not a replica
                     // of the focus assignment under test.
-                    decision_queue::apply_resolved_action(
-                        &mut state,
-                        action,
-                        reducer::restore_focus_after_modal,
-                    );
+                    decision_queue::apply_resolved_action(&mut state, action);
                     assert!(!state.decisions.holds(kind));
                     assert!(!state.decisions.holds(DecisionKind::LargeImage));
                     assert!(!state.decisions.holds(DecisionKind::DeleteConversations));
@@ -8983,124 +8773,98 @@ mod tests {
         }
     }
 
-    fn retained_card_arrival(mut arrive: impl FnMut(&mut TuiState), recovers_input: bool) {
-        use crate::domain::events::{DomainInputEvent as E, DomainKey as K};
-        for (focus, draft, expected, model) in [
-            (FocusState::Input, "", FocusState::Chat, false),
-            (
-                FocusState::Input,
-                "  exact draft λ\nsecond line  ",
-                FocusState::Input,
-                false,
-            ),
-            (FocusState::Input, "overlay draft", FocusState::Input, true),
+    fn retained_card_arrival(mut arrive: impl FnMut(&mut TuiState)) {
+        for (draft, model) in [
+            ("", false),
+            ("  exact draft λ\nsecond line  ", false),
+            ("overlay draft", true),
         ] {
             let mut state = TuiState::new(80, 24);
-            state.focus = focus;
+            state.focus = FocusState::Input;
             state.input_buffer = draft.into();
             if model {
                 presentation::reducer::open(&mut state, presentation::Surface::ModelSelector);
             }
             let frames = state.modal_stack.iter().cloned().collect::<Vec<_>>();
             arrive(&mut state);
-            assert_eq!(state.focus, expected);
+            assert_eq!(state.focus, FocusState::Input);
             assert_eq!(state.input_buffer, draft);
-            assert_eq!(
-                state.modal_stack.iter().cloned().collect::<Vec<_>>(),
-                frames
-            );
-            if model {
-                continue;
+            for frame in &frames {
+                assert!(state.modal_stack.iter().any(|current| current == frame));
             }
-            if state.focus == FocusState::Input {
-                handle_input(&mut state, &E::SpecialKey(K::Esc));
-                assert_eq!(state.focus, FocusState::Chat);
-            }
-            let action = handle_input(&mut state, &E::KeyPress('i'));
-            assert!(
-                matches!(action, InputAction::Consumed | InputAction::Ignored),
-                "i never decides"
-            );
-            assert_eq!(
-                state.focus,
-                if recovers_input {
-                    FocusState::Input
-                } else {
-                    FocusState::Chat
-                }
-            );
-            assert_eq!(
-                state.input_buffer, draft,
-                "i must recover or be swallowed, never enter the draft"
-            );
-            if recovers_input {
-                arrive(&mut state);
-                assert_eq!(
-                    state.focus, expected,
-                    "burst reclaims only an empty composer"
+            if !model {
+                let key = state.decisions.items().next().unwrap().key();
+                assert!(dq::open(&mut state, &key));
+                // The event loop routes with the facts of the active tab: the items belong to "c1".
+                let facts = crate::adapters::tui::notification_log::LogFacts {
+                    active_conversation_id: Some("c1".into()),
+                    ..Default::default()
+                };
+                let routed = presentation::route(
+                    &mut state,
+                    &crate::domain::events::DomainInputEvent::KeyPress('i'),
+                    crate::adapters::tui::keymap::Host::Local,
+                    &facts,
                 );
-                assert_eq!(state.input_buffer, draft);
+                assert!(matches!(routed, Some(presentation::RouteEffect::Consumed)));
+                assert_eq!(
+                    state.input_buffer, draft,
+                    "i must not enter the interrupted draft"
+                );
+                assert_eq!(state.decisions.undecided(), 1, "i must not decide");
             }
         }
     }
 
     #[test]
     fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_consolidation() {
-        retained_card_arrival(
-            |state| {
-                arrive_consolidation_card(
-                    state,
-                    crate::adapters::tui::state::PendingConsolidationCard {
-                        conversation_id: "c1".into(),
-                        proposals: vec![(
-                            crate::domain::models::MemoryFact {
-                                category: "Preferences".into(),
-                                fact: "Keep exact drafts".into(),
-                                detail: None,
-                            },
-                            true,
-                        )],
-                    },
-                );
-                assert_eq!(
-                    state
-                        .pending_consolidation_card
-                        .as_ref()
-                        .unwrap()
-                        .proposals
-                        .len(),
-                    1
-                );
-            },
-            false,
-        );
+        retained_card_arrival(|state| {
+            dq::raise_consolidation(
+                state,
+                dq::PendingConsolidationCard {
+                    conversation_id: "c1".into(),
+                    proposals: vec![(
+                        crate::domain::models::MemoryFact {
+                            category: "Preferences".into(),
+                            fact: "Keep exact drafts".into(),
+                            detail: None,
+                        },
+                        true,
+                    )],
+                },
+            );
+            assert_eq!(
+                state
+                    .decisions
+                    .items()
+                    .filter(|item| matches!(&item.subject,
+                    DS::Consolidation(payload) if payload.card.proposals.len() == 1))
+                    .count(),
+                1
+            );
+        });
     }
 
     #[test]
     fn story21_3_retained_card_arrivals_preserve_focus_and_drafts_forget() {
-        retained_card_arrival(
-            |state| {
-                let entry = crate::domain::models::MemoryEntry {
-                    timestamp: chrono::Local::now(),
-                    summary: "forget me".into(),
-                    context: None,
-                };
-                assert!(
-                    handlers::forget_command::handle_forget_command(
-                        state,
-                        &"c1".into(),
-                        "forget me",
-                        Some(Ok(vec![(7, entry)]))
-                    )
-                    .is_empty()
-                );
-                assert_eq!(
-                    state.pending_forget_card.as_ref().unwrap().candidates[0].0,
-                    7
-                );
-            },
-            false,
-        );
+        retained_card_arrival(|state| {
+            let entry = crate::domain::models::MemoryEntry {
+                timestamp: chrono::Local::now(),
+                summary: "forget me".into(),
+                context: None,
+            };
+            assert!(
+                handlers::forget_command::handle_forget_command(
+                    state,
+                    &"c1".into(),
+                    "forget me",
+                    Some(Ok(vec![(7, entry)]))
+                )
+                .is_empty()
+            );
+            assert!(state.decisions.items().any(|item| matches!(&item.subject,
+                    DS::Forget(card) if card.candidates[0].0 == 7)));
+        });
     }
 
     #[tokio::test]

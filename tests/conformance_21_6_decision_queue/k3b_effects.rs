@@ -21,7 +21,7 @@ use rustain::adapters::tui::handlers::CompactionPayload;
 use rustain::adapters::tui::handlers::HandlerOutcome;
 use rustain::adapters::tui::handlers::budget::handle_upsert_daily_budget_warning;
 use rustain::adapters::tui::handlers::context_warning::handle_upsert_context_warning;
-use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, reducer};
+use rustain::adapters::tui::presentation::{self, RouteEffect, Surface};
 use rustain::adapters::tui::state::{DailyBudgetState, TuiState};
 use rustain::domain::clock::MockClock;
 use rustain::domain::errors::ProviderError;
@@ -469,7 +469,7 @@ fn k3b_large_image_attach_and_cancel_decide_once_and_leave_their_marks() {
         other => panic!("{other:?}"),
     };
     assert_eq!(action, InputAction::ImageConfirmAttach);
-    decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+    decision_queue::apply_resolved_action(&mut state, action);
     assert_eq!(state.pending_images.len(), 1, "attached exactly once");
     assert!(state.image_indicator.is_some());
     assert_once(&mut state, 'y');
@@ -482,7 +482,7 @@ fn k3b_large_image_attach_and_cancel_decide_once_and_leave_their_marks() {
         other => panic!("{other:?}"),
     };
     assert_eq!(action, InputAction::ImageConfirmCancel);
-    decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+    decision_queue::apply_resolved_action(&mut state, action);
     assert!(state.pending_images.is_empty(), "nothing attached");
     assert!(
         state
@@ -511,15 +511,11 @@ fn k3b_a_resolved_item_hands_its_payload_over_exactly_once() {
         other => panic!("{other:?}"),
     };
     assert_eq!(action, InputAction::ImageConfirmAttach);
-    decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+    decision_queue::apply_resolved_action(&mut state, action);
     assert_eq!(state.pending_images.len(), 1);
     assert_eq!(state.pending_images[0].data, "PAYLOAD");
     // Applying the same action again finds no resolved payload: no second attachment.
-    decision_queue::apply_resolved_action(
-        &mut state,
-        InputAction::ImageConfirmAttach,
-        reducer::restore_focus_after_modal,
-    );
+    decision_queue::apply_resolved_action(&mut state, InputAction::ImageConfirmAttach);
     assert_eq!(
         state.pending_images.len(),
         1,

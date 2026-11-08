@@ -1,22 +1,9 @@
-//! Decision-tier confirmation card for `/artifact apply` and
-//! `/artifact resolve`.
-//!
-//! ⛔ **One widget, two modes — and the mode parameterises CONTENT, never
-//! DISPATCH** (Story 18.3a-f, rulings A7 + A13). Both modes paint through the
-//! same render branch in `event_loop.rs`, resolve through the same
-//! `InputAction`s and share one card slot on `TuiState`, which is why the
-//! resolution verb costs the event loop nothing. What differs is the labels and
-//! the body: a card that paints `[y] Apply` for a verb that applies nothing
-//! welds two epistemic classes onto one token, exactly as `apply: applied`
-//! would for the row.
+//! Decision frame body for `/artifact apply` and `/artifact resolve`.
 
 use ratatui::prelude::*;
 
-use crate::adapters::tui::keymap::Context;
-use crate::adapters::tui::keymap::render::rail;
+use crate::adapters::tui::decision_queue::{ArtifactCardMode, PendingArtifactCard};
 use crate::adapters::tui::keymap::table_card::CardCmd;
-use crate::adapters::tui::state::{ArtifactCardMode, PendingArtifactCard};
-use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
 use crate::adapters::tui::widgets::artifacts_panel::id_prefix;
 use crate::domain::models::OperatorApplyFinding;
@@ -35,12 +22,7 @@ pub struct ApplyCardBinding {
     pub choice: ApplyCardChoice,
 }
 
-/// The painted labels and char dispatch for the **apply** card.
-///
-/// ⚠ Kept under this name and with the label `"Apply"` because
-/// `conformance_18_3a_e_apply_surface.rs` requires the literal `"[y] Apply"` in
-/// the painted apply card. ⛔ The resolve card must NOT paint it —
-/// see [`RESOLVE_CARD_BINDINGS`].
+/// The labels and char dispatch for the apply decision.
 pub const APPLY_CARD_BINDINGS: [ApplyCardBinding; 2] = [
     ApplyCardBinding {
         key: 'y',
@@ -111,21 +93,27 @@ pub fn choice_for_key(key: char) -> Option<ApplyCardChoice> {
         .map(|binding| binding.choice)
 }
 
-/// The `Confirm` row that paints and dispatches `choice`: the card's key text comes from the
-/// registry, so what is painted is what the table binds.
-fn choice_command(choice: ApplyCardChoice) -> CardCmd {
+/// Map an artifact choice to its decision-frame command.
+#[must_use]
+pub fn choice_command(choice: ApplyCardChoice) -> CardCmd {
     match choice {
         ApplyCardChoice::Accept => CardCmd::Yes,
         ApplyCardChoice::Decline => CardCmd::No,
     }
 }
 
+/// Build the artifact decision body; the frame wraps its rows and supplies the rail.
 #[must_use]
-pub fn render_apply_card_lines<'a>(
+pub fn lines(card: &PendingArtifactCard, theme: &Theme) -> Vec<Line<'static>> {
+    lines_with_file_limit(card, theme, 200)
+}
+
+/// Copy uses the same raw body but retains every file.
+pub(crate) fn lines_with_file_limit(
     card: &PendingArtifactCard,
     theme: &Theme,
-    width: u16,
-) -> Vec<Line<'a>> {
+    limit: usize,
+) -> Vec<Line<'static>> {
     let title = match card.mode {
         ArtifactCardMode::Apply => format!("  [patch] Apply {}", id_prefix(&card.artifact.id)),
         ArtifactCardMode::Resolve(_) => format!(
@@ -133,215 +121,91 @@ pub fn render_apply_card_lines<'a>(
             id_prefix(&card.artifact.id)
         ),
     };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            title,
-            Style::default()
-                .fg(theme.colors.accent)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!("  Producer: {}", card.artifact.producer.as_str())),
-    ];
-    for (index, chunk) in wrapped_file_chunks(&card.files.join(", "), width)
-        .into_iter()
-        .enumerate()
-    {
-        let prefix = if index == 0 { "  Files: " } else { "         " };
-        lines.push(Line::from(format!("{prefix}{chunk}")));
+    let head = Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(theme.colors.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    // The consequence and consent come first: the frame body scrolls from its top, so a
+    // long file list can never push the epistemic consent out of the first screen.
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let warning = Style::default().fg(theme.colors.warning);
+    let mut push = |text: String, style: Style| {
+        lines.push(Line::from(Span::styled(format!("  {text}"), style)));
+    };
+    match card.mode {
+        ArtifactCardMode::Apply => {
+            if card.predates_apply_records {
+                push(
+                    "Apply state unknown — this journal predates apply records;".into(),
+                    Style::default(),
+                );
+                push(
+                    "patch may already be in the working tree.".into(),
+                    Style::default(),
+                );
+            }
+            push(
+                "Warning: interruption can leave this patch indeterminate.".into(),
+                warning,
+            );
+            push(
+                "Recover with: /artifact resolve <id> present|absent.".into(),
+                warning,
+            );
+        }
+        ArtifactCardMode::Resolve(finding) => {
+            if matches!(finding, OperatorApplyFinding::Present) {
+                push("Warning: this patch becomes applyable again, and applying a delta that is already in the tree can succeed silently.".into(), warning);
+            }
+            push(
+                "No workspace write is performed by this decision.".into(),
+                warning,
+            );
+            push(
+                format!(
+                    "You are reporting: this patch's changes {} in the working tree.",
+                    crate::adapters::tui::handlers::artifact_command::finding_clause(finding)
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            );
+            push("This records what YOU report, not what the system observed. It did not look at the working tree, and it will not.".into(), Style::default());
+        }
+    }
+    lines.push(Line::from("  Awaiting your decision."));
+    lines.insert(0, head);
+    lines.push(Line::from(format!(
+        "  Producer: {}",
+        card.artifact.producer.as_str()
+    )));
+    lines.push(Line::from("  Files:"));
+    for file in card.files.iter().take(limit) {
+        lines.push(Line::from(format!("  {file}")));
+    }
+    let omitted = card.files.len().saturating_sub(limit);
+    if omitted > 0 {
+        lines.push(Line::from(format!("  … and {omitted} more files")));
     }
     lines.push(Line::from(format!(
         "  Workspace: {}",
         card.workspace.display()
     )));
-    match card.mode {
-        ArtifactCardMode::Apply => push_apply_body(&mut lines, card, theme, width),
-        ArtifactCardMode::Resolve(finding) => push_resolve_body(&mut lines, finding, theme, width),
-    }
-    // ⛔ **Every painted key must dispatch, and every key must be painted.**
-    // 18.3c shipped `[✗] Retract` as inert text and it became the epic's
-    // most-cited defect; the dual failure is a key that dispatches but is
-    // clipped off the pane edge, which is what happens to the resolve card's
-    // longer labels at the spec's narrow reference widths. Keep them on one
-    // line while it fits, then break — ⛔ never truncate.
-    let actions: Vec<String> = bindings_for(card.mode)
-        .iter()
-        .map(|binding| {
-            format!(
-                "{} {}",
-                rail(Context::Confirm, choice_command(binding.choice)),
-                binding.label
-            )
-        })
-        .collect();
-    let single = format!("  Awaiting your decision.  {}", actions.join("  "));
-    if fits(&single, width) {
-        lines.push(Line::from(single));
-    } else {
-        lines.push(Line::from("  Awaiting your decision."));
-        for action in actions {
-            lines.push(Line::from(format!("  {action}")));
-        }
-    }
     lines
 }
 
-/// Does one composed line survive the card's border at `width`?
-///
-/// The decision-card chrome spends one column per side on the frame, so a
-/// line of `width - 2` display cells is the last one that renders whole.
-/// Anything longer is silently clipped by the buffer.
-fn fits(line: &str, width: u16) -> bool {
-    geom::cells(line) <= (width as usize).saturating_sub(2)
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn push_apply_body<'a>(
-    lines: &mut Vec<Line<'a>>,
-    card: &PendingArtifactCard,
-    theme: &Theme,
-    width: u16,
-) {
-    // ⛔ Wrapped, never clipped: each line is a consequence the operator is
-    // asked to consent to, and the 59-cell warning exceeds a 60-column
-    // card's 58-cell content area.
-    if card.predates_apply_records {
-        push_wrapped(
-            lines,
-            "Apply state unknown — this journal predates apply records;",
-            width,
-            Style::default(),
-        );
-        push_wrapped(
-            lines,
-            "patch may already be in the working tree.",
-            width,
-            Style::default(),
-        );
-    }
-    push_wrapped(
-        lines,
-        "Warning: interruption can leave this patch indeterminate.",
-        width,
-        Style::default().fg(theme.colors.warning),
-    );
-    push_wrapped(
-        lines,
-        "Recover with: /artifact resolve <id> present|absent.",
-        width,
-        Style::default().fg(theme.colors.warning),
-    );
-}
-
-/// The resolve card's body (Story 18.3a-f, AC4).
-///
-/// 🔴 **The epistemic sentence is stated before `y`, not after.** Post-
-/// Irreversible Confidence applied to the *epistemics*: the operator must know,
-/// before confirming, that what is about to be recorded is their report and not
-/// the system's observation.
-///
-/// ⛔ No copy here says *audit trail*, *evidence*, *authenticated*,
-/// *tamper-evident*, *verified* or *proof* (`ADR-18-3a-d-01:49`, extended to
-/// future surfaces), and ⛔ none calls the record *permanent*, *final* or
-/// *durable* (ruling P6) — compaction that drops this record while keeping its
-/// `PatchApplyStarted` silently re-wedges the artifact.
-fn push_resolve_body<'a>(
-    lines: &mut Vec<Line<'a>>,
-    finding: OperatorApplyFinding,
-    theme: &Theme,
-    width: u16,
-) {
-    if matches!(finding, OperatorApplyFinding::Present) {
-        // Ruling A9: name the double-apply consequence. ⛔ Do not repeat the
-        // "bounded by `git apply`'s atomicity" claim — demonstrated false on
-        // 2026-08-08, when a new-file hunk re-applies with exit=0 onto a tree
-        // the operator had deleted the file from.
-        push_wrapped(
-            lines,
-            "Warning: this patch becomes applyable again, and applying a delta \
-             that is already in the tree can succeed silently.",
-            width,
-            Style::default().fg(theme.colors.warning),
-        );
-    }
-    push_wrapped(
-        lines,
-        "No workspace write is performed by this decision.",
-        width,
-        Style::default().fg(theme.colors.warning),
-    );
-    // 🔴 Emitted LAST so the report statement and the epistemic consent sit
-    // immediately above the actions. The resolve card renders through
-    // `render_bottom_anchored_decision_card`, which tail-scrolls on overflow;
-    // a multi-file patch can push the lead off-screen, so the consent must be
-    // in the tail region to survive it (AC4 — stated before `y`).
-    push_wrapped(
-        lines,
-        &format!(
-            "You are reporting: this patch's changes {} in the working tree.",
-            crate::adapters::tui::handlers::artifact_command::finding_clause(finding)
-        ),
-        width,
-        Style::default().add_modifier(Modifier::BOLD),
-    );
-    push_wrapped(
-        lines,
-        "This records what YOU report, not what the system observed. It did not \
-         look at the working tree, and it will not.",
-        width,
-        Style::default(),
-    );
-}
-
-/// Push one sentence, greedy-wrapped to the card width with a two-space indent.
-///
-/// ⛔ Clipping is not an option here: every line this card paints is a claim the
-/// operator is being asked to consent to, and half a claim is worse than none.
-fn push_wrapped<'a>(lines: &mut Vec<Line<'a>>, text: &str, width: u16, style: Style) {
-    for chunk in wrap_words(text, (width as usize).saturating_sub(4).max(8)) {
-        lines.push(Line::from(Span::styled(format!("  {chunk}"), style)));
-    }
-}
-
-/// Wrap the comma-joined file list to the card width so a multi-file patch
-/// names every touched path instead of clipping past the pane edge. The first
-/// line sits under `Files: `; continuations align beneath it (9-space indent).
-fn wrapped_file_chunks(joined: &str, width: u16) -> Vec<String> {
-    const INDENT: usize = 9;
-    // Border (2 cells) + the 9-cell `  Files: ` / continuation indent.
-    wrap_words(joined, (width as usize).saturating_sub(INDENT + 2).max(8))
-}
-
-/// Greedy word wrap by display cells. Shared by the file list and the resolve
-/// card's prose so one wrapping rule governs everything this widget paints.
-/// A word wider than `limit` (a long unspaced file name) is broken at grapheme
-/// boundaries rather than left to be clipped at the pane edge.
-fn wrap_words(text: &str, limit: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut cur_cells = 0usize;
-    for word in text.split_whitespace() {
-        let word_cells = geom::cells(word);
-        if !cur.is_empty() && cur_cells + 1 + word_cells > limit {
-            out.push(std::mem::take(&mut cur));
-            cur_cells = 0;
+    #[test]
+    fn apply_and_resolve_bindings_share_dispatch() {
+        for (apply, resolve) in APPLY_CARD_BINDINGS.iter().zip(RESOLVE_CARD_BINDINGS.iter()) {
+            assert_eq!(apply.key, resolve.key);
+            assert_eq!(choice_for_key(apply.key), Some(apply.choice));
+            assert_eq!(apply.choice, resolve.choice);
+            assert_eq!(choice_command(apply.choice), choice_command(resolve.choice));
         }
-        if word_cells > limit {
-            let mut rows = geom::wrap_hard(word, limit);
-            if let Some(last) = rows.pop() {
-                out.extend(rows.into_iter().map(str::to_owned));
-                cur.push_str(last);
-                cur_cells = geom::cells(last);
-            }
-            continue;
-        }
-        if !cur.is_empty() {
-            cur.push(' ');
-            cur_cells += 1;
-        }
-        cur.push_str(word);
-        cur_cells += word_cells;
+        assert_eq!(choice_for_key('x'), None);
     }
-    if !cur.is_empty() || out.is_empty() {
-        out.push(cur);
-    }
-    out
 }

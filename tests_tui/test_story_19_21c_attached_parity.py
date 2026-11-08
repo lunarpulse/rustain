@@ -134,6 +134,16 @@ def _exercise(binary, evidence, root, monkeypatch):
         screen = _wait_screen(tui, lambda screen: "Retract on B's host" in screen and "[y] Retract" in screen,
                               "armed retract card")
         (evidence / "05-card.screen.txt").write_text(screen)
+        # The decision frame ignores keys for its first 500 ms: wait for a settled frame.
+        import time as _time
+        last, since, deadline = None, None, _time.monotonic() + 30
+        while True:
+            now, current = _time.monotonic(), tui.get_screen_text()
+            if current != last:
+                last, since = current, now
+            elif now - since >= 0.7:
+                break
+            assert now < deadline, current
         tui.send("y")
         screen = _wait_screen(tui, lambda screen: "Retracted on B's host." in screen, "landed retract")
         (evidence / "06-landed.screen.txt").write_text(screen)

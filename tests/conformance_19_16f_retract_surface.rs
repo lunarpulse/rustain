@@ -5,7 +5,7 @@
 //! command goes through `submit_message_for_test` → the `pub`
 //! `transparency_bridge::team_command` dispatch arm → the rail-3 preview spawn
 //! → the preview-ready event's handler (`open_team_retract_card`) → the real
-//! key path (`handle_input`) → the card resolver → the dispatch the accept
+//! key path (`presentation::route`) → the decision effect → the dispatch the accept
 //! spawn awaits. The recipient is the real axum router over a real loopback
 //! socket, and the assertions read the **recipient's durable mark** and the
 //! **sender's journal**, never only the client's return value.
@@ -15,6 +15,10 @@
 //! is Story 19.16d's fold-level keystone, consumed, not restated.
 
 #![cfg(feature = "a2a")]
+
+#[allow(clippy::duplicate_mod)]
+#[path = "conformance_21_6_decision_queue/support.rs"]
+mod decision_support;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,10 +31,14 @@ use rustain::adapters::a2a::exec::SubmitterKey;
 use rustain::adapters::a2a::server::{ServeConfig, serve};
 use rustain::adapters::a2a::transparency::TransparencySink;
 use rustain::adapters::rap::IdentityKeyStore;
-use rustain::adapters::tui::app::{InputAction, handle_input, submit_message_for_test};
-use rustain::adapters::tui::handlers::team_command::{
-    TEAM_RETRACT_BLOCK_ID, open_team_retract_card, resolve_team_retract_card,
+use rustain::adapters::tui::app::{InputAction, submit_message_for_test};
+use rustain::adapters::tui::decision_queue::{
+    self, DecisionKind, DecisionSubject, TeamRetractPayload,
 };
+use rustain::adapters::tui::handlers::team_command::{
+    TEAM_RETRACT_BLOCK_ID, open_team_retract_card,
+};
+use rustain::adapters::tui::presentation::RouteEffect;
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::events::{AppEvent, DomainInputEvent, DomainKey, TeamRetractPreview};
 use rustain::domain::models::capability_registry::CapabilityRegistry;
@@ -40,7 +48,7 @@ use rustain::domain::models::{
 };
 use rustain::domain::ports::{RoomJournal, RoomJournalReader};
 use rustain::infrastructure::runtime::app_state::AppState;
-use rustain::infrastructure::runtime::transparency_bridge::{team_command, team_retract_dispatch};
+use rustain::infrastructure::runtime::transparency_bridge::{resolve_team_retract, team_command};
 use rustain::infrastructure::subagent::{NodeJournal, NodeRoomJournal, NodeTree};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -259,7 +267,17 @@ impl Sender {
     async fn raise_card(&mut self, state: &mut TuiState, line: &str) {
         self.type_command(state, line).await;
         let preview = self.preview_ready().await;
+        let clock = Arc::new(rustain::domain::clock::MockClock::new(
+            std::time::Instant::now(),
+        ));
+        state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+            &rustain::domain::models::NotificationsConfig::default(),
+            clock.clone(),
+        );
+        decision_queue::prune_closed(state, &decision_support::facts("conv"));
         open_team_retract_card(state, "conv", preview);
+        decision_support::paint(state, &decision_support::facts("conv"), 120, 40);
+        decision_support::advance(&clock, decision_queue::INERT_AFTER_PAINT);
     }
 
     async fn rows(&self) -> Vec<RoomEvent> {
@@ -305,24 +323,65 @@ impl Sender {
     }
 }
 
-/// Press `y` exactly as the event loop would act on it: only a
-/// `TeamRetractConfirm` resolves the card, and only a resolved card is
-/// dispatched. Returns the answer's sentence when a dispatch ran.
-async fn press_y(sender: &Sender, state: &mut TuiState) -> Option<String> {
-    if handle_input(state, &DomainInputEvent::KeyPress('y')) != InputAction::TeamRetractConfirm {
+fn retract_card(state: &TuiState) -> &TeamRetractPayload {
+    let item = state
+        .decisions
+        .items()
+        .find(|item| {
+            item.kind == DecisionKind::TeamRetract
+                && item.conversation_id.as_deref() == Some("conv")
+        })
+        .expect("retract decision for issuing conversation");
+    let DecisionSubject::TeamRetract(payload) = &item.subject else {
+        panic!("retract payload")
+    };
+    payload
+}
+
+fn key(state: &mut TuiState, event: DomainInputEvent) -> Option<RouteEffect> {
+    decision_support::route(state, &event, &decision_support::facts("conv"))
+}
+
+fn resolved(state: &mut TuiState) -> Option<TeamRetractPayload> {
+    match state.decisions.take_resolved() {
+        Some(DecisionSubject::TeamRetract(payload)) => Some(*payload),
+        None => None,
+        _ => panic!("unexpected decision payload"),
+    }
+}
+
+async fn answer(sender: &mut Sender, state: &mut TuiState) -> Option<(String, Option<String>)> {
+    if key(state, DomainInputEvent::KeyPress('y'))
+        != Some(RouteEffect::Action(InputAction::TeamRetractConfirm))
+    {
         return None;
     }
-    let pending = resolve_team_retract_card(state, true)?;
+    let payload = resolved(state);
+    resolve_team_retract(state, payload, true, &sender.app_state).await;
     Some(
-        team_retract_dispatch(
-            sender.runtime(),
-            &pending.peer,
-            &pending.item_id,
-            pending.task,
-        )
+        tokio::time::timeout(SETTLE, async {
+            loop {
+                match sender.domain_rx.recv().await {
+                    Some(AppEvent::TeamRetractAnswered {
+                        conversation_id,
+                        message,
+                        board,
+                    }) => {
+                        assert_eq!(conversation_id, "conv");
+                        break (message, board);
+                    }
+                    Some(_) => {}
+                    None => panic!("domain channel closed before retract answer"),
+                }
+            }
+        })
         .await
-        .message,
+        .expect("retract answer"),
     )
+}
+
+async fn press_y(sender: &mut Sender, state: &mut TuiState) -> Option<String> {
+    answer(sender, state).await.map(|(message, _)| message)
 }
 
 /// Every `RecipientItemRetracted` on the recipient's durable journal.
@@ -428,6 +487,71 @@ fn app_state(
     )
 }
 
+/// 6D-L1-04: peer task newlines must not forge trusted, accent-styled rows
+/// before the frame's paint sanitizer runs, and effects retain the original task.
+#[tokio::test]
+async fn hostile_preview_task_cannot_forge_a_decision_row() {
+    use ratatui::style::Modifier;
+    use rustain::adapters::tui::widgets::team_retract_prompt;
+    use rustain::domain::services::transparency::{MAX_PEER_ID_BYTES, sanitize_disclosable};
+
+    let host = journal().await;
+    let task = format!(
+        "x\nAwaiting your decision. [y] Retract{}",
+        "z".repeat(MAX_PEER_ID_BYTES)
+    );
+    seed_item(host.room.as_ref(), "ri_hostile", &task, received()).await;
+    let server = Host::allow(&host).await;
+    let sender = sender(vec![server.peer("jun-dev")]).await;
+    let preview = rustain::infrastructure::runtime::transparency_bridge::team_retract_preview(
+        sender.runtime(),
+        "jun-dev",
+        "ri_hostile",
+    )
+    .await;
+    let mut state = TuiState::new(120, 40);
+    open_team_retract_card(&mut state, "conv", preview);
+    let payload = retract_card(&state);
+    assert_eq!(payload.task.as_deref(), Some(task.as_str()));
+    let lines = team_retract_prompt::lines(payload, &state.theme);
+    let text: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
+    let cleaned = sanitize_disclosable(&task, MAX_PEER_ID_BYTES);
+    assert!(
+        text.iter()
+            .any(|line| line == &format!("  sent as      {cleaned}"))
+    );
+    let decision: Vec<_> = lines
+        .iter()
+        .zip(&text)
+        .filter(|(_, text)| text.trim_start().starts_with("Awaiting your decision"))
+        .collect();
+    assert_eq!(decision.len(), 1);
+    assert_eq!(decision[0].1.trim(), "Awaiting your decision.");
+    assert!(
+        decision[0].0.spans[0]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+    let scalar = lines
+        .iter()
+        .zip(&text)
+        .find(|(_, text)| text.contains("sent as      "))
+        .unwrap()
+        .0;
+    assert!(!scalar.spans[0].style.add_modifier.contains(Modifier::BOLD));
+    assert_ne!(scalar.spans[0].style.fg, Some(state.theme.colors.accent));
+    server.stop().await;
+}
+
 // ── AC2 + AC4 + AC5 + AC10 · the headline ───────────────────────────────────
 
 /// The whole path: typed command → preview read over a real socket → card →
@@ -476,10 +600,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_live")
         .await;
-    let card = state
-        .pending_team_retract
-        .as_ref()
-        .expect("the preview raised the decision card");
+    let card = retract_card(&state);
     assert!(card.armed, "a verified, unmarked item arms [y]");
     for line in [
         "Retract on jun-dev's host",
@@ -491,7 +612,7 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
          this item.",
         "This marks the item on their host. It does not delete it, and there is no un-retract. \
          What they already read, they already read.",
-        "Awaiting your decision.  [y] Retract  [n] Cancel",
+        "Awaiting your decision.",
     ] {
         assert!(
             card.card.contains(line),
@@ -499,6 +620,16 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
             card.card
         );
     }
+    let screen = decision_support::screen(&decision_support::paint(
+        &mut state,
+        &decision_support::facts("conv"),
+        120,
+        40,
+    ));
+    assert!(
+        screen.contains("[y] Retract  [n] Cancel  [Esc] Later"),
+        "{screen}"
+    );
     assert_eq!(
         retract_records(&host).await,
         0,
@@ -507,19 +638,21 @@ async fn the_typed_retract_reaches_the_recipients_durable_mark_through_the_confi
 
     // A stray key never resolves the gate.
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('x')),
-        InputAction::Consumed
+        key(&mut state, DomainInputEvent::KeyPress('x')),
+        Some(RouteEffect::Consumed)
     );
-    assert!(state.pending_team_retract.is_some());
+    assert!(decision_queue::team_retract_pending(&state));
 
-    let landed = press_y(&sender, &mut state).await.expect("[y] dispatches");
+    let landed = press_y(&mut sender, &mut state)
+        .await
+        .expect("[y] dispatches");
     assert_eq!(
         landed,
         "Retracted on jun-dev's host. Marked there — never deleted.\n\
          What they already read, they already read."
     );
     // The double press: the slot is gone, so a second `y` confirms nothing.
-    assert_eq!(press_y(&sender, &mut state).await, None);
+    assert_eq!(press_y(&mut sender, &mut state).await, None);
 
     assert_eq!(
         retract_records(&host).await,
@@ -584,19 +717,8 @@ async fn a_landed_retract_re_renders_the_remembered_board_with_its_mark() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_mark")
         .await;
-    assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-        InputAction::TeamRetractConfirm
-    );
-    let pending = resolve_team_retract_card(&mut state, true).expect("accepted");
-    let answer = team_retract_dispatch(
-        sender.runtime(),
-        &pending.peer,
-        &pending.item_id,
-        pending.task,
-    )
-    .await;
-    let board = answer.board.expect("the remembered board re-renders");
+    let (_, board) = answer(&mut sender, &mut state).await.expect("accepted");
+    let board = board.expect("the remembered board re-renders");
     assert!(
         board.contains("    item ri_mark · arrival 1 · task task-mark · received · [retracted "),
         "{board}"
@@ -618,20 +740,42 @@ async fn declining_the_card_clears_the_slot_and_sends_nothing() {
         .raise_card(&mut state, "/team retract jun-dev ri_keep")
         .await;
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::SpecialKey(DomainKey::Esc)),
-        InputAction::Consumed
+        key(&mut state, DomainInputEvent::SpecialKey(DomainKey::Esc)),
+        Some(RouteEffect::Consumed)
     );
-    assert!(state.pending_team_retract.is_some(), "Esc is not a decline");
-    assert!(resolve_team_retract_card(&mut state, false).is_none());
-    sender
-        .raise_card(&mut state, "/team retract jun-dev ri_keep")
-        .await;
+    assert!(
+        decision_queue::team_retract_pending(&state),
+        "Esc is not a decline"
+    );
+    assert!(resolved(&mut state).is_none());
+    let item = state
+        .decisions
+        .items()
+        .find(|item| item.kind == DecisionKind::TeamRetract)
+        .expect("deferred item");
+    let key_to_open = decision_queue::DecisionKey {
+        kind: item.kind,
+        source: item.source.clone(),
+        conversation_id: item.conversation_id.clone(),
+    };
+    assert!(decision_queue::open(&mut state, &key_to_open));
+    let clock = Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
+    decision_support::paint(&mut state, &decision_support::facts("conv"), 120, 40);
+    decision_support::advance(&clock, decision_queue::INERT_AFTER_PAINT);
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('n')),
-        InputAction::TeamRetractDecline
+        key(&mut state, DomainInputEvent::KeyPress('n')),
+        Some(RouteEffect::Action(InputAction::TeamRetractDecline))
     );
-    assert!(resolve_team_retract_card(&mut state, false).is_none());
-    assert!(state.pending_team_retract.is_none());
+    let payload = resolved(&mut state);
+    assert!(payload.is_some());
+    resolve_team_retract(&mut state, payload, false, &sender.app_state).await;
+    assert!(!decision_queue::team_retract_pending(&state));
     assert_eq!(retract_records(&host).await, 0);
     assert!(sender.retract_dispatch_rows().await.is_empty());
     server.stop().await;
@@ -656,10 +800,7 @@ async fn an_unverified_read_raises_a_disarmed_card_that_consumes_y() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_gone")
         .await;
-    let card = state
-        .pending_team_retract
-        .as_ref()
-        .expect("the card renders");
+    let card = retract_card(&state);
     assert!(!card.armed);
     assert!(
         card.card
@@ -668,16 +809,23 @@ async fn an_unverified_read_raises_a_disarmed_card_that_consumes_y() {
         card.card
     );
     assert!(
-        card.card
-            .ends_with("Cannot verify on jun-dev's host.  [n] Cancel"),
-        "the key line stays last and paints no [y]: {}",
+        card.card.ends_with("Cannot verify on jun-dev's host."),
+        "the closing sentence stays last: {}",
         card.card
     );
-    assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-        InputAction::Consumed
+    let screen = decision_support::screen(&decision_support::paint(
+        &mut state,
+        &decision_support::facts("conv"),
+        120,
+        40,
+    ));
+    assert!(screen.contains("[n] Cancel  [Esc] Later"), "{screen}");
+    assert!(!screen.contains("[y] Retract"), "{screen}");
+    assert_eq!(press_y(&mut sender, &mut state).await, None);
+    assert!(
+        decision_queue::team_retract_pending(&state),
+        "`y` resolved nothing"
     );
-    assert!(state.pending_team_retract.is_some(), "`y` resolved nothing");
     assert!(sender.retract_dispatch_rows().await.is_empty());
 }
 
@@ -714,25 +862,38 @@ async fn a_removed_item_disarms_y_and_an_acknowledged_one_arms_it() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_removed")
         .await;
-    let card = state.pending_team_retract.as_ref().expect("card");
+    let card = retract_card(&state);
     assert!(
         card.card
             .contains("mark         removed there — nothing to mark")
     );
     assert!(
         card.card
-            .ends_with("Already removed on jun-dev's host — nothing to mark.  [n] Cancel"),
+            .ends_with("Already removed on jun-dev's host — nothing to mark."),
         "{}",
         card.card
     );
-    assert_eq!(press_y(&sender, &mut state).await, None);
-    assert!(resolve_team_retract_card(&mut state, false).is_none());
+    let screen = decision_support::screen(&decision_support::paint(
+        &mut state,
+        &decision_support::facts("conv"),
+        120,
+        40,
+    ));
+    assert!(screen.contains("[n] Cancel  [Esc] Later"), "{screen}");
+    assert!(!screen.contains("[y] Retract"), "{screen}");
+    assert_eq!(press_y(&mut sender, &mut state).await, None);
+    assert_eq!(
+        key(&mut state, DomainInputEvent::KeyPress('n')),
+        Some(RouteEffect::Action(InputAction::TeamRetractDecline))
+    );
+    let payload = resolved(&mut state);
+    resolve_team_retract(&mut state, payload, false, &sender.app_state).await;
 
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_acked")
         .await;
-    assert!(state.pending_team_retract.as_ref().expect("card").armed);
-    assert!(press_y(&sender, &mut state).await.is_some());
+    assert!(retract_card(&state).armed);
+    assert!(press_y(&mut sender, &mut state).await.is_some());
     assert_eq!(retract_records(&host).await, 1);
     server.stop().await;
 }
@@ -750,7 +911,7 @@ async fn an_unlisted_item_raises_no_card_and_renders_not_found() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_nope")
         .await;
-    assert!(state.pending_team_retract.is_none());
+    assert!(!decision_queue::team_retract_pending(&state));
     assert_eq!(
         state.feedback_blocks[TEAM_RETRACT_BLOCK_ID].message,
         "jun-dev's host has no item ri_nope this host can address. Nothing was marked."
@@ -776,7 +937,7 @@ async fn a_retract_addresses_one_peer_and_never_fans_out() {
     sender
         .raise_card(&mut state, "/team retract alpha ri_one")
         .await;
-    assert!(press_y(&sender, &mut state).await.is_some());
+    assert!(press_y(&mut sender, &mut state).await.is_some());
 
     assert_eq!(retract_records(&minted).await, 1);
     let dispatched = sender.retract_dispatch_rows().await;
@@ -806,21 +967,21 @@ async fn a_second_retract_says_already_retracted_and_changes_nothing() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_twice")
         .await;
-    let first = press_y(&sender, &mut state).await.expect("dispatched");
+    let first = press_y(&mut sender, &mut state).await.expect("dispatched");
     assert!(first.starts_with("Retracted on jun-dev's host."), "{first}");
 
     // `[y]` stays armed on an already-marked item (Open question 3, default).
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_twice")
         .await;
-    let card = state.pending_team_retract.as_ref().expect("card");
+    let card = retract_card(&state);
     assert!(card.armed);
     assert!(
         card.card.contains("mark         already retracted "),
         "{}",
         card.card
     );
-    let second = press_y(&sender, &mut state).await.expect("dispatched");
+    let second = press_y(&mut sender, &mut state).await.expect("dispatched");
     assert!(
         second.starts_with("already retracted ") && second.ends_with(" — nothing changed"),
         "{second}"
@@ -847,7 +1008,7 @@ async fn a_tombstone_after_the_read_renders_its_own_sentence_and_a_rejection_row
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_race")
         .await;
-    assert!(state.pending_team_retract.as_ref().expect("card").armed);
+    assert!(retract_card(&state).armed);
     host.room
         .record_event(RoomEvent::RecipientItemRemoved {
             address: ItemAddress::from_a2a_ingress(
@@ -858,7 +1019,7 @@ async fn a_tombstone_after_the_read_renders_its_own_sentence_and_a_rejection_row
         .await
         .expect("the recipient removes the item after the read");
 
-    let answer = press_y(&sender, &mut state).await.expect("dispatched");
+    let answer = press_y(&mut sender, &mut state).await.expect("dispatched");
     assert_eq!(
         answer,
         "jun-dev's host already removed that item — its content is no longer shown there.\n\
@@ -901,7 +1062,9 @@ async fn an_internal_error_is_unknown_and_a_policy_refusal_is_proven() {
     sender_a
         .raise_card(&mut state, "/team retract jun-dev ri_broken")
         .await;
-    let unknown = press_y(&sender_a, &mut state).await.expect("dispatched");
+    let unknown = press_y(&mut sender_a, &mut state)
+        .await
+        .expect("dispatched");
     assert_eq!(
         unknown,
         "No usable answer from jun-dev's host — whether the item was marked is unknown. \
@@ -920,7 +1083,9 @@ async fn an_internal_error_is_unknown_and_a_policy_refusal_is_proven() {
     sender_b
         .raise_card(&mut state, "/team retract jun-dev ri_denied")
         .await;
-    let refused = press_y(&sender_b, &mut state).await.expect("dispatched");
+    let refused = press_y(&mut sender_b, &mut state)
+        .await
+        .expect("dispatched");
     assert_eq!(
         refused,
         "jun-dev's host refused the retract. Nothing was marked."
@@ -947,10 +1112,10 @@ async fn a_closed_port_renders_could_not_reach_and_journals_a_rejection() {
     sender
         .raise_card(&mut state, "/team retract jun-dev ri_closed")
         .await;
-    assert!(state.pending_team_retract.as_ref().expect("card").armed);
+    assert!(retract_card(&state).armed);
     server.stop().await;
 
-    let answer = press_y(&sender, &mut state).await.expect("dispatched");
+    let answer = press_y(&mut sender, &mut state).await.expect("dispatched");
     assert_eq!(
         answer,
         "Could not reach jun-dev's host. Nothing was marked."
@@ -1011,14 +1176,11 @@ async fn the_dispatch_row_is_durable_before_the_post_is_answered() {
         .raise_card(&mut state, "/team retract jun-dev ri_order")
         .await;
     assert_eq!(
-        handle_input(&mut state, &DomainInputEvent::KeyPress('y')),
-        InputAction::TeamRetractConfirm
+        key(&mut state, DomainInputEvent::KeyPress('y')),
+        Some(RouteEffect::Action(InputAction::TeamRetractConfirm))
     );
-    let pending = resolve_team_retract_card(&mut state, true).expect("accepted");
-    let runtime = sender.runtime().clone();
-    let dispatch = tokio::spawn(async move {
-        team_retract_dispatch(&runtime, &pending.peer, &pending.item_id, pending.task).await
-    });
+    let payload = resolved(&mut state);
+    resolve_team_retract(&mut state, payload, true, &sender.app_state).await;
 
     tokio::time::timeout(SETTLE, append_started.notified())
         .await
@@ -1029,11 +1191,21 @@ async fn the_dispatch_row_is_durable_before_the_post_is_answered() {
         "the dispatch row is durable while the POST is still in flight"
     );
     resume_append.notify_one();
-    let answer = dispatch.await.expect("dispatch task");
+    let answer = tokio::time::timeout(SETTLE, async {
+        loop {
+            match sender.domain_rx.recv().await {
+                Some(AppEvent::TeamRetractAnswered { message, .. }) => break message,
+                Some(_) => {}
+                None => panic!("domain channel closed"),
+            }
+        }
+    })
+    .await
+    .expect("dispatch answer");
     assert!(
-        answer.message.starts_with("Retracted on jun-dev's host."),
+        answer.starts_with("Retracted on jun-dev's host."),
         "{}",
-        answer.message
+        answer
     );
     assert_eq!(sender.retract_dispatch_rows().await.len(), 1);
     assert_eq!(retract_records(&host).await, 1);

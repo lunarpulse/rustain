@@ -22,6 +22,7 @@
 //! * `M17` (both parsers default `true` when the key is absent) → the
 //!   unbound-sender assertions (the sentence is lost), on both surfaces.
 
+use rustain::adapters::tui::decision_queue::{DecisionKind, DecisionSubject};
 use rustain::adapters::tui::handlers::team_command::{
     one_credential_sentence, open_team_retract_card,
 };
@@ -81,14 +82,29 @@ impl Side {
         })
         .await
         .expect("the preview spawn publishes TeamRetractPreviewReady");
+        rustain::adapters::tui::decision_queue::prune_closed(
+            &mut self.state,
+            &rustain::adapters::tui::notification_log::LogFacts {
+                active_conversation_id: Some("conv".into()),
+                decisions_supported: true,
+                ..Default::default()
+            },
+        );
         open_team_retract_card(&mut self.state, "conv", preview);
-        let pending = self
+        let item = self
             .state
-            .pending_team_retract
-            .take()
+            .decisions
+            .items()
+            .find(|item| {
+                item.kind == DecisionKind::TeamRetract
+                    && item.conversation_id.as_deref() == Some("conv")
+            })
             .expect("the confirm-time read raised a card, not a sentence");
+        let DecisionSubject::TeamRetract(pending) = &item.subject else {
+            panic!("retract item must carry a retract payload");
+        };
         assert!(pending.armed, "an armed card: {}", pending.card);
-        pending.card
+        pending.card.clone()
     }
 
     /// Typed `/team thread b <item>` rendered through the operator's rail.
@@ -181,7 +197,17 @@ async fn k08_the_retract_card_omits_the_co_holder_sentence_only_for_a_bound_send
         bound_card.contains(&format!("item         {}", bound.item.id)),
         "{bound_card}"
     );
-    assert!(bound_card.contains("[y] Retract"), "{bound_card}");
+    assert!(
+        bound_card.ends_with("Awaiting your decision."),
+        "{bound_card}"
+    );
+    let rail = DecisionKind::TeamRetract
+        .rail()
+        .into_iter()
+        .map(|(key, label)| format!("{key} {label}"))
+        .collect::<Vec<_>>()
+        .join("  ");
+    assert_eq!(rail, "[y] Retract  [n] Cancel  [Esc] Later");
     assert_eq!(
         bound_card
             .replace(&bound.item.id, "<id>")

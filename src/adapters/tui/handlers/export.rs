@@ -6,8 +6,8 @@
 //! - Cross-search results stale-result guard (Story 4-4 AC5)
 //! - Export confirm/cancel/apply (Story 4-4 AC11/AC12)
 
+use crate::adapters::tui::decision_queue::{self, ExportOverwritePayload, FileStamp};
 use crate::adapters::tui::notifications::{self, NoticeSource};
-use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::{Conversation, FocusState};
 
@@ -120,55 +120,78 @@ pub fn close_cross_search(state: &mut TuiState) {
 }
 
 #[doc(hidden)]
-pub async fn apply_confirm_export_overwrite(state: &mut TuiState) {
-    if let Some((target_path, content)) = state.pending_export.take() {
-        let target_for_msg = target_path.clone();
-        let write_result = tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
-            let tmp_path = target_path.with_extension("md.tmp");
-            let res: std::io::Result<()> = (|| {
-                let mut f = std::fs::File::create(&tmp_path)?;
-                f.write_all(content.as_bytes())?;
-                f.sync_all()?;
-                drop(f);
-                std::fs::rename(&tmp_path, &target_path)?;
-                Ok(())
-            })();
-            if res.is_err() {
-                let _ = std::fs::remove_file(&tmp_path);
-            }
-            res
-        })
-        .await;
-        match write_result {
-            Ok(Ok(())) => {
-                notifications::success(
-                    state,
-                    NoticeSource::Export,
-                    format!("Overwrote {}", target_for_msg.display()),
-                );
-            }
-            Ok(Err(e)) => {
-                notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
-            }
-            Err(join_err) => {
-                notifications::error(
-                    state,
-                    NoticeSource::Export,
-                    format!("Export failed: {}", join_err),
-                );
-            }
+pub async fn apply_confirm_export_overwrite(state: &mut TuiState, payload: ExportOverwritePayload) {
+    let target_for_msg = payload.target.clone();
+    let write_result = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let current = stamp_of(&payload.target);
+        if payload.stamp.is_none() || current != payload.stamp {
+            return Ok(false);
+        }
+        let tmp_path = payload.target.with_extension("md.tmp");
+        let res: std::io::Result<()> = (|| {
+            let mut f = std::fs::File::create(&tmp_path)?;
+            f.write_all(payload.content.as_bytes())?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp_path, &payload.target)?;
+            Ok(())
+        })();
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp_path);
+        }
+        res.map(|()| true)
+    })
+    .await;
+    match write_result {
+        Ok(Ok(true)) => notifications::success(
+            state,
+            NoticeSource::Export,
+            format!("Overwrote {}", target_for_msg.display()),
+        ),
+        Ok(Ok(false)) => notifications::warning(
+            state,
+            NoticeSource::Export,
+            "This decision is no longer pending. The export file changed; nothing was written.",
+        ),
+        Ok(Err(e)) => {
+            notifications::error(state, NoticeSource::Export, format!("Export failed: {}", e));
+        }
+        Err(join_err) => {
+            notifications::error(
+                state,
+                NoticeSource::Export,
+                format!("Export failed: {}", join_err),
+            );
         }
     }
-    reducer::set_base(state, FocusState::Chat);
     state.needs_redraw = true;
+}
+
+fn stamp_of(path: &std::path::Path) -> Option<FileStamp> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        #[cfg(unix)]
+        dev: metadata.dev(),
+        #[cfg(unix)]
+        ino: metadata.ino(),
+        #[cfg(unix)]
+        ctime: metadata.ctime(),
+        #[cfg(unix)]
+        ctime_nsec: metadata.ctime_nsec(),
+    })
 }
 
 #[doc(hidden)]
 pub fn apply_cancel_export_overwrite(state: &mut TuiState) {
-    state.pending_export = None;
     notifications::info(state, NoticeSource::Export, "Export cancelled");
-    reducer::set_base(state, FocusState::Chat);
     state.needs_redraw = true;
 }
 
@@ -282,17 +305,26 @@ pub async fn apply_export_command(
     let now = crate::domain::models::session_meta::now_unix();
     let content = render_conversation_markdown(conversation, meta, now);
 
-    let target_exists = tokio::task::spawn_blocking({
+    let (target_exists, stamp) = tokio::task::spawn_blocking({
         let target_path = target_path.clone();
-        move || target_path.exists()
+        move || {
+            (
+                std::fs::symlink_metadata(&target_path).is_ok(),
+                stamp_of(&target_path),
+            )
+        }
     })
     .await
-    .unwrap_or(false);
+    .unwrap_or((false, None));
     if arg.is_some() && target_exists {
-        state.pending_export = Some((target_path.clone(), content));
-        reducer::raise_confirmation(
+        decision_queue::raise_export_overwrite(
             state,
-            crate::domain::models::visual::ConfirmationType::ExportOverwrite(target_path),
+            ExportOverwritePayload {
+                conversation_id: conversation.id.clone(),
+                target: target_path,
+                content,
+                stamp,
+            },
         );
         state.needs_redraw = true;
         return;
@@ -363,4 +395,39 @@ async fn find_available_numbered_path(
     })
     .await
     .unwrap_or_else(|_| exports_dir_fallback.join(format!("{}.md", base_slug_fallback)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn story21_6_overwrite_checks_the_captured_target_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("export.md");
+        std::fs::write(&target, "original").unwrap();
+        let payload = ExportOverwritePayload {
+            conversation_id: "c1".into(),
+            stamp: stamp_of(&target),
+            target: target.clone(),
+            content: "new export".into(),
+        };
+        let mut state = TuiState::new(80, 24);
+        std::fs::write(&target, "changed externally").unwrap();
+        apply_confirm_export_overwrite(&mut state, payload.clone()).await;
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "changed externally"
+        );
+        assert!(state.notifications.visible().any(|notice|
+            notice.message == "This decision is no longer pending. The export file changed; nothing was written."
+        ));
+
+        let fresh = ExportOverwritePayload {
+            stamp: stamp_of(&target),
+            ..payload
+        };
+        apply_confirm_export_overwrite(&mut state, fresh).await;
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new export");
+    }
 }

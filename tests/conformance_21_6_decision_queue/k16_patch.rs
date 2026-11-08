@@ -10,7 +10,7 @@ use rustain::adapters::tui::decision_queue::{
 };
 use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::notification_log::LogFacts;
-use rustain::adapters::tui::presentation::{RouteEffect, reducer};
+use rustain::adapters::tui::presentation::RouteEffect;
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
 use rustain::domain::events::DomainKey;
@@ -110,7 +110,7 @@ fn deliver(state: &mut TuiState, effect: Option<RouteEffect>) {
     let Some(RouteEffect::Action(action @ InputAction::Decision(_))) = effect else {
         panic!("a question answer is a decision effect, got {effect:?}")
     };
-    decision_queue::apply_resolved_action(state, action, reducer::restore_focus_after_modal);
+    decision_queue::apply_resolved_action(state, action);
 }
 
 /// 6C-L1-03: the same tool use id in two conversations is two questions (the source

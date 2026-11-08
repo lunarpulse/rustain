@@ -8,7 +8,6 @@
 //! (`rustain peer …`); the shell that runs them is
 //! `infrastructure::runtime::peer_bridge`, shared with the CLI.
 
-use crate::adapters::tui::presentation::reducer;
 use crate::adapters::tui::state::TuiState;
 
 const USAGE: &str = "/peer list [--json] | /peer show <alias> | /peer invite [--ttl=<dur>] \
@@ -114,7 +113,7 @@ pub fn parse_peer_command(cmd_arg: Option<&str>) -> Result<PeerCommandArgs, Stri
                         "There is no way to skip the confirm: it is the trust gate, not a \
                          formality. Compare the fingerprint, then answer {}.",
                         crate::adapters::tui::keymap::render::rail(
-                            crate::adapters::tui::keymap::Context::Confirm,
+                            crate::adapters::tui::keymap::Context::DecisionConfirm,
                             crate::adapters::tui::keymap::table_card::CardCmd::Yes,
                         )
                     ));
@@ -184,15 +183,4 @@ pub fn show_peer_alarm(state: &mut TuiState, message: String) {
         message,
     );
     state.needs_redraw = true;
-}
-
-/// Take the pending confirm and restore focus. Returns it only on accept.
-pub fn resolve_peer_add_card(
-    state: &mut TuiState,
-    accept: bool,
-) -> Option<crate::adapters::tui::state::PendingPeerAdd> {
-    let pending = state.pending_peer_add.take()?;
-    reducer::set_base(state, pending.prior_focus.clone());
-    state.needs_redraw = true;
-    accept.then_some(pending)
 }

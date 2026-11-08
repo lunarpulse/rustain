@@ -223,41 +223,20 @@ fn scope(code: &str, at: usize) -> String {
     name
 }
 
-// Only the exact prior slots owned by 21-6/21-8 remain after the final 4-C cutover.
+// Only the exact recipient-surface prior slots owned by 21-8 remain.
 #[rustfmt::skip]
 const PINS: &[Pin<'_>] = &[
     ("src/adapters/tui/app.rs", "21-8", &[
         r###"prior|exec_recipient|reducer::set_base(state, surface.prior_focus);"###,
     ]),
-    ("src/adapters/tui/handlers/artifact_command.rs", "21-6", &[
-        r###"prior|resolve_apply_card|reducer::set_base(state, card.prior_focus.clone());"###,
-    ]),
-    ("src/adapters/tui/handlers/peer_command.rs", "21-6", &[
-        r###"prior|resolve_peer_add_card|reducer::set_base(state, pending.prior_focus.clone());"###,
-    ]),
-    ("src/adapters/tui/handlers/team_command.rs", "21-6", &[
-        r###"prior|open_team_retract_card|prior_focus: state.focus.clone(),"###, r###"prior|resolve_team_retract_card|reducer::set_base(state, pending.prior_focus.clone());"###,
-    ]),
-    ("src/adapters/tui/state.rs", "21-6", &[
-        r###"prior|PendingArtifactCard|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingPeerAdd|pub prior_focus: crate::domain::models::FocusState,"###, r###"prior|PendingTeamRetract|pub prior_focus: crate::domain::models::FocusState,"###,
-    ]),
     ("src/adapters/tui/state.rs", "21-8", &[
         r###"prior|RecipientSurface|pub prior_focus: FocusState,"###,
-    ]),
-    ("src/infrastructure/runtime/artifact_bridge.rs", "21-6", &[
-        r###"prior|open_apply_card|let prior_focus = state.focus.clone();"###, r###"prior|open_apply_card|prior_focus,"###, r###"prior|open_resolve_card|let prior_focus = state.focus.clone();"###, r###"prior|open_resolve_card|prior_focus,"###,
     ]),
     ("src/infrastructure/runtime/attach_loop.rs", "21-8", &[
         r###"prior|open_response_surface|let (prior_focus, root_id) = match state.recipient_surface.take() {"###, r###"prior|open_response_surface|surface.prior_focus,"###, r###"prior|open_response_surface|prior_focus,"###, r###"prior|recipient_surface_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###, r###"prior|attached_proposal_key|crate::adapters::tui::presentation::reducer::set_base(state, surface.prior_focus);"###,
     ]),
-    ("src/infrastructure/runtime/peer_bridge.rs", "21-6", &[
-        r###"prior|raise_peer_add_card|prior_focus: state.focus.clone(),"###,
-    ]),
     ("src/infrastructure/runtime/recipient_surface.rs", "21-8", &[
         r###"prior|open_received_surface|let (prior_focus, results) = match old {"###, r###"prior|open_received_surface|surface.prior_focus,"###, r###"prior|open_received_surface|prior_focus,"###,
-    ]),
-    ("src/infrastructure/runtime/transparency_bridge.rs", "21-6", &[
-        r###"prior|retract_card|prior_focus: crate::domain::models::FocusState::Chat,"###,
     ]),
 ];
 
@@ -317,6 +296,12 @@ const RULES: &[(&str, &str)] = &[
     (
         "decision-21-6-c",
         r"\.\s*ask_user_question\b|\btask_panel_state\s*\.\s*pending_deviation\b|\b(?:question_response_tx|pending_skill_trust|skill_trust_queue|skill_trust_inspect_mode|pending_activation(?:_inspect_content)?|pending_plan_approval|pending_plan_card|skip_cascade_pending|cancel_plan_confirm|pending_delegation_card|pending_spawn_gate|pending_kill_confirm|advance_skill_trust_queue)\b|\bConfirmationType\s*::\s*(?:Question|SkillTrust|SkillTrustInspect|PlanApproval)\b",
+    ),
+    // Story 21.6 slice 6-D (A20): the legacy focus mirror and card slots are gone.
+    // Match declarations/accesses, not reusable queue or widget module paths.
+    (
+        "decision-21-6-d",
+        r"\bFocusState\s*::\s*Overlay\b|\b(?:OverlayType|ConfirmationType|AttachedPresentation|InlineCard)\b|\b(?:mod|use)\s+attached_presentation\b|\b(?:raise_confirmation|settle_legacy|settle_legacy_inner|restore_focus_after_modal|take_chat_focus_for_card|settle_borrowed_card_focus|card_focus_blocked|current_confirmation_pending|inline_card|card_context|card_special_key)\s*\(|\bfn\s+confirmation_pending\b|\breducer\s*::\s*confirmation_pending\b|\.\s*(?:card_focus_borrowed_from|pending_confirmation|pending_consolidation_card|pending_forget_card|pending_artifact_card|pending_peer_add|pending_team_retract|pending_fork_index|pending_rewind_index|rewind_preview|pending_export|retract_confirm|consolidation_token)\b|\b(?:card_focus_borrowed_from|pending_confirmation|pending_consolidation_card|pending_forget_card|pending_artifact_card|pending_peer_add|pending_team_retract|pending_fork_index|pending_rewind_index|rewind_preview|pending_export|retract_confirm|consolidation_token)\s*:",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
@@ -496,6 +481,13 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 &code
             };
             for m in pattern.find_iter(haystack) {
+                // The query moved to the queue; its implementation remains legal.
+                if *rule == "decision-21-6-d"
+                    && path == "src/adapters/tui/decision_queue/retract.rs"
+                    && m.as_str().starts_with("fn confirmation_pending")
+                {
+                    continue;
+                }
                 if *rule == "focus-write" && code.as_bytes().get(m.end()) == Some(&b'=') {
                     continue;
                 }
@@ -561,6 +553,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "decision-21-6-a",
                     "decision-21-6-b",
                     "decision-21-6-c",
+                    "decision-21-6-d",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -746,10 +739,10 @@ fn k6_every_production_site_is_owned_and_both_draws_compose_once() {
     );
     assert_eq!(
         PINS.iter().map(|(_, _, sites)| sites.len()).sum::<usize>(),
-        23
+        10
     );
     assert!(PINS.iter().all(|(_, owner, sites)| {
-        matches!(*owner, "21-6" | "21-8") && sites.iter().all(|site| site.starts_with("prior|"))
+        *owner == "21-8" && sites.iter().all(|site| site.starts_with("prior|"))
     }));
     for (path, count) in [
         ("src/adapters/tui/app.rs", 0),
@@ -1303,14 +1296,18 @@ fn k6_bb1a_payload_edits_and_routed_popup_api_remain_allowed() {
     let path = "src/adapters/tui/state.rs";
     let source = "struct SearchState { query: TextField } impl SearchState { fn reset(&mut self) { self.query.clear(); } } struct ReverseSearchState { selected_match: Option<usize> } impl ReverseSearchState { fn is_open(&self) -> bool { self.selected_match.is_some() } fn reset(&mut self) { self.selected_match = Some(0); } fn dismiss(&mut self) { self.selected_match = None; } }";
     assert!(scan(&[(path.into(), source.into())], &[]).is_empty());
-    // Confirmation focus is still 4-C-owned; exact named-site pins remain usable.
+    // A 4-C focus-write pin cannot revive the retired confirmation mirror.
     let source = "fn real() { s.focus = FocusState::Overlay(OverlayType::Confirmation(kind)); }";
     let pins = [(
         "src/x.rs",
         "4-C",
         &["focus-write|real|s.focus = FocusState::Overlay(OverlayType::Confirmation(kind));"][..],
     )];
-    assert!(scan(&[("src/x.rs".into(), source.into())], &pins).is_empty());
+    assert!(
+        scan(&[("src/x.rs".into(), source.into())], &pins)
+            .iter()
+            .any(|error| error.contains("decision-21-6-d|"))
+    );
 }
 
 #[test]
@@ -1365,7 +1362,7 @@ fn bookmark_wave_ownership_and_painters_cannot_hide_behind_future_pins() {
             "ordinary frame requests are not legacy ownership"
         );
     }
-    let legacy = "fn real(s: &mut TuiState) { s.focus = FocusState::Overlay(OverlayType::Confirmation(kind)); }";
+    let legacy = "fn real(s: &mut TuiState) { s.focus = next; }";
     let pin = format!("focus-write|real|{legacy}");
     assert!(!scan(&[("src/ownership_control.rs".into(), legacy.into())], &[]).is_empty());
     assert!(
@@ -2201,5 +2198,94 @@ fn k11c_inline_card_symbols_are_unpinnable_and_reused_apis_pass() {
         scan(&[("src/x.rs".into(), test_only.into())], &[])
             .iter()
             .all(|s| !s.contains("decision-21-6-c|"))
+    );
+}
+
+/// 6-D / 6D-L1-08: retired card ownership, including the old focus helper,
+/// cannot be pinned; reused queue APIs remain legal.
+#[test]
+fn k11d_legacy_card_symbols_are_unpinnable_and_reused_apis_pass() {
+    for text in [
+        "let _ = FocusState::Overlay(x);",
+        "let _: OverlayType = x;",
+        "let _: ConfirmationType = x;",
+        "let _: AttachedPresentation = x;",
+        "mod attached_presentation;",
+        "raise_confirmation(s, x);",
+        "settle_legacy(s);",
+        "settle_legacy_inner(s);",
+        "reducer::restore_focus_after_modal(s);",
+        "take_chat_focus_for_card(s, true);",
+        "settle_borrowed_card_focus(s, true);",
+        "s.card_focus_borrowed_from = None;",
+        "card_focus_blocked(s);",
+        "s.pending_confirmation = None;",
+        "fn confirmation_pending() {}",
+        "reducer::confirmation_pending(s);",
+        "let _: InlineCard = x;",
+        "fn inline_card() {}",
+        "card_context(s);",
+        "card_special_key(s);",
+        "s.pending_consolidation_card = None;",
+        "s.pending_forget_card = None;",
+        "s.pending_artifact_card = None;",
+        "s.pending_peer_add = None;",
+        "s.pending_team_retract = None;",
+        "s.pending_fork_index = None;",
+        "s.pending_rewind_index = None;",
+        "s.rewind_preview = None;",
+        "s.pending_export = None;",
+        "s.retract_confirm = None;",
+        "s.consolidation_token = None;",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("decision-21-6-d|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|e| e.split_once(": ").unwrap().1)
+            .collect();
+        let errors = scan(&files, &[("src/x.rs", "21-6", sites.as_slice())]);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|s| !s.starts_with("stale pin") && s.contains("decision-21-6-d|")),
+            "{text}: {errors:?}"
+        );
+    }
+    let legal = "fn real() { decision_queue::raise_consolidation(s, card); \
+        let _ = DecisionKind::Consolidation; widgets::consolidation_card::lines(card, theme); \
+        state.decisions.holds(DecisionKind::Consolidation); \
+        decision_queue::confirmation_pending(state); \
+        settle_login(state); set_base(state, focus); }";
+    let errors = scan(&[("src/x.rs".into(), legal.into())], &[]);
+    assert!(
+        !errors.iter().any(|s| s.contains("decision-21-6-d|")),
+        "{errors:?}"
+    );
+    let queue_query = "pub fn confirmation_pending(state: &TuiState) -> bool { true }";
+    assert!(
+        scan(
+            &[(
+                "src/adapters/tui/decision_queue/retract.rs".into(),
+                queue_query.into()
+            )],
+            &[]
+        )
+        .iter()
+        .all(|s| !s.contains("decision-21-6-d|"))
+    );
+    let test_only = "#[cfg(test)] mod tests { fn t(s: &mut S) { s.pending_export.take(); } }";
+    assert!(
+        scan(&[("src/x.rs".into(), test_only.into())], &[])
+            .iter()
+            .all(|s| !s.contains("decision-21-6-d|"))
     );
 }

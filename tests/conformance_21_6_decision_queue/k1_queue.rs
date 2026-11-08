@@ -165,3 +165,105 @@ fn a_stale_6c_item_is_not_counted_by_the_quit_guard() {
     assert_eq!(live.decisions.undecided(), 1);
     assert!(matches!(hold, Hold::Question(_)));
 }
+
+#[test]
+fn k1_six_d_kinds_each_increment_the_visible_chip() {
+    use super::raisers::{ALL_6D, PLAIN, raise};
+    let (mut state, _) = clocked(80, 24);
+    for (index, kind) in ALL_6D.into_iter().enumerate() {
+        raise(&mut state, kind, PLAIN);
+        assert_eq!(waiting(&state), index + 1, "{kind:?}");
+        let chip = format!("Needs you ({}) ^X q", index + 1);
+        assert!(status_row(&state, 80).contains(&chip), "{kind:?}: {chip}");
+    }
+}
+
+#[test]
+fn k1_forget_consolidation_and_fork_same_identity_update_in_place() {
+    use rustain::adapters::tui::decision_queue::{PendingConsolidationCard, PendingForgetCard};
+    let (mut state, _) = clocked(80, 24);
+    let forget = |conversation: &str, focused_index| PendingForgetCard {
+        conversation_id: conversation.into(),
+        candidates: vec![],
+        focused_index,
+    };
+    let consolidation = |conversation: &str, fact: &str| PendingConsolidationCard {
+        conversation_id: conversation.into(),
+        proposals: vec![(
+            rustain::domain::models::MemoryFact {
+                category: "test".into(),
+                fact: fact.into(),
+                detail: None,
+            },
+            true,
+        )],
+    };
+    decision_queue::raise_forget(&mut state, forget("c1", 0));
+    decision_queue::raise_forget(&mut state, forget("c1", 1));
+    decision_queue::raise_consolidation(&mut state, consolidation("c1", "old"));
+    decision_queue::raise_consolidation(&mut state, consolidation("c1", "new"));
+    decision_queue::raise_fork(&mut state, "c1", 1, "old", 0);
+    decision_queue::raise_fork(&mut state, "c1", 1, "new", 0);
+    assert_eq!(waiting(&state), 3);
+    assert!(
+        state
+            .decisions
+            .items()
+            .any(|i| matches!(&i.subject, DecisionSubject::Forget(c) if c.focused_index == 1))
+    );
+    assert!(state.decisions.items().any(|i| matches!(&i.subject, DecisionSubject::Consolidation(c) if c.card.proposals[0].0.fact == "new")));
+    assert!(
+        state
+            .decisions
+            .items()
+            .any(|i| matches!(&i.subject, DecisionSubject::Fork(c) if c.preview == "new"))
+    );
+    decision_queue::raise_forget(&mut state, forget("c2", 0));
+    decision_queue::raise_consolidation(&mut state, consolidation("c2", "other"));
+    decision_queue::raise_fork(&mut state, "c1", 2, "other", 0);
+    assert_eq!(
+        waiting(&state),
+        6,
+        "distinct conversation or message is a distinct item"
+    );
+    assert!(status_row(&state, 80).contains("Needs you (6) ^X q"));
+}
+
+#[test]
+fn k1_six_d_withdraw_and_closed_tab_preserve_other_origins() {
+    let (mut state, _) = clocked(80, 24);
+    decision_queue::raise_fork(&mut state, "c1", 0, "one", 0);
+    decision_queue::raise_fork(&mut state, "c2", 0, "two", 0);
+    decision_queue::raise_fork(&mut state, "c3", 0, "three", 0);
+    // Defer the displayed item so withdrawing it removes it rather than painting stale.
+    route(
+        &mut state,
+        &special(DomainKey::Esc),
+        &super::raisers::facts_6d("c1"),
+    );
+    decision_queue::withdraw_for(&mut state, DecisionKind::Fork, "c1");
+    assert!(
+        !state
+            .decisions
+            .items()
+            .any(|i| i.conversation_id.as_deref() == Some("c1"))
+    );
+    assert_eq!(state.decisions.len(), 2);
+    let open_tabs = LogFacts {
+        titles: vec![("c2".into(), "two".into())],
+        ..super::raisers::facts_6d("c2")
+    };
+    decision_queue::prune_closed(&mut state, &open_tabs);
+    assert_eq!(state.decisions.len(), 1);
+    assert_eq!(
+        state
+            .decisions
+            .items()
+            .next()
+            .unwrap()
+            .conversation_id
+            .as_deref(),
+        Some("c2")
+    );
+    assert!(status_row(&state, 80).contains("Needs you (1) ^X q"));
+}

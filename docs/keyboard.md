@@ -822,41 +822,32 @@ Also inherits: Decisions.
 | `Left` | Spawn one fewer | local | portable |  |
 | `Right` | Spawn one more | local | portable |  |
 
-## Confirmation card
-
-Also inherits: Decision cards (shared).
-
-| Keys | Does | Hosts | Reach | Notes |
-|---|---|---|---|---|
-| `y` | Confirm the pending action | local, attached | portable |  |
-| `n` | Decline: nothing is changed | local, attached | portable |  |
-
 ## Confirmation
 
 Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `y` | Confirm the pending action | local | portable |  |
-| `n` | Decline: nothing is changed | local | portable |  |
+| `y` | Confirm the pending action | local, attached | portable |  |
+| `n` | Decline: nothing is changed | local, attached | portable |  |
 
 ## Forget
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
 | `y` | Forget the selected memories | local | portable |  |
 | `n` | Cancel: nothing is forgotten | local | portable |  |
 | `Space` | Select or unselect the focused memory | local | portable |  |
-| `j` | Focus the next memory | local | portable |  |
-| `k` | Focus the previous memory | local | portable |  |
 | `Down` | Focus the next memory | local | portable |  |
 | `Up` | Focus the previous memory | local | portable |  |
+| `j` | Focus the next memory | local | portable |  |
+| `k` | Focus the previous memory | local | portable |  |
 
 ## Rewind
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
@@ -866,12 +857,12 @@ Also inherits: Decision cards (shared).
 
 ## Export overwrite
 
-Also inherits: Decision cards (shared).
+Also inherits: Decisions.
 
 | Keys | Does | Hosts | Reach | Notes |
 |---|---|---|---|---|
-| `y` | Overwrite the existing export file (Y too) | local | portable |  |
-| `n` | Keep the existing file (N too) | local | portable |  |
+| `y` | Overwrite the existing export file | local | portable |  |
+| `n` | Keep the existing file | local | portable |  |
 
 ## Team proposal
 

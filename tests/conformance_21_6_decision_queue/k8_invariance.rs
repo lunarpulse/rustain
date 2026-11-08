@@ -12,7 +12,7 @@ use rustain::adapters::tui::decision_queue::{
 };
 use rustain::adapters::tui::keymap::Host;
 use rustain::adapters::tui::notifications::NotificationStore;
-use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, geometry, reducer};
+use rustain::adapters::tui::presentation::{self, RouteEffect, Surface, geometry};
 use rustain::adapters::tui::state::TuiState;
 use rustain::adapters::tui::tool_inspector::source::COPY_MAX_BYTES;
 use rustain::adapters::tui::widgets::plan_card::plan_card_height;
@@ -181,7 +181,7 @@ impl Rig {
     }
 
     fn press(&mut self, event: &rustain::domain::events::DomainInputEvent) -> Option<RouteEffect> {
-        route(&mut self.h.state, event, &facts("c1"))
+        route(&mut self.h.state, event, &super::raisers::facts_6d("c1"))
     }
 
     /// Esc until the frame closes (a sub-context backs first); the item must remain.
@@ -292,11 +292,7 @@ fn no_kind_writes_the_composer() {
         };
         if let Some(RouteEffect::Action(action @ InputAction::Decision(_))) = deciding {
             if kind == DecisionKind::Question {
-                decision_queue::apply_resolved_action(
-                    &mut rig.h.state,
-                    action,
-                    reducer::restore_focus_after_modal,
-                );
+                decision_queue::apply_resolved_action(&mut rig.h.state, action);
             }
         }
         assert!(
@@ -596,6 +592,144 @@ fn the_painted_content_rows_match_an_independent_row_model_at_60_80_130_and_60x1
     }
 }
 
+/// Compare the fitted frame against an independent row budget. Body rows come
+/// from the public pre-cell body boundary, not from the painted Buffer; this
+/// deliberately checks fitting and placement rather than reimplementing wrapping.
+#[test]
+fn k8_six_d_fitted_rows_match_the_body_and_rail_budget() {
+    use rustain::adapters::tui::widgets::decision_frame::body_lines_for_test;
+
+    for (width, height, full) in [
+        (60u16, 24u16, false),
+        (80, 24, false),
+        (130, 30, false),
+        (60, 16, true),
+    ] {
+        for kind in super::raisers::ALL_6D {
+            for tall in [false, true] {
+                let at = format!("{kind:?} {width}x{height} full={full} tall={tall}");
+                let (mut state, _) = clocked(width, height);
+                if full {
+                    state.input_buffer = draft();
+                    state.focus = FocusState::Chat;
+                }
+                let text = if tall
+                    && matches!(
+                        kind,
+                        DecisionKind::Consolidation
+                            | DecisionKind::Forget
+                            | DecisionKind::ArtifactApply
+                            | DecisionKind::ArtifactResolve
+                            | DecisionKind::Fork
+                    ) {
+                    "long preview file memory ".repeat(80)
+                } else {
+                    PLAIN.into()
+                };
+                if tall && kind == DecisionKind::Rewind {
+                    let mut preview = super::raisers::rewind_preview(PLAIN);
+                    preview.files_to_revert = (0..25)
+                        .map(|n| decision_queue::RevertPreviewItem {
+                            display_path: format!("src/file-{n}.rs"),
+                            conflict: n % 2 == 0,
+                        })
+                        .collect();
+                    decision_queue::raise_rewind(&mut state, "c1", preview, 0);
+                } else {
+                    raise(&mut state, kind, &text);
+                }
+                if !presentation::is_open(&state, Surface::Decision) {
+                    let item = item_key(&state, kind);
+                    assert!(decision_queue::open(&mut state, &item));
+                }
+                let layout = layout_of(&state, width, height);
+                let rect = geometry::frame_rect(geometry::modal_region(
+                    &layout,
+                    Rect::new(0, 0, width, height),
+                ));
+                let inner_width = usize::from(rect.width - 2);
+                let item = state.decisions.items().next().unwrap();
+                let body: Vec<String> = body_lines_for_test(item, &state, inner_width)
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect::<String>()
+                            .trim_end()
+                            .to_owned()
+                    })
+                    .collect();
+                assert!(!body.is_empty(), "{at}");
+                let focus = if kind == DecisionKind::Forget {
+                    body.iter()
+                        .position(|row| row.contains("> "))
+                        .expect("focused forget row")
+                } else {
+                    0
+                };
+                let mut rail = Vec::new();
+                let mut current = String::new();
+                for (key, label) in kind.rail() {
+                    let pair = format!("{key} {label}  ");
+                    if !current.is_empty()
+                        && UnicodeWidthStr::width(current.as_str())
+                            + UnicodeWidthStr::width(pair.as_str())
+                            > inner_width
+                    {
+                        rail.push(current.trim_end().to_owned());
+                        current.clear();
+                    }
+                    current.push_str(&pair);
+                }
+                rail.push(current.trim_end().to_owned());
+                let interior_height = usize::from(rect.height - 2);
+                let crumb = 1 + rail.len() + body.len().min(3) <= interior_height;
+                let visible = interior_height.saturating_sub(usize::from(crumb) + rail.len());
+                let start = (focus + 1).saturating_sub(visible).min(focus);
+                let expected: Vec<_> = body
+                    .iter()
+                    .skip(start)
+                    .take(visible)
+                    .chain(rail.iter())
+                    .collect();
+                let buffer = paint(&mut state, &super::raisers::facts_6d("c1"), width, height);
+                let interior: Vec<String> = (rect.y + 1..rect.bottom() - 1)
+                    .map(|y| {
+                        (rect.x + 1..rect.right() - 1)
+                            .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                            .collect::<String>()
+                            .trim_end()
+                            .to_owned()
+                    })
+                    .collect();
+                let offset = usize::from(crumb);
+                if crumb {
+                    assert!(
+                        interior[0].starts_with(&format!("Needs you › {}", kind.title())),
+                        "{at}: {interior:#?}"
+                    );
+                }
+                for (index, row) in expected.iter().enumerate() {
+                    assert_eq!(
+                        &interior[offset + index],
+                        *row,
+                        "{at}: row {index}, body={}, rail={}\n{interior:#?}",
+                        body.len(),
+                        rail.len()
+                    );
+                }
+                assert!(
+                    interior[offset + expected.len()..]
+                        .iter()
+                        .all(String::is_empty),
+                    "{at}: rows below rail {interior:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// 6C-L2-02: `c` through the route copies the original bytes via the state's injected
 /// copier (never the real clipboard) and posts the one copy notice.
 #[test]
@@ -786,4 +920,347 @@ fn typing_c_in_the_question_field_types_and_never_copies() {
         .expect("the question is queued");
     assert_eq!(typed, "c", "the typed `c` is in the field");
     assert!(state.decisions.holds(DecisionKind::Question));
+}
+
+/// AC18–AC21: the additional decision bodies preserve the real Stage and composer.
+#[test]
+fn k8_six_d_open_keys_defer_and_resolve_preserve_stage_and_composer() {
+    for kind in super::raisers::ALL_6D {
+        let mut rig = rig(80, 24);
+        let before = rig.snap();
+        raise(&mut rig.h.state, kind, PLAIN);
+        if !presentation::is_open(&rig.h.state, Surface::Decision) {
+            let item = item_key(&rig.h.state, kind);
+            assert!(decision_queue::open(&mut rig.h.state, &item));
+        }
+        rig.ready();
+        for event in [
+            key('z'),
+            special(DomainKey::PageDown),
+            special(DomainKey::PageUp),
+        ] {
+            assert_eq!(rig.press(&event), Some(RouteEffect::Consumed), "{kind:?}");
+        }
+        assert_eq!(rig.snap(), before, "{kind:?}: open and keys");
+        rig.defer(kind);
+        assert_eq!(rig.snap(), before, "{kind:?}: defer");
+        let item = item_key(&rig.h.state, kind);
+        assert!(decision_queue::open(&mut rig.h.state, &item));
+        rig.ready();
+        let result = rig.press(&key('n'));
+        assert!(
+            matches!(result, Some(RouteEffect::Action(_))),
+            "{kind:?}: {result:?}"
+        );
+        assert!(rig.h.state.decisions.take_resolved().is_some(), "{kind:?}");
+        assert_eq!(rig.snap(), before, "{kind:?}: resolve");
+    }
+}
+
+#[test]
+fn k8_six_d_frame_extent_and_complete_rail_at_all_sizes() {
+    for (width, height, full) in [
+        (60, 24, false),
+        (80, 24, false),
+        (130, 30, false),
+        (60, 16, true),
+    ] {
+        for kind in super::raisers::ALL_6D {
+            let (mut state, _) = clocked(width, height);
+            if full {
+                state.input_buffer = draft();
+                state.focus = FocusState::Chat;
+            }
+            raise(&mut state, kind, PLAIN);
+            if !presentation::is_open(&state, Surface::Decision) {
+                let item = item_key(&state, kind);
+                assert!(decision_queue::open(&mut state, &item));
+            }
+            let buffer = paint(&mut state, &super::raisers::facts_6d("c1"), width, height);
+            let layout = layout_of(&state, width, height);
+            let rect = geometry::frame_rect(geometry::modal_region(
+                &layout,
+                Rect::new(0, 0, width, height),
+            ));
+            let text = screen(&buffer);
+            assert!(
+                row_text(&buffer, rect.y).contains(kind.frame_title()),
+                "{kind:?} {width}x{height}\n{text}"
+            );
+            assert_eq!(buffer.cell((rect.x, rect.y)).unwrap().symbol(), "┌");
+            assert_eq!(
+                buffer.cell((rect.x, rect.bottom() - 1)).unwrap().symbol(),
+                "└"
+            );
+            let inside = flat(&buffer, rect);
+            for (key, label) in kind.rail() {
+                assert!(
+                    inside.contains(&collapse(&format!("{key} {label}"))),
+                    "{kind:?} {width}x{height}: {key} {label}\n{text}"
+                );
+            }
+            let item = state.decisions.items().next().unwrap();
+            let rows = rustain::adapters::tui::widgets::decision_frame::body_lines_for_test(
+                item,
+                &state,
+                usize::from(rect.width - 2),
+            );
+            let first = rows
+                .first()
+                .expect("body row")
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            // A one-row body of `/memory forget` shows the FOCUSED candidate (6D-L1-06), not
+            // the header above it.
+            let forget_focus = kind == DecisionKind::Forget && inside.contains("[x]");
+            assert!(
+                !first.trim().is_empty() && (inside.contains(first.trim()) || forget_focus),
+                "{kind:?}: first body row missing\n{text}"
+            );
+            assert_eq!(
+                row_text(&buffer, layout.status_bar.y).trim_end(),
+                "status-row-sentinel"
+            );
+            assert!(row_text(&buffer, layout.input_area.y).contains("composer-sentinel"));
+        }
+    }
+}
+
+#[test]
+fn k8_six_d_pre_cell_spans_are_clean_copy_and_payload_remain_original() {
+    use super::support::record_copies;
+    use rustain::adapters::tui::widgets::decision_frame::body_lines_for_test;
+    for kind in super::raisers::ALL_6D {
+        let (mut state, clock) = clocked(80, 24);
+        let copies = record_copies(&mut state);
+        raise(&mut state, kind, HOSTILE);
+        if !presentation::is_open(&state, Surface::Decision) {
+            let item = item_key(&state, kind);
+            assert!(decision_queue::open(&mut state, &item));
+        }
+        let item = state.decisions.items().next().unwrap();
+        let rows = body_lines_for_test(item, &state, 120);
+        let text = rows
+            .iter()
+            .flat_map(|line| &line.spans)
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!text.is_empty(), "{kind:?}: actual body");
+        for control in CONTROLS {
+            assert!(
+                !text.contains(control),
+                "{kind:?}: {control:?} survived in {text:?}"
+            );
+        }
+        assert!(
+            format!("{:?}", item.subject)
+                .contains(&format!("{HOSTILE:?}")[1..format!("{HOSTILE:?}").len() - 1]),
+            "{kind:?}: payload lost bytes"
+        );
+        paint(&mut state, &super::raisers::facts_6d("c1"), 80, 24);
+        ready(&mut state, &clock);
+        assert_eq!(
+            route(&mut state, &key('c'), &super::raisers::facts_6d("c1")),
+            Some(RouteEffect::Consumed)
+        );
+        let copied = copies.lock().unwrap();
+        assert_eq!(copied.len(), 1, "{kind:?}");
+        assert!(copied[0].contains(HOSTILE), "{kind:?}: {:?}", copied[0]);
+        assert!(state.decisions.take_resolved().is_none());
+        drop(copied);
+        assert!(matches!(
+            route(&mut state, &key('n'), &super::raisers::facts_6d("c1")),
+            Some(RouteEffect::Action(_))
+        ));
+        let payload = state.decisions.take_resolved().expect("effect payload");
+        let escaped = format!("{HOSTILE:?}");
+        assert!(
+            format!("{payload:?}").contains(&escaped[1..escaped.len() - 1]),
+            "{kind:?}: effect payload lost bytes"
+        );
+    }
+}
+
+#[test]
+fn k8_six_d_copy_exact_limit_and_one_byte_over() {
+    use super::support::record_copies;
+    // Fork and rewind clip their preview rows; the other bodies can reach the
+    // exact boundary. Export's sample uses a seven-digit content length, as does
+    // its near-limit payload, so its displayed byte-count field has equal width.
+    for kind in [
+        DecisionKind::Consolidation,
+        DecisionKind::Forget,
+        DecisionKind::ArtifactApply,
+        DecisionKind::ArtifactResolve,
+        DecisionKind::PeerAdd,
+        DecisionKind::TeamRetract,
+        DecisionKind::ExportOverwrite,
+    ] {
+        let (mut sample, _) = clocked(80, 24);
+        let sample_input = "x".repeat(if kind == DecisionKind::ExportOverwrite {
+            1_000_000
+        } else {
+            1
+        });
+        raise(&mut sample, kind, &sample_input);
+        if !presentation::is_open(&sample, Surface::Decision) {
+            let item = item_key(&sample, kind);
+            assert!(decision_queue::open(&mut sample, &item));
+        }
+        let Some(PaneOutcome::Copy(text)) = handle_domain_event(
+            &mut sample,
+            &key('c'),
+            &super::raisers::facts_6d("c1"),
+            Host::Local,
+        ) else {
+            panic!("{kind:?}: sample copy");
+        };
+        let overhead = text.len() - sample_input.len();
+        for extra in [0, 1] {
+            let (mut state, _) = clocked(80, 24);
+            let copies = record_copies(&mut state);
+            let input = "x".repeat(COPY_MAX_BYTES - overhead + extra);
+            raise(&mut state, kind, &input);
+            if !presentation::is_open(&state, Surface::Decision) {
+                let item = item_key(&state, kind);
+                assert!(decision_queue::open(&mut state, &item));
+            }
+            assert_eq!(
+                route(&mut state, &key('c'), &super::raisers::facts_6d("c1")),
+                Some(RouteEffect::Consumed)
+            );
+            let recorded = copies.lock().unwrap();
+            if extra == 0 {
+                assert_eq!(recorded.len(), 1, "{kind:?}");
+                assert_eq!(recorded[0].len(), COPY_MAX_BYTES, "{kind:?}");
+            } else {
+                assert!(recorded.is_empty(), "{kind:?}");
+                assert!(
+                    state.notifications.records().any(|r| r
+                        .message
+                        .contains("Copy failed: decision text exceeds the 8 MiB copy limit")),
+                    "{kind:?}"
+                );
+            }
+            assert!(state.decisions.take_resolved().is_none());
+        }
+    }
+}
+
+#[test]
+fn k8_rewind_many_files_copy_at_limit_and_refuse_one_byte_over() {
+    use super::support::record_copies;
+    use rustain::adapters::tui::decision_queue::{RevertPreviewItem, RewindPreview};
+    let preview = |files| RewindPreview {
+        target_message_index: 1,
+        messages_to_remove: 2,
+        files_to_revert: files,
+    };
+    let (mut sample, _) = clocked(80, 24);
+    decision_queue::raise_rewind(
+        &mut sample,
+        "c1",
+        preview(vec![RevertPreviewItem {
+            display_path: String::new(),
+            conflict: false,
+        }]),
+        0,
+    );
+    let Some(PaneOutcome::Copy(text)) = handle_domain_event(
+        &mut sample,
+        &key('c'),
+        &super::raisers::facts_6d("c1"),
+        Host::Local,
+    ) else {
+        panic!("sample copy")
+    };
+    let base = text.len();
+    for extra in [0usize, 1] {
+        // Copy is the original paths joined by newlines: `count` paths cost the sum of
+        // their bytes plus `count - 1` separators, each path up to 4096 bytes.
+        let count = (COPY_MAX_BYTES + extra - base + 1).div_ceil(4097);
+        let mut bytes = COPY_MAX_BYTES + extra - base - (count - 1);
+        let mut files = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = bytes.min(4096);
+            bytes -= len;
+            files.push(RevertPreviewItem {
+                display_path: "x".repeat(len),
+                conflict: false,
+            });
+        }
+        assert_eq!(bytes, 0);
+        let (mut state, _) = clocked(80, 24);
+        let copies = record_copies(&mut state);
+        decision_queue::raise_rewind(&mut state, "c1", preview(files), 0);
+        assert_eq!(
+            route(&mut state, &key('c'), &super::raisers::facts_6d("c1")),
+            Some(RouteEffect::Consumed)
+        );
+        let recorded = copies.lock().unwrap();
+        if extra == 0 {
+            assert_eq!(recorded.len(), 1);
+            assert_eq!(recorded[0].len(), COPY_MAX_BYTES);
+        } else {
+            assert!(recorded.is_empty());
+            assert!(state.notifications.records().any(|r| {
+                r.message
+                    .contains("Copy failed: decision text exceeds the 8 MiB copy limit")
+            }));
+        }
+        assert!(state.decisions.take_resolved().is_none());
+    }
+}
+
+/// 6D-L1-07: oversized lists are refused through the real route with the copy notice.
+#[test]
+fn k8_oversized_artifact_and_rewind_lists_post_copy_refusal() {
+    use super::support::record_copies;
+    use rustain::adapters::tui::decision_queue::{
+        DecisionSubject, RevertPreviewItem, RewindPreview,
+    };
+    let (mut sample, _) = clocked(80, 24);
+    raise(&mut sample, DecisionKind::ArtifactApply, "sample");
+    let DecisionSubject::Artifact(card) = &sample.decisions.items().next().unwrap().subject else {
+        panic!("artifact")
+    };
+    let mut card = (**card).clone();
+    let files = vec!["x".repeat(4096); COPY_MAX_BYTES / 4096 + 1];
+    card.files = files.clone();
+    for artifact in [true, false] {
+        let (mut state, _) = clocked(80, 24);
+        let copies = record_copies(&mut state);
+        if artifact {
+            decision_queue::raise_artifact(&mut state, card.clone());
+        } else {
+            decision_queue::raise_rewind(
+                &mut state,
+                "c1",
+                RewindPreview {
+                    target_message_index: 1,
+                    messages_to_remove: 2,
+                    files_to_revert: files
+                        .iter()
+                        .map(|file| RevertPreviewItem {
+                            display_path: file.clone(),
+                            conflict: false,
+                        })
+                        .collect(),
+                },
+                0,
+            );
+        }
+        assert_eq!(
+            route(&mut state, &key('c'), &super::raisers::facts_6d("c1")),
+            Some(RouteEffect::Consumed)
+        );
+        assert!(copies.lock().unwrap().is_empty());
+        assert!(state.notifications.records().any(|record| {
+            record
+                .message
+                .contains("Copy failed: decision text exceeds the 8 MiB copy limit")
+        }));
+    }
 }

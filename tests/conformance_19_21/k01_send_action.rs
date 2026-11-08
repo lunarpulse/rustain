@@ -478,12 +478,13 @@ async fn failed_retract_dispatch_append_prevents_post_and_renders_a15_refusal() 
         .raise_retract_card(&mut state, &format!("/team retract peer {item_id}"))
         .await;
     assert!(
-        state
-            .pending_team_retract
-            .as_ref()
-            .is_some_and(|card| card.armed),
+        state.decisions.items().any(|item| matches!(
+            &item.subject,
+            rustain::adapters::tui::decision_queue::DecisionSubject::TeamRetract(card)
+                if card.armed && !item.is_stale()
+        )),
         "retract card is not armed: {:?}",
-        state.pending_team_retract
+        state.decisions
     );
     let refusal = sender
         .confirm_retract(&mut state)
