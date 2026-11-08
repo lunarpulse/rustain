@@ -7,7 +7,7 @@
 use crate::e2e_harness;
 use e2e_harness::TestHarness;
 use rustain::adapters::filesystem::FileSystemStorage;
-use rustain::adapters::tui::decision_pane::{
+use rustain::adapters::tui::decision_queue::{
     self, Arrival, DecisionDraft, DecisionEffect, DecisionKind, PaneOutcome,
 };
 use rustain::adapters::tui::notification_log::LogFacts;
@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn raise_recovery(state: &mut TuiState, title: &str) {
-    decision_pane::raise(
+    decision_queue::raise(
         state,
         DecisionDraft::new(
             DecisionKind::Recovery,
@@ -43,7 +43,7 @@ fn clocked_pane_state() -> (TuiState, Arc<MockClock>) {
 }
 
 fn ready(state: &mut TuiState, clock: &MockClock) {
-    decision_pane::note_painted(state);
+    decision_queue::note_painted(state);
     clock.advance(Duration::from_millis(500));
 }
 use rustain::domain::ports::StoragePort;
@@ -97,14 +97,14 @@ fn test_e2e_recovery_prompt_renders() {
     h.conversation.title = "Test Chat".to_string();
 
     // The real producer raises the recovery decision (as the event loop does on the
-    // RecoveryPrompt event); the harness state carries the pane.
+    // RecoveryPrompt event); the harness state carries the queue.
     raise_recovery(&mut h.state, &h.conversation.title.clone());
     assert!(
         rustain::adapters::tui::presentation::is_open(
             &h.state,
-            rustain::adapters::tui::presentation::Surface::DecisionPane
+            rustain::adapters::tui::presentation::Surface::Decision
         ),
-        "startup recovery takes the pane"
+        "startup recovery takes the frame"
     );
 
     h.render();
@@ -166,10 +166,10 @@ fn test_e2e_recovery_enter_continues() {
         raise_recovery(&mut pane.0, "Recovered chat");
         assert!(rustain::adapters::tui::presentation::is_open(
             &pane.0,
-            rustain::adapters::tui::presentation::Surface::DecisionPane
+            rustain::adapters::tui::presentation::Surface::Decision
         ));
         ready(&mut pane.0, &pane.1);
-        let outcome = decision_pane::handle_domain_event(&mut pane.0, &key, &LogFacts::default());
+        let outcome = decision_queue::handle_domain_event(&mut pane.0, &key, &LogFacts::default());
         assert_eq!(
             outcome,
             Some(PaneOutcome::Effect(DecisionEffect::RecoveryContinue)),
@@ -220,7 +220,7 @@ fn test_e2e_recovery_n_starts_fresh() {
     let mut pane = clocked_pane_state();
     raise_recovery(&mut pane.0, &h.conversation.title);
     ready(&mut pane.0, &pane.1);
-    let outcome = decision_pane::handle_domain_event(
+    let outcome = decision_queue::handle_domain_event(
         &mut pane.0,
         &DomainInputEvent::KeyPress('n'),
         &LogFacts::default(),

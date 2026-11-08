@@ -606,7 +606,7 @@ mod local_occlusion {
     use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Modifier};
     use rustain::adapters::noop::*;
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         notification_log::LogFacts,
         notifications::{self, NoticeSeverity, NoticeSource},
         views::{self, ViewKind},
@@ -1666,7 +1666,7 @@ mod local_occlusion {
     }
 
     #[tokio::test]
-    async fn which_key_and_decision_pane_cover_the_actual_clipped_row() {
+    async fn which_key_and_decision_frame_cover_the_actual_clipped_row() {
         for (width, height) in [(60, 16), (80, 24), (130, 30)] {
             for decision in [false, true] {
                 let mut f = Visit::new(width, height).await;
@@ -1677,20 +1677,32 @@ mod local_occlusion {
                     &rustain::domain::models::NotificationsConfig::default(),
                     clock.clone(),
                 );
-                let y = f.pane().bottom() - 1;
-                assert_eq!(f.place(y).await, vec![y]);
+                // old -> new: the decision pane was bottom-anchored over the chat pane, so
+                // the chat pane's last row was always under it; the frame is the Standard
+                // `frame_rect` (a margin around it at >= 100 columns), so the decision
+                // case places its row on the frame's own last row.
+                let y = if decision {
+                    use rustain::adapters::tui::presentation::geometry;
+                    let layout = super::super::k3_compose::layout(&f.h.state);
+                    let region = geometry::modal_region(&layout, Rect::new(0, 0, width, height));
+                    // The projected block is three rows: it must lie wholly inside the frame.
+                    geometry::frame_rect(region).bottom() - 3
+                } else {
+                    f.pane().bottom() - 1
+                };
+                assert_eq!(f.place(y).await[0], y);
                 let visit = f.read().await;
                 let presented = f.h.state.log_awareness.presented.len();
                 if decision {
-                    decision_pane::raise(
+                    decision_queue::raise(
                         &mut f.h.state,
                         DecisionDraft::new(DecisionKind::Budget, "K12 actual decision"),
                         Arrival::Automatic,
                     );
-                    decision_pane::open_waiting(&mut f.h.state, &LogFacts::default());
+                    decision_queue::open_waiting(&mut f.h.state, &LogFacts::default());
                     assert_eq!(
                         f.h.state.modal_stack.top().unwrap().surface,
-                        Surface::DecisionPane
+                        Surface::Decision
                     );
                 } else {
                     press(&mut f.h.state, Key::Ctrl('x'));
@@ -1700,9 +1712,16 @@ mod local_occlusion {
                 let rect = f.painted_box(if decision { "Daily budget" } else { "Ctrl+X" });
                 assert!(rect.y <= y && y < rect.bottom());
                 assert!(rect.x < f.pane().right() && rect.right() > f.pane().x);
-                f.retained(visit, presented);
+                if decision && width >= 100 {
+                    // old -> new: the bottom-anchored pane left no uncovered feedback row under
+                    // its box; the centered frame leaves the rows above it visible, so the
+                    // visit is genuinely presented (the 60/80 sheets still hide every row).
+                    f.acknowledged(visit);
+                } else {
+                    f.retained(visit, presented);
+                }
                 if decision {
-                    clock.advance(decision_pane::INERT_AFTER_PAINT);
+                    clock.advance(decision_queue::INERT_AFTER_PAINT);
                 }
                 assert_eq!(press(&mut f.h.state, Key::Esc), InputAction::Consumed);
                 assert!(f.h.state.modal_stack.is_empty());

@@ -1,8 +1,8 @@
 //! Story 21.3 conformance leg K4 (overlay contexts): every own row of Help,
 //! CommandPalette, ModelSelector, ProfileSwitcher, UsagePanel, CrossSearch,
-//! ReverseSearch, Autocomplete, NotificationLog, QuitConfirm, DecisionPane,
+//! ReverseSearch, Autocomplete, NotificationLog, QuitConfirm, Decision,
 //! RecipientSurface and Login BY VALUE through the real local front door
-//! (`app::handle_input`; S-LOG and the decision pane through the host-neutral
+//! (`app::handle_input`; S-LOG and the decision frame through the host-neutral
 //! handler the event loop calls first), plus the harness's negative sweep.
 
 use std::collections::{BTreeMap, HashSet};
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustain::adapters::tui::app::InputAction;
-use rustain::adapters::tui::decision_pane::{
+use rustain::adapters::tui::decision_queue::{
     self, Arrival, DecisionDraft, DecisionKind, INERT_AFTER_PAINT,
 };
 use rustain::adapters::tui::keymap::resolve::rows_of;
@@ -890,23 +890,53 @@ fn pane(kind: DecisionKind) -> TuiState {
     let config = NotificationsConfig::default();
     let mut s = fresh();
     s.notifications = NotificationStore::from_config(&config, clock.clone());
-    decision_pane::raise(
+    decision_queue::raise(
         &mut s,
         DecisionDraft::new(kind, "the question"),
         Arrival::Requested,
     );
-    decision_pane::note_painted(&mut s);
+    decision_queue::note_painted(&mut s);
     clock.advance(INERT_AFTER_PAINT);
+    s
+}
+
+/// A focused Budget decision whose condition cleared while it is open: it turns stale
+/// (A7), its frame stays and only Close removes it.
+fn stale_budget() -> TuiState {
+    let mut s = pane(DecisionKind::Budget);
+    decision_queue::withdraw(&mut s, DecisionKind::Budget);
+    s
+}
+
+/// A focused Budget decision with a Carryover item waiting behind it (A9: answering the
+/// Budget never promotes the other kind).
+fn budget_with_waiting_carryover() -> TuiState {
+    let mut s = pane(DecisionKind::Budget);
+    decision_queue::raise(
+        &mut s,
+        DecisionDraft::new(DecisionKind::Carryover, "waiting behind"),
+        Arrival::Automatic,
+    );
     s
 }
 
 #[rustfmt::skip]
 const PANE: &[W] = &[
     w(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Budget, true)]"),
+    wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[(Recovery, true)]", |s| *s = pane(DecisionKind::Recovery)),
+    wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[(DeleteConversations, true)]", |s| *s = pane(DecisionKind::DeleteConversations)),
+    wp(&[Key::Ctrl('c')], "Consumed | focused=false items=[]", |s| *s = stale_budget()),
     w(&[Key::Ctrl('q')], "Quit | focused=true items=[(Budget, false)]"),
     wp(&[Key::Enter], "Decision(RecoveryContinue) | focused=false items=[]", |s| *s = pane(DecisionKind::Recovery)),
     w(&[Key::Esc], "Consumed | focused=false items=[(Budget, true)]"),
+    wp(&[Key::Esc], "Consumed | focused=false items=[(Carryover, true)]", |s| *s = pane(DecisionKind::Carryover)),
+    wp(&[Key::Esc], "Consumed | focused=false items=[(ContextWarning, true)]", |s| *s = pane(DecisionKind::ContextWarning)),
+    wp(&[Key::Esc], "Consumed | focused=false items=[(LargeImage, true)]", |s| *s = pane(DecisionKind::LargeImage)),
+    wp(&[Key::Esc], "Decision(RecoveryContinue) | focused=false items=[]", |s| *s = pane(DecisionKind::Recovery)),
+    wp(&[Key::Esc], "CancelDelete | focused=false items=[]", |s| *s = pane(DecisionKind::DeleteConversations)),
+    wp(&[Key::Esc], "Consumed | focused=false items=[]", |s| *s = stale_budget()),
     w(&[Key::Char('y')], "Decision(BudgetContinue) | focused=false items=[]"),
+    wp(&[Key::Char('y')], "Decision(BudgetContinue) | focused=false items=[(Carryover, false)]", |s| *s = budget_with_waiting_carryover()),
     wp(&[Key::Char('n')], "Decision(CarryoverDecline) | focused=false items=[]", |s| *s = pane(DecisionKind::Carryover)),
     w(&[Key::Char('s')], "Decision(BudgetSwitchCheaper) | focused=false items=[]"),
     w(&[Key::Char('p')], "Decision(BudgetPause) | focused=false items=[]"),
@@ -915,11 +945,14 @@ const PANE: &[W] = &[
     wp(&[Key::Char('y')], "ImageConfirmAttach | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
     wp(&[Key::Char('n')], "ImageConfirmCancel | focused=false items=[]", |s| *s = pane(DecisionKind::LargeImage)),
     wp(&[Key::Char('n')], "Consumed | focused=true items=[(Carryover, false)]", |s| *s = pane(DecisionKind::ContextWarning)),
+    w(&[Key::PageUp], "Consumed | focused=true items=[(Budget, false)]"),
+    w(&[Key::PageDown], "Consumed | focused=true items=[(Budget, false)]"),
     w(&[Key::Ctrl('x')], "Consumed | focused=true items=[(Budget, false)]"),
     w(&[Key::Ctrl('p')], "Consumed | focused=true items=[(Budget, false)]"),
 ];
 
 /// A key of another kind's decision does nothing: the pane stays, the decision stays (R7).
+/// A stale decision answers nothing either: every rail key is swallowed (A7).
 #[rustfmt::skip]
 const PANE_OFF: &[W] = &[
     w(&[Key::Char('n')], "Consumed | focused=true items=[(Budget, false)]"),
@@ -929,14 +962,20 @@ const PANE_OFF: &[W] = &[
     wp(&[Key::Char('y')], "Consumed | focused=true items=[(ContextWarning, false)]", |s| *s = pane(DecisionKind::ContextWarning)),
     wp(&[Key::Char('s')], "Consumed | focused=true items=[(LargeImage, false)]", |s| *s = pane(DecisionKind::LargeImage)),
     wp(&[Key::Char('p')], "Consumed | focused=true items=[(DeleteConversations, false)]", |s| *s = pane(DecisionKind::DeleteConversations)),
+    wp(&[Key::Char('y')], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
+    wp(&[Key::Char('n')], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
+    wp(&[Key::Char('s')], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
+    wp(&[Key::Char('p')], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
+    wp(&[Key::Char('k')], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
+    wp(&[Key::Enter], "Consumed | focused=true items=[(Budget, false)]", |s| *s = stale_budget()),
 ];
 
 /// Catches a pane key that runs the wrong effect for its decision kind, resolves twice, or defers destructively.
 #[test]
-fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
+fn decision_rows_by_value_and_every_other_key_is_swallowed() {
     assert!(matches!(
         rustain::adapters::tui::keymap::resolve(
-            Context::DecisionPane,
+            Context::Decision,
             Host::Local,
             &[Key::Ctrl('c')]
         ),
@@ -963,7 +1002,7 @@ fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
             "pane keys never edit the composer"
         );
         if matches!(
-            rustain::adapters::tui::keymap::resolve(Context::DecisionPane, Host::Local, &[key]),
+            rustain::adapters::tui::keymap::resolve(Context::Decision, Host::Local, &[key]),
             rustain::adapters::tui::keymap::Resolved::Miss
         ) {
             assert_eq!(
@@ -972,7 +1011,7 @@ fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
             );
         }
         if key == Key::Ctrl('x') {
-            assert_eq!(state.pending_leader, Some(Context::DecisionPane));
+            assert_eq!(state.pending_leader, Some(Context::Decision));
             assert_eq!(
                 state.modal_stack.iter().cloned().collect::<Vec<_>>(),
                 frames
@@ -1001,19 +1040,16 @@ fn decision_pane_rows_by_value_and_every_other_key_is_swallowed() {
         assert!(presentation::consistent(s));
         assert_eq!(
             s.modal_stack.len(),
-            usize::from(is_open(s, Surface::DecisionPane))
+            usize::from(is_open(s, Surface::Decision))
                 + usize::from(is_open(s, Surface::CommandPalette))
         );
-        format!(
-            "focused={} items={items:?}",
-            is_open(s, Surface::DecisionPane)
-        )
+        format!("focused={} items={items:?}", is_open(s, Surface::Decision))
     };
     let setup = || pane(DecisionKind::Budget);
     run(&Case {
         door,
         off: PANE_OFF,
-        ..local(Context::DecisionPane, setup, salient, PANE)
+        ..local(Context::Decision, setup, salient, PANE)
     });
 }
 

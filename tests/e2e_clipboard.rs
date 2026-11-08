@@ -147,15 +147,24 @@ fn test_e2e_large_image_shows_warning() {
     let mut h = TestHarness::new();
     h.focus_input();
 
-    // Simulate large image via pending_large_image
-    h.state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "largebase64data".to_string(),
-    });
+    // Old: a hand-seeded large-image slot on the state. New: the pasted image is the
+    // payload of a `LargeImage` queue item (the slot is gone).
+    rustain::adapters::tui::decision_queue::raise_large_image(
+        &mut h.state,
+        rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "largebase64data".to_string(),
+        },
+        "Image is over 5 MB. Attach anyway?",
+    );
 
     // Large image detection would use data size estimate
-    // For this test, we just verify the pending_large_image field exists
-    assert!(h.state.pending_large_image.is_some());
+    // For this test, we just verify the queue holds the large-image decision
+    assert!(
+        h.state
+            .decisions
+            .holds(rustain::adapters::tui::decision_queue::DecisionKind::LargeImage)
+    );
 }
 
 /// Covers: AC3 — Large image warning state exists
@@ -164,14 +173,22 @@ fn test_e2e_large_image_warning_state() {
     let mut h = TestHarness::new();
     h.focus_input();
 
-    // Setup large image
-    h.state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "largebase64".to_string(),
-    });
+    // Setup large image (old: the removed slot; new: a `LargeImage` queue item)
+    rustain::adapters::tui::decision_queue::raise_large_image(
+        &mut h.state,
+        rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "largebase64".to_string(),
+        },
+        "Image is over 5 MB. Attach anyway?",
+    );
 
     // Large image detected
-    assert!(h.state.pending_large_image.is_some());
+    assert!(
+        h.state
+            .decisions
+            .holds(rustain::adapters::tui::decision_queue::DecisionKind::LargeImage)
+    );
 }
 
 /// Covers: AC3 — User can cancel large image
@@ -180,15 +197,39 @@ fn test_e2e_large_image_cancel() {
     let mut h = TestHarness::new();
     h.focus_input();
 
-    // Setup large image
-    h.state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "largebase64".to_string(),
-    });
+    // Setup large image (old: the removed slot; new: a `LargeImage` queue item)
+    use rustain::adapters::tui::decision_queue::{self, DecisionEffect, DecisionKind, PaneOutcome};
+    let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
+        std::time::Instant::now(),
+    ));
+    h.state.notifications = rustain::adapters::tui::notifications::NotificationStore::from_config(
+        &rustain::domain::models::NotificationsConfig::default(),
+        clock.clone(),
+    );
+    decision_queue::raise_large_image(
+        &mut h.state,
+        rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "largebase64".to_string(),
+        },
+        "Image is over 5 MB. Attach anyway?",
+    );
+    assert!(h.state.decisions.holds(DecisionKind::LargeImage));
 
-    // Cancel clears pending
-    h.state.pending_large_image = None;
-    assert!(h.state.pending_large_image.is_none());
+    // Old: cancel cleared the slot by hand. New: `n` (after the inert window) is the
+    // real Cancel: the item leaves the queue and the effect is CancelLargeImage.
+    decision_queue::note_painted(&mut h.state);
+    clock.advance(decision_queue::INERT_AFTER_PAINT);
+    let outcome = decision_queue::handle_domain_event(
+        &mut h.state,
+        &rustain::domain::events::DomainInputEvent::KeyPress('n'),
+        &rustain::adapters::tui::notification_log::LogFacts::default(),
+    );
+    assert_eq!(
+        outcome,
+        Some(PaneOutcome::Effect(DecisionEffect::CancelLargeImage))
+    );
+    assert!(!h.state.decisions.holds(DecisionKind::LargeImage));
 }
 
 /// Covers: AC3 — Image reference stored (not base64 in state)

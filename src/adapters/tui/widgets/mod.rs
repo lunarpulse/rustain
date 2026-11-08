@@ -13,6 +13,7 @@ pub mod command_palette;
 pub mod consolidation_card;
 pub mod context_card;
 pub mod cross_search;
+pub mod decision_frame;
 pub mod delegation_card;
 pub mod delimited_body;
 pub mod diverge_view;

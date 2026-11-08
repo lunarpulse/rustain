@@ -135,7 +135,7 @@ fn k11_production_code_of_both_hosts_carries_no_deleted_mechanism_and_one_view_w
         "src/adapters/tui/state.rs",
         "src/adapters/tui/app.rs",
         "src/adapters/tui/notifications.rs",
-        "src/adapters/tui/decision_pane.rs",
+        "src/adapters/tui/decision_queue/mod.rs",
         "src/domain/models/notice.rs",
         "src/domain/models/tab.rs",
     ] {

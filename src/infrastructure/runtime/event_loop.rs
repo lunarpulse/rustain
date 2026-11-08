@@ -1077,7 +1077,7 @@ pub async fn run(
                             }
                         } else if let Some(domain_event) = convert_crossterm_event(&event, &config.mouse) {
                             let facts = if presentation::is_open(&state, presentation::Surface::NotificationLog)
-                                || presentation::is_open(&state, presentation::Surface::DecisionPane) {
+                                || presentation::is_open(&state, presentation::Surface::Decision) {
                                 notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None)
                             } else { notification_log::LogFacts::default() };
                             let mut pane_action: Option<InputAction> = None;
@@ -1714,16 +1714,16 @@ pub async fn run(
                                 }
                                 InputAction::FocusDecisions => {
                                     let facts = notice_actions::log_facts(&conversation, &streaming, Some(&tab_manager), state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None);
-                                    crate::adapters::tui::decision_pane::open_waiting(&mut state, &facts);
+                                    crate::adapters::tui::decision_queue::open_waiting(&mut state, &facts);
                                 }
                                 InputAction::Decision(effect) => {
-                                    use crate::adapters::tui::decision_pane::DecisionEffect;
+                                    use crate::adapters::tui::decision_queue::DecisionEffect;
                                     // The pane resolved the item before returning the effect, so a
                                     // second key can never run it twice.
                                     state.needs_redraw = true;
                                     match effect {
                                         DecisionEffect::RecoveryContinue => {
-                                            crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
+                                            crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, InputAction::Decision(effect), reducer::restore_focus_after_modal);
                                         }
                                         DecisionEffect::RecoveryNewSession => {
                                             conversation.messages.clear();
@@ -1775,7 +1775,8 @@ pub async fn run(
                                             session_index.set_active(Some(&conversation.id));
                                         }
                                         DecisionEffect::BudgetContinue => {
-                                            // One-time dismiss: the next turn's recompute may raise it again if still over.
+                                            // `Continue` holds for this day and limit: the next recompute does not raise it again (A18).
+                                            handlers::budget::acknowledge_daily_budget(&mut state, &AppContext::new(&app_state, &router));
                                         }
                                         DecisionEffect::BudgetSwitchCheaper => {
                                             handlers::model_switch::open_selector(&mut state, &AppContext::new(&app_state, &router), config, None);
@@ -1970,8 +1971,8 @@ pub async fn run(
                                         state.input_scroll_offset = 0;
                                         state.clear_item_selection();
                                         state.feedback_blocks.clear();
-                                        crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::Carryover, &previous_conversation_id);
-                                        crate::adapters::tui::decision_pane::withdraw_for(&mut state, crate::adapters::tui::decision_pane::DecisionKind::ContextWarning, &previous_conversation_id);
+                                        crate::adapters::tui::decision_queue::withdraw_for(&mut state, crate::adapters::tui::decision_queue::DecisionKind::Carryover, &previous_conversation_id);
+                                        crate::adapters::tui::decision_queue::withdraw_for(&mut state, crate::adapters::tui::decision_queue::DecisionKind::ContextWarning, &previous_conversation_id);
                                         state.autocomplete.dismiss();
                                         state.resolved_mentions.clear();
                                         state.token_usage = None;
@@ -2885,19 +2886,11 @@ pub async fn run(
                                         media_type,
                                         data,
                                     };
-                                    state.pending_large_image = Some(attachment);
-                                    crate::adapters::tui::decision_pane::raise(
-                                        &mut state,
-                                        crate::adapters::tui::decision_pane::DecisionDraft::new(
-                                            crate::adapters::tui::decision_pane::DecisionKind::LargeImage,
-                                            warning,
-                                        ),
-                                        crate::adapters::tui::decision_pane::Arrival::Requested,
-                                    );
+                                    crate::adapters::tui::decision_queue::raise_large_image(&mut state, attachment, warning);
                                     state.needs_redraw = true;
                                 }
                                 action @ (InputAction::ImageConfirmAttach | InputAction::ImageConfirmCancel) => {
-                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
                                 }
                                 InputAction::RequestClipboardPaste => {
                                     // Async: read image (or text) from the OS clipboard via
@@ -2917,15 +2910,7 @@ pub async fn run(
                                                 }
                                                 InputAction::ImageSizeWarning { media_type, data, warning } => {
                                                     let attachment = ImageAttachment { media_type, data };
-                                                    state.pending_large_image = Some(attachment);
-                                                    crate::adapters::tui::decision_pane::raise(
-                                                        &mut state,
-                                                        crate::adapters::tui::decision_pane::DecisionDraft::new(
-                                                            crate::adapters::tui::decision_pane::DecisionKind::LargeImage,
-                                                            warning,
-                                                        ),
-                                                        crate::adapters::tui::decision_pane::Arrival::Requested,
-                                                    );
+                                                    crate::adapters::tui::decision_queue::raise_large_image(&mut state, attachment, warning);
                                                     state.needs_redraw = true;
                                                 }
                                                 _ => {} // Consumed or other — already mutated state
@@ -3304,7 +3289,7 @@ pub async fn run(
                                 }
                                 InputAction::ConfirmDelete => {
                                     // Execute the pending delete
-                                    if let Some(target) = state.pending_delete.take() {
+                                    if let Some(crate::adapters::tui::decision_queue::DecisionSubject::Delete(target)) = state.decisions.take_resolved() {
                                         match target {
                                             DeleteConfirmTarget::Single { id: conv_id, .. } => {
                                                 #[cfg(feature = "a2a")] crate::infrastructure::runtime::team_proposal_bridge::withdraw_conversation(&mut state, &app_state, &conv_id).await;
@@ -3403,7 +3388,7 @@ pub async fn run(
                                     state.needs_redraw = true;
                                 }
                                 action @ InputAction::CancelDelete => {
-                                    crate::adapters::tui::decision_pane::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
+                                    crate::adapters::tui::decision_queue::apply_resolved_action(&mut state, action, reducer::restore_focus_after_modal);
                                 }
                                 // ── Fork Conversation (Story 4-3a) ──────────────
                                 InputAction::ForkAtMessage => {
@@ -6049,13 +6034,13 @@ pub async fn run(
                         // Silently drop if conversation not found (tab closed)
                     }
                     AppEvent::RecoveryPrompt { title, token_count, .. } => {
-                        crate::adapters::tui::decision_pane::raise(
+                        crate::adapters::tui::decision_queue::raise(
                             &mut state,
-                            crate::adapters::tui::decision_pane::DecisionDraft::new(
-                                crate::adapters::tui::decision_pane::DecisionKind::Recovery,
+                            crate::adapters::tui::decision_queue::DecisionDraft::new(
+                                crate::adapters::tui::decision_queue::DecisionKind::Recovery,
                                 recovery_prompt::recovery_detail(&title, token_count),
                             ),
-                            crate::adapters::tui::decision_pane::Arrival::Automatic,
+                            crate::adapters::tui::decision_queue::Arrival::Automatic,
                         );
                         state.needs_redraw = true;
                     }
@@ -6891,6 +6876,7 @@ pub async fn run(
                     room_bridge::refresh_head(&app_state, &mut state).await;
                 }
                 state.needs_redraw |= log_awareness.tick(&mut state.log_awareness);
+                crate::adapters::tui::decision_queue::tick(&mut state);
                 crate::infrastructure::runtime::panel_bridge::tick_status(
                     &mut state, &conversation, tick_ms,
                 );
@@ -7702,7 +7688,7 @@ pub fn render(
         state.context_warn_level != crate::adapters::tui::state::ContextWarnLevel::None,
     );
     // Items of a conversation that no longer exists can never be decided.
-    crate::adapters::tui::decision_pane::prune_closed(state, &log_facts);
+    crate::adapters::tui::decision_queue::prune_closed(state, &log_facts);
     let scroll_offset = state.scroll_snapshot;
     let auto_scroll = state.auto_snapshot;
     let inline_card = crate::adapters::tui::app::inline_card(state);
@@ -8675,7 +8661,7 @@ pub fn render(
     })?;
     // The 500 ms inert window runs from a frame the user could really see.
     if decision_painted {
-        crate::adapters::tui::decision_pane::note_painted(state);
+        crate::adapters::tui::decision_queue::note_painted(state);
     }
 
     state.total_content_height = content_height;
@@ -9229,10 +9215,10 @@ fn resolve_command_context(
     )
 }
 
-/// Raise the delete confirmation in the interim decision pane (AC9, D5): the
-/// target is the fact the `ConfirmDelete`/`CancelDelete` arms read, the pane
-/// carries the question and the only keys that answer it. Public so the front
-/// door is reachable from `tests/` (`event_loop::run` itself is not).
+/// Raise the delete confirmation in the decision queue (AC9, D5): the target is
+/// the item's payload, the frame carries the question and the only keys that
+/// answer it. Public so the front door is reachable from `tests/`
+/// (`event_loop::run` itself is not).
 pub fn begin_delete_confirmation(state: &mut TuiState, target: DeleteConfirmTarget) {
     let detail = match &target {
         DeleteConfirmTarget::Single { title, .. } => {
@@ -9245,14 +9231,14 @@ pub fn begin_delete_confirmation(state: &mut TuiState, target: DeleteConfirmTarg
             format!("Delete {count} conversations? This cannot be undone.")
         }
     };
-    state.pending_delete = Some(target);
-    crate::adapters::tui::decision_pane::raise(
+    crate::adapters::tui::decision_queue::raise(
         state,
-        crate::adapters::tui::decision_pane::DecisionDraft::new(
-            crate::adapters::tui::decision_pane::DecisionKind::DeleteConversations,
+        crate::adapters::tui::decision_queue::DecisionDraft::new(
+            crate::adapters::tui::decision_queue::DecisionKind::DeleteConversations,
             detail,
-        ),
-        crate::adapters::tui::decision_pane::Arrival::Requested,
+        )
+        .subject(crate::adapters::tui::decision_queue::DecisionSubject::Delete(target)),
+        crate::adapters::tui::decision_queue::Arrival::Requested,
     );
 }
 
@@ -9360,7 +9346,7 @@ mod tests {
     #[test]
     fn story21_4_pane_effects_preserve_the_interrupted_base_focus() {
         use crate::adapters::tui::{
-            decision_pane::{self, Arrival, DecisionDraft, DecisionEffect, DecisionKind},
+            decision_queue::{self, Arrival, DecisionDraft, DecisionEffect, DecisionKind},
             notification_log::LogFacts,
             notifications::NotificationStore,
             presentation::{self, Surface},
@@ -9405,12 +9391,15 @@ mod tests {
                     state.sidebar_visible = sidebar;
                     state.sidebar_selected = 3;
                     if kind == DecisionKind::LargeImage {
-                        state.pending_large_image = Some(ImageAttachment {
-                            media_type: "image/png".into(),
-                            data: "retained image bytes".into(),
-                        });
-                    }
-                    if kind == DecisionKind::DeleteConversations {
+                        decision_queue::raise_large_image(
+                            &mut state,
+                            ImageAttachment {
+                                media_type: "image/png".into(),
+                                data: "retained image bytes".into(),
+                            },
+                            "pending decision",
+                        );
+                    } else if kind == DecisionKind::DeleteConversations {
                         begin_delete_confirmation(
                             &mut state,
                             DeleteConfirmTarget::Single {
@@ -9419,7 +9408,7 @@ mod tests {
                             },
                         );
                     } else {
-                        decision_pane::raise(
+                        decision_queue::raise(
                             &mut state,
                             DecisionDraft::new(kind, "pending decision"),
                             Arrival::Requested,
@@ -9443,36 +9432,35 @@ mod tests {
                         handle_input(&mut state, &E::KeyPress('q')),
                         InputAction::FocusDecisions
                     );
-                    decision_pane::open_waiting(&mut state, &LogFacts::default());
+                    decision_queue::open_waiting(&mut state, &LogFacts::default());
                     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
                     terminal
                         .draw(|frame| {
-                            assert!(
-                                decision_pane::render(
-                                    frame,
-                                    Rect::new(0, 0, 80, 20),
-                                    &state,
-                                    &LogFacts::default(),
-                                    &Theme::dark(),
-                                )
-                                .is_some()
-                            );
+                            assert!(crate::adapters::tui::widgets::decision_frame::render(
+                                frame,
+                                Rect::new(0, 0, 80, 20),
+                                &state,
+                                &LogFacts::default(),
+                                &Theme::dark(),
+                                kind.frame_title(),
+                                None,
+                            ));
                         })
                         .unwrap();
-                    decision_pane::note_painted(&mut state);
-                    clock.advance(decision_pane::INERT_AFTER_PAINT);
+                    decision_queue::note_painted(&mut state);
+                    clock.advance(decision_queue::INERT_AFTER_PAINT);
                     let action = handle_input(&mut state, &key);
                     assert_eq!(action, expected);
                     // The same effect consumer called by run(), not a replica
                     // of the focus assignment under test.
-                    decision_pane::apply_resolved_action(
+                    decision_queue::apply_resolved_action(
                         &mut state,
                         action,
                         reducer::restore_focus_after_modal,
                     );
                     assert!(!state.decisions.holds(kind));
-                    assert!(state.pending_large_image.is_none());
-                    assert!(state.pending_delete.is_none());
+                    assert!(!state.decisions.holds(DecisionKind::LargeImage));
+                    assert!(!state.decisions.holds(DecisionKind::DeleteConversations));
                     assert_eq!(
                         state.pending_images.len(),
                         usize::from(expected == InputAction::ImageConfirmAttach)

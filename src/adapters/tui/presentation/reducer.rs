@@ -2,7 +2,7 @@
 
 use super::stack::Continuation;
 use super::{Frame, Opened, Surface, is_open};
-use crate::adapters::tui::decision_pane::DecisionKey;
+use crate::adapters::tui::decision_queue::{DecisionKey, DecisionKind};
 use crate::adapters::tui::notification_log::NotificationLogState;
 use crate::adapters::tui::quit_confirm::{QuitConfirmState, QuitFacts, QuitRequest};
 use crate::adapters::tui::state::{LoginFrameIntent, TuiState};
@@ -128,7 +128,7 @@ pub(crate) fn permission_modal_owns_focus(state: &TuiState) -> bool {
         || state.pending_activation.is_some()
         || state.pending_plan_approval.is_some()
         || state.pending_spawn_gate.is_some()
-        || state.pending_large_image.is_some()
+        || state.decisions.holds_undeferred(DecisionKind::LargeImage)
         || state.pending_artifact_card.is_some()
         || state.pending_feedback_input.is_some()
         || another_confirmation_owns_focus(state)
@@ -264,7 +264,7 @@ pub fn take_chat_focus_for_card(state: &mut TuiState, can_answer: bool) -> bool 
     let moves = can_answer
         && state.input_buffer.is_empty()
         && state.focus == FocusState::Input
-        && !crate::adapters::tui::decision_pane::card_focus_blocked(state);
+        && !crate::adapters::tui::decision_queue::card_focus_blocked(state);
     if moves {
         state
             .card_focus_borrowed_from
@@ -280,7 +280,7 @@ pub fn settle_borrowed_card_focus(state: &mut TuiState, card_pending: bool) {
         return;
     }
     if state.focus != FocusState::Chat
-        || crate::adapters::tui::decision_pane::card_focus_blocked(state)
+        || crate::adapters::tui::decision_queue::card_focus_blocked(state)
         || state.recipient_surface.is_some()
     {
         state.card_focus_borrowed_from = None;
@@ -295,7 +295,7 @@ pub fn open(state: &mut TuiState, surface: Surface) -> Opened {
     assert!(
         !matches!(
             surface,
-            Surface::DecisionPane | Surface::ToolInspector(_) | Surface::BlockViewer(_)
+            Surface::Decision | Surface::ToolInspector(_) | Surface::BlockViewer(_)
         ),
         "identity-bearing frames open through their dedicated reducer"
     );
@@ -596,7 +596,7 @@ fn reopen_for_handoff(state: &mut TuiState, from: Surface, to: Surface) -> Opene
 /// The queue requests focus; this reducer alone writes the selected identity.
 pub(crate) fn focus_decision(state: &mut TuiState, key: DecisionKey) {
     state.decisions.prepare(&key);
-    open_frame(state, Surface::DecisionPane, Some(key), None);
+    open_frame(state, Surface::Decision, Some(key), None);
     debug_assert!(super::consistent(state));
 }
 
@@ -747,7 +747,7 @@ fn prepare_payload(state: &mut TuiState, surface: Surface) {
             state.quit_confirm.is_some(),
             "Quit must open through request_quit"
         ),
-        Surface::DecisionPane
+        Surface::Decision
         | Surface::ModelSelector
         | Surface::ProfileSwitcher
         | Surface::UsagePanel
@@ -884,7 +884,7 @@ fn release_payload(state: &mut TuiState, surface: Surface, was_top: bool) {
             state.help_overlay.filtered_scroll_offset = 0;
             None
         }
-        Surface::DecisionPane => {
+        Surface::Decision => {
             state.decisions.clear_paint();
             None
         }
@@ -976,13 +976,13 @@ mod tests {
     #[test]
     fn story21_4_pane_opener_enters_the_stack() {
         let mut state = TuiState::new(80, 24);
-        crate::adapters::tui::decision_pane::raise(
+        crate::adapters::tui::decision_queue::raise(
             &mut state,
-            crate::adapters::tui::decision_pane::DecisionDraft::new(
-                crate::adapters::tui::decision_pane::DecisionKind::Budget,
+            crate::adapters::tui::decision_queue::DecisionDraft::new(
+                crate::adapters::tui::decision_queue::DecisionKind::Budget,
                 "automatic first arrival",
             ),
-            crate::adapters::tui::decision_pane::Arrival::Automatic,
+            crate::adapters::tui::decision_queue::Arrival::Automatic,
         );
         assert_eq!(state.modal_stack.len(), 1);
         assert!(super::super::consistent(&state));

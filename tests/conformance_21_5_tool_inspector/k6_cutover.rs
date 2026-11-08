@@ -4,7 +4,7 @@ use super::support::*;
 use ratatui::style::Modifier;
 use rustain::adapters::tui::{
     app::InputAction,
-    decision_pane::{self, Arrival, DecisionDraft, DecisionKind, Raised},
+    decision_queue::{self, Arrival, DecisionDraft, DecisionKind, Raised},
     keymap::Key,
     presentation::{self, Surface},
     quit_confirm::{self, QuitFacts, QuitHost, QuitRequest},
@@ -233,7 +233,7 @@ fn automatic_decision_preempts_and_escape_restores_exact_tab_viewers_and_cells()
     assert!(f.h.state.decisions.is_empty());
     f.clock.advance(Duration::from_secs(2));
     assert_eq!(
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.h.state,
             DecisionDraft::new(DecisionKind::Budget, "budget arrival control"),
             Arrival::Automatic
@@ -242,11 +242,11 @@ fn automatic_decision_preempts_and_escape_restores_exact_tab_viewers_and_cells()
     );
     assert_eq!(
         f.h.state.modal_stack.top().unwrap().surface,
-        Surface::DecisionPane
+        Surface::Decision
     );
     f.paint();
     assert!(f.h.screen_text().contains("budget arrival control"));
-    f.clock.advance(decision_pane::INERT_AFTER_PAINT);
+    f.clock.advance(decision_queue::INERT_AFTER_PAINT);
     assert!(presentation::is_open(&f.h.state, frame.surface));
     assert_eq!(f.h.state.tool_inspectors.len(), 1);
     f.press(Key::Esc);
@@ -350,7 +350,7 @@ fn depth_cap_continuation_keeps_exact_inspector_payload_until_restoration_or_dis
         let payload = format!("{:?}", f.tool());
         f.clock.advance(Duration::from_secs(2));
         assert_eq!(
-            decision_pane::raise(
+            decision_queue::raise(
                 &mut f.h.state,
                 DecisionDraft::new(DecisionKind::Budget, "continuation arrival"),
                 Arrival::Automatic
@@ -358,7 +358,7 @@ fn depth_cap_continuation_keeps_exact_inspector_payload_until_restoration_or_dis
             Raised::Focused
         );
         f.paint();
-        f.clock.advance(decision_pane::INERT_AFTER_PAINT);
+        f.clock.advance(decision_queue::INERT_AFTER_PAINT);
         assert_eq!(f.h.state.modal_stack.len(), 4);
         assert!(
             !f.h.state

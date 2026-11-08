@@ -3882,6 +3882,7 @@ pub async fn run_attached(
                         // Story 21.1 AC6: attached notices expire — the tick requests the
                         // deadline redraw (the draw's `begin_draw` does the sweep).
                         notifications::tick(&mut state);
+                        crate::adapters::tui::decision_queue::tick(&mut state);
                     }
                 }
     };

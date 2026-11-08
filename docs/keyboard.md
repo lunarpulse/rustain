@@ -662,6 +662,8 @@ Also inherits: Caret text field.
 | `s` | Switch to a cheaper model (a budget decision) | local | portable |  |
 | `p` | Pause (a budget decision) | local | portable |  |
 | `k` | Compact the conversation (a context warning) | local | portable |  |
+| `PgUp` | Scroll the decision body up | local | portable |  |
+| `PgDn` | Scroll the decision body down | local | portable |  |
 
 ## Recipient surface
 

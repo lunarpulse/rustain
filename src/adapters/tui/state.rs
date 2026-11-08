@@ -2640,10 +2640,10 @@ pub struct TuiState {
     pub team_send_blocks:
         BTreeMap<String, Vec<crate::adapters::tui::handlers::team_command::TeamSendRow>>,
     pub team_send_next_id: u64,
-    /// Interim decision pane (Story 21.1 S2, AC9): the six response-key prompts
-    /// (recovery, carryover, budget, context warning, large image, delete).
-    /// A bounded presentation state; 21-4 migrates it onto the modal stack.
-    pub decisions: crate::adapters::tui::decision_pane::DecisionPane,
+    /// The session decision queue (Story 21.6): every question the session asks,
+    /// keyed `(kind, source, conversation)`; its items own the payloads the old
+    /// per-kind slots held (a large image, a delete target).
+    pub decisions: crate::adapters::tui::decision_queue::DecisionQueue,
     /// When the last printable key was typed, from the injected clock (RU-6: an
     /// arriving decision never takes focus from someone who is typing).
     pub last_printable_at: Option<Instant>,
@@ -2732,9 +2732,6 @@ pub struct TuiState {
     /// Images queued for the next message submission (clipboard paste or file mention).
     // Covers: FR112
     pub pending_images: Vec<ImageAttachment>,
-    /// Large image awaiting user confirmation before attachment (AC4).
-    // Covers: FR112
-    pub pending_large_image: Option<ImageAttachment>,
     /// Visual indicator for attached images shown in the input box.
     // Covers: FR112
     pub image_indicator: Option<String>,
@@ -2792,6 +2789,8 @@ pub struct TuiState {
     pub artifacts_panel: ArtifactsPanelState,
     /// Daily budget warning state (Story 7.5 AC5). `None` when budget disabled.
     pub daily_budget: Option<DailyBudgetState>,
+    /// `(day start, limit)` the user chose `Continue` on (A18): no re-raise while both hold.
+    pub budget_acknowledged: Option<(i64, u64)>,
     /// Captured resolved-model from `start_turn_inner`, consumed-and-cleared on
     /// the first subsequent `ChunkAction::TurnComplete` to stamp `Turn.model`
     /// (Story 7.5 AC1.5).
@@ -2850,8 +2849,6 @@ pub struct TuiState {
     /// `"tasks"` (default) or `"none"`. Read by the `PlanExecutionStarted`
     /// event arm to decide whether to auto-open the Tasks panel.
     pub auto_open_on_task_plan: String,
-    /// Pending delete confirmation target. None = no pending confirmation.
-    pub pending_delete: Option<crate::domain::models::visual::DeleteConfirmTarget>,
     /// Message index selected for fork (set when user presses `f`, cleared on confirm/cancel).
     /// Story 4-3a, AC1.
     pub pending_fork_index: Option<usize>,
@@ -3257,7 +3254,6 @@ impl TuiState {
             autocomplete: AutocompleteState::new(),
             resolved_mentions: Vec::new(),
             pending_images: Vec::new(),
-            pending_large_image: None,
             image_indicator: None,
             command_palette: CommandPaletteState::new(),
             pending_leader: None,
@@ -3286,6 +3282,7 @@ impl TuiState {
             room_panel: RoomPanelState::default(),
             artifacts_panel: ArtifactsPanelState::default(),
             daily_budget: None,
+            budget_acknowledged: None,
             pending_resolved_model: None,
             selected_model: None,
             multiplexer_detected: false,
@@ -3307,7 +3304,6 @@ impl TuiState {
             task_panel_state: TaskPanelState::default(),
             agent_panel_state: AgentPanelState::default(),
             auto_open_on_task_plan: "tasks".to_string(),
-            pending_delete: None,
             pending_fork_index: None,
             pending_rewind_index: None,
             rewind_preview: None,

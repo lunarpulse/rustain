@@ -411,15 +411,17 @@ fn test_resize_keeps_sidebar_when_wide_enough() {
     assert!(state.sidebar_visible);
 }
 
-// ── AC5/AC6: Delete confirmation flow (Story 21.1 S2: interim decision pane) ──
+// ── AC5/AC6: Delete confirmation flow (Story 21.1 S2: decision queue, 21.6 frame) ──
 //
 // Old (S1): the prompt was a 30 s status flash plus `Overlay(Confirmation(
 // DeleteConfirmation))`, and `handle_input` mapped `y`/`n`/`Esc` on that focus.
-// New (AC9, D5): `begin_delete_confirmation` raises a pane item; ONLY the
-// focused pane answers (the same `decision_pane::handle_domain_event` the event
-// loop calls), after the 500 ms inert window, exactly once.
+// New (AC9, D5): `begin_delete_confirmation` raises a queue item; ONLY the
+// focused decision frame answers (the same `decision_queue::handle_domain_event` the
+// event loop calls), after the 500 ms inert window, exactly once.
 
-use rustain::adapters::tui::decision_pane::{self, DecisionEffect, DecisionKind, PaneOutcome};
+use rustain::adapters::tui::decision_queue::{
+    self, DecisionEffect, DecisionKind, DecisionSubject, PaneOutcome,
+};
 use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
 use rustain::domain::clock::MockClock;
@@ -440,12 +442,12 @@ fn pane_state() -> (TuiState, Arc<MockClock>) {
 
 /// First paint, then the 500 ms inert window passes.
 fn ready(state: &mut TuiState, clock: &MockClock) {
-    decision_pane::note_painted(state);
+    decision_queue::note_painted(state);
     clock.advance(Duration::from_millis(500));
 }
 
 fn press(state: &mut TuiState, event: DomainInputEvent) -> Option<PaneOutcome> {
-    decision_pane::handle_domain_event(state, &event, &LogFacts::default())
+    decision_queue::handle_domain_event(state, &event, &LogFacts::default())
 }
 
 fn single() -> DeleteConfirmTarget {
@@ -462,11 +464,15 @@ fn test_delete_confirmation_y_confirms() {
     assert!(
         rustain::adapters::tui::presentation::is_open(
             &state,
-            rustain::adapters::tui::presentation::Surface::DecisionPane
+            rustain::adapters::tui::presentation::Surface::Decision
         ),
-        "the user's own delete takes the pane"
+        "the user's own delete takes the frame"
     );
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));
+    // Old: the removed delete slot was asserted after the key. New: the target is
+    // the queue item's payload (its slot is gone); it is observable before the key.
+    let held = state.decisions.items().next().expect("the delete is held");
+    assert_eq!(held.subject, DecisionSubject::Delete(single()));
     ready(&mut state, &clock);
 
     let outcome = press(&mut state, DomainInputEvent::KeyPress('y'));
@@ -483,11 +489,7 @@ fn test_delete_confirmation_y_confirms() {
         press(&mut state, DomainInputEvent::KeyPress('y')).is_none(),
         "a second y has no pane to answer"
     );
-    assert_eq!(
-        state.pending_delete,
-        Some(single()),
-        "the effect arm takes the target"
-    );
+    assert_eq!(state.modal_stack.len(), 0, "the answered frame is popped");
 }
 
 #[test]
@@ -614,7 +616,7 @@ fn story21_1_delete_keys_are_inert_for_500ms_and_never_replayed() {
         press(&mut state, DomainInputEvent::KeyPress('y')),
         Some(PaneOutcome::Consumed)
     );
-    decision_pane::note_painted(&mut state);
+    decision_queue::note_painted(&mut state);
     clock.advance(Duration::from_millis(499));
     assert_eq!(
         press(&mut state, DomainInputEvent::KeyPress('y')),
@@ -633,24 +635,39 @@ fn story21_1_delete_keys_are_inert_for_500ms_and_never_replayed() {
     );
 }
 
-/// The sidebar `y` with no pane is not an answer (the old overlay arm is gone).
+/// The sidebar `y` with no frame is not an answer (the old overlay arm is gone): a
+/// deferred delete question stays queued, holds no frame, and a sidebar `y` neither
+/// confirms it nor removes it.
+// Old: a hand-seeded delete slot. New: the
+// question is a queue item raised by `begin_delete_confirmation`, then set aside
+// (`Ctrl+C` defers on every kind, even inside the inert window).
 #[test]
 fn story21_1_a_stray_y_without_a_pane_never_confirms_a_delete() {
     let mut state = make_state();
+    begin_delete_confirmation(&mut state, single());
+    assert_eq!(
+        press(&mut state, DomainInputEvent::SpecialKey(DomainKey::CtrlC)),
+        Some(PaneOutcome::Consumed)
+    );
+    assert!(state.modal_stack.is_empty(), "no frame holds the question");
+    assert!(state.decisions.holds(DecisionKind::DeleteConversations));
     state.focus = FocusState::Sidebar {
         panel: PanelType::History,
         selected: 0,
     };
-    state.pending_delete = Some(single());
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     assert_ne!(action, InputAction::ConfirmDelete);
+    assert!(
+        state.decisions.holds(DecisionKind::DeleteConversations),
+        "the stray y neither answered nor dropped the question"
+    );
 }
 
-/// Story 21.1 S1-1 → S2: the bulk-delete question is a pane item (no status
+/// Story 21.1 S1-1 → S2 → 21.6: the bulk-delete question is a queue item (no status
 /// flash exists), the confirmed delete ends in one Success notice and the
 /// answered question leaves no `[y/n]` text anywhere.
 #[test]
-fn test_e2e_bulk_delete_confirmation_is_a_pane_item_and_ends_in_one_notice() {
+fn test_e2e_bulk_delete_confirmation_is_a_decision_item_and_ends_in_one_notice() {
     let (mut state, clock) = pane_state();
     state.sidebar_entry_count = 2;
     begin_delete_confirmation(&mut state, DeleteConfirmTarget::Bulk { count: 2 });
@@ -668,9 +685,11 @@ fn test_e2e_bulk_delete_confirmation_is_a_pane_item_and_ends_in_one_notice() {
     assert!(item.detail.contains("cannot be undone"), "{}", item.detail);
     assert!(!item.detail.contains("[y/n]"), "{}", item.detail);
     assert_eq!(state.status, StatusState::Idle, "no status flash");
+    // Old: the removed delete slot held the target. New: the target is the
+    // queue item's payload (the slot is gone; the effect arm takes it after the key).
     assert_eq!(
-        state.pending_delete,
-        Some(DeleteConfirmTarget::Bulk { count: 2 })
+        item.subject,
+        DecisionSubject::Delete(DeleteConfirmTarget::Bulk { count: 2 })
     );
 
     ready(&mut state, &clock);

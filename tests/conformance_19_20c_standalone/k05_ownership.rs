@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rustain::adapters::tui::app::{self, InputAction};
-use rustain::adapters::tui::decision_pane::{
-    Arrival, DecisionDraft, DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise,
+use rustain::adapters::tui::decision_queue::{
+    Arrival, DecisionDraft, DecisionKind, DecisionSubject, PaneOutcome, handle_domain_event,
+    note_painted, raise, raise_large_image, withdraw,
 };
 use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
@@ -206,10 +207,8 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
     f.key(KeyCode::Char('r')).await;
     let permission_focus = f.state.focus.clone();
     f.state.focus = FocusState::Chat;
-    f.state.pending_large_image = Some(ImageAttachment {
-        media_type: "image/png".into(),
-        data: "confirmation-fixture".into(),
-    });
+    // Old -> new (21.6 6-A): the TuiState large-image slot is gone; the queued image
+    // item (raised below) is the higher-priority confirmation and carries the image.
     // Old (19.20c): `handle_input` mapped Chat-focus `y` to ImageConfirmAttach itself.
     // New (21.1 S2, AC9/AC12): the confirmation is a decision-pane item that owns its
     // keys before approval does (the event loop's pane dispatch runs first), inert for
@@ -217,10 +216,13 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
     let clock = Arc::new(MockClock::new(Instant::now()));
     f.state.notifications =
         NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
-    raise(
+    raise_large_image(
         &mut f.state,
-        DecisionDraft::new(DecisionKind::LargeImage, "Large image. Attach it?"),
-        Arrival::Requested,
+        ImageAttachment {
+            media_type: "image/png".into(),
+            data: "confirmation-fixture".into(),
+        },
+        "Large image. Attach it?",
     );
     note_painted(&mut f.state);
     assert!(matches!(
@@ -241,9 +243,10 @@ async fn k05_higher_image_confirmation_and_raw_key_guards_do_not_decide() {
             .is_some()
     );
     assert!(f.tools.executed.lock().is_empty());
-    // Image attachment effects belong to the image dispatcher, not approval;
-    // removing that fixture models its completed higher-priority confirmation.
-    f.state.pending_large_image = None;
+    // Image attachment effects belong to the image dispatcher, not approval; the
+    // answered item left the queue (old: the fixture slot was cleared by hand to model
+    // its completed higher-priority confirmation).
+    assert!(!f.state.decisions.holds(DecisionKind::LargeImage));
     f.state.focus = permission_focus;
     for key in ['y', 'n', 'a', 's', 'f', 'r'] {
         for modifiers in [
@@ -556,10 +559,21 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     assert_eq!(f.state.pending_leader, Some(Context::Chat));
     assert!(f.state.pending_permission.is_none());
     assert_eq!(f.state.permission_queue.len(), 1);
-    f.state.pending_large_image = Some(ImageAttachment {
-        media_type: "image/png".into(),
-        data: "higher-image-confirmation".into(),
-    });
+    // Old -> new (21.6 6-A): a queued, not-deferred image item replaces the slot as the
+    // higher confirmation (Automatic + a pending leader: it waits, never opens a frame).
+    assert_eq!(
+        raise(
+            &mut f.state,
+            DecisionDraft::new(DecisionKind::LargeImage, "higher-image-confirmation").subject(
+                DecisionSubject::LargeImage(ImageAttachment {
+                    media_type: "image/png".into(),
+                    data: "higher-image-confirmation".into(),
+                })
+            ),
+            Arrival::Automatic,
+        ),
+        rustain::adapters::tui::decision_queue::Raised::Waiting
+    );
     f.key(KeyCode::Esc).await;
     assert_eq!(f.state.focus, FocusState::Chat);
     assert!(
@@ -568,7 +582,7 @@ async fn k05_passive_dismissal_preserves_remaining_modal_and_higher_owner() {
     );
     assert_eq!(f.state.permission_queue.len(), 1);
     assert!(f.tools.executed.lock().is_empty());
-    f.state.pending_large_image = None;
+    withdraw(&mut f.state, DecisionKind::LargeImage);
     reducer::open(&mut f.state, Surface::Help);
     f.key(KeyCode::Esc).await;
     assert_eq!(f.current_id(), id);

@@ -62,7 +62,7 @@ QUIT = "System · Notifications › System · Quit"
 HELP = "Help — Rustain Keybindings"
 HELP_LOG = HELP+" › System · Notifications"
 HELP_QUIT = HELP+" › System · Quit"
-BUDGET = HELP+" › System · Daily budget"
+BUDGET = HELP+" › Decision: Daily budget"
 BUDGET_RAIL = ("[y] Continue", "[s] Switch model", "[p] Pause until tomorrow", "[Esc] Later")
 NO_DECISIONS = "No decisions waiting in this client"
 TURN = "A2b-held-budget"
@@ -343,15 +343,15 @@ def _cue(screen):
 
 
 def _budget_box(screen):
-    rows = screen.split("\n")
-    box = _bottom_box(screen, BUDGET, min(100, len(rows[0])), len(rows)-4)
+    """The budget decision is an ordinary L3 frame over Help (Story 21.6): the exact
+    A8 sheet/centered rectangle, never the old bottom-anchored box."""
+    box = _box(screen, BUDGET, "[Esc] Later")
     if not box:
         return None
-    content = [row[1:-1].strip() for row in box[1:-1] if row[1:-1].strip()]
+    content = [row[1:-1].strip() for row in box if row[1:-1].strip()]
     text = " ".join(content)
-    return box if (content and "Daily budget ($0.00) reached." in text
-                   and all(pair in text for pair in BUDGET_RAIL)
-                   and content[-1].endswith("[Esc] Later")) else None
+    return box if ("Daily budget ($0.00) reached." in text
+                   and all(pair in text for pair in BUDGET_RAIL)) else None
 
 
 def _popup_box(screen):

@@ -442,7 +442,7 @@ pub enum InputAction {
     OpenUsagePanel,
     /// A rail key of the interim decision pane (Story 21.1 S2 AC9): the effect
     /// was already resolved once by the pane; the host runs it.
-    Decision(crate::adapters::tui::decision_pane::DecisionEffect),
+    Decision(crate::adapters::tui::decision_queue::DecisionEffect),
     /// `Ctrl+X q`: focus the oldest waiting decision (Story 21.1 S2 AC10).
     FocusDecisions,
     /// Story 14.3a: rerun the spoke at this slot.
@@ -504,7 +504,9 @@ pub(crate) fn proposal_higher_confirmation_active(state: &TuiState) -> bool {
         || state.pending_skill_trust.is_some()
         || state.pending_plan_approval.is_some()
         || state.pending_spawn_gate.is_some()
-        || state.pending_large_image.is_some()
+        || state
+            .decisions
+            .holds_undeferred(crate::adapters::tui::decision_queue::DecisionKind::LargeImage)
         || matches!(state.focus, FocusState::Overlay(_))
 }
 
@@ -612,7 +614,7 @@ pub fn with_card_focus_reconcile<T>(
     state: &mut TuiState,
     dispatch: impl FnOnce(&mut TuiState) -> T,
 ) -> T {
-    let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
+    let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
     let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
@@ -629,7 +631,7 @@ pub fn try_with_card_focus_reconcile<T>(
     state: &mut TuiState,
     dispatch: impl FnOnce(&mut TuiState) -> Option<T>,
 ) -> Option<T> {
-    let surface_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(state);
+    let surface_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(state);
     let permission_owned = reducer::permission_modal_owns_focus(state);
     let owner_before = (
         state.modal_stack.top().map(|frame| frame.id),
@@ -652,7 +654,7 @@ fn finish_input_boundary(
         reducer::settle_legacy(state);
     }
     if surface_was_open
-        && !crate::adapters::tui::decision_pane::card_focus_blocked(state)
+        && !crate::adapters::tui::decision_queue::card_focus_blocked(state)
         && matches!(inline_card(state), Some(card) if !matches!(card, InlineCard::Plan | InlineCard::SkipCascade))
     {
         reducer::take_chat_focus_for_card(state, true);

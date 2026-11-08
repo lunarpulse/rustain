@@ -7,7 +7,7 @@ use crate::adapters::tui::keymap::{
 };
 use crate::adapters::tui::{
     app::{self, InputAction},
-    decision_pane::{self, PaneOutcome},
+    decision_queue::{self, PaneOutcome},
     keymap::{self, CommandId, Context, Host, Key, Resolved},
     notification_log::{self, LogFacts, LogOutcome},
     quit_confirm::{self, QuitKeyOutcome},
@@ -92,9 +92,9 @@ pub fn route(
         && state
             .modal_stack
             .top()
-            .is_some_and(|frame| frame.surface == Surface::DecisionPane)
+            .is_some_and(|frame| frame.surface == Surface::Decision)
     {
-        decision_pane::clear_feedback(state);
+        decision_queue::clear_feedback(state);
     }
     if (!state.modal_stack.is_empty() || state.pending_leader.is_some())
         && matches!(key, Key::Char(c) if !c.is_control())
@@ -148,8 +148,8 @@ pub fn route(
         return Some(RouteEffect::Action(action));
     }
     let surface = state.modal_stack.top()?.surface;
-    if surface == Surface::DecisionPane && decision_pane::current(state, facts).is_none() {
-        super::reducer::close(state, Surface::DecisionPane);
+    if surface == Surface::Decision && decision_queue::current(state, facts).is_none() {
+        super::reducer::close(state, Surface::Decision);
         return route(state, event, host, facts);
     }
     // Search's Stage is its body: only this top owner permits wheel navigation.
@@ -220,7 +220,7 @@ pub fn route(
         Surface::BlockViewer(_) => {
             RouteEffect::Action(crate::adapters::tui::block_viewer::on_key(state, key, host))
         }
-        Surface::DecisionPane => match decision_pane::handle_domain_event(state, event, facts) {
+        Surface::Decision => match decision_queue::handle_domain_event(state, event, facts) {
             Some(PaneOutcome::Effect(effect)) => RouteEffect::Action(effect.into_action()),
             Some(PaneOutcome::Quit) => RouteEffect::QuitRequest,
             Some(PaneOutcome::Consumed) | None => RouteEffect::Consumed,

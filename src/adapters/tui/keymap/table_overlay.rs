@@ -1,6 +1,6 @@
 //! Overlay rows (Story 21.3 AC21, KG-2): Help, CommandPalette, ModelSelector,
 //! ProfileSwitcher, UsagePanel, CrossSearch, ReverseSearch, Autocomplete,
-//! NotificationLog, QuitConfirm, DecisionPane, RecipientSurface and Login.
+//! NotificationLog, QuitConfirm, Decision, RecipientSurface and Login.
 //!
 //! The rows describe TODAY's hand-written arms exactly (3-B2 moves the dispatch
 //! under the resolver and keeps every by-value witness green). Printable keys
@@ -48,8 +48,9 @@ pub enum OverlayCmd {
     NotifCompact, NotifFresh,
     // Quit confirmation.
     QuitYes, QuitNo,
-    // Decision pane.
+    // Decision frame.
     PaneQuit, PaneBack, PaneEnter, PaneEsc, PaneYes, PaneNo, PaneSwitch, PanePause, PaneCompact,
+    PaneScrollUp, PaneScrollDown,
     // Recipient surface.
     RecipientPrev, RecipientNext, RecipientClose, RecipientPageUp, RecipientPageDown,
     RecipientToggle,
@@ -88,7 +89,7 @@ const fn q(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::QuitConfirm, keys, CommandId::Overlay(cmd), "")
 }
 const fn d(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
-    bind(Context::DecisionPane, keys, CommandId::Overlay(cmd), "").local()
+    bind(Context::Decision, keys, CommandId::Overlay(cmd), "").local()
 }
 const fn s(keys: &'static [Key], cmd: OverlayCmd) -> Binding {
     bind(Context::RecipientSurface, keys, CommandId::Overlay(cmd), "")
@@ -113,8 +114,8 @@ pub const ROWS: &[Binding] = &[
     bind(Context::CommandPalette, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Return to this command palette"),
     bind(Context::NotificationLog, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").does("Open the menu above this frame"),
     bind(Context::NotificationLog, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").does("Open the command palette above this frame"),
-    bind(Context::DecisionPane, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
-    bind(Context::DecisionPane, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
+    bind(Context::Decision, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
+    bind(Context::Decision, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     bind(Context::ModelSelector, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
     bind(Context::ModelSelector, &[Key::Ctrl('p')], CommandId::Input(super::table_input::InputCmd::OpenPalette), "").local().does("Open the command palette above this frame"),
     bind(Context::ProfileSwitcher, &[Key::Ctrl('x')], CommandId::Global(super::table::GlobalCmd::OpenLeader), "menu").local().does("Open the menu above this frame"),
@@ -239,7 +240,7 @@ pub const ROWS: &[Binding] = &[
     q(&[Key::Esc], OverlayCmd::QuitNo).does("Stay"),
     q(&[Key::Ctrl('c')], OverlayCmd::QuitNo).does("Stay (back one frame)"),
     q(&[Key::Enter], OverlayCmd::QuitNo).does("Stay"),
-    // ── Decision pane (the key letters depend on the waiting decision's kind) ──
+    // ── Decision frame (the key letters depend on the waiting decision's kind) ──
     d(&[Key::Ctrl('c')], OverlayCmd::PaneBack).does("Back one frame without deciding; leave the item waiting"),
     d(&[Key::Ctrl('q')], OverlayCmd::PaneQuit).does("Ask to quit (guarded by the quit confirmation)"),
     d(&[Key::Enter], OverlayCmd::PaneEnter).does("Continue (a recovery decision)"),
@@ -249,6 +250,8 @@ pub const ROWS: &[Binding] = &[
     d(&[Key::Char('s')], OverlayCmd::PaneSwitch).does("Switch to a cheaper model (a budget decision)"),
     d(&[Key::Char('p')], OverlayCmd::PanePause).does("Pause (a budget decision)"),
     d(&[Key::Char('k')], OverlayCmd::PaneCompact).does("Compact the conversation (a context warning)"),
+    d(&[Key::PageUp], OverlayCmd::PaneScrollUp).does("Scroll the decision body up"),
+    d(&[Key::PageDown], OverlayCmd::PaneScrollDown).does("Scroll the decision body down"),
     // ── Recipient surface ──
     s(&[Key::Char('p')], OverlayCmd::RecipientPrev).does("Show the earlier part of the thread"),
     s(&[Key::Char('l')], OverlayCmd::RecipientNext).does("Show the later part of the thread"),

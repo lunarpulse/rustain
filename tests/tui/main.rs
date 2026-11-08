@@ -34,6 +34,9 @@ mod conformance_21_3_keymap;
 #[path = "../conformance_21_4_modal_stack.rs"]
 mod conformance_21_4_modal_stack;
 
+#[path = "../conformance_21_6_decision_queue.rs"]
+mod conformance_21_6_decision_queue;
+
 #[path = "../conformance_21_1_notification_lifecycle.rs"]
 mod conformance_21_1_notification_lifecycle;
 

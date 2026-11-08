@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use rustain::adapters::a2a::admission::A2aAdmissionPolicy;
 use rustain::adapters::tui::app::InputAction;
-use rustain::adapters::tui::decision_pane::{
-    Arrival, DecisionDraft, DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise,
+use rustain::adapters::tui::decision_queue::{
+    DecisionKind, PaneOutcome, handle_domain_event, note_painted, raise_large_image,
 };
 use rustain::adapters::tui::notification_log::LogFacts;
 use rustain::adapters::tui::notifications::NotificationStore;
@@ -107,22 +107,23 @@ fn pane_key(state: &mut TuiState, key: char) -> Option<InputAction> {
 async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
     let host = ObservedHost::start(A2aAdmissionPolicy::Allow, ResponseMode::NotifyAndWait).await;
     let mut fixture = fixture(&host).await;
-    fixture.state.pending_large_image = Some(ImageAttachment {
-        media_type: "image/png".into(),
-        data: "large-base64-image".into(),
-    });
 
     // Old (19.21b): `handle_input` mapped `y`/`n` to ImageConfirmAttach/Cancel. New
     // (21.1 S2, AC9/AC12): the confirmation is a decision-pane item and the event
     // loop's pane dispatch owns its keys before any proposal action, inert for 500 ms.
+    // Old -> new (21.6 6-A): the TuiState large-image slot is gone; the queued image
+    // item IS the confirmation (and the gate that hides the proposal while it waits).
     let clock = Arc::new(MockClock::new(Instant::now()));
     fixture.state.notifications =
         NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
     let ask = |state: &mut TuiState| {
-        raise(
+        raise_large_image(
             state,
-            DecisionDraft::new(DecisionKind::LargeImage, "Large image. Attach it?"),
-            Arrival::Requested,
+            ImageAttachment {
+                media_type: "image/png".into(),
+                data: "large-base64-image".into(),
+            },
+            "Large image. Attach it?",
         );
         note_painted(state);
     };
@@ -133,14 +134,17 @@ async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
         pane_key(&mut fixture.state, 'y'),
         Some(InputAction::Consumed)
     ));
+    // Old -> new: the slot outlived the answer, so the hidden-proposal check ran after
+    // `y`; an answered item now leaves the queue, so it runs while the item still waits.
+    let rows = fixture.paint(60, 16);
+    assert!(fixture.state.team_proposal_visible.is_none());
+    assert!(!rows.iter().any(|row| row.contains("[y] Send")));
     clock.advance(Duration::from_millis(501));
     assert!(matches!(
         pane_key(&mut fixture.state, 'y'),
         Some(InputAction::ImageConfirmAttach)
     ));
-    let rows = fixture.paint(60, 16);
-    assert!(fixture.state.team_proposal_visible.is_none());
-    assert!(!rows.iter().any(|row| row.contains("[y] Send")));
+    assert!(!fixture.state.decisions.holds(DecisionKind::LargeImage));
     ask(&mut fixture.state);
     clock.advance(Duration::from_millis(501));
     assert!(matches!(
@@ -149,9 +153,10 @@ async fn k03_large_image_confirmation_owns_y_and_n_before_proposal_send() {
     ));
     assert_not_sent(&fixture, &host).await;
 
-    // The fixture dispatches proposal actions only; clear the image confirmation
-    // as its real attach/cancel dispatcher does, then authorize this same proposal.
-    fixture.state.pending_large_image = None;
+    // The fixture dispatches proposal actions only; each answer already removed its
+    // image confirmation (as the real attach/cancel dispatcher consumes it), so the
+    // same proposal can now be authorized.
+    assert!(!fixture.state.decisions.holds(DecisionKind::LargeImage));
     send_once(&mut fixture, &host).await;
     host.stop().await;
 }

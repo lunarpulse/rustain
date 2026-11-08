@@ -6,7 +6,7 @@ use ratatui::{
 };
 use rustain::adapters::tui::{
     app::InputAction,
-    decision_pane::{self, Arrival, DecisionDraft, DecisionKind, Raised},
+    decision_queue::{self, Arrival, DecisionDraft, DecisionKind, Raised},
     keymap::{Context, Key},
     presentation::{self, Surface},
     quit_confirm::{self, QuitFacts, QuitHost, QuitRequest},
@@ -780,7 +780,7 @@ fn queued_permission_and_automatic_arrival_cannot_steal_an_idle_search_field() {
     assert!(f.h.state.pending_permission.is_none());
     assert_eq!(f.h.state.permission_queue.len(), 1);
     assert_eq!(
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.h.state,
             DecisionDraft::new(DecisionKind::Budget, "waiting field arrival"),
             Arrival::Automatic
@@ -836,7 +836,7 @@ fn nonediting_preemption_restores_query_viewers_and_painted_matches() {
     let viewer_status = status(&f);
     f.clock.advance(Duration::from_secs(2));
     assert_eq!(
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.h.state,
             DecisionDraft::new(DecisionKind::Budget, "nonediting preemption control"),
             Arrival::Automatic
@@ -846,10 +846,10 @@ fn nonediting_preemption_restores_query_viewers_and_painted_matches() {
     f.paint();
     assert_eq!(
         f.h.state.modal_stack.top().unwrap().surface,
-        Surface::DecisionPane
+        Surface::Decision
     );
     assert!(f.h.screen_text().contains("nonediting preemption control"));
-    f.clock.advance(decision_pane::INERT_AFTER_PAINT);
+    f.clock.advance(decision_queue::INERT_AFTER_PAINT);
     f.press(Key::Esc);
     f.paint();
     assert_eq!(f.h.state.modal_stack.top(), Some(&frame));

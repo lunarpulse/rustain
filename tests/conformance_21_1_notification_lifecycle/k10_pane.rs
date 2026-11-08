@@ -2,8 +2,9 @@
 //!
 //! Every assertion enters through the public front doors the event loop calls:
 //! the producers (`handle_upsert_context_warning`, `begin_delete_confirmation`,
-//! S-LOG `K`/`n`), `decision_pane::{raise, handle_domain_event, open_waiting,
-//! note_painted, render}`, `handle_input` (typing, `Ctrl+X q`), `status_bar::render`.
+//! S-LOG `K`/`n`), `decision_queue::{raise, handle_domain_event, open_waiting,
+//! note_painted}`, `presentation::compose` (the `Surface::Decision` frame),
+//! `handle_input` (typing, `Ctrl+X q`), `status_bar::render`.
 //! Time is a `MockClock` (no sleeps). The event loop's own effect arms
 //! (`InputAction::Decision`) need a daemon-less runtime and are covered by the
 //! native smoke (K12b).
@@ -17,9 +18,9 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::widgets::Paragraph;
 use rustain::adapters::tui::app::{InputAction, handle_input};
-use rustain::adapters::tui::decision_pane::{
-    self, Arrival, DecisionDraft, DecisionEffect, DecisionKind, INERT_AFTER_PAINT, PaneOutcome,
-    Raised, waiting_toast,
+use rustain::adapters::tui::decision_queue::{
+    self, Arrival, DecisionDraft, DecisionEffect, DecisionKind, DecisionSubject, INERT_AFTER_PAINT,
+    PaneKey, PaneOutcome, Raised, waiting_toast,
 };
 use rustain::adapters::tui::handlers::context_warning::handle_upsert_context_warning;
 use rustain::adapters::tui::keymap::Host;
@@ -32,6 +33,7 @@ use rustain::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost};
 use rustain::adapters::tui::state::TuiState;
 use rustain::domain::clock::MockClock;
 use rustain::domain::events::{DomainInputEvent, DomainKey};
+use rustain::domain::models::visual::DeleteConfirmTarget;
 use rustain::domain::models::{FocusState, ImageAttachment};
 use rustain::infrastructure::runtime::event_loop::begin_delete_confirmation;
 
@@ -46,6 +48,17 @@ fn special(k: DomainKey) -> DomainInputEvent {
     DomainInputEvent::SpecialKey(k)
 }
 
+fn large_image() -> ImageAttachment {
+    ImageAttachment {
+        media_type: "image/png".into(),
+        data: "AAAA".into(),
+    }
+}
+
+fn bulk3() -> DeleteConfirmTarget {
+    DeleteConfirmTarget::Bulk { count: 3 }
+}
+
 fn facts(active: &str) -> LogFacts {
     LogFacts {
         active_conversation_id: Some(active.to_owned()),
@@ -57,19 +70,19 @@ fn facts(active: &str) -> LogFacts {
 }
 
 fn press(state: &mut TuiState, event: DomainInputEvent, f: &LogFacts) -> Option<PaneOutcome> {
-    let outcome = decision_pane::handle_domain_event(state, &event, f);
+    let outcome = decision_queue::handle_domain_event(state, &event, f);
     assert!(presentation::consistent(state));
     outcome
 }
 
 /// First paint, then the inert window passes.
 fn ready(state: &mut TuiState, clock: &MockClock) {
-    decision_pane::note_painted(state);
+    decision_queue::note_painted(state);
     advance(clock, INERT_AFTER_PAINT);
 }
 
 fn automatic(state: &mut TuiState, kind: DecisionKind) -> Raised {
-    let raised = decision_pane::raise(
+    let raised = decision_queue::raise(
         state,
         DecisionDraft::new(kind, "the question"),
         Arrival::Automatic,
@@ -152,12 +165,9 @@ fn k10_an_idle_empty_input_chat_or_sidebar_takes_the_first_arrival() {
             Raised::Focused,
             "{focus:?}"
         );
-        assert!(is_open(&state, Surface::DecisionPane));
+        assert!(is_open(&state, Surface::Decision));
         assert_eq!(state.modal_stack.len(), 1);
-        assert_eq!(
-            state.modal_stack.top().unwrap().surface,
-            Surface::DecisionPane
-        );
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
         assert_eq!(
             waiting_toasts(&state),
             0,
@@ -173,7 +183,7 @@ fn k10_a_typing_composer_is_never_interrupted() {
     state.focus = FocusState::Input;
     state.input_buffer = "half a sentence".into();
     assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Waiting);
-    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
     assert_eq!(state.input_buffer, "half a sentence");
     assert_eq!(
@@ -264,11 +274,12 @@ fn k10_open_surfaces_are_never_taken_from() {
                 },
             );
         }),
-        ("a proposal card", |s| {
-            s.pending_large_image = Some(ImageAttachment {
-                media_type: "image/png".into(),
-                data: "AAAA".into(),
-            });
+        ("a deferred large image", |s| {
+            // Old: a hand-seeded large-image slot ("a proposal card"). New: the image is
+            // a queue item; set aside with `Ctrl+C` so it holds no frame. A waiting item
+            // still protects the user: an arrival is only ever the first (0 -> 1).
+            decision_queue::raise_large_image(s, large_image(), "big");
+            decision_queue::handle_key(s, PaneKey::CtrlC, &LogFacts::default());
         }),
         ("a plan-cancel confirmation", |s| {
             s.task_panel_state.cancel_plan_confirm = Some("plan-1".into());
@@ -292,7 +303,7 @@ fn k10_open_surfaces_are_never_taken_from() {
             Raised::Waiting,
             "{name}"
         );
-        assert!(!is_open(&state, Surface::DecisionPane), "{name}");
+        assert!(!is_open(&state, Surface::Decision), "{name}");
         assert_eq!(
             state.modal_stack.iter().cloned().collect::<Vec<_>>(),
             frames,
@@ -349,10 +360,7 @@ fn k10_non_text_frames_allow_arrival_and_restore_the_interrupted_frame() {
         advance(&clock, Duration::from_secs(1));
         assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Focused);
         assert_eq!(state.modal_stack.len(), frames.len() + 1);
-        assert_eq!(
-            state.modal_stack.top().unwrap().surface,
-            Surface::DecisionPane
-        );
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
         assert!(is_open(&state, surface));
         assert_eq!(waiting_toasts(&state), 0);
         ready(&mut state, &clock);
@@ -364,7 +372,7 @@ fn k10_non_text_frames_allow_arrival_and_restore_the_interrupted_frame() {
             state.decisions.holds(DecisionKind::Budget),
             "Later keeps the item"
         );
-        assert!(!is_open(&state, Surface::DecisionPane));
+        assert!(!is_open(&state, Surface::Decision));
         assert_eq!(
             state.modal_stack.iter().cloned().collect::<Vec<_>>(),
             frames
@@ -417,14 +425,14 @@ fn k10_only_the_first_arrival_can_take_focus_and_a_deferral_blocks_for_a_minute(
         Some(PaneOutcome::Consumed),
         "Esc is Later"
     );
-    decision_pane::withdraw(&mut state, DecisionKind::LargeImage);
+    decision_queue::withdraw(&mut state, DecisionKind::LargeImage);
     advance(&clock, Duration::from_secs(59));
     assert_eq!(
         automatic(&mut state, DecisionKind::Budget),
         Raised::Waiting,
         "59 s"
     );
-    decision_pane::withdraw(&mut state, DecisionKind::Budget);
+    decision_queue::withdraw(&mut state, DecisionKind::Budget);
     advance(&clock, Duration::from_secs(1));
     assert_eq!(
         automatic(&mut state, DecisionKind::Budget),
@@ -445,7 +453,7 @@ fn k10_rail_keys_are_inert_for_500ms_after_first_paint_and_never_replayed() {
         Some(PaneOutcome::Consumed),
         "before paint"
     );
-    decision_pane::note_painted(&mut state);
+    decision_queue::note_painted(&mut state);
     advance(&clock, INERT_AFTER_PAINT - Duration::from_millis(1));
     assert_eq!(
         press(&mut state, key('n'), &f),
@@ -492,7 +500,7 @@ fn k10_esc_follows_the_table_for_every_kind() {
     ];
     for (kind, effect) in cases {
         let (mut state, clock) = clocked(80, 24);
-        decision_pane::raise(
+        decision_queue::raise(
             &mut state,
             DecisionDraft::new(kind, "q"),
             Arrival::Requested,
@@ -510,8 +518,8 @@ fn k10_esc_follows_the_table_for_every_kind() {
                 assert_eq!(outcome, Some(PaneOutcome::Consumed), "{kind:?}");
                 assert!(state.decisions.holds(kind), "{kind:?}: still pending");
                 assert!(
-                    !is_open(&state, Surface::DecisionPane),
-                    "{kind:?}: pane released"
+                    !is_open(&state, Surface::Decision),
+                    "{kind:?}: frame released"
                 );
             }
         }
@@ -524,18 +532,12 @@ fn k10_a_waiting_or_deferred_item_cannot_be_answered_by_a_stray_key() {
     // EV-3 zombie: with the item hidden, typed `y`/`n` are text, never answers.
     let (mut state, clock) = clocked(80, 24);
     state.focus = FocusState::Input;
-    state.pending_large_image = Some(ImageAttachment {
-        media_type: "image/png".into(),
-        data: "AAAA".into(),
-    });
-    decision_pane::raise(
-        &mut state,
-        DecisionDraft::new(DecisionKind::LargeImage, "big"),
-        Arrival::Requested,
-    );
+    // Old: a hand-seeded large-image slot plus a payload-less draft. New: one call; the
+    // image is the item's payload.
+    decision_queue::raise_large_image(&mut state, large_image(), "big");
     ready(&mut state, &clock);
     press(&mut state, special(DomainKey::Esc), &LogFacts::default());
-    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
     for c in ['y', 'n'] {
         let action = handle_input(&mut state, &key(c));
@@ -550,10 +552,9 @@ fn k10_a_waiting_or_deferred_item_cannot_be_answered_by_a_stray_key() {
         );
     }
     assert_eq!(state.input_buffer, "yn", "both keys typed as text");
-    assert!(
-        state.pending_large_image.is_some(),
-        "the attachment is untouched"
-    );
+    // Old: the removed slot was asserted. New: the attachment is the held item's payload.
+    let held = state.decisions.items().next().expect("the image waits");
+    assert_eq!(held.subject, DecisionSubject::LargeImage(large_image()));
     assert!(state.decisions.holds(DecisionKind::LargeImage));
 }
 
@@ -568,7 +569,7 @@ fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
         handle_input(&mut state, &key('q')),
         InputAction::FocusDecisions
     );
-    decision_pane::open_waiting(&mut state, &facts("c1"));
+    decision_queue::open_waiting(&mut state, &facts("c1"));
     assert_eq!(
         state.notifications.visible().last().unwrap().message,
         "No decisions waiting"
@@ -580,18 +581,15 @@ fn k10_ctrl_x_q_focuses_the_oldest_decidable_item_and_says_so_when_none() {
     state.focus = FocusState::Input;
     automatic(&mut state, DecisionKind::Carryover);
     automatic(&mut state, DecisionKind::Budget);
-    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
-    decision_pane::open_waiting(&mut state, &facts("c1"));
+    decision_queue::open_waiting(&mut state, &facts("c1"));
     assert_eq!(
-        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
+        decision_queue::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::Carryover)
     );
     assert!(presentation::consistent(&state));
-    assert_eq!(
-        state.modal_stack.top().unwrap().surface,
-        Surface::DecisionPane
-    );
+    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
     assert_eq!(state.input_buffer, "typing", "the draft is untouched");
 }
 
@@ -604,7 +602,7 @@ fn k10_the_status_row_carries_the_cue_while_items_wait() {
     automatic(&mut state, DecisionKind::Budget);
     let row = status_row(&state, 80, None);
     assert!(row.contains("Needs you (2) ^X q"), "{row}");
-    decision_pane::withdraw(&mut state, DecisionKind::Budget);
+    decision_queue::withdraw(&mut state, DecisionKind::Budget);
     let row = status_row(&state, 80, None);
     assert!(row.contains("Needs you (1) ^X q"), "{row}");
 }
@@ -748,9 +746,11 @@ fn k10_enter_never_resolves_a_delete_through_the_front_door() {
         Some(PaneOutcome::Consumed)
     );
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));
-    assert!(is_open(&state, Surface::DecisionPane));
+    assert!(is_open(&state, Surface::Decision));
     assert_eq!(state.modal_stack.len(), 1);
-    assert!(state.pending_delete.is_some(), "the target is untouched");
+    // Old: the removed delete slot was asserted. New: the target is the held item's payload.
+    let held = state.decisions.items().next().expect("the delete is held");
+    assert_eq!(held.subject, DecisionSubject::Delete(bulk3()));
     // Positive control: the painted `y` resolves it.
     assert_eq!(
         press(&mut state, key('y'), &f),
@@ -758,32 +758,52 @@ fn k10_enter_never_resolves_a_delete_through_the_front_door() {
     );
 }
 
+// Old -> new: answering a decision used to promote the next waiting item of ANY kind
+// (a budget `y` opened the waiting large image). Now (21.6 A9) only a not-deferred item
+// of the SAME kind promotes, and only when the answered frame interrupted nothing; a
+// waiting item of another kind stays queued. The promoted item still gets its own
+// inert window, so a double press answers once.
 #[test]
-fn k10_a_promoted_item_gets_its_own_inert_window_so_a_double_press_answers_once() {
+fn k10_a_promoted_same_kind_item_gets_its_own_inert_window_so_a_double_press_answers_once() {
     let (mut state, clock) = clocked(80, 24);
-    decision_pane::raise(
+    decision_queue::raise(
         &mut state,
-        DecisionDraft::new(DecisionKind::Budget, "b"),
+        DecisionDraft::new(DecisionKind::LargeImage, "a").source("a"),
         Arrival::Requested,
     );
-    automatic(&mut state, DecisionKind::LargeImage);
+    decision_queue::raise(
+        &mut state,
+        DecisionDraft::new(DecisionKind::LargeImage, "b").source("b"),
+        Arrival::Automatic,
+    );
+    automatic(&mut state, DecisionKind::Budget);
+    assert_eq!(state.decisions.count(DecisionKind::LargeImage), 2);
     let f = LogFacts::default();
     ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, key('y'), &f),
-        Some(PaneOutcome::Effect(DecisionEffect::BudgetContinue))
+        Some(PaneOutcome::Effect(DecisionEffect::AttachLargeImage))
     );
     assert_eq!(
         press(&mut state, key('y'), &f),
         Some(PaneOutcome::Consumed),
         "the promoted image has not painted yet: the second `y` is dropped"
     );
-    assert!(state.decisions.holds(DecisionKind::LargeImage));
+    assert_eq!(state.decisions.count(DecisionKind::LargeImage), 1);
+    assert_eq!(
+        decision_queue::current(&state, &f).map(|i| i.source.clone()),
+        Some("b".to_owned()),
+        "the same-kind item opened at once"
+    );
     ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, key('y'), &f),
         Some(PaneOutcome::Effect(DecisionEffect::AttachLargeImage))
     );
+    // The waiting budget (another kind) is NOT promoted after the last image.
+    assert!(state.modal_stack.is_empty());
+    assert!(state.decisions.holds(DecisionKind::Budget));
+    assert!(!is_open(&state, Surface::Decision));
 }
 
 #[test]
@@ -792,7 +812,7 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
     // The user asks to delete while a budget decision is focused and past its
     // window: the `y` meant for the budget must not confirm the delete.
     let (mut state, clock) = clocked(80, 24);
-    decision_pane::raise(
+    decision_queue::raise(
         &mut state,
         DecisionDraft::new(DecisionKind::Budget, "b"),
         Arrival::Requested,
@@ -803,7 +823,7 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
         rustain::domain::models::visual::DeleteConfirmTarget::Bulk { count: 3 },
     );
     assert_eq!(
-        decision_pane::current(&state, &f).map(|i| i.kind),
+        decision_queue::current(&state, &f).map(|i| i.kind),
         Some(DecisionKind::DeleteConversations)
     );
     for k in [key('y'), special(DomainKey::Enter)] {
@@ -814,7 +834,12 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
         );
     }
     assert!(state.decisions.holds(DecisionKind::DeleteConversations));
-    assert!(state.pending_delete.is_some());
+    let held = state
+        .decisions
+        .items()
+        .find(|item| item.kind == DecisionKind::DeleteConversations)
+        .expect("the delete is held");
+    assert_eq!(held.subject, DecisionSubject::Delete(bulk3()));
     ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, key('y'), &f),
@@ -828,19 +853,19 @@ fn k10_an_item_brought_to_focus_over_a_painted_one_gets_its_own_inert_window() {
     ready(&mut state, &clock);
     press(&mut state, special(DomainKey::Esc), &f);
     assert!(
-        !is_open(&state, Surface::DecisionPane),
-        "Later released the pane"
+        !is_open(&state, Surface::Decision),
+        "Later released the frame"
     );
     assert!(state.modal_stack.is_empty());
-    decision_pane::raise(
+    decision_queue::raise(
         &mut state,
         DecisionDraft::new(DecisionKind::Budget, "b"),
         Arrival::Requested,
     );
     ready(&mut state, &clock);
-    decision_pane::open_waiting(&mut state, &f);
+    decision_queue::open_waiting(&mut state, &f);
     assert_eq!(
-        decision_pane::current(&state, &f).map(|i| i.kind),
+        decision_queue::current(&state, &f).map(|i| i.kind),
         Some(DecisionKind::LargeImage)
     );
     assert_eq!(
@@ -862,10 +887,33 @@ fn k10_closing_one_tab_or_clearing_its_warning_never_touches_another_tabs_decisi
     handle_upsert_context_warning(&mut state, "c1", 92);
     handle_upsert_context_warning(&mut state, "c2", 93);
     assert_eq!(state.decisions.len(), 2);
-    // Compaction finished (or the level dropped) in c1: only c1's item clears.
+    // Compaction finished (or the level dropped) in c1: only c1's item is withdrawn.
     rustain::adapters::tui::handlers::context_warning::handle_clear_context_warning(
         &mut state, "c1",
     );
+    // Old -> new: withdrawing the item whose frame is OPEN used to close the frame at
+    // once (len 1). Now (A7) the open copy turns stale: it paints
+    // `This decision is no longer pending.` with `[Esc] Close` only, and Close
+    // removes it. c2's item is untouched and live throughout.
+    assert_eq!(state.decisions.len(), 2, "c1's open frame is kept, stale");
+    let c1 = state
+        .decisions
+        .items()
+        .find(|i| i.conversation_id.as_deref() == Some("c1"))
+        .expect("c1's item is still held until its frame closes");
+    assert!(c1.is_stale());
+    let c2 = state
+        .decisions
+        .items()
+        .find(|i| i.conversation_id.as_deref() == Some("c2"))
+        .expect("c2's warning is still pending");
+    assert!(!c2.is_stale(), "c2's warning is untouched");
+    assert_eq!(
+        press(&mut state, special(DomainKey::Esc), &facts("c1")),
+        Some(PaneOutcome::Consumed),
+        "Esc closes the stale copy"
+    );
+    assert!(state.modal_stack.is_empty());
     assert_eq!(state.decisions.len(), 1);
     assert!(
         state
@@ -879,20 +927,25 @@ fn k10_closing_one_tab_or_clearing_its_warning_never_touches_another_tabs_decisi
         titles: vec![("c3".into(), "three".into())],
         ..facts("c3")
     };
-    decision_pane::prune_closed(&mut state, &remaining);
+    decision_queue::prune_closed(&mut state, &remaining);
     assert!(state.decisions.is_empty());
-    assert_eq!(decision_pane::waiting(&state), 0);
+    assert_eq!(decision_queue::waiting(&state), 0);
     let row = status_row(&state, 80, None);
     assert!(!row.contains("Needs you"), "{row}");
 }
 
-// ── geometry: bottom-anchored over the chat pane, nothing else moves ─────────
+// ── geometry: a frame in `frame_rect`, nothing outside it changes ────────────
+//
+// Old: the pane was bottom-anchored inside the chat pane (its last row was the chat
+// pane's last row). New: every decision is a `Surface::Decision` frame painted in
+// `geometry::frame_rect(shell.region)` (full sheet below 100 columns, centered 90 %
+// at >= 100) with the title ` Decision: <kind> ` on its top border.
 
 #[test]
-fn k10_the_pane_paints_inside_the_chat_pane_and_changes_no_other_cell() {
+fn k10_the_frame_paints_in_frame_rect_and_changes_no_other_cell() {
     for (width, height) in [(60u16, 16u16), (80, 24), (130, 30)] {
         let (mut state, _c) = clocked(width, height);
-        decision_pane::raise(
+        decision_queue::raise(
             &mut state,
             DecisionDraft::new(
                 DecisionKind::Budget,
@@ -901,40 +954,60 @@ fn k10_the_pane_paints_inside_the_chat_pane_and_changes_no_other_cell() {
             Arrival::Requested,
         );
         let layout = layout_of(&state, width, height);
+        let region = Shell::new(Rect::new(0, 0, width, height), &layout).region;
+        let sheet = presentation::geometry::frame_rect(region);
+        if width < 100 {
+            assert_eq!(sheet, region, "{width}x{height}: a full sheet");
+        } else {
+            assert!(
+                sheet.width < region.width && sheet.height < region.height,
+                "{width}x{height}: a centered box inside the region"
+            );
+        }
         let f = LogFacts::default();
         let without = draw_pane(&state, &f, width, height, false);
         let with = draw_pane(&state, &f, width, height, true);
-        let pane = layout.chat_pane;
         for y in 0..height {
             for x in 0..width {
-                let inside =
-                    Rect::new(pane.x, pane.y, pane.width, pane.height).contains((x, y).into());
-                if !inside {
-                    assert_eq!(
-                        without.cell((x, y)).map(|c| c.symbol().to_owned()),
-                        with.cell((x, y)).map(|c| c.symbol().to_owned()),
-                        "{width}x{height}: ({x},{y}) outside the chat pane changed"
+                if sheet.contains((x, y).into()) {
+                    continue;
+                }
+                assert_eq!(
+                    without.cell((x, y)).map(|c| c.symbol().to_owned()),
+                    with.cell((x, y)).map(|c| c.symbol().to_owned()),
+                    "{width}x{height}: ({x},{y}) outside the frame changed"
+                );
+                if layout.input_area.contains((x, y).into()) {
+                    assert!(
+                        with[(x, y)].modifier.contains(Modifier::DIM),
+                        "{width}x{height}: composer ({x},{y}) must dim without changing text"
                     );
-                    if layout.input_area.contains((x, y).into()) {
-                        assert!(
-                            with[(x, y)].modifier.contains(Modifier::DIM),
-                            "{width}x{height}: composer ({x},{y}) must dim without changing text"
-                        );
-                    }
-                    if layout.status_bar.contains((x, y).into()) {
-                        assert_eq!(without[(x, y)], with[(x, y)], "status is unchanged");
-                    }
+                }
+                if layout.status_bar.contains((x, y).into()) {
+                    assert_eq!(without[(x, y)], with[(x, y)], "status is unchanged");
                 }
             }
         }
         let text = screen(&with);
-        assert!(text.contains("Daily budget"), "{width}x{height}:\n{text}");
+        let top = row_text(&with, sheet.y);
+        assert!(
+            top.contains("┌") && top.contains(" Decision: Daily budget "),
+            "{width}x{height}: the title sits on the top border: {top}"
+        );
+        assert!(
+            text.contains("Needs you › Daily budget | 1 pending"),
+            "{width}x{height}:\n{text}"
+        );
+        assert!(
+            text.contains("Daily budget ($10.00) reached."),
+            "{width}x{height}:\n{text}"
+        );
         assert!(text.contains("[y] Continue"), "{width}x{height}:\n{text}");
         assert!(text.contains("[Esc] Later"), "{width}x{height}:\n{text}");
-        // Bottom-anchored: the frame's last row is the chat pane's last row.
-        let last = row_text(&with, pane.bottom() - 1);
+        // The frame's last row is its own bottom border.
+        let last = row_text(&with, sheet.bottom() - 1);
         assert!(
-            last.contains('└') || last.contains('┘'),
+            last.contains('└') && last.contains('┘'),
             "{width}x{height}: {last}"
         );
     }
@@ -947,7 +1020,7 @@ fn k10_the_context_warning_producer_raises_a_decision_and_a_log_record() {
     let (mut state, _c) = clocked(80, 24);
     handle_upsert_context_warning(&mut state, "c1", 92);
     assert_eq!(
-        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
+        decision_queue::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::ContextWarning)
     );
     let record = state.notifications.records().last().expect("a log record");
@@ -969,7 +1042,7 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     ready(&mut state, &clock);
     // Later: the item waits, unfocused.
     press(&mut state, special(DomainKey::Esc), &facts("c1"));
-    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
 
     // `K` on the ctxwarn record raises/focuses the Compact decision.
@@ -982,7 +1055,7 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     );
     assert!(state.notification_log.is_none(), "S-LOG closed");
     assert_eq!(
-        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
+        decision_queue::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::ContextWarning)
     );
 
@@ -992,7 +1065,7 @@ fn k10_slog_k_and_n_raise_decisions_and_never_act() {
     assert_eq!(outcome, Some(LogOutcome::Closed));
     assert!(state.decisions.holds(DecisionKind::Carryover));
     assert_eq!(
-        decision_pane::current(&state, &facts("c1")).map(|i| i.kind),
+        decision_queue::current(&state, &facts("c1")).map(|i| i.kind),
         Some(DecisionKind::Carryover)
     );
 }
@@ -1099,7 +1172,7 @@ fn k10_the_delete_producer_takes_the_pane_even_over_a_typing_composer() {
         &mut state,
         rustain::domain::models::visual::DeleteConfirmTarget::Bulk { count: 3 },
     );
-    assert!(is_open(&state, Surface::DecisionPane));
+    assert!(is_open(&state, Surface::Decision));
     assert!(presentation::consistent(&state));
     assert_eq!(state.modal_stack.len(), 1);
     assert_eq!(state.input_buffer, "draft");
@@ -1122,18 +1195,18 @@ fn k10_ctrl_c_backs_out_and_ctrl_q_inside_the_pane_requests_the_guard() {
         Some(PaneOutcome::Consumed),
         "RU-20: Ctrl+C backs out rather than requesting quit"
     );
-    assert!(!is_open(&state, Surface::DecisionPane));
+    assert!(!is_open(&state, Surface::Decision));
     assert!(state.modal_stack.is_empty());
     assert!(state.decisions.holds(DecisionKind::Carryover));
     assert!(state.decisions.items().next().unwrap().deferred);
 
-    decision_pane::open_waiting(&mut state, &LogFacts::default());
+    decision_queue::open_waiting(&mut state, &LogFacts::default());
     ready(&mut state, &clock);
     assert_eq!(
         press(&mut state, special(DomainKey::CtrlQ), &LogFacts::default()),
         Some(PaneOutcome::Quit)
     );
-    assert!(is_open(&state, Surface::DecisionPane));
+    assert!(is_open(&state, Surface::Decision));
     assert!(
         state.decisions.holds(DecisionKind::Carryover),
         "the guard decides"
@@ -1147,7 +1220,7 @@ fn k10_ctrl_c_backs_out_and_ctrl_q_inside_the_pane_requests_the_guard() {
         state.modal_stack.top().unwrap().surface,
         Surface::QuitConfirm
     );
-    assert!(is_open(&state, Surface::DecisionPane));
+    assert!(is_open(&state, Surface::Decision));
     assert_eq!(automatic(&mut state, DecisionKind::Budget), Raised::Waiting);
     assert_eq!(handle_input(&mut state, &key('n')), InputAction::Consumed);
     assert_eq!(

@@ -25,7 +25,7 @@ mod k1_stack {
     use super::keymap_support::press;
     use rustain::adapters::tui::{
         app::InputAction,
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         keymap::Key,
         notification_log::LogFacts,
         presentation,
@@ -37,7 +37,7 @@ mod k1_stack {
     fn esc_backs_exactly_one_frame_and_restores_the_displaced_one() {
         let mut state = TuiState::new(80, 24);
         state.input_buffer = "untouched".into();
-        decision_pane::raise(
+        decision_queue::raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Budget, "reachable fifth-surface control"),
             Arrival::Automatic,
@@ -53,7 +53,7 @@ mod k1_stack {
             press(&mut state, Key::Char('q')),
             InputAction::FocusDecisions
         );
-        decision_pane::open_waiting(&mut state, &LogFacts::default());
+        decision_queue::open_waiting(&mut state, &LogFacts::default());
         assert_eq!(state.modal_stack.len(), 4, "the pane must join the stack");
         let before: Vec<_> = state.modal_stack.iter().cloned().collect();
         let payload = state.notification_log.clone();
@@ -87,7 +87,7 @@ mod k1_stack {
             press(&mut state, Key::Ctrl('x'));
             let action = press(&mut state, Key::Char(chord));
             if action == InputAction::FocusDecisions {
-                decision_pane::open_waiting(&mut state, &LogFacts::default());
+                decision_queue::open_waiting(&mut state, &LogFacts::default());
             }
         }
         assert_eq!(press(&mut state, Key::Ctrl('q')), InputAction::Quit);
@@ -98,13 +98,31 @@ mod k1_stack {
                 ..QuitFacts::idle(QuitHost::Local)
             },
         );
-        decision_pane::withdraw(&mut state, DecisionKind::Budget);
+        decision_queue::withdraw(&mut state, DecisionKind::Budget);
+        // old -> new: withdrawing the item whose frame was a Quit continuation
+        // closed that frame; now an open frame is never pulled away (A7): the
+        // item turns stale, its frame stays suspended, and nothing resurrects it.
         assert!(presentation::consistent(&state));
-        assert!(!presentation::is_open(
+        assert!(presentation::is_open(
             &state,
-            presentation::Surface::DecisionPane
+            presentation::Surface::Decision
         ));
+        assert_eq!(state.decisions.len(), 1);
+        assert!(state.decisions.items().all(|item| item.is_stale()));
         press(&mut state, Key::Char('n'));
+        assert_eq!(state.modal_stack.len(), 4);
+        assert_eq!(
+            state.modal_stack.top().unwrap().surface,
+            presentation::Surface::Decision
+        );
+        assert_eq!(
+            press(&mut state, Key::Char('y')),
+            InputAction::Consumed,
+            "a stale item decides nothing"
+        );
+        assert!(state.decisions.items().all(|item| item.is_stale()));
+        assert_eq!(press(&mut state, Key::Esc), InputAction::Consumed);
+        assert!(state.decisions.is_empty(), "Close removes the stale item");
         assert_eq!(state.modal_stack.len(), 3);
         assert_eq!(
             state.modal_stack.top().unwrap().surface,
@@ -130,14 +148,14 @@ mod k1_stack {
                 }
             }
         }
-        use decision_pane::{DecisionItem, Raised};
+        use decision_queue::{DecisionItem, Raised};
         use presentation::{Frame, Opened, Surface, reducer};
 
         fn queued() -> (TuiState, DecisionItem) {
             let mut state = TuiState::new(80, 24);
             state.input_buffer = "untouched".into();
             assert_eq!(
-                decision_pane::raise(
+                decision_queue::raise(
                     &mut state,
                     DecisionDraft::new(DecisionKind::Budget, "queued identity"),
                     Arrival::Automatic,
@@ -152,9 +170,9 @@ mod k1_stack {
             assert_eq!(state.input_buffer, "untouched");
             assert!(state.modal_stack.len() <= 4);
             assert!(presentation::consistent(state));
-            if presentation::is_open(state, Surface::DecisionPane) {
+            if presentation::is_open(state, Surface::Decision) {
                 assert_eq!(
-                    decision_pane::current(state, &LogFacts::default()),
+                    decision_queue::current(state, &LogFacts::default()),
                     Some(item)
                 );
             }
@@ -193,14 +211,14 @@ mod k1_stack {
             let top = after.last().unwrap();
             assert_eq!(top.surface, surface);
             assert!(before.iter().all(|frame| frame.id < top.id));
-            assert_eq!(top.decision.is_some(), surface == Surface::DecisionPane);
+            assert_eq!(top.decision.is_some(), surface == Surface::Decision);
         }
 
         let surfaces = [
             Surface::CommandPalette,
             Surface::Help,
             Surface::NotificationLog,
-            Surface::DecisionPane,
+            Surface::Decision,
             Surface::QuitConfirm,
         ];
         let (mut reachable, mut blocked, mut reducer_only) = (0, 0, 0);
@@ -234,7 +252,7 @@ mod k1_stack {
                         0..=2 => assert_eq!(action, InputAction::Consumed, "{order:?}"),
                         3 => {
                             assert_eq!(action, InputAction::FocusDecisions, "{order:?}");
-                            decision_pane::open_waiting(&mut state, &LogFacts::default());
+                            decision_queue::open_waiting(&mut state, &LogFacts::default());
                         }
                         4 => {
                             assert_eq!(action, InputAction::Quit, "{order:?}");
@@ -276,8 +294,8 @@ mod k1_stack {
                 let before = frames(&state);
                 let surface = surfaces[usize::from(opener)];
                 match surface {
-                    Surface::DecisionPane => {
-                        assert!(decision_pane::focus_oldest(
+                    Surface::Decision => {
+                        assert!(decision_queue::focus_oldest(
                             &mut state,
                             &LogFacts::default()
                         ));
@@ -330,7 +348,7 @@ mod k5_restore {
     use super::keymap_support::press;
     use ratatui::{Terminal, backend::TestBackend};
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind, Raised},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind, Raised},
         keymap::{Host, Key},
         notification_log::LogFacts,
         notifications::{self, NoticeSource, NotificationStore},
@@ -355,7 +373,7 @@ mod k5_restore {
     }
 
     pub(super) fn arrival(state: &mut TuiState) -> Raised {
-        decision_pane::raise(
+        decision_queue::raise(
             state,
             DecisionDraft::new(DecisionKind::Budget, "budget detail"),
             Arrival::Automatic,
@@ -380,8 +398,8 @@ mod k5_restore {
             })
             .unwrap();
         assert!(painted, "only a visible top pane can start its inert clock");
-        decision_pane::note_painted(state);
-        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        decision_queue::note_painted(state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
     }
 
     #[test]
@@ -401,7 +419,7 @@ mod k5_restore {
                 Raised::Waiting,
                 "recent inspector printable protects arrival"
             );
-            decision_pane::withdraw(&mut state, DecisionKind::Budget);
+            decision_queue::withdraw(&mut state, DecisionKind::Budget);
             clock.advance(Duration::from_secs(1));
             let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
             let help = state.help_overlay.scroll_offset;
@@ -414,7 +432,7 @@ mod k5_restore {
                 assert_eq!(
                     action,
                     rustain::adapters::tui::app::InputAction::Decision(
-                        decision_pane::DecisionEffect::BudgetContinue,
+                        decision_queue::DecisionEffect::BudgetContinue,
                     )
                 );
             }
@@ -450,10 +468,10 @@ mod k5_restore {
             state
                 .notifications
                 .records()
-                .any(|r| r.message == decision_pane::waiting_toast())
+                .any(|r| r.message == decision_queue::waiting_toast())
         );
         assert_eq!(
-            decision_pane::status_cue(decision_pane::waiting(&state)).as_deref(),
+            decision_queue::status_cue(decision_queue::waiting(&state)).as_deref(),
             Some("Needs you (1) ^X q")
         );
         let (mut idle, _) = self::state();
@@ -482,7 +500,7 @@ mod k5_restore {
                     assert_eq!(arrival(&mut state), Raised::Focused);
                     ready(&mut state, &clock);
                     press(&mut state, Key::Esc);
-                    decision_pane::withdraw(&mut state, DecisionKind::Budget);
+                    decision_queue::withdraw(&mut state, DecisionKind::Budget);
                 }
                 "quit" => {
                     super::k3_compose::open_quit(&mut state);
@@ -490,7 +508,7 @@ mod k5_restore {
                 "second" => {
                     press(&mut state, Key::Char('a'));
                     assert_eq!(
-                        decision_pane::raise(
+                        decision_queue::raise(
                             &mut state,
                             DecisionDraft::new(DecisionKind::Carryover, "first"),
                             Arrival::Automatic,
@@ -508,10 +526,7 @@ mod k5_restore {
                     empty.input_buffer.clear();
                     empty_clock.advance(Duration::from_secs(2));
                     assert_eq!(arrival(&mut empty), Raised::Focused);
-                    assert_eq!(
-                        empty.modal_stack.top().unwrap().surface,
-                        Surface::DecisionPane
-                    );
+                    assert_eq!(empty.modal_stack.top().unwrap().surface, Surface::Decision);
                 }
                 _ => unreachable!(),
             }
@@ -536,13 +551,10 @@ mod k5_restore {
         assert_eq!(arrival(&mut state), Raised::Focused);
         ready(&mut state, &clock);
         press(&mut state, Key::Esc);
-        decision_pane::withdraw(&mut state, DecisionKind::Budget);
+        decision_queue::withdraw(&mut state, DecisionKind::Budget);
         clock.advance(Duration::from_secs(60));
         assert_eq!(arrival(&mut state), Raised::Focused);
-        assert_eq!(
-            state.modal_stack.top().unwrap().surface,
-            Surface::DecisionPane
-        );
+        assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
     }
 }
 
@@ -939,11 +951,11 @@ mod k7_surfaces {
     #[tokio::test]
     async fn depth_four_drilldown_replaces_utility_and_decision_restore() {
         use rustain::adapters::tui::{
-            decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+            decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
             notification_log::LogFacts,
         };
         tokio::time::timeout(Duration::from_secs(5), async {
-            for fifth in [Surface::UsagePanel, Surface::Help, Surface::DecisionPane] {
+            for fifth in [Surface::UsagePanel, Surface::Help, Surface::Decision] {
                 let mut state = TuiState::new(80, 24);
                 let clock = Arc::new(rustain::domain::clock::MockClock::new(
                     std::time::Instant::now(),
@@ -976,7 +988,7 @@ mod k7_surfaces {
                     press(&mut state, Key::Ctrl('x'));
                     press(&mut state, Key::Char('?'));
                 } else {
-                    decision_pane::raise(
+                    decision_queue::raise(
                         &mut state,
                         DecisionDraft::new(DecisionKind::Budget, "queued at cap"),
                         Arrival::Automatic,
@@ -991,16 +1003,16 @@ mod k7_surfaces {
                         press(&mut state, Key::Char('q')),
                         InputAction::FocusDecisions
                     );
-                    decision_pane::open_waiting(&mut state, &LogFacts::default());
+                    decision_queue::open_waiting(&mut state, &LogFacts::default());
                 }
                 assert_eq!(state.modal_stack.len(), 4);
                 assert_eq!(state.modal_stack.top().unwrap().surface, fifth);
                 assert!(state.modal_stack.top().unwrap().id > before[3].id);
                 assert!(presentation::consistent(&state));
-                if fifth == Surface::DecisionPane {
+                if fifth == Surface::Decision {
                     k3_compose::draw(&state, &k3_compose::layout(&state), None);
-                    decision_pane::note_painted(&mut state);
-                    clock.advance(decision_pane::INERT_AFTER_PAINT);
+                    decision_queue::note_painted(&mut state);
+                    clock.advance(decision_queue::INERT_AFTER_PAINT);
                 }
                 back(&mut state);
                 if fifth == Surface::UsagePanel {
@@ -1229,7 +1241,7 @@ mod k7_surfaces {
 
     #[tokio::test]
     async fn arrivals_wait_for_model_and_login_but_preempt_profile_and_usage() {
-        use rustain::adapters::tui::decision_pane::Raised;
+        use rustain::adapters::tui::decision_queue::Raised;
         tokio::time::timeout(Duration::from_secs(5), async {
             for surface in [
                 Surface::ModelSelector,
@@ -1251,12 +1263,9 @@ mod k7_surfaces {
                 if protected {
                     assert_eq!(state.modal_stack.top(), Some(&caller));
                     assert!(state.notifications.records().any(|record| record.message
-                        == rustain::adapters::tui::decision_pane::waiting_toast()));
+                        == rustain::adapters::tui::decision_queue::waiting_toast()));
                 } else {
-                    assert_eq!(
-                        state.modal_stack.top().unwrap().surface,
-                        Surface::DecisionPane
-                    );
+                    assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
                     k5_restore::ready(&mut state, &clock);
                     back(&mut state);
                     assert_eq!(state.modal_stack.top(), Some(&caller));

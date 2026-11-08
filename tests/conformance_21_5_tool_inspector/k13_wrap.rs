@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use rustain::adapters::tui::{
     app::InputAction,
-    decision_pane::{self, Arrival, DecisionDraft, DecisionKind, Raised},
+    decision_queue::{self, Arrival, DecisionDraft, DecisionKind, Raised},
     keymap::Key,
     markdown::metrics,
     presentation::{self, Surface},
@@ -512,7 +512,7 @@ fn exact_target_reopen_and_automatic_preemption_restore_the_off_mode() {
     assert!(f.h.state.decisions.is_empty());
     f.clock.advance(Duration::from_secs(2));
     assert_eq!(
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.h.state,
             DecisionDraft::new(DecisionKind::Budget, "wrap preemption control"),
             Arrival::Automatic
@@ -522,10 +522,10 @@ fn exact_target_reopen_and_automatic_preemption_restore_the_off_mode() {
     f.paint();
     assert_eq!(
         f.h.state.modal_stack.top().unwrap().surface,
-        Surface::DecisionPane
+        Surface::Decision
     );
     assert!(f.h.screen_text().contains("wrap preemption control"));
-    f.clock.advance(decision_pane::INERT_AFTER_PAINT);
+    f.clock.advance(decision_queue::INERT_AFTER_PAINT);
     f.press(Key::Esc);
     f.paint();
     assert_eq!(f.h.state.modal_stack.top(), Some(&frame));
@@ -613,7 +613,7 @@ fn nonediting_preemption_restores_query_viewers_wrap_and_painted_matches() {
     let viewer_status = status(&f);
     f.clock.advance(Duration::from_secs(2));
     assert_eq!(
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.h.state,
             DecisionDraft::new(DecisionKind::Budget, "nonediting preemption control"),
             Arrival::Automatic
@@ -623,10 +623,10 @@ fn nonediting_preemption_restores_query_viewers_wrap_and_painted_matches() {
     f.paint();
     assert_eq!(
         f.h.state.modal_stack.top().unwrap().surface,
-        Surface::DecisionPane
+        Surface::Decision
     );
     assert!(f.h.screen_text().contains("nonediting preemption control"));
-    f.clock.advance(decision_pane::INERT_AFTER_PAINT);
+    f.clock.advance(decision_queue::INERT_AFTER_PAINT);
     f.press(Key::Esc);
     f.paint();
     assert_eq!(f.h.state.modal_stack.top(), Some(&frame));

@@ -226,7 +226,7 @@ assert!(h.state.modal_stack.is_empty()); // routed popup, not a frame
 
 The E2E tests are designed to work with the existing rustain codebase. Some tests reference fields that may need to be added when implementing the actual features:
 
-- `pending_images`, `pending_large_image`: For image attachment tracking
+- `pending_images`, the `decision_queue` `LargeImage` item (`decisions.holds(DecisionKind::LargeImage)`): For image attachment tracking
 - `reverse_search`: For Ctrl+R search functionality
 - `autocomplete`: Optional kind identifies the Input-routed `/` and `@` popup; `open`/`dismiss` own its payload lifecycle
 - `command_palette`: For Ctrl+P palette

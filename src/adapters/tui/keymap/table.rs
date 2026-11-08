@@ -83,9 +83,9 @@ fn decisions(c: &AvailCtx) -> Availability {
 /// Every resolved pane effect declares its presentation target. No wildcard:
 /// a new effect cannot silently inherit permission to open an unmigrated surface.
 pub fn pane_effect_availability(
-    effect: crate::adapters::tui::decision_pane::DecisionEffect,
+    effect: crate::adapters::tui::decision_queue::DecisionEffect,
 ) -> Availability {
-    use crate::adapters::tui::decision_pane::DecisionEffect;
+    use crate::adapters::tui::decision_queue::DecisionEffect;
     match effect {
         DecisionEffect::BudgetSwitchCheaper
         | DecisionEffect::RecoveryContinue

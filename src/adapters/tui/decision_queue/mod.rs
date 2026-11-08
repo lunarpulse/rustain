@@ -1,34 +1,37 @@
-//! Interim decision pane (Story 21.1 slice S2, AC9–AC11; RU-5/RU-6/RU-7; A9).
+//! The session decision queue (Story 21.6 slice 6-A), grown from the 21-1 interim
+//! decision pane (S2, AC9–AC11; RU-5/RU-6/RU-7; AD-2106).
 //!
-//! The six response-key prompts that used to ride feedback blocks and a flash
-//! (recovery, carryover, daily budget, context warning, large image, delete
-//! conversation(s)) are items of ONE bounded presentation state, following the
-//! S-QUIT / S-LOG precedent: a FIFO keyed by (kind, conversation), with at
-//! most one frame-owned item identity and one shared local handler/widget.
-//! 21-6 deletes the interim pane.
+//! Every question the session asks the user is an item of ONE FIFO keyed by
+//! `(kind, source, conversation)`, counted by the `Needs you (N)` status cue and
+//! the quit guard. A decision is an L3 `Surface::Decision` frame on the 21-4
+//! stack: it opens only through [`raise`]/[`open`]/[`focus_oldest`] (producers
+//! never write focus), pops back to exactly what it interrupted, and `Esc` sets
+//! it aside without ever deciding it.
 //!
 //! RU-6 arrivals may interrupt a non-text L2, never typing or a higher layer.
-//! Waiting/deferred items cannot receive keys. Decision rail keys are inert
-//! for 500 ms from actual first paint; Ctrl+C backs without deciding.
+//! Rail keys are inert for 500 ms from the frame's first paint; `Ctrl+C` backs
+//! without deciding. This module is pure: no I/O and no clock of its own.
+
+mod keys;
+mod kinds;
 
 use std::time::{Duration, Instant};
 
-use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+pub(crate) use keys::clear_feedback;
+pub use keys::{PaneKey, PaneOutcome, handle_domain_event, handle_key};
+pub use kinds::{
+    DecisionEffect, DecisionKind, DecisionSubject, EscPolicy, NO_LONGER_PENDING, Responder,
+    StaleCopy, Validity,
+};
 
 use crate::adapters::tui::app::InputAction;
 use crate::adapters::tui::keymap::render::leader_follow_up_compact;
 use crate::adapters::tui::keymap::table::LeaderCmd;
-use crate::adapters::tui::keymap::table_overlay::OverlayCmd;
-use crate::adapters::tui::keymap::{self, CommandId, Context, Host, Key, Resolved};
-use crate::adapters::tui::notification_log::{LogFacts, footer_lines};
+use crate::adapters::tui::keymap::{self, CommandId};
+use crate::adapters::tui::notification_log::LogFacts;
 use crate::adapters::tui::notifications::{self, NoticeSource};
 use crate::adapters::tui::presentation::{self, Surface};
 use crate::adapters::tui::state::TuiState;
-use crate::adapters::tui::theme::Theme;
-use crate::adapters::tui::widgets::modal::wrapped;
-use crate::adapters::tui::widgets::{ModalPart, fit_modal};
-use crate::domain::events::DomainInputEvent;
 use crate::domain::models::FocusState;
 
 /// Rail keys are inert this long after the pane's first paint.
@@ -50,123 +53,6 @@ pub fn waiting_toast() -> String {
     )
 }
 
-/// The six interim decision kinds (A9).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DecisionKind {
-    Recovery,
-    Carryover,
-    Budget,
-    ContextWarning,
-    LargeImage,
-    DeleteConversations,
-}
-
-impl DecisionKind {
-    /// Frame title.
-    #[must_use]
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Recovery => "Session recovery",
-            Self::Carryover => "Carry over context",
-            Self::Budget => "Daily budget",
-            Self::ContextWarning => "Context window",
-            Self::LargeImage => "Large image",
-            Self::DeleteConversations => "Delete conversations",
-        }
-    }
-
-    /// True when `Esc` means "Later" (the item stays pending, never destructive).
-    #[must_use]
-    pub fn deferrable(self) -> bool {
-        !matches!(self, Self::Recovery | Self::DeleteConversations)
-    }
-
-    /// The painted rail: `(key, label)` pairs, exactly the keys the handler honours. The
-    /// key text is generated from the `DecisionPane` rows of the registry (Story 21.3 AC15).
-    #[must_use]
-    pub fn rail(self) -> Vec<(String, &'static str)> {
-        let key = |command: OverlayCmd| keymap::render::rail(Context::DecisionPane, command);
-        match self {
-            Self::Recovery => vec![
-                (
-                    format!(
-                        "[{}]",
-                        keymap::render::rail_pair(
-                            Context::DecisionPane,
-                            OverlayCmd::PaneEnter,
-                            OverlayCmd::PaneEsc
-                        )
-                    ),
-                    "Continue",
-                ),
-                (key(OverlayCmd::PaneNo), "New session"),
-            ],
-            Self::Carryover => vec![
-                (key(OverlayCmd::PaneYes), "Carry over a summary"),
-                (key(OverlayCmd::PaneNo), "Start fresh without it"),
-                (key(OverlayCmd::PaneEsc), "Later"),
-            ],
-            Self::Budget => vec![
-                (key(OverlayCmd::PaneYes), "Continue"),
-                (key(OverlayCmd::PaneSwitch), "Switch model"),
-                (key(OverlayCmd::PanePause), "Pause until tomorrow"),
-                (key(OverlayCmd::PaneEsc), "Later"),
-            ],
-            Self::ContextWarning => vec![
-                // Letters fold case in the pane's resolver; the rail paints the capital.
-                (key(OverlayCmd::PaneCompact).to_uppercase(), "Compact"),
-                (key(OverlayCmd::PaneNo), "Start fresh"),
-                (key(OverlayCmd::PaneEsc), "Later"),
-            ],
-            Self::LargeImage => vec![
-                (key(OverlayCmd::PaneYes), "Attach anyway"),
-                (key(OverlayCmd::PaneNo), "Cancel"),
-                (key(OverlayCmd::PaneEsc), "Later"),
-            ],
-            Self::DeleteConversations => vec![
-                (key(OverlayCmd::PaneYes), "Delete"),
-                (key(OverlayCmd::PaneNo), "Cancel"),
-                (key(OverlayCmd::PaneEsc), "Cancel"),
-            ],
-        }
-    }
-}
-
-/// The existing effect a rail key executes — exactly once (the item is resolved
-/// before the effect is returned).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecisionEffect {
-    RecoveryContinue,
-    RecoveryNewSession,
-    /// Compact into a summary and carry it into a fresh tab.
-    CarryoverAccept,
-    /// Open a fresh tab without a summary.
-    CarryoverDecline,
-    BudgetContinue,
-    BudgetSwitchCheaper,
-    BudgetPause,
-    ContextCompact,
-    AttachLargeImage,
-    CancelLargeImage,
-    ConfirmDelete,
-    CancelDelete,
-}
-
-impl DecisionEffect {
-    /// The host action that runs the effect (the four delete/image effects keep
-    /// their existing arms).
-    #[must_use]
-    pub fn into_action(self) -> InputAction {
-        match self {
-            Self::AttachLargeImage => InputAction::ImageConfirmAttach,
-            Self::CancelLargeImage => InputAction::ImageConfirmCancel,
-            Self::ConfirmDelete => InputAction::ConfirmDelete,
-            Self::CancelDelete => InputAction::CancelDelete,
-            other => InputAction::Decision(other),
-        }
-    }
-}
-
 /// State-only effects consumed by the live pane action arms, after the pane has
 /// resolved its item and restored or promoted its caller.
 /// Surviving caller frames keep their interrupted base focus. Only an empty
@@ -185,7 +71,7 @@ pub(crate) fn apply_resolved_action(
             }
         }
         InputAction::ImageConfirmAttach => {
-            if let Some(attachment) = state.pending_large_image.take() {
+            if let Some(DecisionSubject::LargeImage(attachment)) = state.decisions.take_resolved() {
                 use crate::adapters::tui::image;
                 state.pending_images.push(attachment);
                 state.image_indicator = Some(image::format_image_indicator(
@@ -201,14 +87,14 @@ pub(crate) fn apply_resolved_action(
             }
         }
         InputAction::ImageConfirmCancel => {
-            state.pending_large_image = None;
+            drop(state.decisions.take_resolved());
             notifications::info(state, NoticeSource::Image, "Image attachment cancelled");
             if state.modal_stack.is_empty() {
                 restore_base_focus(state);
             }
         }
         InputAction::CancelDelete => {
-            state.pending_delete = None;
+            drop(state.decisions.take_resolved());
             if state.modal_stack.is_empty() {
                 let focus = if state.sidebar_visible {
                     FocusState::Sidebar {
@@ -226,22 +112,19 @@ pub(crate) fn apply_resolved_action(
     state.needs_redraw = true;
 }
 
+/// Stable identity of one decision: the kind, the source's own identity (empty
+/// for the interim kinds, whose source is the session itself) and the conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionKey {
-    kind: DecisionKind,
-    conversation_id: Option<String>,
+    pub(crate) kind: DecisionKind,
+    pub(crate) source: String,
+    pub(crate) conversation_id: Option<String>,
 }
 
 impl DecisionKey {
+    /// The stack frame's title (`Decision: <kind title>`).
     pub(crate) fn title(&self) -> &'static str {
-        match self.kind {
-            DecisionKind::Recovery => "System · Session recovery",
-            DecisionKind::Carryover => "System · Carry over context",
-            DecisionKind::Budget => "System · Daily budget",
-            DecisionKind::ContextWarning => "System · Context window",
-            DecisionKind::LargeImage => "System · Large image",
-            DecisionKind::DeleteConversations => "System · Delete conversations",
-        }
+        self.kind.frame_title()
     }
 }
 
@@ -249,37 +132,55 @@ impl DecisionKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecisionItem {
     pub kind: DecisionKind,
+    /// The source's own identity; empty for the interim kinds.
+    pub source: String,
     /// `None` = decidable from any tab; `Some(id)` only while `id` is active.
     pub conversation_id: Option<String>,
     pub detail: String,
+    /// The payload the kind's effect consumes (moved here from its old slot).
+    pub subject: DecisionSubject,
     /// `Esc`/"Later" was pressed: never re-focused automatically.
     pub deferred: bool,
+    /// A stale item answers nothing; its only key is Close.
+    pub validity: Validity,
+    pub arrived: Instant,
+    pub responder: Responder,
 }
 
 impl DecisionItem {
-    fn key(&self) -> DecisionKey {
+    pub(crate) fn key(&self) -> DecisionKey {
         DecisionKey {
             kind: self.kind,
+            source: self.source.clone(),
             conversation_id: self.conversation_id.clone(),
         }
     }
 
     fn matches_key(&self, key: &DecisionKey) -> bool {
-        self.kind == key.kind && self.conversation_id == key.conversation_id
+        self.kind == key.kind
+            && self.conversation_id == key.conversation_id
+            && self.source == key.source
     }
 
-    fn actionable(&self, facts: &LogFacts) -> bool {
+    pub(crate) fn actionable(&self, facts: &LogFacts) -> bool {
         self.conversation_id.is_none()
             || self.conversation_id.as_deref() == facts.active_conversation_id.as_deref()
     }
+
+    #[must_use]
+    pub fn is_stale(&self) -> bool {
+        matches!(self.validity, Validity::Stale(_))
+    }
 }
 
-/// What a producer asks the pane to hold.
+/// What a producer asks the queue to hold.
 #[derive(Debug, Clone)]
 pub struct DecisionDraft {
     pub kind: DecisionKind,
+    pub source: String,
     pub conversation_id: Option<String>,
     pub detail: String,
+    pub subject: DecisionSubject,
 }
 
 impl DecisionDraft {
@@ -287,8 +188,10 @@ impl DecisionDraft {
     pub fn new(kind: DecisionKind, detail: impl Into<String>) -> Self {
         Self {
             kind,
+            source: String::new(),
             conversation_id: None,
             detail: detail.into(),
+            subject: DecisionSubject::Text,
         }
     }
 
@@ -297,13 +200,26 @@ impl DecisionDraft {
         self.conversation_id = Some(conversation_id.into());
         self
     }
+
+    /// The source's own identity, for kinds with more than one source per conversation.
+    #[must_use]
+    pub fn source(mut self, source: impl Into<String>) -> Self {
+        self.source = source.into();
+        self
+    }
+
+    #[must_use]
+    pub fn subject(mut self, subject: DecisionSubject) -> Self {
+        self.subject = subject;
+        self
+    }
 }
 
 /// Why a decision was raised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrival {
     /// The user's own action raised it (delete, attach, S-LOG `K`/`n`): the pane
-    /// takes focus immediately.
+    /// takes focus immediately, except over the quit guard or a text field.
     Requested,
     /// The system raised it (startup recovery, budget, context): RU-6 applies.
     Automatic,
@@ -319,15 +235,25 @@ pub enum Raised {
 
 /// The session's pending decisions. Never persisted.
 #[derive(Debug, Default)]
-pub struct DecisionPane {
+pub struct DecisionQueue {
     items: Vec<DecisionItem>,
     painted_at: Option<Instant>,
+    /// The inert window's end was already announced to the redraw tick.
+    inert_released: bool,
     last_defer_at: Option<Instant>,
     /// Surface-owned refusal; expires on its next key, never a hidden toast.
     feedback: Option<&'static str>,
+    /// First visible body row of the focused frame (`PgUp`/`PgDn`).
+    scroll: usize,
+    /// The payload of the item the last rail key resolved, until its effect arm
+    /// consumes it (the same tick); the queue is its only owner.
+    resolved: Option<DecisionSubject>,
+    /// The active tab's conversation, as the last draw saw it: an item for
+    /// another conversation is never focused (it waits, counted).
+    active_conversation: Option<String>,
 }
 
-impl DecisionPane {
+impl DecisionQueue {
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
@@ -347,24 +273,85 @@ impl DecisionPane {
         self.items.iter().any(|item| item.kind == kind)
     }
 
+    /// An item of `kind` the user has not set aside: the only kind of waiting
+    /// that gates other prompts (a deferred large image never does).
+    #[must_use]
+    pub fn holds_undeferred(&self, kind: DecisionKind) -> bool {
+        self.items
+            .iter()
+            .any(|item| item.kind == kind && !item.deferred)
+    }
+
+    /// How many items of `kind` wait.
+    #[must_use]
+    pub fn count(&self, kind: DecisionKind) -> usize {
+        self.items.iter().filter(|item| item.kind == kind).count()
+    }
+
+    /// How many items of `kind` can still be decided (a stale one cannot).
+    #[must_use]
+    pub fn count_live(&self, kind: DecisionKind) -> usize {
+        self.items
+            .iter()
+            .filter(|item| item.kind == kind && !item.is_stale())
+            .count()
+    }
+
+    /// How many items can still be decided: what quitting would leave unanswered.
+    #[must_use]
+    pub fn undecided(&self) -> usize {
+        self.items.iter().filter(|item| !item.is_stale()).count()
+    }
+
     pub(crate) fn contains_key(&self, key: &DecisionKey) -> bool {
         self.items.iter().any(|item| item.matches_key(key))
     }
 
+    pub(crate) fn item(&self, key: &DecisionKey) -> Option<&DecisionItem> {
+        self.items.iter().find(|item| item.matches_key(key))
+    }
+
+    fn item_mut(&mut self, key: &DecisionKey) -> Option<&mut DecisionItem> {
+        self.items.iter_mut().find(|item| item.matches_key(key))
+    }
+
     pub(crate) fn prepare(&mut self, key: &DecisionKey) {
-        if let Some(item) = self.items.iter_mut().find(|item| item.matches_key(key)) {
+        if let Some(item) = self.item_mut(key) {
             item.deferred = false;
         }
-        self.painted_at = None;
+        self.clear_paint();
         self.feedback = None;
+        self.scroll = 0;
     }
 
     pub(crate) fn clear_paint(&mut self) {
         self.painted_at = None;
+        self.inert_released = false;
     }
 
     pub(crate) fn last_defer_at(&self) -> Option<Instant> {
         self.last_defer_at
+    }
+
+    pub(crate) fn feedback(&self) -> Option<&'static str> {
+        self.feedback
+    }
+
+    pub(crate) fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// The payload of the item a rail key just resolved; taken once by its effect arm.
+    pub(crate) fn take_resolved(&mut self) -> Option<DecisionSubject> {
+        self.resolved.take()
+    }
+
+    /// True until 500 ms after the focused frame's first paint (RU-6).
+    pub(crate) fn inert(&self, state: &TuiState) -> bool {
+        let now = state.notifications.now();
+        !self
+            .painted_at
+            .is_some_and(|at| now.saturating_duration_since(at) >= INERT_AFTER_PAINT)
     }
 
     /// The oldest decidable item, optionally skipping deferred ones.
@@ -375,28 +362,46 @@ impl DecisionPane {
             .map(DecisionItem::key)
     }
 
-    fn remove(&mut self, key: &DecisionKey) -> bool {
-        let before = self.items.len();
-        self.items.retain(|item| !item.matches_key(key));
-        self.items.len() != before
+    /// The oldest decidable, not-deferred item of `kind`.
+    fn next_of_kind(&self, kind: DecisionKind, facts: &LogFacts) -> Option<DecisionKey> {
+        self.items
+            .iter()
+            .find(|item| item.kind == kind && item.actionable(facts) && !item.deferred)
+            .map(DecisionItem::key)
+    }
+
+    fn remove(&mut self, key: &DecisionKey) -> Option<DecisionItem> {
+        let at = self.items.iter().position(|item| item.matches_key(key))?;
+        Some(self.items.remove(at))
+    }
+
+    /// Whether a draft for `conversation_id` can be answered where the user is.
+    /// Unknown (no draw yet) counts as here: the facts of the next draw correct it.
+    fn here(&self, conversation_id: Option<&str>) -> bool {
+        match (conversation_id, self.active_conversation.as_deref()) {
+            (Some(wanted), Some(active)) => wanted == active,
+            _ => true,
+        }
     }
 }
 
 /// The selected queue item is derived from the frame, including a suspended
-/// continuation. Only the top frame is routed; this query never grants keys.
+/// continuation. Only the top frame is routed; this query never grants keys. A
+/// stale item is shown on any tab (its Close must stay reachable); a live one
+/// only where it can be decided.
 #[must_use]
 pub fn current<'a>(state: &'a TuiState, facts: &LogFacts) -> Option<&'a DecisionItem> {
     let key = state
         .modal_stack
         .all_frames()
-        .find(|frame| frame.surface == Surface::DecisionPane)?
+        .find(|frame| frame.surface == Surface::Decision)?
         .decision
         .as_ref()?;
     state
         .decisions
         .items
         .iter()
-        .find(|item| item.matches_key(key) && item.actionable(facts))
+        .find(|item| item.matches_key(key) && (item.is_stale() || item.actionable(facts)))
 }
 
 fn clean(detail: &str) -> String {
@@ -415,38 +420,52 @@ fn clean(detail: &str) -> String {
         .collect()
 }
 
-/// Hold a decision. An existing item of the same (kind, conversation) is
-/// updated in place. The first item (0→1) of an automatic arrival takes focus
-/// only when nothing protects the user's current work and no deferral happened
-/// in the last minute; otherwise one Info toast says it is waiting.
+/// Hold a decision. An existing item with the same key is updated in place
+/// (a producer's update is never a new arrival). The first item (0→1) of an
+/// automatic arrival takes focus only when nothing protects the user's current
+/// work and no deferral happened in the last minute; otherwise one Info toast
+/// says it is waiting. An item for another conversation never takes focus.
 pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Raised {
     let now = state.notifications.now();
     let detail = clean(&draft.detail);
     let key = DecisionKey {
         kind: draft.kind,
+        source: draft.source.clone(),
         conversation_id: draft.conversation_id.clone(),
     };
     let may_preempt = presentation::arrival_may_preempt(state, now);
-    let existing = state
-        .decisions
-        .items
-        .iter_mut()
-        .find(|item| item.matches_key(&key));
-    let is_new = existing.is_none();
-    match existing {
-        Some(item) => item.detail = detail,
-        None => state.decisions.items.push(DecisionItem {
-            kind: draft.kind,
-            conversation_id: draft.conversation_id,
-            detail,
-            deferred: false,
-        }),
-    }
-    state.needs_redraw = true;
-    let take_focus = match arrival {
-        Arrival::Requested => !presentation::is_open(state, Surface::QuitConfirm),
-        Arrival::Automatic => may_preempt,
+    let here = state.decisions.here(draft.conversation_id.as_deref());
+    let is_new = match state.decisions.item_mut(&key) {
+        Some(item) => {
+            item.detail = detail;
+            item.subject = draft.subject;
+            item.validity = Validity::Live;
+            false
+        }
+        None => {
+            state.decisions.items.push(DecisionItem {
+                kind: draft.kind,
+                source: draft.source,
+                conversation_id: draft.conversation_id,
+                detail,
+                subject: draft.subject,
+                deferred: false,
+                validity: Validity::Live,
+                arrived: now,
+                responder: Responder::Local,
+            });
+            true
+        }
     };
+    state.needs_redraw = true;
+    let take_focus = here
+        && match arrival {
+            Arrival::Requested => {
+                !presentation::is_open(state, Surface::QuitConfirm)
+                    && !presentation::typing_top(state)
+            }
+            Arrival::Automatic => may_preempt,
+        };
     if take_focus {
         presentation::reducer::focus_decision(state, key);
         return Raised::Focused;
@@ -458,8 +477,8 @@ pub fn raise(state: &mut TuiState, draft: DecisionDraft, arrival: Arrival) -> Ra
 }
 
 /// Drop every item of `kind` (its condition cleared) whatever conversation it
-/// belongs to: only for global conditions (the daily budget). A focused item
-/// that goes away releases focus; nothing is promoted here.
+/// belongs to: only for global conditions (the daily budget). Nothing is promoted
+/// here; an item whose frame is open turns stale instead (A7).
 pub fn withdraw(state: &mut TuiState, kind: DecisionKind) {
     withdraw_where(state, |item| item.kind == kind);
 }
@@ -474,9 +493,11 @@ pub fn withdraw_for(state: &mut TuiState, kind: DecisionKind, conversation_id: &
 
 /// Drop every item keyed to a conversation that no longer exists (its tab was
 /// closed or the conversation deleted): such an item could never be decided, yet
-/// would keep `Needs you (N)` up and make the quit guard ask forever. Does
-/// nothing without a tab list to compare against.
+/// would keep `Needs you (N)` up and make the quit guard ask forever. Also
+/// records which conversation the user is in. Prunes nothing without a tab list
+/// to compare against.
 pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
+    state.decisions.active_conversation = facts.active_conversation_id.clone();
     if facts.titles.is_empty() {
         return;
     }
@@ -488,22 +509,31 @@ pub fn prune_closed(state: &mut TuiState, facts: &LogFacts) {
     });
 }
 
+/// A withdrawn item leaves the queue, unless its frame is open: then the user is
+/// reading it, so it turns stale (its source copy, `[Esc] Close` only) and Close
+/// removes it.
 fn withdraw_where(state: &mut TuiState, matches: impl Fn(&DecisionItem) -> bool) {
+    let shown = state
+        .modal_stack
+        .all_frames()
+        .find(|frame| frame.surface == Surface::Decision)
+        .and_then(|frame| frame.decision.clone());
     let before = state.decisions.items.len();
-    state.decisions.items.retain(|item| !matches(item));
-    if state.decisions.items.len() == before {
-        return;
+    let mut staled = false;
+    state.decisions.items.retain_mut(|item| {
+        if !matches(item) {
+            return true;
+        }
+        if shown.as_ref().is_some_and(|key| item.matches_key(key)) {
+            staled |= !item.is_stale();
+            item.validity = Validity::Stale(NO_LONGER_PENDING);
+            return true;
+        }
+        false
+    });
+    if staled || state.decisions.items.len() != before {
+        state.needs_redraw = true;
     }
-    if state.modal_stack.all_frames().any(|frame| {
-        frame.surface == Surface::DecisionPane
-            && frame
-                .decision
-                .as_ref()
-                .is_some_and(|key| !state.decisions.contains_key(key))
-    }) {
-        presentation::reducer::close(state, Surface::DecisionPane);
-    }
-    state.needs_redraw = true;
 }
 
 /// Raise (and focus) the carryover question for `conversation_id`: the user's
@@ -517,13 +547,46 @@ pub fn request_carryover(state: &mut TuiState, conversation_id: Option<String>) 
     raise(state, draft, Arrival::Requested);
 }
 
-/// `Ctrl+X q`: focus the oldest decidable item (a deferred one included).
-/// False when nothing decidable waits here.
+/// Hold a pasted image above the size limit for the user's confirmation: the
+/// image is the item's payload, the warning its question (Requested: the user
+/// just pasted it).
+pub fn raise_large_image(
+    state: &mut TuiState,
+    attachment: crate::domain::models::ImageAttachment,
+    warning: impl Into<String>,
+) -> Raised {
+    raise(
+        state,
+        DecisionDraft::new(DecisionKind::LargeImage, warning)
+            .subject(DecisionSubject::LargeImage(attachment)),
+        Arrival::Requested,
+    )
+}
+
+/// `Ctrl+X q` (interim, 6-A): focus the oldest decidable item (a deferred one
+/// included). False when nothing decidable waits here.
 pub fn focus_oldest(state: &mut TuiState, facts: &LogFacts) -> bool {
     let Some(key) = state.decisions.oldest(facts, false) else {
         return false;
     };
     presentation::reducer::focus_decision(state, key);
+    true
+}
+
+/// Open the queued item `key` as a frame over whatever is open: an explicit,
+/// Requested open (A10). False when the key is not queued, not decidable in this
+/// conversation, or the top is the quit guard or a text field.
+pub fn open(state: &mut TuiState, key: &DecisionKey) -> bool {
+    let Some(item) = state.decisions.item(key) else {
+        return false;
+    };
+    if !state.decisions.here(item.conversation_id.as_deref())
+        || presentation::is_open(state, Surface::QuitConfirm)
+        || presentation::typing_top(state)
+    {
+        return false;
+    }
+    presentation::reducer::focus_decision(state, key.clone());
     true
 }
 
@@ -560,25 +623,37 @@ pub fn open_waiting(state: &mut TuiState, facts: &LogFacts) {
     }
 }
 
-/// Hand focus to the next waiting, not-deferred decision (the user is already
-/// answering: this never steals focus from anything else).
-fn promote(state: &mut TuiState, facts: &LogFacts) {
-    match state.decisions.oldest(facts, true) {
-        Some(key) => presentation::reducer::focus_decision(state, key),
-        None => presentation::reducer::close(state, Surface::DecisionPane),
-    }
-}
-
 /// First paint of the focused pane: starts the 500 ms inert window.
 pub fn note_painted(state: &mut TuiState) {
     if state
         .modal_stack
         .top()
-        .is_some_and(|frame| frame.surface == Surface::DecisionPane)
+        .is_some_and(|frame| frame.surface == Surface::Decision)
         && state.decisions.painted_at.is_none()
     {
         state.decisions.painted_at = Some(state.notifications.now());
+        state.decisions.inert_released = false;
     }
+}
+
+/// Both hosts' tick: the frame was painted with muted keys while inert, so the
+/// moment the window ends asks for the one redraw that activates them. True when
+/// it asked.
+pub fn tick(state: &mut TuiState) -> bool {
+    let queue = &state.decisions;
+    if queue.inert_released
+        || queue.painted_at.is_none()
+        || queue.inert(state)
+        || state
+            .modal_stack
+            .top()
+            .is_none_or(|frame| frame.surface != Surface::Decision)
+    {
+        return false;
+    }
+    state.decisions.inert_released = true;
+    state.needs_redraw = true;
+    true
 }
 
 /// Decisions waiting, for the `Needs you (N) ^X q` status cue.
@@ -607,292 +682,30 @@ pub fn status_cue(waiting: usize) -> Option<String> {
     })
 }
 
-/// Host-neutral key classes the pane understands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneKey {
-    Char(char),
-    Enter,
-    Esc,
-    CtrlC,
-    CtrlQ,
-    /// Any other user input: consumed, never leaked to the surface below.
-    Other,
-}
-
-/// What the host must do after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PaneOutcome {
-    /// Swallowed (inert window, unmapped key, deferral, a new item raised).
-    Consumed,
-    /// `Ctrl+Q`: run the host's S-QUIT guard.
-    Quit,
-    /// Run this existing effect exactly once.
-    Effect(DecisionEffect),
-}
-
-fn inert(state: &TuiState) -> bool {
-    let now = state.notifications.now();
-    !state
-        .decisions
-        .painted_at
-        .is_some_and(|at| now.saturating_duration_since(at) >= INERT_AFTER_PAINT)
-}
-
-impl PaneKey {
-    fn key(self) -> Key {
-        match self {
-            PaneKey::Char(c) => Key::Char(c),
-            PaneKey::Enter => Key::Enter,
-            PaneKey::Esc => Key::Esc,
-            PaneKey::CtrlC => Key::Ctrl('c'),
-            PaneKey::CtrlQ => Key::Ctrl('q'),
-            PaneKey::Other => Key::Other,
-        }
-    }
-}
-
-/// Apply one key to the focused pane. Without a decidable focused item it
-/// consumes the key and heals the focus.
-pub fn handle_key(state: &mut TuiState, key: PaneKey, facts: &LogFacts) -> PaneOutcome {
-    execute(state, key.key(), facts)
-}
-
-pub(crate) fn clear_feedback(state: &mut TuiState) {
-    if state.decisions.feedback.take().is_some() {
-        state.needs_redraw = true;
-    }
-}
-
-/// Resolve the key in `DecisionPane` (letters fold case) and run its command
-/// against the focused item's kind; a command the kind does not offer is swallowed.
-fn execute(state: &mut TuiState, key: Key, facts: &LogFacts) -> PaneOutcome {
-    state.needs_redraw = true;
-    let command = match keymap::resolve(Context::DecisionPane, Host::Local, &[key]) {
-        Resolved::Hit(row) => match row.command {
-            CommandId::Overlay(command) => Some(command),
-            _ => None,
-        },
-        _ => None,
-    };
-    if command == Some(OverlayCmd::PaneQuit) {
-        return PaneOutcome::Quit;
-    }
-    let Some(item) = current(state, facts) else {
-        presentation::reducer::close(state, Surface::DecisionPane);
-        return PaneOutcome::Consumed;
-    };
-    if command == Some(OverlayCmd::PaneBack) {
-        let key = item.key();
-        defer_current(state, &key);
-        return PaneOutcome::Consumed;
-    }
-    if inert(state) {
-        // Dropped, never replayed once the window passes.
-        return PaneOutcome::Consumed;
-    }
-    let Some(command) = command else {
-        return PaneOutcome::Consumed;
-    };
-    let (kind, conversation_id) = (item.kind, item.conversation_id.clone());
-    let item_key = item.key();
-    let resolve = |state: &mut TuiState, effect: DecisionEffect| {
-        if let keymap::Availability::Unavailable(remedy) =
-            keymap::table::pane_effect_availability(effect)
-        {
-            state.decisions.feedback = Some(remedy);
-            return PaneOutcome::Consumed;
-        }
-        state.decisions.remove(&item_key);
-        promote(state, facts);
-        PaneOutcome::Effect(effect)
-    };
-    let defer = |state: &mut TuiState| {
-        defer_current(state, &item_key);
-        PaneOutcome::Consumed
-    };
-    match (kind, command) {
-        (DecisionKind::Recovery, OverlayCmd::PaneEnter | OverlayCmd::PaneEsc) => {
-            resolve(state, DecisionEffect::RecoveryContinue)
-        }
-        (DecisionKind::Recovery, OverlayCmd::PaneNo) => {
-            resolve(state, DecisionEffect::RecoveryNewSession)
-        }
-        (DecisionKind::Carryover, OverlayCmd::PaneYes) => {
-            resolve(state, DecisionEffect::CarryoverAccept)
-        }
-        (DecisionKind::Carryover, OverlayCmd::PaneNo) => {
-            resolve(state, DecisionEffect::CarryoverDecline)
-        }
-        (DecisionKind::Budget, OverlayCmd::PaneYes) => {
-            resolve(state, DecisionEffect::BudgetContinue)
-        }
-        (DecisionKind::Budget, OverlayCmd::PaneSwitch) => {
-            resolve(state, DecisionEffect::BudgetSwitchCheaper)
-        }
-        (DecisionKind::Budget, OverlayCmd::PanePause) => {
-            resolve(state, DecisionEffect::BudgetPause)
-        }
-        (DecisionKind::ContextWarning, OverlayCmd::PaneCompact) => {
-            resolve(state, DecisionEffect::ContextCompact)
-        }
-        (DecisionKind::ContextWarning, OverlayCmd::PaneNo) => {
-            // "Start fresh" asks about the carried summary first (RU-21: never `c`).
-            state.decisions.remove(&item_key);
-            request_carryover(state, conversation_id);
-            PaneOutcome::Consumed
-        }
-        (DecisionKind::LargeImage, OverlayCmd::PaneYes) => {
-            resolve(state, DecisionEffect::AttachLargeImage)
-        }
-        (DecisionKind::LargeImage, OverlayCmd::PaneNo) => {
-            resolve(state, DecisionEffect::CancelLargeImage)
-        }
-        (DecisionKind::DeleteConversations, OverlayCmd::PaneYes) => {
-            resolve(state, DecisionEffect::ConfirmDelete)
-        }
-        (DecisionKind::DeleteConversations, OverlayCmd::PaneNo | OverlayCmd::PaneEsc) => {
-            resolve(state, DecisionEffect::CancelDelete)
-        }
-        (kind, OverlayCmd::PaneEsc) if kind.deferrable() => defer(state),
-        _ => PaneOutcome::Consumed,
-    }
-}
-
-fn defer_current(state: &mut TuiState, key: &DecisionKey) {
-    if let Some(item) = state
-        .decisions
-        .items
-        .iter_mut()
-        .find(|item| item.matches_key(key))
-    {
-        item.deferred = true;
-    }
-    state.decisions.last_defer_at = Some(state.notifications.now());
-    presentation::reducer::close(state, Surface::DecisionPane);
-}
-
-/// Apply a local domain event. User keys, paste and mouse are consumed;
-/// resize/focus events (and an unfocused pane) return `None` so the caller
-/// handles them normally.
-pub fn handle_domain_event(
-    state: &mut TuiState,
-    event: &DomainInputEvent,
-    facts: &LogFacts,
-) -> Option<PaneOutcome> {
-    if state
-        .modal_stack
-        .top()
-        .is_none_or(|frame| frame.surface != Surface::DecisionPane)
-    {
-        return None;
-    }
-    if current(state, facts).is_none() {
-        // The focused item left (tab switch, condition cleared): heal and let
-        // the key reach whoever owns it now.
-        presentation::reducer::close(state, Surface::DecisionPane);
-        return None;
-    }
-    if matches!(
-        event,
-        DomainInputEvent::Resize(..) | DomainInputEvent::FocusGained | DomainInputEvent::FocusLost
-    ) {
-        return None;
-    }
-    let key = Key::from_domain(event).unwrap_or(Key::Other);
-    Some(execute(state, key, facts))
-}
-
-/// Paint the focused item bottom-anchored over `area` (the chat pane): `Clear`,
-/// no layout change. Items that wait unfocused paint nothing here (the status
-/// row carries the cue). Returns its actual painted rectangle; compose reports
-/// whether it is visible on top before the host starts the 500 ms inert clock.
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    state: &TuiState,
-    facts: &LogFacts,
-    theme: &Theme,
-) -> Option<Rect> {
-    let pane = &state.decisions;
-    let item = current(state, facts)?;
-    if area.width < 12 || area.height < 5 {
-        return None;
-    }
-    let width = area.width.min(100);
-    let inner_width = usize::from(width.saturating_sub(2));
-    let normal = Style::default().fg(theme.colors.fg_primary);
-    let muted = Style::default().fg(theme.colors.fg_muted);
-    let accent = Style::default().fg(theme.colors.accent);
-
-    let mut rail: Vec<Span<'static>> = Vec::new();
-    for (key, label) in item.kind.rail() {
-        rail.push(Span::styled(key, accent));
-        rail.push(Span::styled(format!(" {label}  "), normal));
-    }
-    let rail_lines = footer_lines(rail, inner_width);
-    let detail = wrapped(pane.feedback.unwrap_or(&item.detail), normal, inner_width);
-    let others = pane.len().saturating_sub(1);
-    let mut parts: Vec<ModalPart> = Vec::new();
-    if others > 0 {
-        let passive = pane
-            .items()
-            .filter(|other| !std::ptr::eq(*other, item) && !other.actionable(facts))
-            .count();
-        let text = if passive > 0 {
-            format!("{others} more waiting — {passive} in another tab: open it to decide")
-        } else {
-            format!("{others} more waiting")
-        };
-        parts.push(ModalPart::Notice(vec![Line::from(Span::styled(
-            text, muted,
-        ))]));
-    }
-    let detail_len = detail.len();
-    parts.push(ModalPart::Rows {
-        lines: detail,
-        selected: (0, 0),
-    });
-    let rail_len = rail_lines.len();
-    parts.push(ModalPart::Footer(rail_lines));
-
-    let wanted = u16::try_from(detail_len.min(8) + rail_len + usize::from(others > 0) + 2)
-        .unwrap_or(u16::MAX);
-    let height = wanted.max(5).min(area.height);
-    let rect = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.bottom().saturating_sub(height),
-        width,
-        height,
-    );
-    frame.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(accent)
-        .title(format!(" System · {} ", item.kind.title()))
-        .style(Style::default().bg(theme.colors.bg_surface));
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-    let lines = fit_modal(parts, usize::from(inner.height), usize::from(inner.width));
-    frame.render_widget(
-        Paragraph::new(lines).style(
-            Style::default()
-                .fg(theme.colors.fg_primary)
-                .bg(theme.colors.bg_surface),
-        ),
-        inner,
-    );
-    Some(rect)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::adapters::tui::notifications::NotificationStore;
+    use crate::adapters::tui::theme::Theme;
+    use crate::adapters::tui::widgets::decision_frame;
     use crate::domain::clock::MockClock;
+    use crate::domain::events::DomainInputEvent;
     use crate::domain::models::NotificationsConfig;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
+    use ratatui::prelude::*;
+    use ratatui::{Terminal, backend::TestBackend};
     use std::sync::Arc;
+
+    /// Paint the focused frame into `area`: `Some(area)` when it really painted.
+    fn render(
+        frame: &mut Frame,
+        area: Rect,
+        state: &TuiState,
+        facts: &LogFacts,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        decision_frame::render(frame, area, state, facts, theme, "Decision: test", None)
+            .then_some(area)
+    }
 
     const ALL: [DecisionKind; 6] = [
         DecisionKind::Recovery,
@@ -976,7 +789,7 @@ mod tests {
                 let kinds_after: Vec<DecisionKind> =
                     state.decisions.items().map(|i| i.kind).collect();
                 let resolved = kinds_after != kinds_before
-                    || !presentation::is_open(&state, Surface::DecisionPane)
+                    || !presentation::is_open(&state, Surface::Decision)
                     || matches!(outcome, PaneOutcome::Effect(_));
                 assert!(
                     resolved,
@@ -1014,7 +827,7 @@ mod tests {
                     "{kind:?}: unpainted {stray:?}"
                 );
                 assert!(
-                    presentation::is_open(&state, Surface::DecisionPane),
+                    presentation::is_open(&state, Surface::Decision),
                     "{kind:?}: {stray:?} resolved it"
                 );
             }
@@ -1073,25 +886,27 @@ mod tests {
     fn story21_1_a_promoted_item_gets_its_own_inert_window_so_one_double_press_answers_once() {
         let (mut state, clock) = clocked();
         let f = LogFacts::default();
-        for (kind, arrival) in [
-            (DecisionKind::Budget, Arrival::Requested),
-            (DecisionKind::LargeImage, Arrival::Automatic),
-        ] {
-            raise(&mut state, DecisionDraft::new(kind, "q"), arrival);
+        // Only the same kind promotes (AD-2106): two carryover questions of two sources.
+        for (source, arrival) in [("one", Arrival::Requested), ("two", Arrival::Automatic)] {
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Carryover, "q").source(source),
+                arrival,
+            );
         }
         ready(&mut state, &clock);
         let y = PaneKey::Char('y');
         assert_eq!(
             handle_key(&mut state, y, &f),
-            PaneOutcome::Effect(DecisionEffect::BudgetContinue)
+            PaneOutcome::Effect(DecisionEffect::CarryoverAccept)
         );
         // Promoted but unpainted: the immediate second `y` is dropped.
         assert_eq!(handle_key(&mut state, y, &f), PaneOutcome::Consumed);
-        assert!(state.decisions.holds(DecisionKind::LargeImage));
+        assert_eq!(state.decisions.count(DecisionKind::Carryover), 1);
         ready(&mut state, &clock);
         assert_eq!(
             handle_key(&mut state, y, &f),
-            PaneOutcome::Effect(DecisionEffect::AttachLargeImage)
+            PaneOutcome::Effect(DecisionEffect::CarryoverAccept)
         );
     }
 
@@ -1185,6 +1000,9 @@ mod tests {
             Arrival::Automatic,
         );
         assert_eq!(state.decisions.len(), 4);
+        // The first arrival took the frame; the user sets it aside (an OPEN item
+        // that is withdrawn turns stale instead of vanishing: see the stale tests).
+        presentation::reducer::close(&mut state, Surface::Decision);
         // The context-warning clear for c1.
         withdraw_for(&mut state, DecisionKind::ContextWarning, "c1");
         let left: Vec<(DecisionKind, Option<String>)> = state
@@ -1235,6 +1053,7 @@ mod tests {
             Arrival::Automatic,
         );
         assert_eq!(waiting(&state), 2);
+        presentation::reducer::close(&mut state, Surface::Decision);
         // No tab list to compare against: nothing is pruned.
         prune_closed(&mut state, &LogFacts::default());
         assert_eq!(waiting(&state), 2);
@@ -1388,7 +1207,7 @@ mod tests {
             handle_domain_event(&mut state, &event, &facts("active")),
             None
         );
-        assert!(!presentation::is_open(&state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&state, Surface::Decision));
         assert!(
             state.decisions.holds(DecisionKind::Carryover),
             "the item still waits"
@@ -1397,14 +1216,14 @@ mod tests {
         open_waiting(&mut state, &facts("active"));
         let last = state.notifications.records().next_back().unwrap();
         assert!(last.message.contains("another tab"), "{}", last.message);
-        assert!(!presentation::is_open(&state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&state, Surface::Decision));
         // Back on its own tab the same chord focuses it.
         open_waiting(&mut state, &facts("other"));
-        assert!(presentation::is_open(&state, Surface::DecisionPane));
+        assert!(presentation::is_open(&state, Surface::Decision));
     }
 
     #[test]
-    fn story21_1_resolving_promotes_the_next_waiting_item_but_never_a_deferred_one() {
+    fn story21_6_answering_never_promotes_another_kind_and_a_deferred_item_is_never_reopened() {
         let (mut state, clock) = clocked();
         raise(
             &mut state,
@@ -1422,17 +1241,21 @@ mod tests {
             Arrival::Automatic,
         );
         assert_eq!(state.decisions.len(), 3);
-        // Defer the image, then answer the budget: the delete (not deferred) is next.
+        // Answer the budget from the base: nothing of its kind waits, so the frame
+        // closes and neither the image nor the delete is opened by surprise.
         ready(&mut state, &clock);
         assert_eq!(
             handle_key(&mut state, PaneKey::Char('y'), &LogFacts::default()),
             PaneOutcome::Effect(DecisionEffect::BudgetContinue)
         );
-        let selected = current(&state, &LogFacts::default()).map(|i| i.kind);
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(current(&state, &LogFacts::default()), None);
+        assert_eq!(state.decisions.len(), 2);
+        // `Ctrl+X q` focuses the oldest decidable item: FIFO, the image.
+        assert!(focus_oldest(&mut state, &LogFacts::default()));
         assert_eq!(
-            selected,
-            Some(DecisionKind::LargeImage),
-            "FIFO: the image is oldest"
+            current(&state, &LogFacts::default()).map(|i| i.kind),
+            Some(DecisionKind::LargeImage)
         );
         ready(&mut state, &clock);
         assert_eq!(
@@ -1440,7 +1263,8 @@ mod tests {
             PaneOutcome::Consumed,
             "Esc defers the image"
         );
-        assert!(!presentation::is_open(&state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(current(&state, &LogFacts::default()), None);
         assert!(focus_oldest(&mut state, &LogFacts::default()));
         assert_eq!(
             current(&state, &LogFacts::default()).map(|i| i.kind),
@@ -1466,7 +1290,7 @@ mod tests {
             handle_key(&mut state, PaneKey::CtrlC, &LogFacts::default()),
             PaneOutcome::Consumed
         );
-        assert!(!presentation::is_open(&state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&state, Surface::Decision));
         assert!(state.decisions.holds(DecisionKind::Recovery));
         assert!(focus_oldest(&mut state, &LogFacts::default()));
         assert_eq!(
@@ -1616,5 +1440,470 @@ mod tests {
                 assert_eq!(state.focus, FocusState::Chat);
             }
         }
+    }
+
+    fn painted(state: &TuiState, f: &LogFacts) -> String {
+        draw(state, f, 80, 24)
+    }
+
+    #[test]
+    fn story21_6_a_withdrawn_item_whose_frame_is_open_turns_stale_and_close_removes_it() {
+        let (mut state, clock) = clocked();
+        let f = LogFacts::default();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "Daily budget ($10.00) reached."),
+            Arrival::Automatic,
+        );
+        assert!(presentation::is_open(&state, Surface::Decision));
+        ready(&mut state, &clock);
+        withdraw(&mut state, DecisionKind::Budget);
+        let item = state.decisions.items().next().expect("the open item stays");
+        assert_eq!(item.validity, Validity::Stale(NO_LONGER_PENDING));
+        assert_eq!(waiting(&state), 1, "a stale item still counts until closed");
+        let text = painted(&state, &f);
+        assert!(
+            text.contains("This decision is no longer pending."),
+            "{text}"
+        );
+        assert!(text.contains("[Esc] Close"), "{text}");
+        assert!(
+            !text.contains("Pause until tomorrow"),
+            "no mutation key is offered: {text}"
+        );
+        for key in ['y', 's', 'p', 'n', 'k'] {
+            assert_eq!(
+                handle_key(&mut state, PaneKey::Char(key), &f),
+                PaneOutcome::Consumed,
+                "{key} acts on nothing"
+            );
+        }
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Enter, &f),
+            PaneOutcome::Consumed
+        );
+        assert_eq!(waiting(&state), 1);
+        assert!(presentation::is_open(&state, Surface::Decision));
+        // Close removes it; it was never deferred, so no cooldown starts.
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Esc, &f),
+            PaneOutcome::Consumed
+        );
+        assert!(state.decisions.is_empty());
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(state.decisions.last_defer_at(), None);
+        assert!(presentation::consistent(&state));
+    }
+
+    #[test]
+    fn story21_6_a_vanished_conversation_turns_an_open_item_stale_on_any_tab() {
+        let (mut state, _clock) = clocked();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::ContextWarning, "low").conversation("c1"),
+            Arrival::Automatic,
+        );
+        assert!(presentation::is_open(&state, Surface::Decision));
+        let gone = LogFacts {
+            titles: vec![("c2".into(), "two".into())],
+            ..facts("c2")
+        };
+        prune_closed(&mut state, &gone);
+        assert!(current(&state, &gone).is_some_and(DecisionItem::is_stale));
+        assert_eq!(
+            handle_key(&mut state, PaneKey::CtrlC, &gone),
+            PaneOutcome::Consumed
+        );
+        assert!(state.decisions.is_empty());
+        assert!(!presentation::is_open(&state, Surface::Decision));
+    }
+
+    #[test]
+    fn story21_6_an_item_for_another_conversation_waits_and_never_takes_focus() {
+        let (mut state, _clock) = clocked();
+        prune_closed(&mut state, &facts("a"));
+        for arrival in [Arrival::Automatic, Arrival::Requested] {
+            assert_eq!(
+                raise(
+                    &mut state,
+                    DecisionDraft::new(DecisionKind::ContextWarning, "low").conversation("b"),
+                    arrival,
+                ),
+                Raised::Waiting
+            );
+            assert!(!presentation::is_open(&state, Surface::Decision));
+        }
+        assert_eq!(state.decisions.len(), 1);
+        let toasts = state
+            .notifications
+            .visible()
+            .filter(|r| r.message == waiting_toast())
+            .count();
+        assert_eq!(toasts, 1, "one waiting toast per new item");
+        // Positive control: the same arrival for the active conversation takes the frame.
+        assert_eq!(
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Carryover, "x").conversation("a"),
+                Arrival::Requested,
+            ),
+            Raised::Focused
+        );
+        assert_eq!(
+            current(&state, &facts("a")).map(|i| i.kind),
+            Some(DecisionKind::Carryover)
+        );
+    }
+
+    #[test]
+    fn story21_6_a_requested_decision_queues_behind_a_text_field_but_opens_over_a_reader() {
+        let (mut state, _clock) = clocked();
+        presentation::reducer::open(&mut state, Surface::CommandPalette);
+        assert_eq!(
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::DeleteConversations, "d"),
+                Arrival::Requested,
+            ),
+            Raised::Waiting
+        );
+        assert!(!presentation::is_open(&state, Surface::Decision));
+        assert_eq!(waiting(&state), 1);
+        let (mut state, _clock) = clocked();
+        presentation::reducer::open(&mut state, Surface::Help);
+        assert_eq!(
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::DeleteConversations, "d"),
+                Arrival::Requested,
+            ),
+            Raised::Focused
+        );
+        assert_eq!(state.modal_stack.len(), 2);
+    }
+
+    #[test]
+    fn story21_6_a_resolve_or_defer_restores_the_interrupted_frame_exactly() {
+        for answer in [PaneKey::Char('y'), PaneKey::Esc] {
+            let (mut state, clock) = clocked();
+            presentation::reducer::open(&mut state, Surface::Help);
+            state.help_overlay.scroll_offset = 7;
+            let help = state.modal_stack.top().cloned();
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Budget, "b"),
+                Arrival::Requested,
+            );
+            assert_eq!(state.modal_stack.len(), 2);
+            ready(&mut state, &clock);
+            handle_key(&mut state, answer, &LogFacts::default());
+            assert_eq!(state.modal_stack.top().cloned(), help, "{answer:?}");
+            assert_eq!(state.help_overlay.scroll_offset, 7, "{answer:?}");
+            assert!(presentation::consistent(&state));
+        }
+    }
+
+    #[test]
+    fn story21_6_only_an_answer_from_the_base_opens_the_next_item_of_the_same_kind() {
+        let f = LogFacts::default();
+        let two = |state: &mut TuiState| {
+            for (source, arrival) in [("a", Arrival::Requested), ("b", Arrival::Automatic)] {
+                raise(
+                    state,
+                    DecisionDraft::new(DecisionKind::Carryover, "q").source(source),
+                    arrival,
+                );
+            }
+        };
+        // Nothing beneath: answering `a` opens `b` at once (the legacy sequence).
+        let (mut state, clock) = clocked();
+        two(&mut state);
+        ready(&mut state, &clock);
+        handle_key(&mut state, PaneKey::Char('y'), &f);
+        assert_eq!(current(&state, &f).map(|i| i.source.as_str()), Some("b"));
+        // Deferring `b` never opens anything.
+        ready(&mut state, &clock);
+        handle_key(&mut state, PaneKey::Esc, &f);
+        assert_eq!(current(&state, &f), None);
+        // A frame beneath: AD-2106 restore wins, `b` waits.
+        let (mut state, clock) = clocked();
+        presentation::reducer::open(&mut state, Surface::Help);
+        two(&mut state);
+        ready(&mut state, &clock);
+        handle_key(&mut state, PaneKey::Char('y'), &f);
+        assert_eq!(current(&state, &f), None);
+        assert_eq!(
+            state.modal_stack.top().map(|frame| frame.surface),
+            Some(Surface::Help)
+        );
+        assert_eq!(state.decisions.count(DecisionKind::Carryover), 1);
+    }
+
+    #[test]
+    fn story21_6_the_tick_asks_for_one_redraw_when_the_inert_window_ends() {
+        let (mut state, clock) = clocked();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "b"),
+            Arrival::Requested,
+        );
+        assert!(!tick(&mut state), "unpainted: nothing to release");
+        note_painted(&mut state);
+        assert!(!tick(&mut state), "still inert");
+        clock.advance(INERT_AFTER_PAINT);
+        state.needs_redraw = false;
+        assert!(tick(&mut state));
+        assert!(state.needs_redraw);
+        assert!(!tick(&mut state), "announced once per painted frame");
+    }
+
+    #[test]
+    fn story21_6_page_keys_scroll_the_body_and_never_decide() {
+        let (mut state, clock) = clocked();
+        let f = LogFacts::default();
+        let body: Vec<String> = (0..30).map(|n| format!("row-{n:02}")).collect();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::LargeImage, body.join("\n")),
+            Arrival::Requested,
+        );
+        // Never painted, so keys are inert: scrolling is allowed all the same.
+        assert!(painted(&state, &f).contains("row-00"));
+        assert_eq!(
+            handle_key(&mut state, PaneKey::PageDown, &f),
+            PaneOutcome::Consumed
+        );
+        let text = painted(&state, &f);
+        assert!(
+            text.contains("row-05") && !text.contains("row-00"),
+            "{text}"
+        );
+        for _ in 0..20 {
+            handle_key(&mut state, PaneKey::PageDown, &f);
+        }
+        assert!(painted(&state, &f).contains("row-29"));
+        for _ in 0..20 {
+            handle_key(&mut state, PaneKey::PageUp, &f);
+        }
+        assert!(painted(&state, &f).contains("row-00"));
+        assert!(state.decisions.holds(DecisionKind::LargeImage));
+        ready(&mut state, &clock);
+    }
+
+    #[test]
+    fn story21_6_a_large_image_travels_as_the_items_payload_and_is_attached_once() {
+        use crate::domain::models::ImageAttachment;
+        let (mut state, clock) = clocked();
+        let f = LogFacts::default();
+        let image = ImageAttachment {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        };
+        raise_large_image(&mut state, image.clone(), "Image is large (6 MB).");
+        ready(&mut state, &clock);
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Char('y'), &f),
+            PaneOutcome::Effect(DecisionEffect::AttachLargeImage)
+        );
+        assert!(
+            state.pending_images.is_empty(),
+            "the effect arm attaches, not the key"
+        );
+        apply_resolved_action(
+            &mut state,
+            InputAction::ImageConfirmAttach,
+            presentation::reducer::restore_focus_after_modal,
+        );
+        assert_eq!(state.pending_images, vec![image]);
+        assert!(state.image_indicator.is_some());
+        assert!(state.decisions.is_empty());
+        // Cancel drops the payload and attaches nothing.
+        raise_large_image(
+            &mut state,
+            ImageAttachment {
+                media_type: "image/png".into(),
+                data: "BBBB".into(),
+            },
+            "Image is large (6 MB).",
+        );
+        ready(&mut state, &clock);
+        assert_eq!(
+            handle_key(&mut state, PaneKey::Char('n'), &f),
+            PaneOutcome::Effect(DecisionEffect::CancelLargeImage)
+        );
+        apply_resolved_action(
+            &mut state,
+            InputAction::ImageConfirmCancel,
+            presentation::reducer::restore_focus_after_modal,
+        );
+        assert_eq!(state.pending_images.len(), 1);
+        assert_eq!(state.decisions.take_resolved(), None);
+    }
+
+    #[test]
+    fn story21_6_the_key_is_kind_source_and_conversation_and_an_update_never_re_arrives() {
+        let (mut state, _clock) = clocked();
+        for text in ["one", "two"] {
+            raise(
+                &mut state,
+                DecisionDraft::new(DecisionKind::Budget, text),
+                Arrival::Automatic,
+            );
+        }
+        assert_eq!(state.decisions.len(), 1);
+        assert_eq!(state.decisions.items().next().unwrap().detail, "two");
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "other source").source("s2"),
+            Arrival::Automatic,
+        );
+        assert_eq!(state.decisions.len(), 2, "the source is part of the key");
+        let toasts = state
+            .notifications
+            .visible()
+            .filter(|r| r.message == waiting_toast())
+            .count();
+        assert_eq!(toasts, 1, "the update never announced itself again");
+    }
+
+    #[test]
+    fn story21_6_open_by_key_opens_a_queued_item_unless_a_text_field_or_quit_owns_the_top() {
+        let (mut state, _clock) = clocked();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::Budget, "b"),
+            Arrival::Automatic,
+        );
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::LargeImage, "i"),
+            Arrival::Automatic,
+        );
+        let image = state.decisions.items().nth(1).unwrap().key();
+        assert!(open(&mut state, &image));
+        assert_eq!(
+            current(&state, &LogFacts::default()).map(|i| i.kind),
+            Some(DecisionKind::LargeImage)
+        );
+        let unknown = DecisionKey {
+            kind: DecisionKind::Recovery,
+            source: String::new(),
+            conversation_id: None,
+        };
+        assert!(!open(&mut state, &unknown));
+        presentation::reducer::open(&mut state, Surface::CommandPalette);
+        let budget = state.decisions.items().next().unwrap().key();
+        assert!(
+            !open(&mut state, &budget),
+            "a text field keeps the keyboard"
+        );
+    }
+
+    #[test]
+    fn story21_6_esc_defers_inside_the_inert_window_but_every_deciding_key_stays_inert() {
+        let f = LogFacts::default();
+        for kind in [
+            DecisionKind::Carryover,
+            DecisionKind::Budget,
+            DecisionKind::ContextWarning,
+            DecisionKind::LargeImage,
+        ] {
+            let (mut state, clock) = clocked();
+            raise(
+                &mut state,
+                DecisionDraft::new(kind, "q"),
+                Arrival::Requested,
+            );
+            note_painted(&mut state);
+            clock.advance(Duration::from_millis(499));
+            // A deciding rail key is still dropped at 499 ms ...
+            for key in ['y', 'n', 's', 'p', 'k'] {
+                assert_eq!(
+                    handle_key(&mut state, PaneKey::Char(key), &f),
+                    PaneOutcome::Consumed
+                );
+                assert!(
+                    state.decisions.holds(kind),
+                    "{kind:?}: `{key}` inert at 499 ms"
+                );
+            }
+            assert!(presentation::is_open(&state, Surface::Decision));
+            // ... but Esc sets it aside at once: counted, deferred, frame gone.
+            assert_eq!(
+                handle_key(&mut state, PaneKey::Esc, &f),
+                PaneOutcome::Consumed
+            );
+            assert!(
+                !presentation::is_open(&state, Surface::Decision),
+                "{kind:?}"
+            );
+            assert_eq!(waiting(&state), 1, "{kind:?}: still counted");
+            assert!(state.decisions.items().next().unwrap().deferred, "{kind:?}");
+        }
+        // The resolving Esc policies wait for the window like any decision key.
+        for kind in [DecisionKind::Recovery, DecisionKind::DeleteConversations] {
+            let (mut state, clock) = clocked();
+            raise(
+                &mut state,
+                DecisionDraft::new(kind, "q"),
+                Arrival::Requested,
+            );
+            note_painted(&mut state);
+            clock.advance(Duration::from_millis(499));
+            assert_eq!(
+                handle_key(&mut state, PaneKey::Esc, &f),
+                PaneOutcome::Consumed
+            );
+            assert!(state.decisions.holds(kind), "{kind:?}: Esc inert at 499 ms");
+            clock.advance(Duration::from_millis(2));
+            assert!(matches!(
+                handle_key(&mut state, PaneKey::Esc, &f),
+                PaneOutcome::Effect(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn story21_6_a_scrolled_body_survives_a_width_change_in_both_directions() {
+        let words: Vec<String> = (0..200).map(|n| format!("w{n:03}")).collect();
+        let detail = words.join(" ");
+        // Narrow (60 columns): scroll to the end, then widen to 130 where far fewer rows wrap.
+        let (mut state, _clock) = clocked();
+        state.terminal_width = 60;
+        let f = LogFacts::default();
+        raise(
+            &mut state,
+            DecisionDraft::new(DecisionKind::LargeImage, detail.clone()),
+            Arrival::Requested,
+        );
+        for _ in 0..10 {
+            handle_key(&mut state, PaneKey::PageDown, &f);
+        }
+        assert!(
+            draw(&state, &f, 60, 24).contains("w199"),
+            "narrow: the end shows"
+        );
+        state.terminal_width = 130;
+        let wide = draw(&state, &f, 130, 30);
+        assert!(
+            wide.contains("w199"),
+            "widened: the body is never skipped away\n{wide}"
+        );
+        assert!(wide.contains("[y] Attach anyway"), "the rail stays");
+        // A later PgUp starts from the clamped offset, not the stale one, and reaches the top.
+        for _ in 0..10 {
+            handle_key(&mut state, PaneKey::PageUp, &f);
+        }
+        assert!(draw(&state, &f, 130, 30).contains("w000"));
+        // Wide to narrow: an offset kept at 130 columns still shows rows at 60.
+        for _ in 0..3 {
+            handle_key(&mut state, PaneKey::PageDown, &f);
+        }
+        state.terminal_width = 60;
+        let narrow = draw(&state, &f, 60, 24);
+        assert!(
+            narrow.contains("w1") && narrow.contains("[y] Attach anyway"),
+            "{narrow}"
+        );
     }
 }

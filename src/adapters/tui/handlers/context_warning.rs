@@ -12,7 +12,7 @@
 
 #![allow(dead_code)]
 
-use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
+use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
 use crate::adapters::tui::notifications::{
     self, NoticeAction, NoticeDraft, NoticeSeverity, NoticeSource,
 };
@@ -40,7 +40,7 @@ pub fn handle_upsert_context_warning(
             .conversation(conversation_id)
             .action(NoticeAction::ContextDecision),
     );
-    decision_pane::raise(
+    decision_queue::raise(
         state,
         DecisionDraft::new(DecisionKind::ContextWarning, message).conversation(conversation_id),
         Arrival::Automatic,
@@ -51,7 +51,7 @@ pub fn handle_upsert_context_warning(
 /// Story 7.4: clear the context-warning decision of `conversation_id` only (a
 /// different tab's pending warning is untouched).
 pub fn handle_clear_context_warning(state: &mut TuiState, conversation_id: &str) -> HandlerOutcome {
-    decision_pane::withdraw_for(state, DecisionKind::ContextWarning, conversation_id);
+    decision_queue::withdraw_for(state, DecisionKind::ContextWarning, conversation_id);
     state.needs_redraw = true;
     HandlerOutcome::Quiet
 }

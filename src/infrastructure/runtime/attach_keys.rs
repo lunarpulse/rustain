@@ -437,7 +437,7 @@ pub(super) fn handle_attached_paste(state: &mut TuiState, text: &str, card_pendi
 /// The attached key front door. Called by `run_attached` for every key event.
 pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> KeyFlow {
     // Reconcile only an overlay-close transition, never a frame or deliberate `i`.
-    let overlay_was_open = crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state);
+    let overlay_was_open = crate::adapters::tui::decision_queue::card_focus_blocked(ctx.state);
     let owner_before = (
         ctx.state.modal_stack.top().map(|frame| frame.id),
         ctx.state.pending_leader,
@@ -471,7 +471,7 @@ pub(super) async fn handle_attached_key(ctx: &mut KeyCtx<'_>, key: KeyEvent) -> 
     };
     if overlay_was_open
         && ctx.state.focus == FocusState::Input
-        && !crate::adapters::tui::decision_pane::card_focus_blocked(ctx.state)
+        && !crate::adapters::tui::decision_queue::card_focus_blocked(ctx.state)
     {
         reconcile_pending_card_after_overlay_close(ctx);
     }
@@ -1002,6 +1002,7 @@ fn request_quit(ctx: &mut KeyCtx<'_>) -> KeyFlow {
                 .is_some(),
         pending_decisions: ctx.state.attached.consent.len()
             + usize::from(ctx.state.attached.consolidation_token.is_some())
+            + ctx.state.decisions.len()
             + usize::from(attached_proposal_pending(ctx.state).is_some())
             + if ctx.read_only {
                 0
@@ -5300,7 +5301,7 @@ pub(super) mod tests {
                             rig.ctrl('q').await;
                         }
                     }
-                    Surface::DecisionPane
+                    Surface::Decision
                     | Surface::ModelSelector
                     | Surface::ProfileSwitcher
                     | Surface::UsagePanel
@@ -5879,7 +5880,7 @@ pub(super) mod tests {
             panic!("attached frame-origin pane absence must be registry-gated");
         };
         assert_eq!(remedy, "No decisions waiting in this client");
-        assert!(!presentation::is_open(&rig.state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&rig.state, Surface::Decision));
         rig.ch('q').await;
         assert_eq!(rig.notice(NoticeSource::Chord), Some(remedy));
         assert_eq!(rig.state.notifications.records().len(), records + 1);

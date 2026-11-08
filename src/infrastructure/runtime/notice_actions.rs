@@ -1,7 +1,7 @@
 //! Local-host execution of notice actions and decision effects (Story 21.1
 //! AC5, AC9, A8).
 //!
-//! S-LOG (`notification_log`) and the interim decision pane (`decision_pane`)
+//! S-LOG (`notification_log`) and the session decision queue (`decision_queue`)
 //! decide *what* the user asked for; this module runs it with the local host's
 //! facts. S-LOG `r`, the pane's Compact and the carryover decision share the
 //! same two helpers, so there is one retry path and one compaction trigger.

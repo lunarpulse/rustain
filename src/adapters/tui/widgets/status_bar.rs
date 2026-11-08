@@ -2,7 +2,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::adapters::tui::decision_pane;
+use crate::adapters::tui::decision_queue;
 use crate::adapters::tui::state::{DailyBudgetState, LogAwareness};
 use crate::adapters::tui::text_geometry as geom;
 use crate::adapters::tui::theme::Theme;
@@ -366,7 +366,7 @@ pub fn render(
         }
     }
     let reminder = log_reminder_text(log_awareness);
-    let cue = decision_pane::status_cue(badges.decisions);
+    let cue = decision_queue::status_cue(badges.decisions);
     let reserved_width = reminder.as_deref().map_or(0, |text| geom::cells(text) + 1)
         + cue.as_deref().map_or(0, |text| geom::cells(text) + 1);
     // The role is mandatory, its explanation is not: keep the complete state
@@ -1645,7 +1645,7 @@ mod tests {
 
     #[test]
     fn story21_3_tail_is_rightmost_and_covers_no_neighbour_at_60_80_130() {
-        let cue = decision_pane::status_cue(2).unwrap();
+        let cue = decision_queue::status_cue(2).unwrap();
         for width in [60u16, 80, 130] {
             // cue + reminder + tail: the tail owns the edge, the others sit beside it.
             let badges = NoticeBadges {

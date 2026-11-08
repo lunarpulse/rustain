@@ -45,23 +45,10 @@ pub(super) fn open_quit(state: &mut TuiState) {
     assert!(presentation::consistent(state));
 }
 
-fn top_rect(state: &TuiState, layout: &AppLayout, buffer: &Buffer) -> Rect {
-    if state
-        .modal_stack
-        .top()
-        .is_some_and(|f| f.surface == Surface::DecisionPane)
-    {
-        let width = layout.chat_pane.width.min(100);
-        let x = layout.chat_pane.x + (layout.chat_pane.width - width) / 2;
-        let bottom = layout.chat_pane.bottom();
-        let y = (layout.chat_pane.y..bottom)
-            .rev()
-            .find(|y| buffer[(x, *y)].symbol() == "┌")
-            .expect("pane top border");
-        Rect::new(x, y, width, bottom - y)
-    } else {
-        geometry::frame_rect(geometry::modal_region(layout, buffer.area))
-    }
+fn top_rect(_state: &TuiState, layout: &AppLayout, buffer: &Buffer) -> Rect {
+    // old -> new: a decision was a bottom-anchored box over the chat pane, found by its
+    // own `┌`; it is now an ordinary L3 frame in the shared Standard `frame_rect`.
+    geometry::frame_rect(geometry::modal_region(layout, buffer.area))
 }
 
 pub(super) fn draw(state: &TuiState, layout: &AppLayout, title: Option<&str>) -> Buffer {
@@ -202,18 +189,19 @@ fn status_row_is_painted_last_and_never_covered() {
                         if route == "help-pane" {
                             press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
                         }
-                        rustain::adapters::tui::decision_pane::raise(
+                        rustain::adapters::tui::decision_queue::raise(
                             &mut state,
-                            rustain::adapters::tui::decision_pane::DecisionDraft::new(
-                                rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                            rustain::adapters::tui::decision_queue::DecisionDraft::new(
+                                rustain::adapters::tui::decision_queue::DecisionKind::Budget,
                                 "budget detail",
                             ),
-                            rustain::adapters::tui::decision_pane::Arrival::Requested,
+                            rustain::adapters::tui::decision_queue::Arrival::Requested,
                         );
+                        // old -> new: `System · Daily budget` -> the decision frame title.
                         if route == "pane" {
-                            "System · Daily budget"
+                            "Decision: Daily budget"
                         } else {
-                            "Help — Rustain Keybindings › System · Daily budget"
+                            "Help — Rustain Keybindings › Decision: Daily budget"
                         }
                     }
                     _ => {
@@ -927,7 +915,7 @@ fn nested_palette_refusal_is_visible_without_dispatch() {
 #[test]
 fn a2b_smoke_predicates_have_real_rust_frames() {
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         keymap::{CommandId, Context, table::LeaderCmd},
         notifications::NotificationStore,
         state::LeaderFeedback,
@@ -982,28 +970,28 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
         let scroll = h.state.help_overlay.scroll_offset;
         emit(&mut h, Host::Local, "help-before-arrival");
         assert_eq!(
-            decision_pane::raise(
+            decision_queue::raise(
                 &mut h.state,
                 DecisionDraft::new(DecisionKind::Budget, "Daily budget ($0.00) reached."),
                 Arrival::Automatic,
             ),
-            decision_pane::Raised::Focused
+            decision_queue::Raised::Focused
         );
         emit(&mut h, Host::Local, "help-budget");
-        decision_pane::note_painted(&mut h.state);
-        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        decision_queue::note_painted(&mut h.state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
         press(&mut h.state, Key::Esc);
         assert_eq!(h.state.modal_stack.top(), Some(&frame));
         assert_eq!(h.state.help_overlay.scroll_offset, scroll);
         emit(&mut h, Host::Local, "help-deferred");
         press_all(&mut h.state, &[Key::Ctrl('x'), Key::Char('q')]);
-        decision_pane::open_waiting(&mut h.state, &LogFacts::default());
+        decision_queue::open_waiting(&mut h.state, &LogFacts::default());
         emit(&mut h, Host::Local, "help-reopened-budget");
-        decision_pane::note_painted(&mut h.state);
-        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        decision_queue::note_painted(&mut h.state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
         assert_eq!(
             press(&mut h.state, Key::Char('y')),
-            InputAction::Decision(decision_pane::DecisionEffect::BudgetContinue,)
+            InputAction::Decision(decision_queue::DecisionEffect::BudgetContinue,)
         );
         assert_eq!(h.state.modal_stack.top(), Some(&frame));
         assert_eq!(h.state.help_overlay.scroll_offset, scroll);
@@ -1056,7 +1044,7 @@ fn a2b_smoke_predicates_have_real_rust_frames() {
 #[test]
 fn a_covered_pane_does_not_start_its_inert_window() {
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         notifications::NotificationStore,
     };
     use rustain::domain::{clock::MockClock, models::NotificationsConfig};
@@ -1068,7 +1056,7 @@ fn a_covered_pane_does_not_start_its_inert_window() {
     let mut state = TuiState::new(80, 24);
     state.notifications =
         NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
-    decision_pane::raise(
+    decision_queue::raise(
         &mut state,
         DecisionDraft::new(DecisionKind::Budget, "covered"),
         Arrival::Requested,
@@ -1099,11 +1087,11 @@ fn a_covered_pane_does_not_start_its_inert_window() {
     assert_eq!(press(&mut state, Key::Char('y')), InputAction::Consumed);
     assert!(state.decisions.holds(DecisionKind::Budget));
     assert!(paint(&state));
-    decision_pane::note_painted(&mut state);
-    clock.advance(decision_pane::INERT_AFTER_PAINT);
+    decision_queue::note_painted(&mut state);
+    clock.advance(decision_queue::INERT_AFTER_PAINT);
     assert_eq!(
         press(&mut state, Key::Char('y')),
-        InputAction::Decision(decision_pane::DecisionEffect::BudgetContinue)
+        InputAction::Decision(decision_queue::DecisionEffect::BudgetContinue)
     );
 }
 
@@ -1142,7 +1130,7 @@ fn autocomplete_is_painted_only_without_a_frame_and_returns_after_quit() {
 #[test]
 fn pane_model_effect_paints_its_destination_and_restores_the_caller() {
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         notifications::NotificationStore,
     };
     use rustain::domain::{clock::MockClock, models::NotificationsConfig};
@@ -1154,19 +1142,19 @@ fn pane_model_effect_paints_its_destination_and_restores_the_caller() {
             NotificationStore::from_config(&NotificationsConfig::default(), clock.clone());
         press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
         let caller = state.modal_stack.iter().cloned().collect::<Vec<_>>();
-        decision_pane::raise(
+        decision_queue::raise(
             &mut state,
             DecisionDraft::new(DecisionKind::Budget, "budget detail"),
             Arrival::Requested,
         );
         let layout = layout(&state);
         draw(&state, &layout, None);
-        decision_pane::note_painted(&mut state);
-        clock.advance(decision_pane::INERT_AFTER_PAINT);
+        decision_queue::note_painted(&mut state);
+        clock.advance(decision_queue::INERT_AFTER_PAINT);
         assert_eq!(
             press(&mut state, Key::Char('s')),
             InputAction::Decision(
-                rustain::adapters::tui::decision_pane::DecisionEffect::BudgetSwitchCheaper
+                rustain::adapters::tui::decision_queue::DecisionEffect::BudgetSwitchCheaper
             )
         );
         rustain::adapters::tui::handlers::model_switch::open_selector(
@@ -1197,7 +1185,7 @@ fn pane_model_effect_paints_its_destination_and_restores_the_caller() {
 #[test]
 fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
     use rustain::adapters::tui::{
-        decision_pane::{self, Arrival, DecisionDraft, DecisionKind},
+        decision_queue::{self, Arrival, DecisionDraft, DecisionKind},
         keymap::Context,
     };
     for (width, height) in [(60, 16), (80, 24), (130, 30)] {
@@ -1209,8 +1197,16 @@ fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
                 let mut draft = DecisionDraft::new(DecisionKind::Budget, "waiting");
                 if waiting == "other" {
                     draft = draft.conversation("other");
+                    // The last draw saw another tab: the arrival queues, never opens (A5).
+                    decision_queue::prune_closed(
+                        &mut state,
+                        &LogFacts {
+                            active_conversation_id: Some("here".into()),
+                            ..LogFacts::default()
+                        },
+                    );
                 }
-                decision_pane::raise(&mut state, draft, Arrival::Automatic);
+                decision_queue::raise(&mut state, draft, Arrival::Automatic);
             }
             press_all(&mut state, &[Key::Ctrl('x'), Key::Char('?')]);
             let frames: Vec<_> = state.modal_stack.iter().cloned().collect();
@@ -1219,13 +1215,10 @@ fn frame_origin_decisions_refusal_is_visible_and_retains_the_menu() {
                 press(&mut state, Key::Char('q')),
                 InputAction::FocusDecisions
             );
-            decision_pane::open_waiting(&mut state, &LogFacts::default());
+            decision_queue::open_waiting(&mut state, &LogFacts::default());
             if waiting == "actionable" {
                 assert!(state.pending_leader.is_none());
-                assert_eq!(
-                    state.modal_stack.top().unwrap().surface,
-                    Surface::DecisionPane
-                );
+                assert_eq!(state.modal_stack.top().unwrap().surface, Surface::Decision);
                 assert_eq!(state.modal_stack.iter().next(), frames.first());
             } else {
                 let expected = if waiting == "empty" {

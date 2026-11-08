@@ -559,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn story21_1_owner_screenshot_storm_leaves_an_empty_notice_area_and_every_fact_in_the_log()
      {
-        use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
+        use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
         use crate::adapters::tui::keymap::Host;
         use crate::adapters::tui::layout::compute_layout;
         use crate::adapters::tui::notification_log::LogFacts;
@@ -628,7 +628,7 @@ mod tests {
                 })
                 .unwrap();
             if pane_painted {
-                decision_pane::note_painted(&mut f.state);
+                decision_queue::note_painted(&mut f.state);
             }
             let buffer = terminal.backend().buffer().clone();
             (0..buffer.area.height)
@@ -643,7 +643,7 @@ mod tests {
         let mut every_screen = String::new();
 
         // The storm. A startup recovery prompt first (0→1, empty composer: it takes focus).
-        decision_pane::raise(
+        decision_queue::raise(
             &mut f.state,
             DecisionDraft::new(DecisionKind::Recovery, "Recovered chat · 1234 tokens"),
             Arrival::Automatic,
@@ -738,12 +738,12 @@ mod tests {
 
         // The recovery decision is still pending, focused, and painted with its own rail.
         assert_eq!(f.state.decisions.len(), 1);
-        assert!(is_open(&f.state, Surface::DecisionPane));
+        assert!(is_open(&f.state, Surface::Decision));
         assert!(presentation::consistent(&f.state));
         assert_eq!(f.state.modal_stack.len(), 1);
         assert_eq!(
             f.state.modal_stack.top().unwrap().surface,
-            Surface::DecisionPane
+            Surface::Decision
         );
         assert!(
             last.contains("[Enter/Esc] Continue") && last.contains("[n] New session"),

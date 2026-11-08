@@ -45,7 +45,7 @@ async fn only_the_top_frame_receives_keys() {
         Surface::NotificationLog,
         Surface::Help,
         Surface::CommandPalette,
-        Surface::DecisionPane,
+        Surface::Decision,
         Surface::QuitConfirm,
         Surface::ModelSelector,
         Surface::ProfileSwitcher,
@@ -62,14 +62,14 @@ async fn only_the_top_frame_receives_keys() {
             if surface == Surface::CommandPalette {
                 press(&mut state, Key::Ctrl('p'));
             }
-            if surface == Surface::DecisionPane {
-                rustain::adapters::tui::decision_pane::raise(
+            if surface == Surface::Decision {
+                rustain::adapters::tui::decision_queue::raise(
                     &mut state,
-                    rustain::adapters::tui::decision_pane::DecisionDraft::new(
-                        rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                    rustain::adapters::tui::decision_queue::DecisionDraft::new(
+                        rustain::adapters::tui::decision_queue::DecisionKind::Budget,
                         "pane owns the key",
                     ),
-                    rustain::adapters::tui::decision_pane::Arrival::Requested,
+                    rustain::adapters::tui::decision_queue::Arrival::Requested,
                 );
             }
             if surface == Surface::QuitConfirm {
@@ -137,14 +137,14 @@ async fn only_the_top_frame_receives_keys() {
             if surface == Surface::CommandPalette {
                 press(&mut state, Key::Ctrl('p'));
             }
-            if surface == Surface::DecisionPane {
-                rustain::adapters::tui::decision_pane::raise(
+            if surface == Surface::Decision {
+                rustain::adapters::tui::decision_queue::raise(
                     &mut state,
-                    rustain::adapters::tui::decision_pane::DecisionDraft::new(
-                        rustain::adapters::tui::decision_pane::DecisionKind::Budget,
+                    rustain::adapters::tui::decision_queue::DecisionDraft::new(
+                        rustain::adapters::tui::decision_queue::DecisionKind::Budget,
                         "pane owns ingress",
                     ),
-                    rustain::adapters::tui::decision_pane::Arrival::Requested,
+                    rustain::adapters::tui::decision_queue::Arrival::Requested,
                 );
             }
             if surface == Surface::QuitConfirm {

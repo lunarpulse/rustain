@@ -7,7 +7,7 @@ pub enum Surface {
     Help,
     NotificationLog,
     QuitConfirm,
-    DecisionPane,
+    Decision,
     ModelSelector,
     ProfileSwitcher,
     UsagePanel,
@@ -28,7 +28,7 @@ impl Surface {
             Self::Help => "Help — Rustain Keybindings",
             Self::NotificationLog => "System · Notifications",
             Self::QuitConfirm => "System · Quit",
-            Self::DecisionPane => "System · Decisions",
+            Self::Decision => "Decision",
             Self::ModelSelector => "Select Model",
             Self::ProfileSwitcher => "Profile Switcher",
             Self::UsagePanel => "Usage & Cost",
@@ -49,7 +49,7 @@ impl Surface {
             Self::Help => Context::Help,
             Self::NotificationLog => Context::NotificationLog,
             Self::QuitConfirm => Context::QuitConfirm,
-            Self::DecisionPane => Context::DecisionPane,
+            Self::Decision => Context::Decision,
             Self::ModelSelector => Context::ModelSelector,
             Self::ProfileSwitcher => Context::ProfileSwitcher,
             Self::UsagePanel => Context::UsagePanel,
@@ -88,7 +88,7 @@ pub struct Frame {
     pub surface: Surface,
     pub conversation_id: Option<String>,
     /// Queue item identity belongs to the frame, never to the queue payload.
-    pub decision: Option<crate::adapters::tui::decision_pane::DecisionKey>,
+    pub decision: Option<crate::adapters::tui::decision_queue::DecisionKey>,
     /// Display metadata belongs to the frame, not its cached body payload.
     pub tool_title: Option<String>,
     /// One-shot payload preparation after an effect opens a fresh frame.

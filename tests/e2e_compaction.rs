@@ -13,10 +13,10 @@ use rustain::domain::models::{
 use crate::e2e_harness;
 // ── Context warning, compaction results via TestHarness ──────────
 
-// Covers: AC3 — context-warning decision renders in the interim decision pane.
+// Covers: AC3 — context-warning decision renders in the decision frame.
 // Old (7.4): a `ctxwarn-*` FeedbackBlock with `[Ctrl+K c] Compact` chips in the
-// transcript. New (21.1 S2 AC9): the real producer holds a pane item and the pane
-// paints the question with the keys that answer it.
+// transcript. New (21.1 S2 AC9 / 21.6): the real producer holds a queue item and the
+// `Surface::Decision` frame paints the question with the keys that answer it.
 #[test]
 fn test_context_warning_decision_renders_in_the_pane() {
     let mut h = e2e_harness::TestHarness::new();
@@ -29,7 +29,7 @@ fn test_context_warning_decision_renders_in_the_pane() {
     assert!(
         rustain::adapters::tui::presentation::is_open(
             &h.state,
-            rustain::adapters::tui::presentation::Surface::DecisionPane
+            rustain::adapters::tui::presentation::Surface::Decision
         ),
         "the 0→1 arrival took focus"
     );
@@ -38,7 +38,7 @@ fn test_context_warning_decision_renders_in_the_pane() {
     let text = h.screen_text();
     assert!(
         text.contains("Running low on context (85%)."),
-        "Warning message should render in the pane, got lines:\n{}",
+        "Warning message should render in the frame, got lines:\n{}",
         h.screen_text_lines().join("\n")
     );
     assert!(text.contains("[K] Compact"), "{text}");

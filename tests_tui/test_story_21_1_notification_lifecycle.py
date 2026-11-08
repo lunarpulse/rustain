@@ -623,9 +623,9 @@ _CUE = re.compile(r"Needs you \((\d+)\) \^X q")
 
 
 def _pane_lines(screen, title):
-    """The frame titled `System · <title>` (top border row index and the lines), else None."""
+    """The frame titled `Decision: <title>` (top border row index and the lines), else None."""
     lines = screen.split("\n")
-    marker = f"System · {title} "
+    marker = f"Decision: {title} "
     top = next((i for i, line in enumerate(lines) if "┌" in line and marker in line), None)
     return None if top is None else (top, lines)
 

@@ -5,7 +5,6 @@ use ratatui::widgets::Paragraph;
 
 use super::{Surface, geometry, occlusion::OpaqueRects, stage_search};
 use crate::adapters::tui::{
-    decision_pane,
     keymap::Host,
     layout::AppLayout,
     notification_log::{self, LogFacts},
@@ -155,13 +154,27 @@ pub fn compose(
                     .snapshot();
                 wave_overlay::render_frame(frame, rect, state, &snap, theme);
             }
-            Surface::DecisionPane => {
-                let Some(pane_rect) =
-                    decision_pane::render(frame, shell.chat_pane, state, facts, theme)
-                else {
+            Surface::Decision => {
+                let interrupted = (depth > 0).then(|| {
+                    state
+                        .modal_stack
+                        .iter()
+                        .take(depth)
+                        .map(|prior| prior.title())
+                        .collect::<Vec<_>>()
+                        .join(" › ")
+                });
+                if !crate::adapters::tui::widgets::decision_frame::render(
+                    frame,
+                    rect,
+                    state,
+                    facts,
+                    theme,
+                    modal.title(),
+                    interrupted.as_deref(),
+                ) {
                     continue;
-                };
-                rect = pane_rect;
+                }
                 pane_painted =
                     depth + 1 == state.modal_stack.len() && state.pending_leader.is_none();
             }
@@ -224,7 +237,7 @@ pub fn compose(
                 Surface::NotificationLog
                 | Surface::Help
                 | Surface::CommandPalette
-                | Surface::DecisionPane
+                | Surface::Decision
                 | Surface::ModelSelector
                 | Surface::ProfileSwitcher
                 | Surface::UsagePanel

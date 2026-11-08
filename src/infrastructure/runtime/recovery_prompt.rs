@@ -14,7 +14,7 @@ pub(crate) fn recovery_detail(title: &str, token_count: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::tui::decision_pane::{
+    use crate::adapters::tui::decision_queue::{
         Arrival, DecisionDraft, DecisionEffect, DecisionKind, PaneKey, PaneOutcome, handle_key,
         note_painted, raise,
     };
@@ -62,13 +62,13 @@ mod tests {
                 Arrival::Automatic,
             );
             assert!(
-                is_open(&state, Surface::DecisionPane),
+                is_open(&state, Surface::Decision),
                 "startup recovery takes focus"
             );
             assert!(presentation::consistent(&state));
             assert_eq!(state.modal_stack.len(), 1);
             let frame = state.modal_stack.top().unwrap().clone();
-            assert_eq!(frame.surface, Surface::DecisionPane);
+            assert_eq!(frame.surface, Surface::Decision);
             note_painted(&mut state);
             clock.advance(Duration::from_millis(500));
             let outcome = handle_key(&mut state, key, &facts);

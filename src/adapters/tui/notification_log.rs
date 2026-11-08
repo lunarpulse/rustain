@@ -309,14 +309,14 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
             let conversation_id = record.conversation_id.clone().unwrap_or_default();
             close(state);
             // Raises the decision; nothing is compacted until the pane's own `K`.
-            crate::adapters::tui::decision_pane::raise(
+            crate::adapters::tui::decision_queue::raise(
                 state,
-                crate::adapters::tui::decision_pane::DecisionDraft::new(
-                    crate::adapters::tui::decision_pane::DecisionKind::ContextWarning,
+                crate::adapters::tui::decision_queue::DecisionDraft::new(
+                    crate::adapters::tui::decision_queue::DecisionKind::ContextWarning,
                     message,
                 )
                 .conversation(conversation_id),
-                crate::adapters::tui::decision_pane::Arrival::Requested,
+                crate::adapters::tui::decision_queue::Arrival::Requested,
             );
             LogOutcome::Closed
         }
@@ -326,7 +326,7 @@ pub fn handle_key(state: &mut TuiState, host: Host, key: Key, facts: &LogFacts) 
             };
             let conversation_id = record.conversation_id.clone().unwrap_or_default();
             close(state);
-            crate::adapters::tui::decision_pane::request_carryover(state, Some(conversation_id));
+            crate::adapters::tui::decision_queue::request_carryover(state, Some(conversation_id));
             LogOutcome::Closed
         }
         _ => LogOutcome::Consumed,

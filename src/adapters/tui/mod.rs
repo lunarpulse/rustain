@@ -5,7 +5,7 @@ pub mod block_viewer;
 pub mod clipboard;
 #[allow(dead_code)]
 pub mod color_detect;
-pub mod decision_pane;
+pub mod decision_queue;
 pub mod editor_suspend;
 pub mod fanout_spec;
 pub mod handlers;

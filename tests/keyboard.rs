@@ -1145,16 +1145,14 @@ fn test_large_image_confirm_attach() {
     }
 }
 
-// Story 21.1 S2 (AC9, AC12). Old: `y` / `n` in Chat focus with a `pending_large_image`
+// Story 21.1 S2 (AC9, AC12). Old: `y` / `n` in Chat focus with a pending large image
 // returned ImageConfirmAttach / ImageConfirmCancel straight from `handle_input`
 // (a key arm in app.rs that any focus-Chat `y` could reach). New: the confirmation is
-// a decision-pane item, answered through the pane dispatch the event loop runs
-// (`decision_pane::handle_domain_event`), inert for 500 ms after its first paint, and
-// `handle_input` no longer owns the key at all.
+// a decision-queue item (21.6: its own `Surface::Decision` frame), answered through the
+// dispatch the event loop runs (`decision_queue::handle_domain_event`), inert for
+// 500 ms after its first paint, and `handle_input` no longer owns the key at all.
 fn large_image_pane() -> (TuiState, std::sync::Arc<rustain::domain::clock::MockClock>) {
-    use rustain::adapters::tui::decision_pane::{
-        Arrival, DecisionDraft, DecisionKind, note_painted, raise,
-    };
+    use rustain::adapters::tui::decision_queue::{note_painted, raise_large_image};
     let clock = std::sync::Arc::new(rustain::domain::clock::MockClock::new(
         std::time::Instant::now(),
     ));
@@ -1164,27 +1162,28 @@ fn large_image_pane() -> (TuiState, std::sync::Arc<rustain::domain::clock::MockC
         clock.clone(),
     );
     state.focus = FocusState::Chat;
-    state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-        media_type: "image/png".to_string(),
-        data: "large_base64_data".to_string(),
-    });
-    raise(
+    // Old: a hand-seeded large-image slot + a payload-less LargeImage draft.
+    // New: one call; the image is the item's payload.
+    raise_large_image(
         &mut state,
-        DecisionDraft::new(DecisionKind::LargeImage, "Large image (5.3 MB). Attach it?"),
-        Arrival::Requested,
+        rustain::domain::models::ImageAttachment {
+            media_type: "image/png".to_string(),
+            data: "large_base64_data".to_string(),
+        },
+        "Large image (5.3 MB). Attach it?",
     );
     note_painted(&mut state);
     (state, clock)
 }
 
 fn answer_large_image(key: char) -> (Option<InputAction>, Option<InputAction>) {
-    use rustain::adapters::tui::decision_pane::{PaneOutcome, handle_domain_event};
+    use rustain::adapters::tui::decision_queue::{PaneOutcome, handle_domain_event};
     use rustain::adapters::tui::notification_log::LogFacts;
     let (mut state, clock) = large_image_pane();
     assert!(
         rustain::adapters::tui::presentation::is_open(
             &state,
-            rustain::adapters::tui::presentation::Surface::DecisionPane
+            rustain::adapters::tui::presentation::Surface::Decision
         ),
         "a requested decision is focused"
     );
@@ -1225,29 +1224,44 @@ fn test_large_image_n_cancels() {
     assert_eq!(late, Some(InputAction::ImageConfirmCancel));
 }
 
-// AC12: the retired key arm — `y`/`n` in Chat focus with a pending image reach
-// nothing through `handle_input` (the pane owns them).
+// AC12: the retired key arm — `y`/`n` in Chat focus with a queued large image reach
+// nothing through `handle_input` (the decision frame owns them).
+// Old: seeded the removed large-image slot (no frame at all). New: the image is a
+// `LargeImage` queue item, set aside with `Ctrl+C` so no frame holds the keyboard
+// and Chat focus is what `handle_input` sees.
 #[test]
-fn test_chat_focus_y_and_n_no_longer_answer_a_pending_large_image() {
+fn test_chat_focus_y_and_n_no_longer_answer_a_queued_large_image() {
+    use rustain::adapters::tui::decision_queue::{self, DecisionKind, PaneKey};
+    use rustain::adapters::tui::notification_log::LogFacts;
     for key in ['y', 'n'] {
         let mut state = TuiState::new(80, 24);
         state.focus = FocusState::Chat;
-        state.pending_large_image = Some(rustain::domain::models::ImageAttachment {
-            media_type: "image/png".to_string(),
-            data: "large_base64_data".to_string(),
-        });
+        decision_queue::raise_large_image(
+            &mut state,
+            rustain::domain::models::ImageAttachment {
+                media_type: "image/png".to_string(),
+                data: "large_base64_data".to_string(),
+            },
+            "Large image (5.3 MB). Attach it?",
+        );
+        decision_queue::handle_key(&mut state, PaneKey::CtrlC, &LogFacts::default());
+        assert!(state.modal_stack.is_empty(), "{key}: no frame holds keys");
         let action = handle_input(&mut state, &DomainInputEvent::KeyPress(key));
         assert_ne!(action, InputAction::ImageConfirmAttach, "{key}");
         assert_ne!(action, InputAction::ImageConfirmCancel, "{key}");
+        assert!(
+            state.decisions.holds(DecisionKind::LargeImage),
+            "{key}: the item is untouched"
+        );
     }
 }
 
-// AC4: 'y' key in Chat focus without pending_large_image does NOT trigger confirm
+// AC4: 'y' key in Chat focus without a queued large image does NOT trigger confirm
 #[test]
 fn test_y_key_without_pending_image_not_confirm() {
     let mut state = TuiState::new(80, 24);
     state.focus = FocusState::Chat;
-    // No pending_large_image
+    // No queued large image
 
     let action = handle_input(&mut state, &DomainInputEvent::KeyPress('y'));
     // Should NOT be ImageConfirmAttach — should be something else (Consumed or other)

@@ -102,9 +102,9 @@ pub fn consistent(state: &TuiState) -> bool {
                     .all(|earlier| earlier.id != frame.id && earlier.surface != frame.surface)
                 && match &frame.decision {
                     Some(key) => {
-                        frame.surface == Surface::DecisionPane && state.decisions.contains_key(key)
+                        frame.surface == Surface::Decision && state.decisions.contains_key(key)
                     }
-                    None => frame.surface != Surface::DecisionPane,
+                    None => frame.surface != Surface::Decision,
                 }
                 && match frame.surface {
                     Surface::ToolInspector(key) => {
@@ -165,17 +165,17 @@ pub fn consistent(state: &TuiState) -> bool {
 /// RU-6 eligibility is evaluated BEFORE adding the incoming queue item.
 /// Both inherited text contexts protect a frame independently of recent typing.
 pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
-    use super::{app, decision_pane};
+    use super::{app, decision_queue};
     use crate::domain::models::FocusState;
     if !state.decisions.is_empty()
         || state
             .decisions
             .last_defer_at()
-            .is_some_and(|at| now.saturating_duration_since(at) < decision_pane::DEFER_COOLDOWN)
+            .is_some_and(|at| now.saturating_duration_since(at) < decision_queue::DEFER_COOLDOWN)
         || (state.focus == FocusState::Input && !state.input_buffer.is_empty())
         || state
             .last_printable_at
-            .is_some_and(|at| now.saturating_duration_since(at) < decision_pane::TYPING_GRACE)
+            .is_some_and(|at| now.saturating_duration_since(at) < decision_queue::TYPING_GRACE)
         || state.pending_leader.is_some()
         || state.ask_user_question.is_some()
         || app::proposal_higher_confirmation_active(state)
@@ -190,9 +190,18 @@ pub fn arrival_may_preempt(state: &TuiState, now: std::time::Instant) -> bool {
     state.modal_stack.top().is_none_or(|frame| {
         !matches!(
             frame.surface,
-            Surface::DecisionPane | Surface::QuitConfirm | Surface::Login
+            Surface::Decision | Surface::QuitConfirm | Surface::Login
         ) && !typing_context(frame_context(state, frame.surface))
     })
+}
+
+/// True when the top frame is a text field: a Requested decision queues behind it
+/// instead of taking the keyboard (A5).
+pub(crate) fn typing_top(state: &TuiState) -> bool {
+    state
+        .modal_stack
+        .top()
+        .is_some_and(|frame| typing_context(frame_context(state, frame.surface)))
 }
 
 fn typing_context(context: super::keymap::Context) -> bool {

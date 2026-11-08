@@ -397,7 +397,7 @@ pub enum Context {
     Autocomplete,
     NotificationLog,
     QuitConfirm,
-    DecisionPane,
+    Decision,
     RecipientSurface,
     Login,
     /// Shared parent of every decision card: the `Esc` / `Ctrl+C` cue rows (A8).
@@ -465,7 +465,7 @@ impl Context {
         Context::Autocomplete,
         Context::NotificationLog,
         Context::QuitConfirm,
-        Context::DecisionPane,
+        Context::Decision,
         Context::RecipientSurface,
         Context::Login,
         Context::Card,
@@ -528,7 +528,7 @@ impl Context {
             Context::Autocomplete => "Autocomplete",
             Context::NotificationLog => "Notification log",
             Context::QuitConfirm => "Quit confirmation",
-            Context::DecisionPane => "Decisions",
+            Context::Decision => "Decisions",
             Context::RecipientSurface => "Recipient surface",
             Context::Login => "Login",
             Context::Card => "Decision cards (shared)",
@@ -568,7 +568,7 @@ impl Context {
             | Context::Autocomplete
             | Context::NotificationLog
             | Context::QuitConfirm
-            | Context::DecisionPane
+            | Context::Decision
             | Context::RecipientSurface
             | Context::Login
             | Context::Card
@@ -622,7 +622,7 @@ impl Context {
         matches!(
             self,
             Context::Leader
-                | Context::DecisionPane
+                | Context::Decision
                 | Context::ModelSelector
                 | Context::ProfileSwitcher
                 | Context::ExportOverwrite

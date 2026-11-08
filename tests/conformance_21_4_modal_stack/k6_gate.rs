@@ -288,13 +288,20 @@ const RULES: &[(&str, &str)] = &[
     ),
     (
         "render",
-        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search|tool_inspector|block_viewer)\s*::\s*render\w*\s*\("###,
+        r###"\b(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_frame|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|wave_overlay|stage_search|search_bar|cross_search|bookmark_list|reverse_search|tool_inspector|block_viewer)\s*::\s*render\w*\s*\("###,
     ),
     // Payload presence cannot become a second open authority, regardless of read syntax.
     ("option", r"\.\s*(?:notification_log|quit_confirm)\b"),
     (
         "interceptor",
-        r"\b(?:notification_log|quit_confirm|decision_pane)\s*::\s*(?:handle_\w+|execute)\s*\(",
+        r"\b(?:notification_log|quit_confirm|decision_queue)\s*::\s*(?:handle_\w+|execute)\s*\(",
+    ),
+    // Story 21.6 slice 6-A (A20): the interim pane, its bottom-anchored placement and the
+    // singleton slots its kinds used are gone. Field/type/fn accesses, never module paths:
+    // `decision_queue::` and `widgets::decision_frame::` line builders stay legal.
+    (
+        "decision-21-6-a",
+        r"\b(?:decision_pane|DecisionPane|StageBottom|pending_delete|pending_large_image)\b",
     ),
     ("close-surfaces", r"\bclose_surfaces\b"),
     (
@@ -396,7 +403,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
     });
     static PAINTER: LazyLock<Regex> = LazyLock::new(|| {
         re(
-            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_pane|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay|tool_inspector|block_viewer)\b",
+            r"^(?:notification_log|quit_confirm|help_overlay|command_palette|which_key_bar|decision_frame|autocomplete_popup|model_selector|profile_switcher|usage_panel|login_dialog|stage_search|reverse_search|cross_search|bookmark_list|wave_overlay|tool_inspector|block_viewer)\b",
         )
     });
     static TOOL_OPEN_ARM: LazyLock<Regex> =
@@ -491,7 +498,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                 if *rule == "a2b-payload-owner"
                     && !matches!(
                         scope(&code, m.start()).as_str(),
-                        "AutocompleteState" | "DecisionPane"
+                        "AutocompleteState" | "DecisionQueue"
                     )
                 {
                     continue;
@@ -536,6 +543,7 @@ fn scan(files: &[(String, String)], pins: &[Pin<'_>]) -> Vec<String> {
                     "welcome-widget",
                     "field-string",
                     "field-tail",
+                    "decision-21-6-a",
                 ]
                 .contains(rule)
                     || (["overlay", "variant"].contains(rule) && MIGRATED.is_match(m.as_str()))
@@ -779,6 +787,13 @@ fn k6_same_scanner_rejects_each_forbidden_mechanism() {
         ("render", "quit_confirm::render(f);"),
         ("render", "reverse_search::render(f);"),
         ("option", "s\n.quit_confirm\n.as_ref();"),
+        ("interceptor", "decision_queue::handle_key(s, k, f);"),
+        ("render", "decision_frame::render(f);"),
+        ("decision-21-6-a", "decision_pane::raise(s, d, a);"),
+        ("decision-21-6-a", "let t = Surface::DecisionPane;"),
+        ("decision-21-6-a", "let p = Placement::StageBottom;"),
+        ("decision-21-6-a", "s.pending_large_image = Some(image);"),
+        ("decision-21-6-a", "let t = s.pending_delete.take();"),
     ];
     for (rule, text) in cases
         .into_iter()
@@ -1071,8 +1086,8 @@ fn k6_a2a_ownership_reads_patterns_and_painters_are_unpinnable() {
         "struct AutocompleteState { active: bool }",
         "s.decisions.is_focused();",
         "match &s.decisions.focused { Some(_) => (), None => () }",
-        "struct DecisionPane { focused: Option<Key> }",
-        "decision_pane::render(f);",
+        "struct DecisionQueue { focused: Option<Key> }",
+        "decision_frame::render(f);",
         "autocomplete_popup::render(f);",
         "s.model_selector.active;",
         "matches!(&s.profile_switcher.active, true);",
@@ -1995,4 +2010,45 @@ fn k6_story21_9_old_tool_line_and_welcome_clauses_have_positive_controls() {
             .any(|e| e.contains("tool-line-") || e.contains("welcome-widget|")),
         "{shipped:?}"
     );
+}
+
+/// 6-A (A20): the interim pane's names are gone from production, a pin can never
+/// exempt them, and the reused queue/frame API passes the same scanner.
+#[test]
+fn k11a_the_interim_pane_symbols_are_unpinnable_and_the_queue_api_passes() {
+    for text in [
+        "decision_pane::raise(s, d, a);",
+        "let t = Surface::DecisionPane;",
+        "let p = Placement::StageBottom;",
+        "s.pending_large_image = Some(image);",
+        "let t = s.pending_delete.take();",
+    ] {
+        let files = [("src/x.rs".to_owned(), format!("fn real() {{ {text} }}"))];
+        let first = scan(&files, &[]);
+        assert!(
+            first.iter().any(|s| s.contains("decision-21-6-a|")),
+            "{text}: {first:?}"
+        );
+        let sites: Vec<_> = first
+            .iter()
+            .map(|error| error.split_once(": ").unwrap().1)
+            .collect();
+        let pins = [("src/x.rs", "21-6", sites.as_slice())];
+        let errors = scan(&files, &pins);
+        assert!(
+            errors.iter().any(|s| s.starts_with("stale pin")),
+            "{text}: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|s| !s.starts_with("stale pin")),
+            "{text}: a pin never exempts a 21-6 symbol: {errors:?}"
+        );
+    }
+    // Negative control: the queue API, its kind enum and the new frame are not the
+    // retired names.
+    let queue = "fn real() { crate::adapters::tui::decision_queue::raise(s, d, a); \
+                 s.decisions.holds(DecisionKind::LargeImage); \
+                 let q: DecisionQueue = Default::default(); \
+                 let k = Surface::Decision; let n = s.pending_images.len(); }";
+    assert!(scan(&[("src/x.rs".into(), queue.into())], &[]).is_empty());
 }

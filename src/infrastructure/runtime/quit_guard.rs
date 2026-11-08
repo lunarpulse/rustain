@@ -6,6 +6,7 @@
 //! event loop calls these for every quit route (`q`, Ctrl+Q, idle Ctrl+C,
 //! `/quit`) so the guard cannot be bypassed by one ingress.
 
+use crate::adapters::tui::decision_queue::DecisionKind;
 use crate::adapters::tui::quit_confirm::{self, QuitFacts, QuitHost, QuitRequest};
 use crate::adapters::tui::state::TuiState;
 use crate::domain::models::Conversation;
@@ -52,8 +53,10 @@ pub(crate) fn local_facts(
         facts.agents = running.max(1);
     }
     facts.composer_draft = !state.input_buffer.trim().is_empty();
-    facts.pending_images =
-        state.pending_images.len() + usize::from(state.pending_large_image.is_some());
+    // A queued large image is an unsent attachment: it counts once, as an image. A stale
+    // item can no longer be answered, so quitting leaves nothing unanswered for it.
+    let large_images = state.decisions.count_live(DecisionKind::LargeImage);
+    facts.pending_images = state.pending_images.len() + large_images;
     facts.peer_compose = state.pinned_peer_compose.is_some()
         || crate::adapters::tui::handlers::recipient_actions::pending_composition(state).is_some();
     facts.pending_decisions = usize::from(state.pending_permission.is_some())
@@ -66,7 +69,7 @@ pub(crate) fn local_facts(
         + usize::from(state.pending_delegation_card.is_some())
         + usize::from(state.pending_consolidation_card.is_some())
         + usize::from(state.ask_user_question.is_some())
-        + state.decisions.len();
+        + (state.decisions.undecided() - large_images);
     facts
 }
 
@@ -131,7 +134,7 @@ pub(crate) fn quit_from_banner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::tui::decision_pane::{self, Arrival, DecisionDraft, DecisionKind};
+    use crate::adapters::tui::decision_queue::{self, Arrival, DecisionDraft, DecisionKind};
     use crate::adapters::tui::quit_confirm::{QuitKey, QuitKeyOutcome, handle_key};
     use crate::domain::models::FocusState;
     use crate::domain::models::ImageAttachment;
@@ -386,7 +389,7 @@ mod tests {
     /// counted as a pending decision (AC10), so even an otherwise idle host asks.
     fn assert_pane_quit_asks(kind: DecisionKind, arm: impl Fn(&mut Host)) {
         let mut h = host();
-        decision_pane::raise(
+        decision_queue::raise(
             &mut h.state,
             DecisionDraft::new(kind, "pending"),
             Arrival::Requested,
@@ -426,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn story21_1_every_pane_kind_is_counted_as_a_pending_decision() {
+    fn story21_1_every_queue_kind_is_counted_once_as_a_decision_or_an_image() {
         for kind in [
             DecisionKind::Recovery,
             DecisionKind::Carryover,
@@ -436,7 +439,7 @@ mod tests {
             DecisionKind::DeleteConversations,
         ] {
             let mut h = host();
-            decision_pane::raise(
+            decision_queue::raise(
                 &mut h.state,
                 DecisionDraft::new(kind, "x"),
                 Arrival::Requested,
@@ -449,14 +452,22 @@ mod tests {
                 &h.lifecycle,
                 &h.queue,
             );
-            assert_eq!(facts.pending_decisions, 1, "{kind:?}");
+            // A queued large image is an unsent attachment: it counts once, as an
+            // image (AC5); every other kind counts once, as a pending decision.
+            let (decisions, images) = if kind == DecisionKind::LargeImage {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            assert_eq!(facts.pending_decisions, decisions, "{kind:?}");
+            assert_eq!(facts.pending_images, images, "{kind:?}");
         }
     }
 
     #[test]
     fn story21_1_a_closed_conversations_decision_no_longer_blocks_quitting() {
         let mut h = host();
-        decision_pane::raise(
+        decision_queue::raise(
             &mut h.state,
             DecisionDraft::new(DecisionKind::ContextWarning, "low").conversation("c1"),
             Arrival::Automatic,
@@ -479,10 +490,16 @@ mod tests {
             titles: vec![("c2".into(), "two".into())],
             ..Default::default()
         };
-        decision_pane::prune_closed(&mut h.state, &remaining);
+        decision_queue::prune_closed(&mut h.state, &remaining);
         assert_eq!(pending(&h), 0, "an orphaned item never makes quit ask");
+        // Its frame is open: the orphan is stale (counted by the chip) until Close removes it.
         assert_eq!(
-            decision_pane::status_cue(decision_pane::waiting(&h.state)),
+            decision_queue::status_cue(decision_queue::waiting(&h.state)).as_deref(),
+            Some("Needs you (1) ^X q")
+        );
+        decision_queue::handle_key(&mut h.state, decision_queue::PaneKey::Esc, &remaining);
+        assert_eq!(
+            decision_queue::status_cue(decision_queue::waiting(&h.state)),
             None
         );
     }
@@ -507,7 +524,7 @@ mod tests {
         assert!(arm.contains("quit_guard::quit_from_banner("), "{arm}");
         assert!(!arm.contains("should_quit = true"), "{arm}");
         let mut h = host();
-        decision_pane::raise(
+        decision_queue::raise(
             &mut h.state,
             DecisionDraft::new(DecisionKind::Budget, "waiting"),
             Arrival::Requested,
@@ -536,7 +553,7 @@ mod tests {
             ),
             app::InputAction::Consumed
         );
-        assert!(!presentation::is_open(&h.state, Surface::DecisionPane));
+        assert!(!presentation::is_open(&h.state, Surface::Decision));
         assert!(h.state.decisions.holds(DecisionKind::Budget));
         assert!(!h.state.should_quit);
     }
