@@ -426,7 +426,7 @@ fn ac6_plan_proposed_sets_pending() {
 }
 
 #[test]
-fn ac6_pending_invariant_one_per_conversation() {
+fn story21_6_plan_card_pending_invariant_one_per_plan_and_open_frame_goes_stale() {
     use rustain::adapters::tui::color_detect::ColorCapability;
     use rustain::adapters::tui::decision_queue::{self, PlanCardPayload};
     use rustain::adapters::tui::state::TuiState;
@@ -434,24 +434,38 @@ fn ac6_pending_invariant_one_per_conversation() {
     let mut state = TuiState::with_capability(80, 24, ColorCapability::TrueColor);
     assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
 
-    let card = |tasks| PlanCardPayload {
+    let card = |plan: &str, tasks| PlanCardPayload {
         conversation_id: "c1".to_string(),
-        plan_id: "plan-1".to_string(),
+        plan_id: plan.to_string(),
         plan_snapshot: make_plan_with_tasks(tasks),
     };
-    decision_queue::raise_plan_card(&mut state, card(1));
+    decision_queue::raise_plan_card(&mut state, card("plan-1", 1));
     assert!(decision_queue::plan_card_pending(&state, "plan-1"));
     // The same plan raised again updates in place: still exactly one pending card.
-    decision_queue::raise_plan_card(&mut state, card(3));
+    decision_queue::raise_plan_card(&mut state, card("plan-1", 3));
     assert_eq!(state.decisions.len(), 1);
     assert_eq!(
         decision_queue::plan_card_snapshot(&state, "plan-1").map(|plan| plan.tasks.len()),
         Some(3)
     );
 
+    // A queued item of another plan leaves outright when its plan is withdrawn.
+    decision_queue::raise_plan_card(&mut state, card("plan-2", 1));
+    assert_eq!(state.decisions.len(), 2);
+    decision_queue::withdraw_plan_card(&mut state, "plan-2");
+    assert!(!decision_queue::plan_card_pending(&state, "plan-2"));
+    assert_eq!(state.decisions.len(), 1);
+
+    // Withdrawing the plan whose frame is open (A7): it is no longer pending, but the
+    // user is reading it, so it turns stale and waits for Close instead of vanishing.
     decision_queue::withdraw_plan_card(&mut state, "plan-1");
     assert!(!decision_queue::plan_card_pending(&state, "plan-1"));
-    assert!(state.decisions.is_empty());
+    let stale: Vec<bool> = state
+        .decisions
+        .items()
+        .map(|item| item.is_stale())
+        .collect();
+    assert_eq!(stale, [true], "the open frame is kept, stale, until Close");
 }
 
 // ── AC7: Approve / Reject / Edit ─────────────────────────────────────────

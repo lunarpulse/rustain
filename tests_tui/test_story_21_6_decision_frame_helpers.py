@@ -1,4 +1,6 @@
 """Desk regressions for queued decision opening and the first-paint safety window."""
+import itertools
+
 import pytest
 
 import decision_frame_helpers as helpers
@@ -9,7 +11,8 @@ import decision_frame_helpers as helpers
     ("Permission", "[s] Session"),
 ])
 def test_story21_6_queued_decision_is_opened_and_stable_before_return(monkeypatch, kind, rail):
-    now = iter(n / 10 for n in range(100))
+    # Every read of the clock advances 0.1 s; the helper's polling decides how many it makes.
+    now = (n / 10 for n in itertools.count())
     monkeypatch.setattr(helpers.time, "monotonic", lambda: next(now))
 
     class Terminal:
@@ -28,6 +31,7 @@ def test_story21_6_queued_decision_is_opened_and_stable_before_return(monkeypatc
                 self.queue_reads += 1
                 bottom = "\n└────────────────────┘" if self.queue_reads > 1 else ""
                 return ("┌ Needs you ─────────┐\n"
+                        "│ Needs you › 1 waiting │\n"
                         f"│ ▸ {kind} · source │\n"
                         "│ [Enter] Open       │" + bottom)
             self.frame_reads += 1
