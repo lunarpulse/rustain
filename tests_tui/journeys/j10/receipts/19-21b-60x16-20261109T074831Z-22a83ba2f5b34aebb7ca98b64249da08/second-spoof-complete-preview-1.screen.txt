@@ -1,0 +1,16 @@
+┌ Decision: Team proposal ─────────────────────────────────┐
+│Needs you › Team proposal lena-po, jun-dev | 2 pending    │
+││ [y] Send to spoof-recipient                             │
+││ Your agent proposes a message. Nothing has been sent. Aw│
+││ aiting your decision.                                   │
+│… more not shown — [r] Review first                       │
+│[y] Send to lena-po, jun-dev  [r] Review first            │
+│[n] Dismiss                                               │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑173 ↓18 │ Rea Needs you (2) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

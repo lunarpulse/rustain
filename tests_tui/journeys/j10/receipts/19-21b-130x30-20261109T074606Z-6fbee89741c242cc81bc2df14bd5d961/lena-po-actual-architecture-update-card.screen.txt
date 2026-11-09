@@ -1,0 +1,30 @@
+[terminal] You:                                                                                                                   
+┆  architecture_update · 12203535dced0df145672aa8ccdc486824d2d634eded9461d8e3f45c67bbff5b826c                                     
+┆  ADR┌ Decision: Recipient draft ────────────────────────────────────────────────────────────────────────────────────────┐       
+┆  The│Needs you › Recipient draft marcus-arch | 1 pending                                                                │       
+┆  ADR│architecture_update · marcus-arch                                                                                  │       
+┆  A c│Principal: 12203535dced0df145672aa8ccdc486824d2d634eded9461d8e3f45c67bbff5b826c                                    │       
+┆  Len│Peer is waiting for your response.                                                                                 │       
+┆  Jun│[w] My own  [n] Decline  [v] View item                                                                             │       
+┆  Do │                                                                                                                   │       
+┆  Ret│                                                                                                                   │       
+┆  Rev│                                                                                                                   │       
+┆  Pre│                                                                                                                   │       
+┆  Rés│                                                                                                                   │       
+┆  Dec│                                                                                                                   │       
+┆  res│                                                                                                                   │       
+┆  not│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+[termi│                                                                                                                   │       
+[await│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+│ ℹ   └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘──────┐
+│ ⚠ ← inbound ✓ accepted via A2A · peer 12203535dced0df145672aa8ccdc486824d2d634eded9461d8e3f45c│Info Decision waiting — Ctrl+X q│
+│   rustain-1794210380213690013-fd33afa2368d4355 · task accepted and executing│                 └────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready                                                                Needs you (1) ^X q log: 5
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

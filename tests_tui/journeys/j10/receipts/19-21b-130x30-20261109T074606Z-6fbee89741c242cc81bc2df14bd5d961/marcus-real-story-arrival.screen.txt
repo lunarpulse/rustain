@@ -1,0 +1,30 @@
+[terminal] ⤷ System:                                                                                                              
+— session start — · Earlier sessions not loaded                                                                                   
+      ┌ Decision: Recipient draft ────────────────────────────────────────────────────────────────────────────────────────┐       
+      │Needs you › Recipient draft lena-po | 1 pending                                                                    │       
+      │story_assignment · lena-po                                                                                         │       
+[termi│Principal: 12206a7d998704d535e04d6d1437510cee0fc555389ed4aa28287780b43c98747f7c                                    │       
+┆  sto│Peer is waiting for your response.                                                                                 │       
+┆  STO│[w] My own  [n] Decline  [v] View item                                                                             │       
+┆  Jun│                                                                                                                   │       
+┆  Acc│                                                                                                                   │       
+┆  Ple│                                                                                                                   │       
+┆  res│                                                                                                                   │       
+┆  not│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+[termi│                                                                                                                   │       
+[await│                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+      │                                                                                                                   │       
+│ ⚠ ← │                                                                                                                   │       
+│   ru│                                                                                                                   │       
+      │                                                                                                                   │       
+      └───────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘──────┐
+                                                                                                │Info Decision waiting — Ctrl+X q│
+                                                                                                └────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready                                                                Needs you (1) ^X q log: 4
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

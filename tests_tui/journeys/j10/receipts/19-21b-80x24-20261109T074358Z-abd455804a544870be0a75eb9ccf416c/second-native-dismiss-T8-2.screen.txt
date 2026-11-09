@@ -1,0 +1,24 @@
+│   12208983fa7e042f0925e0d2287cef6e73b968ccee3b109a2bfb3df8a18fb1968490 ·│     
+│   task rustain-1794210241933248805-1fbfe7d9f5f3a692 · task parked awaiting│   
+│   operator approval│                                                          
+│   2026-11-09 07:44:03Z ← inbound ↓ item-received · peer│                      
+│   12208983fa7e042f0925e0d2287cef6e73b968ccee3b109a2bfb3df8a18fb1968490 ·│     
+│   task ri_ig_s55a85-rl6EZFZ1ZW1fqf3d7qAKeO · recipient item received from│    
+│   lena-po│                                                                    
+│   2026-11-09 07:44:03Z ← inbound ✓ accepted via A2A · peer│                   
+│   12208983fa7e042f0925e0d2287cef6e73b968ccee3b109a2bfb3df8a18fb1968490 ·│     
+│   task rustain-1794210241933248805-1fbfe7d9f5f3a692 · task accepted and│      
+│   executing│                                                                  
+│   2026-11-09 07:44:03Z ← inbound ! surfaced · peer│                           
+│   12208983fa7e042f0925e0d2287cef6e73b968ccee3b109a2bfb3df8a18fb1968490 ·│     
+│   task│                                                                       
+│   a2a-in/p-cGVlcjoxMjIwODk4M2ZhN2UwNDJmMDkyNWUwZDIyODdjZWY2ZTczYjk2OGNjZWUzY│ 
+│   jEwOWEyYmZiM2RmOGExOGZiMTk2ODQ5MA/t-cnVzdGFpbi0xNzk0MjEwMjQxOTMzMjQ4ODA1LT│ 
+│   FmYmZlN2Q5ZjVmM2E2OTI · peer interaction recorded · notification immediate│ 
+│     response: notify-and-wait · via individual — a2a-interaction.toml│        
+│     notification: immediate · via individual — a2a-interaction.toml│          
+│   2026-11-09 07:44:07Z ? unknown ✓ item-acknowledged · peer│                  
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready  Needs you (1) ^X q ^X menu
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

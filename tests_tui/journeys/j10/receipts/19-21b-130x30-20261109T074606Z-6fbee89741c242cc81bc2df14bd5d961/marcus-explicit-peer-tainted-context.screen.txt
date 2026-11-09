@@ -1,0 +1,30 @@
+│  item actions · ri_grFyFZj29x-KZpueLSqENEvMbWwvOOdr                                                                             
+│  story_assignment · peer-tainted                                                                                                
+│  story_assignment · lena-po                                                                                                     
+│  received thread · lena-po · ri_grFyFZj29x-KZpueLSqENEvMbWwvOOdr                                                                
+│  Context received: 1 text body · 254 bytes                                                                                      
+│      STORY-047: publish the received card before persisting its row.                                                            
+│      Jun owns implementation; Marcus checks the architecture.                                                                   
+│      Acceptance: an arriving item is visible before its durable append.                                                         
+│      Please identify conflicts with ADR-047; do not send automatically.                                                         
+│  ri_grFyFZj29x-KZpueLSqENEvMbWwvOOdr · acknowledged                                                                             
+│                                                                                                                                 
+│  item ri_grFyFZj29x-KZpueLSqENEvMbWwvOOdr selected as peer context for this daemon conversation — clears on /clear or daemon res
+│  tart; view and acknowledgement do not select it                                                                                
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│                                                                                                                                 
+│  [r] Respond  [n] Decline  [c] Stop using as context                                          ┌────────────────────────────────┐
+│  [Tab] Item/Response actions                                                                  │Info Decision waiting — Ctrl+X q│
+│  [PgUp/PgDn] Scroll  [Esc] Close                                                              └────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready                                                        Needs you (1) ^X q log: 4 ^X menu
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

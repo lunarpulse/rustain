@@ -27,8 +27,8 @@ from harness import RustainTUI
 from conflict_receipt_manifest import begin_run
 from fixtures.scene_provider import SceneStub
 from test_story_19_21_act1_distribution import (
-    _chat_pages, _command, _compact, _events, _fresh_board, _painted_item,
-    _sha, _stop, _surface_pages, _wait, _wait_for_marker,
+    _chat_pages, _command, _compact, _events, _fresh_board, _open_decision, _painted_item,
+    _recipient_frame, _sha, _stop, _surface_pages, _wait, _wait_for_marker, _wait_inert,
 )
 from test_story_19_21b_standalone_modes import _ObservedHttp
 
@@ -78,87 +78,119 @@ def _painted_rows(text, width):
     return [row.rstrip(" ") for row in terminal.display[:terminal.cursor.y + 1]]
 
 
-def _review_rows(rendered, screen_height):
-    lines = rendered.splitlines()
-    assert len(lines) % screen_height == 0, "incomplete native Review page"
-    pages = [lines[start:start + screen_height] for start in range(0, len(lines), screen_height)]
-    merged = []
-    previous = None
-    for page in pages:
-        # Review reserves the whole transcript above its double-bordered card.
-        # Never collect overlay aliases, quoted body chrome or composer rows.
-        boundary = next(i for i, row in enumerate(page) if "╔" in row)
-        current = [unicodedata.normalize("NFC", row.rstrip(" ")) for row in page[:boundary]]
-        assert current, "native Review has no scrollable transcript"
-        if previous is None:
-            merged.extend(current)
-        else:
-            assert len(current) == len(previous), "native Review viewport changed during pagination"
-            step = min(len(current), 5)
-            # PageDown advances at most five rows. Prefer its full, known stride;
-            # only a clamped boundary may have a larger observed overlap.
-            overlap = len(current) - step
-            if overlap and previous[-overlap:] != current[:overlap]:
-                overlap = next(
-                    (count for count in range(overlap + 1, len(current) + 1)
-                     if previous[-count:] == current[:count]),
-                    None,
-                )
-                assert overlap is not None, "native Review pages lost ordered overlap"
-            # Equal text is not a scroll boundary: preserve repeated logical
-            # body rows, including when small viewports genuinely do not overlap.
-            merged.extend(current[overlap:])
-        previous = current
-    return merged
-
-
 def _squash(text):
     return "".join(text.split())
 
 
+def _idle(tui):
+    # At 60 columns the Needs-you chip reserves status-row width ahead of the state
+    # segment, so `Ready` may be clipped while a decision is queued. The status row
+    # is the row immediately above the composer border, selected structurally.
+    lines = tui.get_screen_text().splitlines()
+    for index, line in enumerate(lines):
+        if index and line.startswith("┌ Message"):
+            status = lines[index - 1]
+            return "Ready" in status or "Needs you (" in status
+    return False
+
+
+def _frame_rows(screen):
+    # The complete single-border `Decision: Team proposal` frame only: its top
+    # border fixes the columns, every row must be bounded by `│` through `└…┘`.
+    lines = unicodedata.normalize("NFC", screen).splitlines()
+    top = next((i for i, line in enumerate(lines)
+                if "┌" in line and "Decision: Team proposal" in line and "┐" in line), None)
+    if top is None:
+        return []
+    left, right = lines[top].index("┌"), lines[top].rindex("┐")
+    result = []
+    for line in lines[top + 1:]:
+        assert len(line) > right, "truncated frame row\n" + screen
+        if line[left] == "└" and line[right] == "┘":
+            return result
+        assert line[left] == "│" and line[right] == "│", "broken frame border\n" + screen
+        result.append(line[left + 1:right].rstrip())
+    raise AssertionError("missing frame bottom\n" + screen)
+
+
 def _card_rows(screen):
-    # Only the product's double-bordered overlay, never the prose behind it.
-    return [row.split("║", 2)[1].rstrip() for row in screen.splitlines() if row.count("║") >= 2]
-
-
-def _assert_card(screen, expected_body, *, reviewing=False):
-    rows = _card_rows(screen)
-    joined = _squash("".join(rows))
-    assert joined.startswith(_squash(HEADING)), "product proposal heading missing\n" + screen
-    # Deliberately after the heading-only progress fence. Footer aliases and
-    # body-spoof aliases cannot satisfy this independent dedicated block.
-    before_type = joined.split(_squash(TYPE), 1)[0]
-    assert before_type.removeprefix(_squash(HEADING)) == _squash(ALIASES), (
-        "complete proposal alias block is missing or truncated\n" + screen
-    )
-    assert _squash(TYPE) in joined, "proposal type block is missing or truncated\n" + screen
-    footer_start = next((i for i, row in enumerate(rows) if row.startswith("[y] Send to ")), None)
-    assert footer_start is not None, "true proposal action row missing\n" + screen
-    assert _squash("".join(rows[footer_start:])) == _squash(FOOTER), (
-        "true footer must be the final complete action-row group\n" + screen
-    )
-    type_start = next(i for i, row in enumerate(rows) if row.startswith("Type: "))
-    middle = rows[type_start + 1:footer_start]
-    assert all(row.startswith("│ ") or row.startswith("… more not shown") for row in middle), (
-        "proposal body/spoof chrome escaped the delimited body region\n" + screen
-    )
-    preview = [row[2:] for row in middle if row.startswith("│ ")]
-    if reviewing:
-        assert not preview, "Review overlay must not masquerade as the Info body\n" + screen
-    else:
-        raw_rows = [row.split("║", 2)[1] for row in screen.splitlines() if row.count("║") >= 2]
-        body_width = len(raw_rows[0]) - 4
-        expected = _painted_rows(expected_body, body_width)
-        area_height = next(i for i, row in enumerate(screen.splitlines()) if row.startswith(" (daemon)"))
-        chrome_rows = type_start + 1 + len(rows) - footer_start
-        count = min(4, area_height - 3 - chrome_rows, len(expected))
-        assert count > 0 and preview == expected[:count], (
-            "native proposal preview is not the verbatim wrapped body prefix\n" + screen
-        )
-        assert any(row.startswith("… more not shown") for row in middle), (
-            "uncapped body must disclose Review first\n" + screen
-        )
+    # Only the product's decision frame, never the prose behind it; the breadcrumb
+    # is removed, body delimiters never are.
+    rows = _frame_rows(screen)
+    if rows and rows[0].startswith("Needs you › Team proposal"):
+        rows = rows[1:]
     return rows
+
+
+def _frame_body(screen, review):
+    rows = _frame_rows(screen)
+    assert rows and rows[0].startswith("Needs you › Team proposal"), "missing proposal breadcrumb\n" + screen
+    rows = rows[1:]
+    prefix = "[Esc] Back" if review else "[y] Send to "
+    footer = next((i for i, row in enumerate(rows) if row.startswith(prefix)), None)
+    assert footer is not None, "missing genuine action rail\n" + screen
+    expected = "[Esc] Back" if review else FOOTER
+    assert _squash("".join(rows[footer:])) == _squash(expected), "incomplete or non-final rail\n" + screen
+    return rows[:footer]
+
+
+def _frame_width(screen):
+    line = next(line for line in screen.splitlines() if "┌" in line and "Decision: Team proposal" in line)
+    return line.rindex("┐") - line.index("┌") - 1
+
+
+def _collect_frame(tui, expected, review, name, snapshots):
+    # PgDown advances five source rows. Check every visible row against its exact
+    # source offset and require overlap/adjacency, so skipped rows cannot pass.
+    offset = 0
+    covered = 0
+    for index in range(len(expected) + 1):
+        def painted():
+            screen = tui.get_screen_text()
+            body = _frame_body(screen, review)
+            return (screen, body) if body and body == expected[offset:offset + len(body)] else None
+        screen, body = _wait(painted, tui.get_screen_text)
+        snapshots.append((f"{name}-{index}", screen))
+        assert offset <= covered, "frame pagination skipped body rows\n" + screen
+        covered = max(covered, offset + len(body))
+        if covered == len(expected):
+            return
+        assert len(body) >= 5, "frame viewport too small for lossless five-row pagination\n" + screen
+        offset = min(offset + 5, len(expected) - 1)
+        tui.send("\x1b[6~")
+    raise AssertionError("frame pagination did not reach the end")
+
+
+def _assert_frame_card(tui, expected_body, name, snapshots):
+    screen = tui.get_screen_text()
+    width = _frame_width(screen)
+    wrapped = _painted_rows(expected_body, width - 2)
+    assert len(wrapped) > 4, "fixture must exercise the disclosure"
+    expected = (_painted_rows(HEADING, width) + _painted_rows(ALIASES, width)
+                + _painted_rows(TYPE, width) + ["│ " + row for row in wrapped[:4]]
+                + _painted_rows("… more not shown — [r] Review first", width))
+    _collect_frame(tui, expected, False, name + "-preview", snapshots)
+    # Return to the heading, not merely the last scrolled preview row.
+    for _ in range((len(expected) + 4) // 5):
+        tui.send("\x1b[5~")
+    _wait(lambda: _frame_body(tui.get_screen_text(), False)[:1] == expected[:1], tui.get_screen_text)
+    snapshots.append((name + "-preview-restored", tui.get_screen_text()))
+
+
+def _review_frame(tui, expected_body, name, snapshots):
+    screen = tui.get_screen_text()
+    width = _frame_width(screen)
+    _wait_inert(tui)
+    tui.send("r")
+    _wait(lambda: "[Esc] Back" in tui.get_screen_text(), tui.get_screen_text)
+    expected = (_painted_rows("Proposed message (not sent) · architecture_update", width)
+                + _painted_rows(ALIASES, width)
+                + ["│ " + row for row in _painted_rows(expected_body, width - 2)])
+    _collect_frame(tui, expected, True, name + "-review-full", snapshots)
+    tui.send("\x1b")
+    _wait(lambda: _card_rows(tui.get_screen_text()) and
+          _squash("".join(_card_rows(tui.get_screen_text()))).startswith(_squash(HEADING)),
+          tui.get_screen_text)
 
 
 class _ObservedHost(_ObservedHttp):
@@ -449,9 +481,11 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
         warmup = checkpoint("boot-discovery-and-attachment-complete")
         no_model_turns("warmup")
         _command(lena, "/team send --type story_assignment --subject adr-047 marcus-arch " + STORY)
+        _open_decision(marcus, "Decision: Peer consent", timeout=45)
         assert marcus.wait_for_screen("[y] Allow once", timeout=45), marcus.get_screen_text()
+        _wait_inert(marcus)
         marcus.send("y")
-        assert marcus.wait_for_screen("story_assignment · lena-po", timeout=45), marcus.get_screen_text()
+        _recipient_frame(marcus, "story_assignment · lena-po")
         save(marcus, "marcus-real-story-arrival")
         no_model_turns("arrival")
         item = _painted_item(marcus, "marcus-assignment", snapshots)
@@ -490,63 +524,19 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
 
         def proposal(prompt, expected_body, expected_turns, name):
             _command(marcus, prompt)
+            _open_decision(marcus, "Decision: Team proposal", timeout=30)
             screen = _wait(
                 lambda: screen if _squash("".join(_card_rows(screen := marcus.get_screen_text()))).startswith(_squash(HEADING)) else None,
                 marcus.get_screen_text,
             )
             snapshots.append((name + "-card", screen))
-            _assert_card(screen, expected_body)
+            _assert_frame_card(marcus, expected_body, name, snapshots)
             # Continuation is a real provider request; no served prose fences
             # either card progress or the model turn's completion.
             _wait(lambda: len(turns("marcus-arch")) == expected_turns, lambda: stub.rows())
-            assert marcus.wait_for_screen("Ready", timeout=30), marcus.get_screen_text()
-            _assert_card(save(marcus, name + "-card-complete-turn"), expected_body)
-
-        def review(expected_body, name):
-            last_body_row = next(
-                row for row in reversed(_painted_rows(expected_body, columns - 2)) if row.strip()
-            )
-            if name == "first":
-                _command(marcus, f"/team view {item}")
-                save(marcus, name + "-recipient-surface-before-review")
-            else:
-                marcus.send("r")
-                _wait(
-                    lambda: "│ " + last_body_row in unicodedata.normalize("NFC", marcus.get_screen_text()),
-                    marcus.get_screen_text,
-                )
-                for _ in range(12):
-                    marcus.send("\x1b[5~")
-            marcus.send("r")
-            _wait(
-                lambda: "│ " + last_body_row in unicodedata.normalize("NFC", marcus.get_screen_text()),
-                marcus.get_screen_text,
-            )
-            _wait_for_marker(marcus, "Proposed message (not sent)", marcus.get_screen_text)
-            save(marcus, name + "-review-open")
-            rendered = _chat_pages(marcus, name + "-review-full", snapshots)
-            actual = _review_rows(rendered, rows)
-            width = columns
-            title = _painted_rows("Proposed message (not sent) · architecture_update", width)
-            aliases = _painted_rows(ALIASES, width)
-            expected = title + aliases + ["│ " + row for row in _painted_rows(expected_body, width - 2)]
-            starts = [index for index, row in enumerate(actual) if row == title[0]]
-            assert starts, "native Review Info title/type is missing\n" + rendered
-            start = starts[-1]
-            assert actual[start:start + len(title)] == title, "native Review Info title/type is incomplete\n" + rendered
-            alias_start = start + len(title)
-            assert actual[alias_start:alias_start + len(aliases)] == aliases, (
-                "complete native Review dedicated alias block is missing or truncated\n" + rendered
-            )
-            assert actual[start:start + len(expected)] == expected, (
-                "full native Review body is missing, reordered or not verbatim delimited\n" + rendered
-            )
-            end = start + len(expected)
-            assert end == len(actual) or not actual[end].startswith("│ "), (
-                "native Review body has unexpected extra delimited rows\n" + rendered
-            )
-            _assert_card(save(marcus, name + "-review-footer"), expected_body, reviewing=True)
-            return rendered
+            _wait(lambda: _idle(marcus), marcus.get_screen_text, timeout=30)
+            save(marcus, name + "-card-complete-turn")
+            _assert_frame_card(marcus, expected_body, name + "-complete", snapshots)
 
         proposal("Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.", body, 2, "first")
         zero_effects(before_proposal, "first-card-before-any-decision")
@@ -554,14 +544,17 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
         assert "propose_team_message" in first_turn["tool_names"], first_turn
         assert first_turn["tool_results"] == 0, first_turn
         assert first_turn["request_observations"]["needle_present"] == {"selected_assignment": True, "peer_data_boundary": True}, first_turn
-        review(body, "first")
+        _review_frame(marcus, body, "first", snapshots)
         zero_effects(before_proposal, "first-full-review-before-human-send")
+        _wait_inert(marcus)
         marcus.send("y")
         for alias in RECIPIENTS:
             tui = tuis[alias]
+            _open_decision(tui, "Decision: Peer consent", timeout=45)
             assert tui.wait_for_screen("[y] Allow once", timeout=45), tui.get_screen_text()
+            _wait_inert(tui)
             tui.send("y")
-            assert tui.wait_for_screen("architecture_update · marcus-arch", timeout=45), tui.get_screen_text()
+            _recipient_frame(tui, "architecture_update · marcus-arch")
             save(tui, alias + "-actual-architecture-update-card")
         _wait(lambda: len(_events(workspaces["marcus-arch"], "team_send_recipient_settled")) == 2, marcus.get_screen_text)
         # As in Act 1, a separate product-local status response fences the
@@ -627,8 +620,9 @@ def test_conflict_flag_capture(columns, rows, monkeypatch, conflict_run):
             for row in _card_rows(second_card):
                 if spoof in row:
                     assert row.startswith("│ "), "spoof chrome escaped the card body\n" + second_card
-        review(spoof_body, "second-spoof")
+        _review_frame(marcus, spoof_body, "second-spoof", snapshots)
         zero_effects(before_dismiss, "second-spoof-full-review-before-dismiss")
+        _wait_inert(marcus)
         marcus.send("n")
         _wait_for_marker(marcus, "Proposal dismissed. Nothing was sent.", marcus.get_screen_text)
         dismissed = _chat_pages(marcus, "second-native-dismiss-T8", snapshots)

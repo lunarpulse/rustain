@@ -1,0 +1,16 @@
+                                                            
+[terminal] You:                                             
+Check this selected story assignment against ADR-047 and    
+propose the exact finding to Lena and Jun; never send it.   
+                                                            
+                                                            
+                                                            
+[terminal] Assistant:                                       
+The architecture finding is a draft for your review. I have 
+not sent it.                                                
+                                                            
+                                                            
+ [F] │ attached │ Normal │ ↑109 ↓1 Needs you (1) ^X q log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

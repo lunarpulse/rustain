@@ -1,0 +1,16 @@
+— session start — · Earlier sessions not loaded             
+                                                            
+                                                            
+                                                            
+[terminal] You:                                             
+┆  story_assignment ·                                       
+┆  12200a3bf2e169c5c63484db2e1e3b735b61c6677c214ac5f02b2138c
+┆  713dd0facbc                                              
+┆  STORY-047: publish the received card before persisting   
+┆  its row.                                                 
+┆  Jun owns implementation; Marcus checks the architecture. 
+┆  Acceptance: an arriving item is visible before its       
+ [F] │ attached │ Normal │ ↑109 ↓1 Needs you (1) ^X q log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+│   Peers:│                                                 
+│   - jun-dev│                                              
+│   (122005b13597af6ed239c5f2294ebd6950d7fbd3c3b8e0bd8bc59│ 
+│   21805a69c519504): not granted│                          
+│   - lena-po│                                              
+│   (12200a3bf2e169c5c63484db2e1e3b735b61c6677c214ac5f02b2│ 
+│   138c713dd0facbc): not granted│                          
+│ ℹ Distribution board · architecture_update│               
+│   attempted just now · 2 addressed│                       
+│     ● lena-po  delivered│                                 
+│       item ri_xqzygXHJesYRoiVeaYlLCmGDjf--0f39 · arrival│ 
+│   1 · task rustain-1794210527727644234-762f3cec143a855e│  
+ [F] │ attached │ Normal │ ↑173 ↓18 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

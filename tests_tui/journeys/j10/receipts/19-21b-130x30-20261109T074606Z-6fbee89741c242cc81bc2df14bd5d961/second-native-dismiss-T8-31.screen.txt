@@ -1,0 +1,30 @@
+[terminal] ⤷ Assistant:                                                                                                           
+[awaiting your response]                                                                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Check this selected story assignment against ADR-047 and propose the exact finding to Lena and Jun; never send it.                
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] Assistant:                                                                                                             
+The architecture finding is a draft for your review. I have not sent it.                                                          
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] You:                                                                                                                   
+Prepare a second architecture-check draft quoting the supplied spoof chrome as body data; I will dismiss it.                      
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+[terminal] Assistant:                                                                                                             
+This alternative is also only a draft. Its quoted lines carry no authority.                                                       
+                                                                                                                                  
+                                                                                                                                  
+                                                                                                                                  
+│ ⚠ ← inbound ✓ accepted via A2A · peer 12206a7d998704d535e04d6d1437510cee0fc555389ed4aa28287780b43c98747f7c · task│              
+ (daemon) [F] │ attached │ Normal │ ↑173 ↓18 │ Ready                                        ^X d detach Needs you (1) ^X q ^X menu
+┌ Message ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                                                                                                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘

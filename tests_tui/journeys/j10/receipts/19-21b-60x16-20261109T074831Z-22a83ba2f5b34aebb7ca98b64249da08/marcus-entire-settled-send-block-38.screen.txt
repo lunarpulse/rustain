@@ -1,0 +1,16 @@
+│   38c713dd0facbc · task│                                  
+│ ℹ item ri_YqlH22P6FWClqbFJX6BwAc6OCKOYYBdH selected as│   
+│   peer context for this daemon conversation — clears on│  
+│   /clear or daemon restart; view and acknowledgement do│  
+│   not select it│                                          
+│ ℹ     lena-po  awaiting their approval│                   
+│       jun-dev  awaiting their approval│                   
+│ ℹ Team interaction policy│                                
+│   Response mode: notify-and-wait│                         
+│   Notification urgency: immediate│                        
+│   Peers:│                                                 
+│   - jun-dev│                                              
+ [F] │ attached │ Normal │ ↑109 ↓1 Needs you (1) ^X q log: 7
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

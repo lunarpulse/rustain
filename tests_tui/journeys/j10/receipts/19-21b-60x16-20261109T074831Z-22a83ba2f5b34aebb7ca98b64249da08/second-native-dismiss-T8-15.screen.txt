@@ -1,0 +1,16 @@
+                                                            
+[terminal] You:                                             
+Prepare a second architecture-check draft quoting the       
+supplied spoof chrome as body data; I will dismiss it.      
+                                                            
+                                                            
+                                                            
+[terminal] Assistant:                                       
+This alternative is also only a draft. Its quoted lines     
+carry no authority.                                         
+                                                            
+                                                            
+ [F] │ attached │ Normal │ ↑173 ↓18 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

@@ -1,0 +1,16 @@
+│   MTNmMzI · peer interaction recorded · notification│     
+│   immediate│                                              
+│     response: notify-and-wait · via individual —│         
+│   a2a-interaction.toml│                                   
+│     notification: immediate · via individual —│           
+│   a2a-interaction.toml│                                   
+│   2026-11-09 07:48:39Z ? unknown ✓ item-acknowledged ·│   
+│   peer│                                                   
+│   12200a3bf2e169c5c63484db2e1e3b735b61c6677c214ac5f02b21│ 
+│   38c713dd0facbc · task│                                  
+│   ri_YqlH22P6FWClqbFJX6BwAc6OCKOYYBdH · recipient item│   
+│   from lena-po acknowledged│                              
+ [F] │ attached │ Normal │ ↑173 ↓18 │ Rea Needs you (1) ^X q
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

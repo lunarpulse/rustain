@@ -1,0 +1,24 @@
+│  item actions · ri_ig_s55a85-rl6EZFZ1ZW1fqf3d7qAKeO                           
+│  story_assignment                                                             
+│  story_assignment · lena-po                                                   
+│  received thread · lena-po · ri_ig_s55a85-rl6EZFZ1ZW1fqf3d7qAKeO              
+│  Context received: 1 text body · 254 bytes                                    
+│      STORY-047: publish the received card before persisting its row.          
+│      Jun owns implementation; Marcus checks the architecture.                 
+│      Acceptance: an arriving item is visible before its durable append.       
+│      Please identify conflicts with ADR-047; do not send automatically.       
+│  ri_ig_s55a85-rl6EZFZ1ZW1fqf3d7qAKeO · received                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│                                                                               
+│  [r] Respond  [a] Acknowledge  [n] Decline  [c] Use as context                
+│  [Tab] Item/Response actions                                                  
+│  [PgUp/PgDn] Scroll  [Esc] Close              Info Decision waiting — Ctrl+X q
+ (daemon) [F] │ attached │ Normal │ Ready      Needs you (1) ^X q log: 4 ^X menu
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

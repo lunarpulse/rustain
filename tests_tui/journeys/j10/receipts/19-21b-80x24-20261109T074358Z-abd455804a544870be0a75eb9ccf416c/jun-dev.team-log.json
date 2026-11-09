@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "structural_replay": "append-only, crash-safe, structurally replayable (not payload- or provenance-authenticated)",
+  "attribution": "peer attribution is only as strong as the credential scheme that produced it",
+  "structurally_consistent": true,
+  "divergence": null,
+  "export_path": null,
+  "export_rows": null,
+  "rows": [
+    {
+      "seq": 6,
+      "recorded_at_ms": 1794210255030,
+      "direction": "inbound",
+      "kind": "awaiting-approval",
+      "peer": "12201300918ba4e6748ec6063b06352725cc22b1dd8ebaf280db7b5467dd994cb7e6",
+      "task": "rustain-1794210254965035308-54efc4194c453766",
+      "summary": "task parked awaiting operator approval",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 7,
+      "recorded_at_ms": 1794210258326,
+      "direction": "inbound",
+      "kind": "item-received",
+      "peer": "12201300918ba4e6748ec6063b06352725cc22b1dd8ebaf280db7b5467dd994cb7e6",
+      "task": "ri_dtnI6gziX1d0hAIVbJkytpHJOlh0LPtV",
+      "summary": "recipient item received from marcus-arch [agent-composed]",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 8,
+      "recorded_at_ms": 1794210258337,
+      "direction": "inbound",
+      "kind": "accepted",
+      "rail": "a2a",
+      "peer": "12201300918ba4e6748ec6063b06352725cc22b1dd8ebaf280db7b5467dd994cb7e6",
+      "task": "rustain-1794210254965035308-54efc4194c453766",
+      "summary": "task accepted and executing",
+      "response_clause": null,
+      "notification_clause": null
+    },
+    {
+      "seq": 9,
+      "recorded_at_ms": 1794210258346,
+      "direction": "inbound",
+      "kind": "surfaced",
+      "peer": "12201300918ba4e6748ec6063b06352725cc22b1dd8ebaf280db7b5467dd994cb7e6",
+      "task": "a2a-in/p-cGVlcjoxMjIwMTMwMDkxOGJhNGU2NzQ4ZWM2MDYzYjA2MzUyNzI1Y2MyMmIxZGQ4ZWJhZjI4MGRiN2I1NDY3ZGQ5OTRjYjdlNg/t-cnVzdGFpbi0xNzk0MjEwMjU0OTY1MDM1MzA4LTU0ZWZjNDE5NGM0NTM3NjY",
+      "summary": "peer interaction recorded · notification immediate",
+      "response_clause": "response: notify-and-wait · via individual — a2a-interaction.toml",
+      "notification_clause": "notification: immediate · via individual — a2a-interaction.toml"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+┌ Decision: Team proposal ─────────────────────────────────┐
+│Needs you › Team proposal lena-po, jun-dev | 2 pending    │
+││ The assignment publishes before durable append.         │
+││ ADR-047 requires persist, then publish.                 │
+││ A crash between those steps loses the item.             │
+│… more not shown — [r] Review first                       │
+│[y] Send to lena-po, jun-dev  [r] Review first            │
+│[n] Dismiss                                               │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+ [F] │ attached │ Normal │ ↑109 ↓1 Needs you (2) ^X q log: 5
+┌ Message ─────────────────────────────────────────────────┐
+│                                                          │
+└──────────────────────────────────────────────────────────┘

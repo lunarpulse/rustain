@@ -18,6 +18,7 @@ import pytest
 import harness
 from fixtures.scene_provider import SceneStub
 from harness import RustainTUI
+from test_story_19_21_act1_distribution import _open_decision, _wait_inert
 
 pytestmark = pytest.mark.a2a_binary
 
@@ -33,8 +34,24 @@ def _wait(predicate, diagnostic, timeout=30):
 
 
 def _pending_card(screen):
-    rows = [row.split("║")[1] for row in screen.splitlines() if row.count("║") >= 2]
-    return "Awaitingyourdecision." in "".join(char for row in rows for char in row if not char.isspace())
+    # A complete single-border `Decision: Team proposal` frame only: the top border
+    # fixes the columns and every row through `└…┘` must be bounded by `│` there.
+    lines = screen.splitlines()
+    top = next((i for i, line in enumerate(lines)
+                if "┌" in line and "Decision: Team proposal" in line and "┐" in line), None)
+    if top is None:
+        return False
+    left, right = lines[top].index("┌"), lines[top].rindex("┐")
+    rows = []
+    for line in lines[top + 1:]:
+        if len(line) <= right:
+            return False
+        if line[left] == "└" and line[right] == "┘":
+            return "Awaitingyourdecision." in "".join("".join(rows).split())
+        if line[left] != "│" or line[right] != "│":
+            return False
+        rows.append(line[left + 1:right])
+    return False
 
 
 def _command(tui, text):
@@ -205,19 +222,33 @@ def test_standalone_auto_mode_still_requires_human_send(tmp_path, mode):
         assert control.read_text() == mode + " Write completed without approval", "K02 ordinary Write control failed"
         assert tui.wait_for_screen("WRITE_CONTROL_DONE", 30), tui.get_screen_text()
         _command(tui, "raise-proposal")
-        _wait(lambda: _pending_card(tui.get_screen_text()) or _events(sender, "team_send_action_recorded"), tui.get_screen_text)
+        _wait(lambda: (_pending_card(tui.get_screen_text()) or "Needs you (" in tui.get_screen_text()
+                       or _events(sender, "team_send_action_recorded")), tui.get_screen_text)
         assert not _events(sender, "team_send_action_recorded"), "K02 automatic mode sent the proposal without a human key"
         assert not _events(sender, "remote_envelope_dispatched"), "K02 automatic mode dispatched the proposal without a human key"
         assert observer.snapshot() == {"get": 0, "post": 0}, "K02 automatic mode contacted the recipient before human approval"
-        assert _pending_card(tui.get_screen_text()), "K02 proposal card missing before a human decision"
+        # RU-6 may queue the proposal as the `Needs you (n) ^X q` chip rather than present it.
+        if not _pending_card(tui.get_screen_text()):
+            _open_decision(tui, "Decision: Team proposal", timeout=30)
+        _wait(lambda: _pending_card(tui.get_screen_text()),
+              lambda: "K02 proposal card missing before a human decision\n" + tui.get_screen_text())
         (tmp_path / "pending-card.txt").write_text(tui.get_screen_text())
+        _wait_inert(tui)
         tui.send("y")
         _wait(lambda: observer.snapshot()["post"] == 1 and len(_events(sender, "remote_envelope_dispatched")) == 1, tui.get_screen_text)
         assert observer.snapshot() == {"get": 0, "post": 1}, "K02 human Send must make exactly one recipient POST"
         assert len(_events(sender, "team_send_action_recorded")) == 1
         assert tui.wait_for_screen("PROPOSAL_TURN_DONE", 30), tui.get_screen_text()
         _command(tui, "raise-clear-proposal")
+        _open_decision(tui, "Decision: Team proposal", timeout=30)
         _wait(lambda: _pending_card(tui.get_screen_text()), tui.get_screen_text)
+        # A presented frame owns the keys and gates a pasted draft ("Finish or clear
+        # your draft to decide."), so /clear needs the composer: defer the proposal
+        # (one Esc), which leaves it queued behind the Needs-you chip.
+        _wait_inert(tui)
+        tui.send("\x1b")
+        _wait(lambda: "Needs you (1)" in tui.get_screen_text() and "Decision:" not in tui.get_screen_text(),
+              tui.get_screen_text)
         assert tui.wait_for_screen("CLEAR_PROPOSAL_TURN_DONE", 30), tui.get_screen_text()
         _command(tui, "/clear")
         # A completed turn in the replacement conversation drains the real Root
@@ -225,6 +256,7 @@ def test_standalone_auto_mode_still_requires_human_send(tmp_path, mode):
         _command(tui, "after-clear-control")
         assert tui.wait_for_screen("AFTER_CLEAR_CONTROL_DONE", 30), tui.get_screen_text()
         assert not _pending_card(tui.get_screen_text()), "K03 clear must withdraw rather than retarget a proposal"
+        assert "Needs you (" not in tui.get_screen_text(), "K03 clear must not leave the withdrawn proposal queued"
         assert observer.snapshot() == {"get": 0, "post": 1}, "K03 clear must not send or preflight the withdrawn proposal"
         assert len(_events(sender, "team_send_action_recorded")) == 1
         assert len(_events(sender, "remote_envelope_dispatched")) == 1

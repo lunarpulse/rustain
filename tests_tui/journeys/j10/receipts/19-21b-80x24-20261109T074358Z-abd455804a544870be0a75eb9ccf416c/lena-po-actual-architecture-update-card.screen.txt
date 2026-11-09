@@ -1,0 +1,24 @@
+┌ Decision: Recipient draft ───────────────────────────────────────────────────┐
+│Needs you › Recipient draft marcus-arch | 1 pending                           │
+│architecture_update · marcus-arch                                             │
+│Principal:                                                                    │
+│12201300918ba4e6748ec6063b06352725cc22b1dd8ebaf280db7b5467dd994cb7e6          │
+│Peer is waiting for your response.                                            │
+│[w] My own  [n] Decline  [v] View item                                        │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ (daemon) [F] │ attached │ Normal │ Ready              Needs you (1) ^X q log: 5
+┌ Message ─────────────────────────────────────────────────────────────────────┐
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘

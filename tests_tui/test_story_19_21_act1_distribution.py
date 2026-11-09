@@ -180,9 +180,101 @@ def _compact(text):
     return " ".join(text.replace("│", " ").split())
 
 
-def _painted_item(tui, alias, snapshots):
-    tui.send("\t")
+def _wait_inert(tui, timeout=30.0, ages=False):
+    # A decision frame ignores keys during its 500 ms first-paint window (RU-6):
+    # require the painted screen to stay byte-identical for 600 ms before a key.
+    # The Needs-you list prints per-row ages (`34s`) that tick on unsynchronised
+    # phases; `ages=True` (list navigation only) masks those tokens, nothing else.
+    deadline = time.monotonic() + timeout
+    previous = None
+    stable_since = None
+    while True:
+        text = tui.get_screen_text()
+        if ages:
+            text = re.sub(r"\b\d+[smh]\b", "", text)
+        screen = text.encode("utf-8")
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError("screen did not remain unchanged for 600 ms")
+        if screen != previous:
+            previous = screen
+            stable_since = now
+        elif now - stable_since >= 0.6:
+            return
+
+
+def _open_decision(tui, title_fragment_or_text, timeout=30.0):
+    """Present the wanted decision frame, opening it from the Needs-you queue when queued.
+
+    RU-6 queues a decision that arrives while the operator is typing (or another
+    protected state holds the bottom area) as the `Needs you (n) ^X q` chip.
+    """
+    kind = title_fragment_or_text.removeprefix("Decision: ")
+    title = "Decision: " + kind
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        assert left > 0, tui.get_screen_text()
+        return left
+
+    def wait_for(predicate):
+        return _wait(predicate, tui.get_screen_text, timeout=remaining())
+
+    def frame(screen):
+        return any("┌" in line and title in line and "┐" in line
+                   for line in screen.splitlines())
+
+    screen = wait_for(lambda: screen if (frame(screen := tui.get_screen_text())
+                      or "Needs you (" in screen) else None)
+    if frame(screen):
+        return screen
+
+    tui.send("\x18q")
+    wait_for(lambda: re.search(r"Needs you › \d+ waiting", tui.get_screen_text()))
+    while True:
+        screen = tui.get_screen_text()
+        match = re.search(r"Needs you › (\d+) waiting", screen)
+        assert match, screen
+        count = int(match.group(1))
+        # The list initially selects the oldest non-deferred item, not necessarily
+        # the first. Reset to the first, then visit every row, including offscreen.
+        for _ in range(count - 1):
+            tui.send("k")
+            _wait_inert(tui, timeout=remaining(), ages=True)
+        for index in range(count):
+            screen = tui.get_screen_text()
+            selected = next((line.split("▸", 1)[1].strip()
+                             for line in screen.splitlines() if "▸" in line), "")
+            if selected.startswith(kind + " ·"):
+                tui.send("\r")
+                return wait_for(lambda: screen if frame(screen := tui.get_screen_text()) else None)
+            if index + 1 < count:
+                tui.send("j")
+                _wait_inert(tui, timeout=remaining(), ages=True)
+        # An unrelated item may have exposed the chip before the wanted arrival.
+        # Rescan even if replacement leaves the queue count unchanged.
+        _wait_inert(tui, timeout=remaining(), ages=True)
+
+
+def _recipient_frame(tui, expected=None):
+    _open_decision(tui, "Decision: Recipient draft", timeout=30)
+    if expected is not None:
+        assert tui.wait_for_screen(expected, timeout=30), tui.get_screen_text()
+
+
+def _recipient_view(tui):
+    # The arrival is a Recipient-draft decision frame; `v` opens its item surface
+    # without deciding it (the old bare Tab focus no longer exists).
+    _recipient_frame(tui)
+    assert tui.wait_for_screen("[v] View item", timeout=30), tui.get_screen_text()
+    _wait_inert(tui)
+    tui.send("v")
     assert tui.wait_for_screen("item actions ·", timeout=15), tui.get_screen_text()
+
+
+def _painted_item(tui, alias, snapshots):
+    _recipient_view(tui)
     screen = tui.get_screen_text()
     snapshots.append((alias + "-painted-item", screen))
     match = re.search(r"item actions · (ri_[A-Za-z0-9_-]+)", screen)
@@ -414,9 +506,11 @@ def test_act1_attached_distribution(columns, rows, monkeypatch):
         _command(lena, "/team send --type story_assignment --subject sprint-7 jun-dev,tom-dev,yuki-dev,nina-ux " + STORY)
 
         for recipient in (jun, tom):
+            _open_decision(recipient, "Decision: Peer consent", timeout=45)
             assert recipient.wait_for_screen("[y] Allow once", timeout=45), recipient.get_screen_text()
+            _wait_inert(recipient)
             recipient.send("y")
-            assert recipient.wait_for_screen("story_assignment ·", timeout=45), recipient.get_screen_text()
+            _recipient_frame(recipient, "story_assignment ·")
         sender_feedback_rows = (
             "jun-dev awaiting their approval",
             "tom-dev awaiting their approval",
@@ -709,9 +803,11 @@ def test_act1_daemon_crash_restart(monkeypatch):
         lena = start_tui("lena-po", 0)
         jun = start_tui("jun-dev", 0)
         _command(lena, "/team send --type story_assignment --subject restart-check tom-dev,jun-dev " + STORY)
+        _open_decision(jun, "Decision: Peer consent", timeout=45)
         assert jun.wait_for_screen("[y] Allow once", timeout=45), jun.get_screen_text()
+        _wait_inert(jun)
         jun.send("y")
-        assert jun.wait_for_screen("story_assignment ·", timeout=45), jun.get_screen_text()
+        _recipient_frame(jun, "story_assignment ·")
         jun_item = _painted_item(jun, "jun-dev", snapshots)
         jun.send("a")
         jun_ack = _wait(

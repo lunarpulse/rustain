@@ -118,6 +118,112 @@ def _ledger(workspace):
             for line in path.read_text().splitlines() if line.strip()]
 
 
+def _wait_inert(tui, timeout=30.0, ages=False):
+    # A decision frame ignores keys during its 500 ms first-paint window (RU-6):
+    # require the painted frame to stay byte-identical for 600 ms before a key.
+    # At 130 columns the 100-cell frame leaves a strip of the transcript beside it,
+    # where an executing tool's spinner animates; once a `┌ Decision:` frame is
+    # painted only its own rectangle (top border to `└` row) is compared.
+    # The Needs-you list prints per-row ages (`34s`) that tick on unsynchronised
+    # phases; `ages=True` (list navigation only) masks those tokens, nothing else.
+    deadline = time.monotonic() + timeout
+    previous = None
+    stable_since = None
+    while True:
+        text = tui.get_screen_text()
+        lines = text.splitlines()
+        top = next((i for i, line in enumerate(lines) if "┌ Decision:" in line and "┐" in line), None)
+        if top is not None:
+            left, right = lines[top].index("┌"), lines[top].rindex("┐")
+            view = []
+            for line in lines[top:]:
+                view.append(line[left:right + 1])
+                if line[left:left + 1] == "└":
+                    break
+            text = "\n".join(view)
+        if ages:
+            text = re.sub(r"\b\d+[smh]\b", "", text)
+        screen = text.encode("utf-8")
+        now = time.monotonic()
+        if now >= deadline:
+            raise TimeoutError("screen did not remain unchanged for 600 ms")
+        if screen != previous:
+            previous = screen
+            stable_since = now
+        elif now - stable_since >= 0.6:
+            return
+
+
+def _open_decision(tui, title_fragment_or_text, timeout=30.0):
+    """Present the wanted decision frame, opening it from the Needs-you queue when queued.
+
+    RU-6 queues a decision that arrives while the operator is typing (or another
+    protected state holds the bottom area) as the `Needs you (n) ^X q` chip.
+    """
+    kind = title_fragment_or_text.removeprefix("Decision: ")
+    title = "Decision: " + kind
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        left = deadline - time.monotonic()
+        assert left > 0, tui.get_screen_text()
+        return left
+
+    def wait_for(predicate):
+        return _wait(predicate, tui.get_screen_text, timeout=remaining())
+
+    def frame(screen):
+        return any("┌" in line and title in line and "┐" in line
+                   for line in screen.splitlines())
+
+    screen = wait_for(lambda: screen if (frame(screen := tui.get_screen_text())
+                      or "Needs you (" in screen) else None)
+    if frame(screen):
+        return screen
+
+    tui.send("\x18q")
+    wait_for(lambda: re.search(r"Needs you › \d+ waiting", tui.get_screen_text()))
+    while True:
+        screen = tui.get_screen_text()
+        match = re.search(r"Needs you › (\d+) waiting", screen)
+        assert match, screen
+        count = int(match.group(1))
+        # The list initially selects the oldest non-deferred item, not necessarily
+        # the first. Reset to the first, then visit every row, including offscreen.
+        for _ in range(count - 1):
+            tui.send("k")
+            _wait_inert(tui, timeout=remaining(), ages=True)
+        for index in range(count):
+            screen = tui.get_screen_text()
+            selected = next((line.split("▸", 1)[1].strip()
+                             for line in screen.splitlines() if "▸" in line), "")
+            if selected.startswith(kind + " ·"):
+                tui.send("\r")
+                return wait_for(lambda: screen if frame(screen := tui.get_screen_text()) else None)
+            if index + 1 < count:
+                tui.send("j")
+                _wait_inert(tui, timeout=remaining(), ages=True)
+        # An unrelated item may have exposed the chip before the wanted arrival.
+        # Rescan even if replacement leaves the queue count unchanged.
+        _wait_inert(tui, timeout=remaining(), ages=True)
+
+
+def _recipient_frame(tui, expected=None):
+    _open_decision(tui, "Decision: Recipient draft", timeout=30)
+    if expected is not None:
+        assert tui.wait_for_screen(expected, timeout=30), tui.get_screen_text()
+
+
+def _recipient_view(tui):
+    # The arrival is a Recipient-draft decision frame; `v` opens its item surface
+    # without deciding it (the old bare Tab focus no longer exists).
+    _recipient_frame(tui)
+    assert tui.wait_for_screen("[v] View item", timeout=30), tui.get_screen_text()
+    _wait_inert(tui)
+    tui.send("v")
+    assert tui.wait_for_screen("item actions ·", timeout=15), tui.get_screen_text()
+
+
 @pytest.mark.parametrize("columns", [80, 130])
 @pytest.mark.timeout(420)
 def test_act2_consultation_adr_fanout(columns, monkeypatch):
@@ -301,7 +407,7 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
             return painted
 
         def painted_item(tui, alias):
-            tui.send("\t")
+            _recipient_view(tui)
             assert tui.wait_for_screen("item actions ·", timeout=10), tui.get_screen_text()
             painted = save(tui, alias + "-canonical-item")
             match = re.search(r"item actions · (ri_[A-Za-z0-9_-]+)", painted)
@@ -330,10 +436,14 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         jun_source = start_tui("jun", fresh=True)
         _command(jun_source, "/team send --type consultation marcus " + QUESTION)
         marcus = writers["marcus"]
+        _open_decision(marcus, "Decision: Peer consent", timeout=30)
         assert marcus.wait_for_screen("[y] Allow once", timeout=30), marcus.get_screen_text()
+        _wait_inert(marcus)
         marcus.send("y")
-        for tui in (marcus, marcus_reader):
-            assert tui.wait_for_screen("consultation ·", timeout=30), tui.get_screen_text()
+        _recipient_frame(marcus, "consultation ·")
+        # FR-21-6-k deletes the passive mirror card; the transcript placeholder remains observable.
+        assert marcus_reader.wait_for_screen("[awaiting your response]", timeout=30), marcus_reader.get_screen_text()
+        assert "Decision: Recipient draft" not in marcus_reader.get_screen_text(), marcus_reader.get_screen_text()
         consultation = painted_item(marcus, "marcus-consultation")
         question_pages = pages(marcus, "marcus-question")
         assert f"1 text body · {len(QUESTION.encode())} bytes" in question_pages, question_pages
@@ -350,7 +460,7 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         defers = _events(workspaces["marcus"], "recipient_item_replied")
         assert len(defers) == 1 and defers[0]["content"] == "Busy — defer 30m", defers
         assert defers[0]["kind"] == {"type": "defer", "minutes": 30} and defers[0].get("via_node") is None, defers
-        assert "Peer is waiting for your response." in marcus_reader.get_screen_text()
+        assert "[awaiting your response]" in marcus_reader.get_screen_text(), marcus_reader.get_screen_text()
         busy_thread = thread(jun_source, "marcus", consultation, "jun-explicit-busy-pull")
         assert _defer_header_visible(busy_thread), "M30: completed thread is missing the reported-defer header\n" + busy_thread
         assert "Busy — defer 30m" in busy_thread
@@ -359,7 +469,7 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         _wait(lambda: len(_events(workspaces["marcus"], "recipient_item_replied")) == 2, marcus.get_screen_text)
         replies = _events(workspaces["marcus"], "recipient_item_replied")
         assert replies[-1]["content"] == ANSWER and "kind" not in replies[-1] and replies[-1].get("via_node"), replies
-        _wait(lambda: "Peer is waiting for your response." not in marcus_reader.get_screen_text(), marcus_reader.get_screen_text)
+        _wait(lambda: "[awaiting your response]" not in marcus_reader.get_screen_text(), marcus_reader.get_screen_text)
         answer_thread = thread(jun_source, "marcus", consultation, "jun-explicit-answer-pull")
         assert _defer_header_visible(answer_thread) and "Persist before publishing" in answer_thread, answer_thread
         _command(jun_source, "/clear")
@@ -381,7 +491,9 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
 
         local_agent = start_tui("marcus", fresh=True)
         _command(local_agent, "Update ADR-047 with the persist-before-publish decision using the ordinary local Write tool.")
+        _open_decision(local_agent, "Decision: Permission", timeout=30)
         assert local_agent.wait_for_screen("[y] Allow", timeout=30), local_agent.get_screen_text()
+        _wait_inert(local_agent)
         save(local_agent, "marcus-local-write-approval")
         local_agent.approve_permission()
         actual_adr = workspaces["marcus"] / "ADR-047.md"
@@ -400,10 +512,12 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         notification_ids = {}
         for alias in ("jun", "dev2"):
             tui = writers[alias]
+            _open_decision(tui, "Decision: Peer consent", timeout=30)
             assert tui.wait_for_screen("[y] Allow once", timeout=30), tui.get_screen_text()
+            _wait_inert(tui)
             save(tui, alias + "-independent-send-consent")
             tui.send("y")
-            assert tui.wait_for_screen("architecture_update ·", timeout=30), tui.get_screen_text()
+            _recipient_frame(tui, "architecture_update ·")
             notification_ids[alias] = painted_item(tui, alias + "-adr")
             body_pages = pages(tui, alias + "-adr-view")
             assert f"1 text body · {len(notification_body.encode())} bytes" in body_pages, body_pages
@@ -500,7 +614,9 @@ def test_act2_consultation_adr_fanout(columns, monkeypatch):
         # … approve from the local TUI" notice. Nothing decides it here: the
         # native evidence is still actual blocking/canary protection in Normal;
         # the Rust K10b suite separately proves Yolo differential + Reject.
+        _open_decision(jun, "Decision: Permission", timeout=30)
         assert jun.wait_for_screen("[y] Allow", timeout=30), jun.get_screen_text()
+        _wait_inert(jun)
         assert "Write" in jun.get_screen_text(), jun.get_screen_text()
         save(jun, "jun-selected-peer-tool-blocked")
         assert canary.read_text() == "unchanged native canary\n"
